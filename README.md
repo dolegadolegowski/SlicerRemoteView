@@ -89,6 +89,10 @@ prompty są samowystarczalne.
 
 ## Stan projektu
 
-Repo zawiera na razie **plan pracy** (prompty, subagenci, zasady). Dokumentacja i kod powstają po
-uruchomieniu `/project-goal` i workstreamów. Stos domyślny (Node.js 22 LTS/TypeScript, three.js, Unity LTS,
-Python/VTK) to propozycja — prompt celu każe go zweryfikować i zapisać decyzje jako ADR.
+**2026-10-17 — `/project-goal` wykonany (fazy A–E, `Active milestone: M0`).** Powstały: notatki z rozpoznania
+(`docs/research/`), wymagania (`docs/requirements.md`: 18 US, 70 FR, 41 NFR), architektura z kanonicznym
+threat modelem (`docs/architecture.md`), kontrakt protokołu v1.0 (`docs/protocol.md`), ADR 0001–0008
+(`docs/adr/`) oraz plany z 121 zadaniami (`docs/plan/`). Stos potwierdzony przez rozpoznanie i zapisany w ADR:
+Node.js 22 LTS / Fastify 5 / `ws`, Vite 8 / three.js r186, Python + numpy (własny writer GLB) w Slicerze 5.12,
+Unity 6.3 LTS / OpenXR / glTFast na Quest (po etapie WebXR w Quest Browser). Kodu produkcyjnego jeszcze nie ma —
+następny krok: `/ws-protocol`, potem równolegle `/ws-server`, `/ws-web`, `/ws-slicer`.

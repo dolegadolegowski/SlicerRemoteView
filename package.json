@@ -1,0 +1,22 @@
+{
+  "name": "slicerremoteview",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Remote 3D viewing of a 3D Slicer scene on Meta Quest and mobile browsers via a relay server with 5-character session codes.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.12 <23"
+  },
+  "workspaces": [
+    "shared",
+    "relay-server",
+    "web-viewer",
+    "tools/fake-slicer"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  }
+}

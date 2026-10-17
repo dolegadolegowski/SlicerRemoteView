@@ -11,11 +11,11 @@ mobilnych (iPhone/iPad/Android). Urządzenia łączą się z konkretną sesją 3
 | `<komponent>` | Katalog(i)                          | Gałąź         | Plan                    | ID zadań | Subagent     | Stos domyślny                                   |
 |---------------|-------------------------------------|---------------|-------------------------|----------|--------------|-------------------------------------------------|
 | `protocol`    | `shared/`, `tools/`                 | `ws/protocol` | `docs/plan/protocol.md` | `PRO-`   | `server-dev` | JSON Schema, generowane typy TS/Python/C#, symulator `tools/fake-slicer` |
-| `server`      | `relay-server/`                     | `ws/server`   | `docs/plan/server.md`   | `SRV-`   | `server-dev` | Node.js 22 LTS, TypeScript, `ws`, Fastify, Docker, Railway |
+| `server`      | `relay-server/` (incl. Dockerfile)  | `ws/server`   | `docs/plan/server.md`   | `SRV-`   | `server-dev` | Node.js 22 LTS, TypeScript, `ws`, Fastify, Docker, Railway |
 | `web`         | `web-viewer/`                       | `ws/web`      | `docs/plan/web.md`      | `WEB-`   | `web-dev`    | Vite, TypeScript, three.js, opcjonalnie WebXR    |
 | `slicer`      | `slicer-plugin/`                    | `ws/slicer`   | `docs/plan/slicer.md`   | `SLC-`   | `slicer-dev` | Python (Slicer 5.x), PythonQt, VTK, numpy        |
 | `quest`       | `quest-app/`                        | `ws/quest`    | `docs/plan/quest.md`    | `QST-`   | `quest-dev`  | Unity LTS, OpenXR, Meta XR SDK, glTFast          |
-| `deploy`      | `.github/`, `railway.*`, Dockerfile | `ws/deploy`   | `docs/plan/deploy.md`   | `DEP-`   | `server-dev` | GitHub Actions, Docker, Railway                  |
+| `deploy`      | `.github/`, `.railway/`             | `ws/deploy`   | `docs/plan/deploy.md`   | `DEP-`   | `server-dev` | GitHub Actions, Docker, Railway                  |
 | `qa`          | `tests/`, `docs/security.md`        | `ws/qa`       | `docs/plan/qa.md`       | `QA-`    | `qa`         | Playwright, k6                                   |
 | `release`     | integracja na `main`                | `main`        | `docs/plan/00-overview.md` | —     | `reviewer`   | —                                                |
 
@@ -76,5 +76,8 @@ zawsze streść użytkownikowi i zapisz do plików — nie polegaj na tym, że z
 Aktualne komendy testów/buildu każdego komponentu są w `README.md` tego komponentu (utrzymuje je jego
 workstream). Poniższa lista jest uzupełniana wyłącznie przez `release` na `main`:
 
+- Root (npm workspaces: `shared`, `relay-server`, `web-viewer`, `tools/fake-slicer`): `npm test`, `npm run lint`,
+  `npm run typecheck`, `npm run build` — każdy przechodzi po workspace'ach z `--if-present`.
 - `shared/`: `[TODO]` · `relay-server/`: `[TODO]` · `web-viewer/`: `[TODO]` · `slicer-plugin/`: `[TODO]`
-- `quest-app/`: Unity Test Runner (EditMode) — manualnie · `tests/`: `[TODO]`
+- `quest-app/`: Unity Test Runner (EditMode) — manualnie · `tests/`: `[TODO]` (nie jest workspace'em; `npm --prefix tests`)
+- Obraz relay: `docker build -f relay-server/Dockerfile .` z katalogu głównego repo (ADR 0007).

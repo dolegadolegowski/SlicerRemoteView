@@ -1,0 +1,22 @@
+# Docker build context = repository root (see docs/adr/0007-monorepo-wiring-and-docker-context.md).
+# Only shared/, relay-server/ and web-viewer/ are needed to build the relay image.
+.git
+.github
+.claude
+.railway
+docs
+prompts
+slicer-plugin
+quest-app
+tests
+tools
+**/node_modules
+**/dist
+**/coverage
+**/*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+*.md
+!relay-server/README.md
