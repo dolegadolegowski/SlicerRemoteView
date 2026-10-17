@@ -1,5 +1,5 @@
 # Docker build context = repository root (see docs/adr/0007-monorepo-wiring-and-docker-context.md).
-# Only shared/, relay-server/ and web-viewer/ are needed to build the relay image.
+# shared/, relay-server/, web-viewer/ and the tools/fake-slicer workspace (needed by `npm ci`) stay in the context.
 .git
 .github
 .claude
@@ -9,7 +9,8 @@ prompts
 slicer-plugin
 quest-app
 tests
-tools
+tools/**/dist
+tools/**/node_modules
 **/node_modules
 **/dist
 **/coverage

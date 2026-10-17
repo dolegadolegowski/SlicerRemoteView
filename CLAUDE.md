@@ -15,7 +15,7 @@ mobilnych (iPhone/iPad/Android). Urządzenia łączą się z konkretną sesją 3
 | `web`         | `web-viewer/`                       | `ws/web`      | `docs/plan/web.md`      | `WEB-`   | `web-dev`    | Vite, TypeScript, three.js, opcjonalnie WebXR    |
 | `slicer`      | `slicer-plugin/`                    | `ws/slicer`   | `docs/plan/slicer.md`   | `SLC-`   | `slicer-dev` | Python (Slicer 5.x), PythonQt, VTK, numpy        |
 | `quest`       | `quest-app/`                        | `ws/quest`    | `docs/plan/quest.md`    | `QST-`   | `quest-dev`  | Unity LTS, OpenXR, Meta XR SDK, glTFast          |
-| `deploy`      | `.github/`, `.railway/`             | `ws/deploy`   | `docs/plan/deploy.md`   | `DEP-`   | `server-dev` | GitHub Actions, Docker, Railway                  |
+| `deploy`      | `.github/`, `.railway/`, `docs/deploy.md` | `ws/deploy`   | `docs/plan/deploy.md`   | `DEP-`   | `server-dev` | GitHub Actions, Docker, Railway                  |
 | `qa`          | `tests/`, `docs/security.md`        | `ws/qa`       | `docs/plan/qa.md`       | `QA-`    | `qa`         | Playwright, k6                                   |
 | `release`     | integracja na `main`                | `main`        | `docs/plan/00-overview.md` | —     | `reviewer`   | —                                                |
 
@@ -35,7 +35,9 @@ Pozostałe katalogi: `docs/` (wymagania, architektura, **protokół = kontrakt**
    (w tym samym commicie).
 4. **Gałęzie i własność plików.** Każdy workstream pracuje na własnej gałęzi (tabela) i edytuje tylko:
    katalogi swojego komponentu, swój plan, `docs/testing/<komponent>.md`, `README.md` swojego komponentu,
-   nowe pliki w `docs/research/` i `docs/adr/`, oraz `docs/protocol.md` wg zasady 2. Wszystko inne
+   nowe pliki w `docs/research/` i `docs/adr/`, oraz `docs/protocol.md` wg zasady 2. Wyjątek: `qa` może
+   porządkować wszystkie `docs/testing/*.md` w scenariusze (bez zmiany treści kroków) i utrzymuje
+   `docs/testing/strategy.md`, `docs/testing/reports/` oraz `docs/security.md`. Wszystko inne
    (cudze plany, `CLAUDE.md`, `docs/plan/00-overview.md`, `docs/architecture.md`) zmienia tylko `release`
    na `main`. Błędy w cudzym komponencie zgłaszasz w `docs/testing/reports/<data>.md` (zasada 9), nie w cudzym planie.
 5. **Nie zgaduj API** (Slicer/VTK, Railway, three.js, Meta XR SDK, glTFast). Sprawdź w dokumentacji lub źródłach;
