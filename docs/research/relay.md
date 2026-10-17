@@ -44,7 +44,7 @@ Scope: the `server` and `deploy` components (relay on Railway, Node.js 22 LTS, T
   upgraded sockets must be closed in `preClose`.
 - **Code space:** alphabet without `0 O 1 I L` has **31 symbols**, 31^5 = **28,629,151** codes (24.8 bits).
   Brute force is bounded by rate limiting, not entropy: at 10 attempts/min/IP, hitting one of 100 active
-  sessions needs ~2.4 months on average; enforce per-IP limits with `@fastify/rate-limit` 11.2.1
+  sessions needs ~20 days on average (28,629,151 / 100 / 10 per min ≈ 28,629 min; corrected 2026-10-17, an earlier draft said 2.4 months); enforce per-IP limits with `@fastify/rate-limit` 11.2.1
   (`trustProxy` on, Railway edge sets `X-Forwarded-For`), bind the code to a per-session join nonce, expire
   codes (TTL), and invalidate on N failed attempts per session.
 - **Observability:** pino 10.4.0 with `redact` paths (`code`, `token`, `*.code`, `req.headers.authorization`),
