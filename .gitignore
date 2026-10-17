@@ -1,0 +1,53 @@
+# Secrets / local config
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules/
+dist/
+build/
+coverage/
+*.log
+.npm/
+.vite/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Unity (quest-app) — standard ignores
+quest-app/[Ll]ibrary/
+quest-app/[Tt]emp/
+quest-app/[Oo]bj/
+quest-app/[Bb]uild/
+quest-app/[Bb]uilds/
+quest-app/[Ll]ogs/
+quest-app/[Uu]ser[Ss]ettings/
+quest-app/MemoryCaptures/
+*.apk
+*.aab
+*.unitypackage
+*.csproj
+*.sln
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Claude Code local state
+.claude/settings.local.json
