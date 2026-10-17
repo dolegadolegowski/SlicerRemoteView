@@ -17,7 +17,10 @@ Constraints:
 - Verify Slicer/VTK APIs in the Slicer docs, script repository or source before using them; cite the source
   in a comment when the API is non-obvious. Unverified → `[TODO verify]` comment and a manual test step.
 - Export: preserve node names, colors, opacity, visibility; stable `nodeId` = MRML node ID; convert RAS/mm to
-  glTF Y-up/metres exactly as `docs/protocol.md` specifies; test orientation and scale with fixtures.
+  glTF Y-up/metres exactly as `docs/protocol.md` specifies; test orientation and scale with synthetic
+  `vtkPolyData` fixtures (real-data checks with MRHead are manual steps).
+- Runtime dependencies and `shared/py` are vendored into the extension by a build script; the installed
+  module must not import from outside its own directory, and must not rely on `pip_install` at runtime.
 - Any task that needs the real Slicer gets precise manual test steps in `docs/testing/slicer.md`.
 - Code, comments and commit messages in English. Follow Conventional Commits with the task ID.
 - Report back: what you changed (files), how you tested, what must be tested manually, open questions.

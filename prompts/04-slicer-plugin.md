@@ -8,7 +8,7 @@
 ## Cel workstreamu
 
 Moduł `RemoteView` w extension `SlicerRemoteView` (`slicer-plugin/`): po kliknięciu „Start session” łączy się
-z relay (WSS), pokazuje **duży 5‑znakowy kod i QR**, eksportuje widoczne modele/segmentacje jako GLB, wysyła je
+z relay (WSS), pokazuje **duży 5-znakowy kod i QR**, eksportuje widoczne modele/segmentacje jako GLB, wysyła je
 do relay i na bieżąco przesyła zmiany (widoczność, kolor, przezroczystość, transformacje). Pokazuje liczbę
 podłączonych widzów i pozwala zakończyć sesję.
 
@@ -16,10 +16,14 @@ podłączonych widzów i pozwala zakończyć sesję.
 
 W sandboxie **nie ma 3D Slicera**. Dlatego:
 
-- Rdzeń bez zależności od Slicera: `slicer-plugin/RemoteView/remoteview_core/` (czysty Python + `vtk`):
-  eksport/konwersja do GLB, decymacja, konwersja układu współrzędnych (RAS mm → glTF Y‑up m), klient protokołu
-  (koperty, chunkowanie, hash), maszyna stanów sesji — **testowane `pytest` z wheelem `vtk`**
-  (zainstaluj w sandboxie: `pip install vtk pytest websocket-client` lub to, co ADR wskazuje).
+- Rdzeń bez zależności od Slicera: `slicer-plugin/RemoteView/remoteview_core/` (czysty Python + `vtk` + numpy):
+  writer GLB z `vtkPolyData` (domyślnie własny, wg ADR), decymacja, konwersja układu współrzędnych
+  (RAS mm → glTF Y-up m), klient protokołu (koperty, chunkowanie, hash), maszyna stanów sesji —
+  **testowane `pytest` z wheelem `vtk`** (zainstaluj w sandboxie: `pip install vtk numpy pytest websocket-client
+  pygltflib trimesh` lub to, co ADR wskazuje; `pygltflib`/`trimesh` tylko do weryfikacji wyniku w testach).
+- Zależności runtime (np. `websocket-client`, `qrcode`/`segno`, typy z `shared/py`) są **vendorowane** do
+  extension skryptem budowania (`slicer-plugin/scripts/vendor.*`) — zainstalowany moduł nie może importować
+  z `../shared`, a `pip_install` w Slicerze wymaga dostępu do PyPI, którego w sieci szpitalnej może nie być.
 - Cienki adapter Slicera: `RemoteView.py` (UI Qt, dostęp do MRML, obserwatory, `qt.QTimer` do przekazywania
   zdarzeń z wątku sieciowego do głównego wątku Qt). Wszystko, co dotyka `slicer.*`/`qt.*`, trzymaj tutaj.
 - Testy wymagające Slicera: `RemoteViewTest` (ScriptedLoadableModuleTest) + kroki manualne w
@@ -27,14 +31,17 @@ W sandboxie **nie ma 3D Slicera**. Dlatego:
 
 ## Zakres funkcjonalny
 
-- UI (`.ui` z Qt Designer lub kod): pole URL relay (domyślnie z `PUBLIC_URL`), przycisk Start/Stop, etykieta
-  kodu czcionką ≥ 48 pt, obraz QR (`https://<host>/j/<kod>`), lista podłączonych widzów, ustawienia: co
-  udostępniać (wszystkie widoczne modele / wybrane), poziom decymacji (%), auto‑aktualizacja (on/off, debounce ms),
+- UI (`.ui` z Qt Designer lub kod): pole URL relay (stała domyślna w kodzie, zapamiętywana w `QSettings`),
+  przycisk Start/Stop, etykieta kodu czcionką ≥ 48 pt, obraz QR (`https://<host>/j#<kod>` — kod we fragmencie,
+  wg protokołu), lista podłączonych widzów, ustawienia: co
+  udostępniać (wszystkie widoczne modele / wybrane), poziom decymacji (%), auto-aktualizacja (on/off, debounce ms),
   status połączenia i ostatni błąd.
-- Eksport sceny: wg decyzji ADR (`vtkGLTFExporter` vs własny eksport z węzłów MRML). Segmentacje → zamknięte
-  powierzchnie (`vtkMRMLSegmentationNode` → closed surface representation) → siatki; zachowaj nazwy, kolory,
-  przezroczystość; każdy węzeł ma stabilny `nodeId` (ID węzła MRML). Weryfikuj orientację i skalę na
-  fixture (np. `MRHead` → segmentacja → eksport → wczytanie w `trimesh`/`pygltflib` w teście).
+- Eksport sceny: wg ADR (domyślnie własny writer GLB z węzłów MRML). Segmentacje → zamknięte powierzchnie
+  (`vtkMRMLSegmentationNode` → closed surface representation) → siatki; zachowaj nazwy, kolory, przezroczystość;
+  każdy węzeł ma stabilny `nodeId` (ID węzła MRML). Orientację i skalę weryfikuj w `pytest` na syntetycznym
+  `vtkPolyData` o znanych współrzędnych RAS (np. znacznik w (+100, 0, 0) mm musi wylądować w glTF w (+0.1, 0, 0)
+  po konwersji osi), odczytując wynik `pygltflib`/`trimesh`; test na prawdziwych danych (`MRHead` → Segment
+  Editor → eksport) opisz jako manualny w `docs/testing/slicer.md`.
 - Decymacja: `vtkQuadricDecimation` z celem trójkątów wg ustawienia; raportuj rozmiar przed/po; ostrzeżenie,
   gdy scena przekracza limit protokołu.
 - Obserwowanie zmian: eventy MRML (dodanie/usunięcie węzła, `ModifiedEvent` display node, transformacje) z

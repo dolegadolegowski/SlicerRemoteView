@@ -32,8 +32,8 @@ quest-app/MemoryCaptures/
 *.apk
 *.aab
 *.unitypackage
-*.csproj
-*.sln
+quest-app/*.csproj
+quest-app/*.sln
 *.pidb
 *.booproj
 *.svd
@@ -51,3 +51,6 @@ Thumbs.db
 
 # Claude Code local state
 .claude/settings.local.json
+
+# Claude Code worktrees
+.claude/worktrees/

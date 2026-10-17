@@ -12,10 +12,11 @@ Check, in this order:
 1. Acceptance criteria of the task are met; nothing unrelated is included; the change is small enough for one commit.
 2. Protocol conformance: message shapes, versioning, limits, coordinate system/units, stable `nodeId`s.
 3. Tests exist and cover the change (or a manual test step is documented when Slicer/Unity/Railway is required).
-4. Security and privacy: no secrets committed, no scene payloads/codes/tokens in logs, limits enforced,
-   codes expire, no persistence of scene data in the relay.
+4. Security and privacy: no secrets committed, no scene payloads/codes/tokens in logs or URL paths, limits
+   enforced, codes expire, no persistence of scene data in the relay (threat model: `docs/architecture.md`).
 5. Threading/UI safety (Slicer: no blocking of the Qt main thread; web: disposal of GPU resources; Quest: comfort).
-6. Docs: plan status updated, component README and `CLAUDE.md` commands still accurate.
+6. Docs: plan status updated, component README still accurate; the change stays inside the files the
+   workstream owns (`CLAUDE.md` rule 4).
 7. Code quality: naming, error handling, dead code, dependencies added without need.
 
 Output format:

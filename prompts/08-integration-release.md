@@ -1,9 +1,14 @@
 # 08 — Workstream `release`: integracja gałęzi, dokumentacja użytkownika, wydanie
 
 > Komponent: `release` · pracuje na `main` (plus krótkotrwałe gałęzie `release/vX.Y`) · plan
-> `docs/plan/00-overview.md` (sekcja milestone'ów) · subagenci: `reviewer`, `qa`, `architect` · wymaga: PR‑ów
-> z workstreamów gotowych do scalenia. Stosuj pętlę pracy z `prompts/_workflow.md` w wersji dla integracji
-> (zadania = kroki poniżej; argument uruchomienia = milestone, np. `M1`, albo `status`; podany przy komendzie lub na początku wiadomości).
+> `docs/plan/00-overview.md` (sekcja milestone'ów) · subagenci: `reviewer`, `qa`, `architect` · wymaga: PR-ów
+> z workstreamów gotowych do scalenia.
+>
+> **Ten prompt NIE używa pętli z `prompts/_workflow.md`** (ona jest dla komponentów na gałęziach `ws/*`).
+> Przebieg jest opisany w „Krokach” poniżej. Argument uruchomienia (przy komendzie lub w pierwszej linii
+> wiadomości): milestone, np. `M1` — wykonaj kroki 1–6 dla tego milestone'u; `status` (domyślny) — tylko
+> krok 1. Zatrzymuj się z nagłówkiem `PYTANIE DO UŻYTKOWNIKA` przy konfliktach w `docs/protocol.md`, decyzjach
+> o tagu/wersji i wszędzie tam, gdzie zmiana jest nieodwracalna (merge, tag, publikacja).
 
 ## Cel workstreamu
 
@@ -24,10 +29,14 @@ testy, uzupełnić dokumentację użytkownika i wydać wersję.
    sesji i odczyt kodu/QR, łączenie telefonu/tabletu, łączenie Quest (Browser/WebXR lub aplikacja), rozwiązywanie
    problemów (zły kod, sieć szpitalna, duża scena), informacja o prywatności. Po polsku **i** po angielsku
    (`docs/user-guide/pl/`, `docs/user-guide/en/`) — ta dokumentacja jest dla użytkowników, nie deweloperów.
-   Dodatkowo `docs/user-guide/demo-script.md`: 10‑minutowy scenariusz pokazu na zajęciach.
+   Dodatkowo `docs/user-guide/demo-script.md`: 10-minutowy scenariusz pokazu na zajęciach.
+   W tym kroku także: przenieś do planów komponentów zgłoszenia z `docs/testing/reports/`, które nie mają
+   jeszcze właściciela, i zaktualizuj threat model w `docs/architecture.md` o wyniki `qa`.
 5. **Wydanie**: wersje (protokół, relay, web, plugin, quest) wg semver w jednym miejscu (`VERSIONS.md` lub
-   `package.json`/metadane), `CHANGELOG.md` z conventional commits, tag `vX.Y.Z`, GitHub Release
-   (workflow z `ws/deploy`): zip pluginu; APK Quest dołączam ręcznie — przypomnij mi.
+   `package.json`/metadane), `CHANGELOG.md` z conventional commits (jedyne źródło treści GitHub Release),
+   przesunięcie `Active milestone:` w `docs/plan/00-overview.md`, uzupełnienie sekcji „Komendy projektu”
+   w `CLAUDE.md`, tag `vX.Y.Z` (zapytaj przed utworzeniem), GitHub Release (workflow z `ws/deploy`): zip pluginu;
+   APK Quest dołączam ręcznie — przypomnij mi.
 6. **Retro** (krótko, w `docs/plan/00-overview.md`): co spowolniło, co zmienić w planach/promptach; jeśli trzeba
    — zaproponuj poprawki do `prompts/*.md` i `CLAUDE.md` jako osobny commit `chore(prompts): …`.
 

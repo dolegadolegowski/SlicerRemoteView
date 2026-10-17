@@ -7,26 +7,30 @@
 
 ## Cel workstreamu
 
-Aplikacja www w `web-viewer/`, którą użytkownik telefonu/tabletu otwiera bez instalacji: wpisuje 5‑znakowy kod
-(lub wchodzi przez QR/deep link `/j/ABCDE`), a następnie ogląda model 3D ze Slicera: obraca, przybliża, przesuwa,
+Aplikacja www w `web-viewer/`, którą użytkownik telefonu/tabletu otwiera bez instalacji: wpisuje 5-znakowy kod
+(lub wchodzi przez QR/deep link `/j#ABCDE`), a następnie ogląda model 3D ze Slicera: obraca, przybliża, przesuwa,
 włącza/wyłącza elementy i zmienia ich przezroczystość. Scena aktualizuje się na żywo. Opcjonalnie: tryb VR
 w Quest Browser (WebXR) jako szybka ścieżka na gogle przed aplikacją natywną.
 
-## Stos (domyślny, zgodny z ADR)
+## Stos (domyślny — obowiązuje, o ile ADR nie zdecydował inaczej)
 
-Vite + TypeScript + three.js (GLTFLoader z dekoderami Draco/meshopt, OrbitControls z obsługą dotyku), bez
-frameworka UI (lub lekki, jeśli ADR tak mówi), vitest (jednostkowe), Playwright (E2E, w tym emulacja iPhone'a).
+Vite + TypeScript + three.js (GLTFLoader, OrbitControls z obsługą dotyku), bez frameworka UI (lub lekki,
+jeśli ADR tak mówi), vitest (jednostkowe), Playwright (E2E komponentu: emulacja viewportu/dotyku iPhone'a
+i Androida — to **nie** jest prawdziwe Safari, więc kryterium akceptacji dla iOS pozostaje test na urządzeniu
+opisany w `docs/testing/web.md`). Dekodery Draco/meshopt tylko jeśli protokół przewiduje kompresję (w v1 nie
+przewiduje — rozmiar ogranicza decymacja po stronie Slicera); wtedy CSP musi dopuścić `'wasm-unsafe-eval'`.
 Build trafia do `web-viewer/dist` i jest serwowany przez relay-server (ten sam origin).
 
-## Wymagania UX (mobile‑first)
+## Wymagania UX (mobile-first)
 
-- Ekran dołączania: 5 dużych pól (auto‑przeskok, wklejanie całego kodu, klawiatura alfanumeryczna wielkie
+- Ekran dołączania: 5 dużych pól (auto-przeskok, wklejanie całego kodu, klawiatura alfanumeryczna, wielkie
   litery), czytelne komunikaty błędów (zły kod, sesja wygasła, brak sieci), stan „łączenie”.
-- Deep link `/j/:code` od razu łączy; po sukcesie adres bez kodu (nie zostawiaj kodu w historii).
+- Deep link `/j#ABCDE` (kod we fragmencie URL — nie trafia do serwera) od razu łączy; po sukcesie fragment
+  usunięty z adresu (`history.replaceState`), kod nie zostaje w historii.
 - Widok 3D na całym ekranie, sterowanie: jeden palec obrót, dwa palce zoom/przesunięcie, podwójne dotknięcie
   = reset widoku; przycisk „dopasuj do ekranu”.
 - Panel elementów (nazwa, kolor, widoczność, przezroczystość) zwijany; na tablecie może być boczny.
-- Pasek stanu: połączono / aktualizacja / rozłączono (auto‑reconnect z backoffem), liczba widzów, wersja sceny.
+- Pasek stanu: połączono / aktualizacja / rozłączono (auto-reconnect z backoffem), liczba widzów, wersja sceny.
 - Ciemny motyw, wysoki kontrast, działanie w poziomie i pionie, brak przewijania strony pod canvasem.
 - Dostępność podstawowa (etykiety, focus), i18n gotowe na PL/EN (teksty w jednym pliku).
 
@@ -35,9 +39,10 @@ Build trafia do `web-viewer/dist` i jest serwowany przez relay-server (ten sam o
 - Warstwa protokołu (`src/protocol/`) oddzielona od three.js: maszyna stanów połączenia, składanie chunków GLB,
   weryfikacja hasha, obsługa wersji sceny — testowana jednostkowo na fixtures z `shared/`.
 - Mapowanie `nodeId` → obiekty three.js; aktualizacje (`scene.update`) bez przeładowania całej sceny.
-- Pamięć: limit pixel ratio (max 2), zwalnianie geometrii/materiałów przy nowym snapshotcie, obsługa
+- Pamięć: limit pixel ratio (max 2), zwalnianie geometrii/materiałów przy nowym snapshocie, obsługa
   `webglcontextlost`, informacja gdy scena przekracza limity urządzenia.
-- Bezpieczeństwo: brak `eval`, CSP‑friendly, kod sesji nigdy w query stringu poza deep linkiem wejściowym.
+- Bezpieczeństwo: brak `eval`, CSP-friendly, kod sesji nigdy w ścieżce ani query stringu (tylko fragment
+  deep linku i treść wiadomości WebSocket); pobieranie sceny HTTP z tokenem widza w nagłówku.
 - PWA manifest + ikony (bez service workera cache'ującego scenę).
 - **WebXR (zadanie opcjonalne, M3)**: `VRButton`, kontrolery/ręce do obracania i skalowania modelu, model
   umieszczany przed użytkownikiem; działa w Quest Browser. Nie blokuje ścieżki mobilnej.
@@ -46,9 +51,10 @@ Build trafia do `web-viewer/dist` i jest serwowany przez relay-server (ten sam o
 
 1. Szkielet Vite+TS, lint, vitest, Playwright, `README.md`, strona dołączania (bez sieci).
 2. Klient protokołu + testy jednostkowe (fixtures).
-3. Ładowanie GLB i sterowanie kamerą; test E2E „kod → model widoczny” z fake‑slicer.
+3. Ładowanie GLB i sterowanie kamerą; test E2E komponentu „kod → model widoczny” z fake-slicer (smoke;
+   pełne scenariusze systemowe — late join, reconnect, wielu widzów — należą do `tests/e2e` workstreamu `qa`).
 4. Panel elementów + aktualizacje na żywo.
-5. Reconnect, late join, błędy, stany; test E2E na emulowanym iPhonie.
+5. Reconnect, late join, błędy, stany; test E2E komponentu na emulowanym viewportcie iPhone'a.
 6. Wydajność i pamięć (duża scena z fixtures), PWA.
 7. (M3) WebXR.
 

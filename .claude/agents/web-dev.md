@@ -13,7 +13,8 @@ Rules:
   from rendering (`src/viewer/`) and UI (`src/ui/`).
 - Mobile first: touch controls, portrait and landscape, no page scroll under the canvas, pixel ratio capped,
   geometry/material disposal, `webglcontextlost` handling, memory-aware loading (iOS Safari limits).
-- Session code never leaves the join flow: deep link `/j/:code` is consumed and removed from the URL.
+- Session code never leaves the join flow: the deep link carries it in the URL fragment (`/j#ABCDE`), which
+  is consumed and removed from the address; never put the code in a path or query string.
 - Strict TypeScript, ESLint + Prettier, vitest; Playwright E2E against relay + fake-slicer when available,
   otherwise a WebSocket mock (mark `[stub: SRV-xx]`).
 - Accessibility basics and a single i18n strings file (PL/EN).

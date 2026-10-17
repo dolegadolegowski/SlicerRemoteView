@@ -1,8 +1,8 @@
-# Pętla pracy workstreamu (wspólna dla promptów 01–08)
+# Pętla pracy workstreamu (wspólna dla promptów 01–07)
 
-Ten plik jest częścią każdego promptu `ws-*`. Oznaczenia: `<komponent>` = nazwa z promptu (np. `server`),
-`<GAŁĄŹ>` = `ws/<komponent>`, `<PLAN>` = `docs/plan/<komponent>.md`, `<DEV>` = subagent implementujący
-(np. `server-dev`).
+Ten plik jest częścią każdego promptu `ws-*` oprócz `ws-release` (08 ma własny przebieg). Oznaczenia:
+`<komponent>` = nazwa z promptu (np. `server`), `<GAŁĄŹ>` = `ws/<komponent>`, `<PLAN>` =
+`docs/plan/<komponent>.md`, `<DEV>` = subagent implementujący (np. `server-dev`) — pełna mapa w `CLAUDE.md`.
 
 ## Argument uruchomienia
 
@@ -18,10 +18,14 @@ Podawany przy komendzie (np. `/ws-server 5`) lub w pierwszej linii wiadomości (
 1. Przeczytaj `CLAUDE.md`, `docs/protocol.md`, `<PLAN>` i `docs/plan/00-overview.md`. Jeśli `<PLAN>` nie
    istnieje → **zatrzymaj się** i poproś o uruchomienie `prompts/00-goal.md`. Nie wymyślaj własnego planu.
 2. `git status` musi być czyste. `git fetch` (jeśli jest remote). Przełącz się na `<GAŁĄŹ>` (utwórz z `main`,
-   jeśli nie istnieje). Jeśli `main` ma nowe commity dotykające `docs/protocol.md` lub `shared/`, zrób
-   `git rebase main` (lub merge, gdy rebase jest ryzykowny) i powiedz mi o tym.
-3. Pokaż mi w 3–5 linijkach: co jest `done`, co jest zablokowane (brakujące zależności z innych komponentów)
-   i które zadania zrobisz teraz.
+   jeśli nie istnieje). Jeśli `git worktree list` pokazuje, że `<GAŁĄŹ>` jest już wyewidencjonowana w innym
+   worktree, nie twórz drugiej gałęzi — pracuj w tamtym worktree albo zapytaj. Jeśli `main` ma nowe commity
+   dotykające `docs/protocol.md` lub `shared/`, zrób `git rebase main` (lub merge, gdy rebase jest ryzykowny)
+   i powiedz mi o tym.
+3. Sprawdź `docs/testing/reports/` pod kątem zgłoszeń dla swojego komponentu bez wpisu w `<PLAN>` — dopisz je
+   jako zadania `todo` (następne wolne ID) w osobnym commicie `docs(plan): triage reports`.
+4. Pokaż mi w 3–5 linijkach: co jest `done`, co jest zablokowane (brakujące zależności z innych komponentów),
+   który milestone jest aktywny (`Active milestone:` w `docs/plan/00-overview.md`) i które zadania zrobisz teraz.
 
 ## Dla każdego zadania
 
@@ -37,8 +41,8 @@ Podawany przy komendzie (np. `/ws-server 5`) lub w pierwszej linii wiadomości (
 4. Subagent `reviewer` ocenia diff względem kryteriów akceptacji, `docs/protocol.md` i `CLAUDE.md`.
    Uwagi high/medium wdrażasz; low zapisujesz w `<PLAN>` jako follow-up.
 5. Commit: Conventional Commits z ID, np. `feat(server): session code generator (SRV-02)`. W tym samym
-   commicie: status `done` w `<PLAN>`, aktualizacja `README.md` komponentu i sekcji „Komendy projektu”
-   w `CLAUDE.md`, jeśli coś się zmieniło.
+   commicie: status `done` w `<PLAN>` i aktualizacja `README.md` komponentu (komendy testów/buildu), jeśli coś
+   się zmieniło. `CLAUDE.md` i `docs/plan/00-overview.md` zostaw — aktualizuje je `release` na `main`.
 6. Jedna linijka podsumowania dla mnie → następne zadanie.
 
 ## Zmiana kontraktu
@@ -49,10 +53,13 @@ dotyczy. Jeśli zmiana łamie zgodność wsteczną — zatrzymaj się i zapytaj.
 
 ## Kiedy się zatrzymać
 
-- wyczerpany limit zadań (domyślnie 3) lub koniec milestone'u,
+- wyczerpany limit zadań (domyślnie 3) lub koniec zadań Twojego komponentu w aktywnym milestonie,
 - decyzja nieodwracalna/niejasna (zapytaj; zaproponuj wariant domyślny),
 - blokada przez inny komponent, której nie da się zastubować,
 - testy nie przechodzą po 2 próbach naprawy (opisz problem; nie commituj zepsutego stanu).
+
+Pytania blokujące zadawaj pod nagłówkiem **`PYTANIE DO UŻYTKOWNIKA`** (zwięźle, każde z proponowanym wariantem
+domyślnym) i zakończ turę — w trybie `/goal` ten nagłówek oznacza zatrzymanie pracy do czasu odpowiedzi.
 
 ## Na koniec uruchomienia
 

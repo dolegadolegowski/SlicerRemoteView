@@ -8,7 +8,7 @@
 
 ## Cel workstreamu
 
-Aplikacja na Meta Quest (2/3/3S) w `quest-app/`: użytkownik wpisuje 5‑znakowy kod (lub wybiera ostatnią
+Aplikacja na Meta Quest (2/3/3S) w `quest-app/`: użytkownik wpisuje 5-znakowy kod (lub wybiera ostatnią
 sesję), aplikacja łączy się z relay, pobiera scenę (GLB) i wyświetla ją w przestrzeni przed użytkownikiem;
 model można chwytać, obracać, skalować i przesuwać rękami lub kontrolerami; elementy można włączać/wyłączać
 z panelu; scena aktualizuje się na żywo. Tryb passthrough (MR) jako opcja.
@@ -22,9 +22,12 @@ W sandboxie **nie ma Unity ani Androida**. Dlatego:
   oraz, jeśli w sandboxie jest `dotnet`, równoległy projekt testowy `quest-app/Tests.NET/` używający tych
   samych plików źródłowych (link w `.csproj`), żeby testy dało się uruchomić tutaj. Jeśli `dotnet` nie ma —
   napisz testy EditMode i dokładne kroki uruchomienia w Unity.
+- Typy protokołu pochodzą z `shared/cs` i są generowane do `Assets/RemoteView/Protocol/Generated/` skryptem
+  z workstreamu `protocol` (nie edytuj ich ręcznie); JSON: Newtonsoft.Json z pakietu Unity
+  `com.unity.nuget.newtonsoft-json`.
 - Warstwa Unity (`Assets/RemoteView/Runtime/`): `RelayClient` (WebSocket — biblioteka wg ADR, np.
   NativeWebSocket), `SceneSync` (snapshot/aktualizacje → GameObjects), `GlbLoader` (glTFast, runtime),
-  `CodeEntryUI` (world‑space UI, klawiatura numeryczno‑literowa pod kontrolery/ręce), `ModelInteraction`
+  `CodeEntryUI` (world-space UI, klawiatura numeryczno-literowa pod kontrolery/ręce), `ModelInteraction`
   (grab/rotate/scale — XR Interaction Toolkit lub Meta Interaction SDK wg ADR), `PassthroughToggle`,
   `Settings` (URL relay, zapamiętany ostatni kod), `DiagnosticsOverlay` (stan, wersja sceny, fps).
 - Projekt Unity musi dać się otworzyć bez ręcznych poprawek: `Packages/manifest.json` z wersjami **zweryfikowanymi**
@@ -41,13 +44,13 @@ W sandboxie **nie ma Unity ani Androida**. Dlatego:
   z zachowaniem proporcji; informacja o rozmiarze sceny i ostrzeżenie, gdy przekracza limit.
 - Panel elementów przypięty do dłoni/kontrolera lub świata (przełączalny); widoczność/przezroczystość.
 - Passthrough on/off; komfort (brak gwałtownego ruchu kamery; model porusza się, nie użytkownik).
-- Stan połączenia zawsze widoczny; auto‑reconnect.
+- Stan połączenia zawsze widoczny; auto-reconnect.
 
 ## Kolejność zadań (sugerowana; plan `QST-xx` jest źródłem prawdy)
 
 1. Szkielet projektu Unity (manifest, settings, scena, asmdef), `README.md`, test EditMode „smoke”.
 2. Protokół w C# + testy na fixtures z `shared/`.
-3. `RelayClient` + `CodeEntryUI` (test manualny: połączenie z fake‑slicer, kod OK/zły).
+3. `RelayClient` + `CodeEntryUI` (test manualny: połączenie z fake-slicer, kod OK/zły).
 4. `GlbLoader` + `SceneSync` (snapshot → obiekty; aktualizacje bez przeładowania).
 5. `ModelInteraction` (grab/rotate/scale), reset, panel elementów.
 6. Passthrough, ustawienia, diagnostyka, reconnect/late join.

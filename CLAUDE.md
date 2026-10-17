@@ -4,63 +4,77 @@
 
 Zdalny podgląd sceny 3D z **3D Slicer** na goglach **Meta Quest** i w przeglądarce urządzeń
 mobilnych (iPhone/iPad/Android). Urządzenia łączą się z konkretną sesją 3D Slicera przez
-**5‑znakowy kod**. Komponenty (monorepo):
+**5-znakowy kod**. Monorepo; stos domyślny poniżej obowiązuje, o ile ADR w `docs/adr/` nie mówi inaczej.
 
-| Katalog          | Co to jest                                                                 | Stos (domyślny — patrz `docs/adr/`)        |
-|------------------|----------------------------------------------------------------------------|--------------------------------------------|
-| `slicer-plugin/` | moduł/extension 3D Slicer: start sesji, kod + QR, eksport sceny, wysyłka    | Python (Slicer 5.x), PythonQt, VTK         |
-| `relay-server/`  | serwer pośredniczący: sesje i kody, relay WebSocket, hosting web‑viewera    | Node.js/TypeScript, Docker, Railway        |
-| `web-viewer/`    | viewer 3D w przeglądarce: kod → model, obracanie/zoom, lista elementów      | Vite, TypeScript, three.js (opcj. WebXR)   |
-| `quest-app/`     | natywna aplikacja Meta Quest                                               | Unity LTS, OpenXR, Meta XR SDK, glTFast    |
-| `shared/`        | definicja protokołu (JSON Schema / typy) używana przez wszystkie komponenty | JSON Schema + wygenerowane typy            |
-| `docs/`          | wymagania, architektura, **protokół (kontrakt)**, plany per komponent, ADR  | Markdown + Mermaid                          |
-| `prompts/`       | prompty do uruchamiania w Claude Code (cel + niezależne workstreamy)        | —                                          |
+## Mapa komponentów (jedyne źródło nazw używanych w regułach, planach i gałęziach)
 
-Jeśli katalogu jeszcze nie ma, tworzy go pierwszy workstream, który go potrzebuje.
+| `<komponent>` | Katalog(i)                          | Gałąź         | Plan                    | ID zadań | Subagent     | Stos domyślny                                   |
+|---------------|-------------------------------------|---------------|-------------------------|----------|--------------|-------------------------------------------------|
+| `protocol`    | `shared/`, `tools/`                 | `ws/protocol` | `docs/plan/protocol.md` | `PRO-`   | `server-dev` | JSON Schema, generowane typy TS/Python/C#, symulator `tools/fake-slicer` |
+| `server`      | `relay-server/`                     | `ws/server`   | `docs/plan/server.md`   | `SRV-`   | `server-dev` | Node.js 22 LTS, TypeScript, `ws`, Fastify, Docker, Railway |
+| `web`         | `web-viewer/`                       | `ws/web`      | `docs/plan/web.md`      | `WEB-`   | `web-dev`    | Vite, TypeScript, three.js, opcjonalnie WebXR    |
+| `slicer`      | `slicer-plugin/`                    | `ws/slicer`   | `docs/plan/slicer.md`   | `SLC-`   | `slicer-dev` | Python (Slicer 5.x), PythonQt, VTK, numpy        |
+| `quest`       | `quest-app/`                        | `ws/quest`    | `docs/plan/quest.md`    | `QST-`   | `quest-dev`  | Unity LTS, OpenXR, Meta XR SDK, glTFast          |
+| `deploy`      | `.github/`, `railway.*`, Dockerfile | `ws/deploy`   | `docs/plan/deploy.md`   | `DEP-`   | `server-dev` | GitHub Actions, Docker, Railway                  |
+| `qa`          | `tests/`, `docs/security.md`        | `ws/qa`       | `docs/plan/qa.md`       | `QA-`    | `qa`         | Playwright, k6                                   |
+| `release`     | integracja na `main`                | `main`        | `docs/plan/00-overview.md` | —     | `reviewer`   | —                                                |
+
+Pozostałe katalogi: `docs/` (wymagania, architektura, **protokół = kontrakt**, plany, ADR, testy, user guide),
+`prompts/` (prompty uruchamiane w Claude Code; komendy w `.claude/skills/` tylko je wczytują), `.claude/agents/`
+(subagenci). Jeśli katalogu komponentu jeszcze nie ma, tworzy go jego workstream.
 
 ## Zasady pracy (obowiązują każdego agenta i subagenta)
 
-1. **Najpierw czytaj, potem rób**: `docs/protocol.md` i plan swojego komponentu `docs/plan/<komponent>.md`.
-   Jeśli plan nie istnieje — zatrzymaj się i poproś o uruchomienie promptu celu (`prompts/00-goal.md`).
+1. **Najpierw czytaj, potem rób**: `docs/protocol.md` i plan swojego komponentu (tabela wyżej). Jeśli plan nie
+   istnieje — zatrzymaj się i poproś o uruchomienie promptu celu (`/project-goal`, plik `prompts/00-goal.md`).
 2. **Protokół jest kontraktem.** Zmieniasz go tylko świadomie: najpierw `docs/protocol.md` + numer wersji,
-   osobny commit `docs(protocol): …`, dopiero potem kod. Zmianę oznacz w planach innych komponentów (`[protocol change]`).
+   osobny commit `docs(protocol): …`, dopiero potem kod. Zmianę oznacz w planach komponentów, których dotyczy
+   (`[protocol change: vX.Y]`).
 3. **Przyrostowo.** Jedno zadanie z planu = jeden commit (≤ ~300 linii zmian, działający stan). Kolejność:
-   implementacja + testy → testy/lint przechodzą → `reviewer` → poprawki → commit → status `done` w planie (w tym samym commicie).
-4. **Gałęzie.** Każdy workstream pracuje na własnej gałęzi `ws/<komponent>` i nie dotyka katalogów innych
-   komponentów (wyjątek: `docs/plan/<swój>.md`, `docs/protocol.md` wg zasady 2). Integracja do `main` przez PR.
+   implementacja + testy → testy/lint przechodzą → `reviewer` → poprawki → commit → status `done` w planie
+   (w tym samym commicie).
+4. **Gałęzie i własność plików.** Każdy workstream pracuje na własnej gałęzi (tabela) i edytuje tylko:
+   katalogi swojego komponentu, swój plan, `docs/testing/<komponent>.md`, `README.md` swojego komponentu,
+   nowe pliki w `docs/research/` i `docs/adr/`, oraz `docs/protocol.md` wg zasady 2. Wszystko inne
+   (cudze plany, `CLAUDE.md`, `docs/plan/00-overview.md`, `docs/architecture.md`) zmienia tylko `release`
+   na `main`. Błędy w cudzym komponencie zgłaszasz w `docs/testing/reports/<data>.md` (zasada 9), nie w cudzym planie.
 5. **Nie zgaduj API** (Slicer/VTK, Railway, three.js, Meta XR SDK, glTFast). Sprawdź w dokumentacji lub źródłach;
    link do źródła zostaw w ADR, komentarzu lub notatce w `docs/research/`. Niezweryfikowane → oznacz `[TODO verify]`.
-6. **Dane medyczne.** Relay nigdy nie zapisuje modeli na dysk ani do logów, kody sesji wygasają, cały ruch przez TLS,
-   ochrona przed zgadywaniem kodów. Nie commituj sekretów (`.env` w `.gitignore`).
+6. **Dane medyczne.** Relay nigdy nie zapisuje modeli na dysk ani do logów; kody sesji i tokeny nie trafiają do
+   ścieżek URL ani logów; kody wygasają; cały ruch przez TLS; ochrona przed zgadywaniem kodów. Nie commituj
+   sekretów (`.env` w `.gitignore`). Kanoniczny opis zagrożeń: threat model w `docs/architecture.md`.
 7. **Język.** Kod, komentarze, commity, dokumentacja w repo — **po angielsku**. Rozmowa z użytkownikiem — **po polsku**.
    (Jeśli chcesz zmienić tę zasadę, zmień ją tutaj, nie w pojedynczych plikach.)
 8. **Pytaj zamiast zgadywać**, gdy decyzja jest nieodwracalna lub niejasna (wybór silnika, format transportu,
-   zmiana kontraktu). W pozostałych przypadkach wybierz rozsądny domyślny wariant i napisz, że tak zrobiłeś.
-9. **Środowisko.** W sandboxie nie ma 3D Slicera ani Unity. Logikę pisz tak, by była testowalna bez nich
-   (adaptery, czyste funkcje); testy wymagające Slicera/Unity opisuj jako manualne kroki dla użytkownika.
-10. **Commity**: Conventional Commits z ID zadania, np. `feat(server): session code generator (SRV-02)`,
+   zmiana kontraktu). Pytanie blokujące zadawaj pod nagłówkiem `PYTANIE DO UŻYTKOWNIKA` (zwięźle, z proponowanym
+   wariantem domyślnym) i zakończ turę — tryb `/goal` rozpoznaje ten nagłówek jako zatrzymanie. W pozostałych
+   przypadkach wybierz rozsądny wariant domyślny i napisz, że tak zrobiłeś.
+9. **Zgłoszenia między komponentami.** Każdy workstream na starcie sprawdza `docs/testing/reports/` pod kątem
+   zgłoszeń dla swojego komponentu i dopisuje je do swojego planu jako zadania `todo`.
+10. **Środowisko.** W sandboxie nie ma 3D Slicera ani Unity. Logikę pisz tak, by była testowalna bez nich
+    (adaptery, czyste funkcje); testy wymagające Slicera/Unity opisuj jako manualne kroki w `docs/testing/<komponent>.md`.
+11. **Commity**: Conventional Commits z ID zadania, np. `feat(server): session code generator (SRV-02)`,
     `docs(plan): mark WEB-04 done`. Nie łącz zadań z różnych komponentów w jednym commicie.
 
 ## Subagenci (`.claude/agents/`)
 
-| Agent         | Rola                                                            | Pisze kod? |
-|---------------|-----------------------------------------------------------------|------------|
-| `architect`   | rozpoznanie technologii, decyzje, ADR, weryfikacja w dokumentacji | nie (tylko `docs/`) |
-| `slicer-dev`  | implementacja w `slicer-plugin/`                                 | tak        |
-| `server-dev`  | implementacja w `relay-server/` i `shared/`                      | tak        |
-| `web-dev`     | implementacja w `web-viewer/`                                    | tak        |
-| `quest-dev`   | implementacja w `quest-app/`                                     | tak        |
-| `reviewer`    | przegląd diffu przed commitem (kryteria akceptacji, protokół, testy, bezpieczeństwo) | nie |
-| `qa`          | testy E2E, obciążeniowe, plany testów manualnych                 | tak (tylko testy) |
+| Agent         | Rola                                                                       | Pisze kod?            |
+|---------------|----------------------------------------------------------------------------|-----------------------|
+| `architect`   | rozpoznanie technologii, decyzje, ADR, weryfikacja w dokumentacji           | nie (tylko `docs/`)   |
+| `slicer-dev`  | implementacja w `slicer-plugin/`                                            | tak                   |
+| `server-dev`  | implementacja w `relay-server/`, `shared/`, `tools/`, CI/Docker/Railway     | tak                   |
+| `web-dev`     | implementacja w `web-viewer/`                                               | tak                   |
+| `quest-dev`   | implementacja w `quest-app/`                                                | tak                   |
+| `reviewer`    | przegląd diffu przed commitem (kryteria akceptacji, protokół, testy, bezpieczeństwo) | nie          |
+| `qa`          | testy E2E/obciążeniowe/bezpieczeństwa w `tests/`, plany testów, raporty     | tak (tylko testy)     |
 
 Zadania niezależne uruchamiaj **równolegle** (kilka wywołań subagentów w jednej wiadomości). Wynik subagenta
 zawsze streść użytkownikowi i zapisz do plików — nie polegaj na tym, że zostanie w kontekście.
 
 ## Komendy projektu
 
-Uzupełniane przez workstreamy w miarę powstawania kodu (zostaw aktualne):
+Aktualne komendy testów/buildu każdego komponentu są w `README.md` tego komponentu (utrzymuje je jego
+workstream). Poniższa lista jest uzupełniana wyłącznie przez `release` na `main`:
 
-- relay-server: `npm test`, `npm run lint`, `npm run build`, `docker build .`  `[TODO]`
-- web-viewer: `npm test`, `npm run build`, `npm run dev`  `[TODO]`
-- slicer-plugin: `pytest` (logika bez Slicera); self-testy w Slicerze — manualnie  `[TODO]`
-- quest-app: Unity Test Runner (EditMode) — manualnie  `[TODO]`
+- `shared/`: `[TODO]` · `relay-server/`: `[TODO]` · `web-viewer/`: `[TODO]` · `slicer-plugin/`: `[TODO]`
+- `quest-app/`: Unity Test Runner (EditMode) — manualnie · `tests/`: `[TODO]`
