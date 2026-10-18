@@ -29,6 +29,7 @@
     "build": "tsc -p tsconfig.build.json",
     "generate": "node scripts/generate.mjs",
     "generate:check": "node scripts/generate.mjs --check",
+    "check": "node scripts/check.mjs",
     "fixtures": "node --experimental-strip-types scripts/make-glb-fixtures.ts",
     "test": "vitest run",
     "test:py": "py/.venv/bin/pytest py",
