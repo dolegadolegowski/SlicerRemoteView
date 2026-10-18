@@ -11,5 +11,7 @@ export default defineConfig({
   test: {
     include: ["test/**/*.test.ts"],
     environment: "node",
+    // `gc()` lets the registry tests prove released snapshot buffers are collectable (NFR-10).
+    execArgv: ["--expose-gc"],
   },
 });

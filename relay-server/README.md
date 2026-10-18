@@ -77,7 +77,9 @@ Logs are JSON lines (`level`, `time`, `message`) on stdout; per-request logging 
 | --- | --- |
 | `src/config.ts` | environment → validated `Config` (fail fast, protocol maximums) |
 | `src/codes.ts` | 5-symbol session codes (`crypto.randomInt` per symbol over `23456789ABCDEFGHJKMNPQRSTUVWXYZ`, redraw on collision), the release quarantine (`CODE_QUARANTINE_S`, bounded), `pt_`/`vt_` tokens (256 bit, base64url), SHA-256 storage and constant-time comparison |
-| `src/app.ts` | Fastify factory: `/healthz`, `/api/version`, 404 handling, client-IP policy |
+| `src/registry.ts` | in-memory sessions (architecture §3): phases `allocated → active → grace → closed/expired`, code index, quarantine, TTL sweep every 10 s (grace `PUBLISHER_GRACE_S`, idle `SESSION_TTL_S` only while no viewer is connected, lifetime `SESSION_MAX_LIFETIME_S`), `MAX_SESSIONS` → `CAPACITY`, `expiring`/`expired` events; releasing a session drops its snapshot buffers — nothing is written to disk |
+| `src/clock.ts` | injectable time source; tests drive TTLs with `test/helpers/manual-clock.ts` |
+| `src/app.ts` | Fastify factory: `/healthz`, `/api/version`, 404 handling, client-IP policy; starts/stops the registry sweep with the server |
 | `src/logger.ts` | pino JSON lines with redaction of codes and tokens |
 
 ## Test and lint commands

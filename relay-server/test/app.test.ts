@@ -8,16 +8,20 @@ import { afterEach, describe, expect, it } from "vitest";
 import { buildApp, systemErrorCode } from "../src/app.js";
 import { loadConfig } from "../src/config.js";
 import { createLogger } from "../src/logger.js";
+import { Registry } from "../src/registry.js";
 import { childEnv } from "./helpers/env.js";
+import { ManualClock } from "./helpers/manual-clock.js";
 import { RELAY_VERSION } from "../src/version.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 describe("GET /healthz (SRV-01, §10)", () => {
   it("answers 200 with exactly {status, uptimeS, sessions, version} within 100 ms", async () => {
-    let now = 1_000_000;
-    const app = await buildApp({ now: () => now, sessionCount: () => 3 });
-    now += 12_345;
+    const clock = new ManualClock();
+    const registry = new Registry({ ...loadConfig({}), clock });
+    for (let i = 0; i < 3; i++) registry.createSession("mobile");
+    const app = await buildApp({ clock, registry });
+    clock.advance(12_345);
     await app.ready();
     await app.inject("/healthz"); // the first inject boots the app; time the steady state (NFR-38)
     const started = performance.now();
@@ -29,7 +33,7 @@ describe("GET /healthz (SRV-01, §10)", () => {
     await app.close();
   });
 
-  it("reports 0 sessions without a registry", async () => {
+  it("reports 0 sessions on a fresh relay", async () => {
     const app = await buildApp();
     expect((await app.inject("/healthz")).json()).toMatchObject({ sessions: 0 });
     await app.close();

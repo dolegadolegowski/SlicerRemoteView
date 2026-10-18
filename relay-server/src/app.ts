@@ -10,9 +10,12 @@ import Fastify, { LogController } from "fastify";
 import type { FastifyBaseLogger, FastifyInstance, FastifyReply } from "fastify";
 import type { Logger } from "pino";
 import { LIMITS } from "@slicerremoteview/shared";
+import { systemClock } from "./clock.js";
+import type { Clock } from "./clock.js";
 import { loadConfig } from "./config.js";
 import type { Config } from "./config.js";
 import { createLogger } from "./logger.js";
+import { Registry } from "./registry.js";
 import { PROTOCOL_VERSIONS, RELAY_NAME, RELAY_VERSION } from "./version.js";
 
 /** The `limits` object of `GET /api/version` (§10). */
@@ -28,10 +31,10 @@ export interface AppOptions {
   config?: Config;
   /** Defaults to a silent logger, so `buildApp()` in tests prints nothing. */
   logger?: Logger;
-  /** Live session count for `GET /healthz`; `0` until the registry exists. */
-  sessionCount?: () => number;
-  /** Clock for `uptimeS`; defaults to `Date.now`. */
-  now?: () => number;
+  /** Time source for uptime, TTLs and timeouts; tests pass a manual clock. */
+  clock?: Clock;
+  /** Session registry; by default one is built from `config` and `clock`. */
+  registry?: Registry;
 }
 
 /** Effective limits: configured snapshot and viewer caps, protocol maximums otherwise (§3.3, §14). */
@@ -93,12 +96,19 @@ function clientErrorHandler(logger: Logger) {
 }
 
 export async function buildApp(options: AppOptions = {}): Promise<FastifyInstance> {
-  const now = options.now ?? Date.now;
-  const startedAt = now();
+  const clock = options.clock ?? systemClock;
+  const startedAt = clock.now();
   const config = options.config ?? loadConfig({});
   const limits = publicLimits(config);
-  const sessionCount = options.sessionCount ?? (() => 0);
   const logger = options.logger ?? createLogger({ level: "silent" });
+  const registry =
+    options.registry ??
+    new Registry({
+      ...config,
+      clock,
+      onListenerError: (error) =>
+        logger.error({ errorCode: systemErrorCode(error) }, "session expiry handler failed"),
+    });
 
   const app = Fastify({
     loggerInstance: logger as FastifyBaseLogger,
@@ -118,14 +128,18 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     },
   });
 
+  // The TTL sweep runs while the server is up (architecture §5).
+  app.addHook("onReady", async () => registry.start());
+  app.addHook("onClose", async () => registry.stop());
+
   // No endpoint takes a request body (§10); without parsers a POST to an unknown path is a plain 404.
   app.removeAllContentTypeParsers();
 
   // `/healthz` is the Railway healthcheck target: status only, no codes, no IPs, no memory figures.
   app.get("/healthz", async () => ({
     status: "ok",
-    uptimeS: Math.floor((now() - startedAt) / 1000),
-    sessions: sessionCount(),
+    uptimeS: Math.floor((clock.now() - startedAt) / 1000),
+    sessions: registry.size,
     version: RELAY_VERSION,
   }));
 
