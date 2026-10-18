@@ -1,0 +1,23 @@
+{
+  "$comment": "`viewerCount` is a non-negative integer",
+  "expect": {
+    "instancePath": "/viewerCount",
+    "keyword": "minimum"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "session.resumed",
+    "replyTo": "p-9",
+    "sessionId": "sess_01K7Q4XMB2TJ9RD6",
+    "code": "7KQ4X",
+    "sceneVersion": 42,
+    "snapshotVersion": 40,
+    "viewerCount": -1,
+    "ttl": {
+      "graceS": 120,
+      "idleS": 1800,
+      "maxLifetimeS": 43200,
+      "expiresAt": 1792281600120
+    }
+  }
+}

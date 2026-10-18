@@ -14,7 +14,7 @@ valid/invalid fixtures shared by every language, and generated types (`ts/`, `py
 | Path | Content |
 |---|---|
 | `schema/` | JSON Schema files: `envelope.schema.json`, `defs.schema.json` (common definitions) and one `<type>.schema.json` per message type |
-| `fixtures/messages/<type>/` | `valid-*.json` / `invalid-*.json` conformance fixtures (PRO-03…) |
+| `fixtures/messages/<type>/` | `valid-*.json` / `invalid-*.json` conformance fixtures, one directory per message type |
 | `ts/` | TypeScript sources of `@slicerremoteview/shared` (entry `ts/index.ts`), built to `dist/` |
 | `test/` | vitest suites (`*.test.ts`); file names match the plan's `npm test -w shared -- <name>` filters |
 | `scripts/` | generation and check scripts (`*.mjs`); `check-generators.mjs` = the PRO-02 generator spike |
@@ -56,6 +56,25 @@ Runtime dependency policy: only the schema validator (`ajv`); everything else is
 - The envelope never sets `additionalProperties: false`: unknown fields must be accepted (`docs/protocol.md` §14).
 - Validation in TS: Ajv 2020 (`ajv/dist/2020.js`) in `strict` mode with `allowUnionTypes` (for `string|null`),
   all files registered with `addSchema` — see `test/helpers.ts`.
+
+## Fixture conventions
+
+- `fixtures/messages/<type>/valid-*.json` is a **raw message**; `valid-example.json` is the example of
+  `docs/protocol.md` value for value (a test parses the document's JSON blocks and compares).
+- `fixtures/messages/<type>/invalid-*.json` wraps the message with the failure it must produce, so every language
+  can assert the same thing:
+
+  ```json
+  { "$comment": "why it is invalid (§ reference)",
+    "expect": { "instancePath": "/code", "keyword": "pattern" },
+    "message": { "...": "the invalid message" } }
+  ```
+
+  `instancePath` is the JSON Pointer of the offending value (`""` for a missing required property, as Ajv and
+  Python `jsonschema` both report it on the parent); `keyword` is optional. There is one invalid fixture per
+  required field (including the envelope-required `type` and `protocolVersion`) and per enum, plus the boundary cases
+  named in the plan's acceptance criteria.
+- The TS runner is `loadFixtures()` in `test/helpers.ts`; `test/session.test.ts` covers `session.*`.
 
 ## Generator spike (PRO-02, ADR 0002 errata)
 

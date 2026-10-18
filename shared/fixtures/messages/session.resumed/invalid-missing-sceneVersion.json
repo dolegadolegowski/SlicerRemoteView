@@ -1,0 +1,22 @@
+{
+  "$comment": "session.resumed without required `sceneVersion` (§4.3)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "session.resumed",
+    "replyTo": "p-9",
+    "sessionId": "sess_01K7Q4XMB2TJ9RD6",
+    "code": "7KQ4X",
+    "snapshotVersion": 40,
+    "viewerCount": 3,
+    "ttl": {
+      "graceS": 120,
+      "idleS": 1800,
+      "maxLifetimeS": 43200,
+      "expiresAt": 1792281600120
+    }
+  }
+}

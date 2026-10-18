@@ -1,0 +1,12 @@
+{
+  "protocolVersion": "1.0",
+  "type": "session.create",
+  "id": "p-2",
+  "clientInfo": {
+    "app": "SlicerRemoteView",
+    "version": "0.3.0",
+    "platform": "Slicer 5.12.4 / darwin"
+  },
+  "preferredCode": "7KQ4X",
+  "profile": "quest3"
+}

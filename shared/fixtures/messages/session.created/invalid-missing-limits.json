@@ -1,0 +1,23 @@
+{
+  "$comment": "session.created without required `limits` (§4.2)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "session.created",
+    "replyTo": "p-1",
+    "ts": 1792238400120,
+    "sessionId": "sess_01K7Q4XMB2TJ9RD6",
+    "code": "7KQ4X",
+    "publisherToken": "pt_Mn3Vq8YtK2cR9xLwZaBdE7fGhJ4uP6sTvW1yXoNQ5kA",
+    "viewerLimit": 20,
+    "ttl": {
+      "graceS": 120,
+      "idleS": 1800,
+      "maxLifetimeS": 43200,
+      "expiresAt": 1792281600120
+    }
+  }
+}

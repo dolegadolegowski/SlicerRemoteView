@@ -1,0 +1,20 @@
+{
+  "$comment": "`lastSceneVersion` is a non-negative integer (§8.4)",
+  "expect": {
+    "instancePath": "/lastSceneVersion",
+    "keyword": "minimum"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "session.resume",
+    "id": "p-9",
+    "sessionId": "sess_01K7Q4XMB2TJ9RD6",
+    "publisherToken": "pt_Mn3Vq8YtK2cR9xLwZaBdE7fGhJ4uP6sTvW1yXoNQ5kA",
+    "clientInfo": {
+      "app": "SlicerRemoteView",
+      "version": "0.3.0",
+      "platform": "Slicer 5.12.4 / win32"
+    },
+    "lastSceneVersion": -1
+  }
+}

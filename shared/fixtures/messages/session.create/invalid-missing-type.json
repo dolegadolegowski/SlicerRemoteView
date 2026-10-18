@@ -1,0 +1,19 @@
+{
+  "$comment": "session.create without required `type` (§4.1)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "id": "p-1",
+    "ts": 1792238400000,
+    "clientInfo": {
+      "app": "SlicerRemoteView",
+      "version": "0.3.0",
+      "platform": "Slicer 5.12.4 / win32"
+    },
+    "preferredCode": null,
+    "profile": "mobile"
+  }
+}

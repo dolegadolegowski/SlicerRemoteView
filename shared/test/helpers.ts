@@ -45,3 +45,75 @@ export function compile(ajv: Ajv2020, file: string): ValidateFunction {
 export function instancePaths(errors: ErrorObject[] | null | undefined): string[] {
   return [...new Set((errors ?? []).map((e) => e.instancePath))];
 }
+
+/** Invalid fixtures are wrapped so the expected failure travels with the message (shared/README.md). */
+export interface InvalidFixture {
+  $comment?: string;
+  expect: { instancePath: string; keyword?: string };
+  message: unknown;
+}
+
+export interface FixtureSet {
+  type: string;
+  valid: { file: string; message: Record<string, unknown> }[];
+  invalid: { file: string; fixture: InvalidFixture }[];
+}
+
+/** All fixture directories under `fixtures/messages` whose name starts with `prefix` (e.g. `session.`). */
+export function loadFixtures(prefix = ""): FixtureSet[] {
+  return readdirSync(FIXTURES_DIR, { withFileTypes: true })
+    .filter((d) => d.isDirectory() && d.name.startsWith(prefix))
+    .map((d) => d.name)
+    .sort()
+    .map((type) => {
+      const dir = resolve(FIXTURES_DIR, type);
+      const files = readdirSync(dir)
+        .filter((f) => f.endsWith(".json"))
+        .sort();
+      return {
+        type,
+        valid: files
+          .filter((f) => f.startsWith("valid-"))
+          .map((file) => ({
+            file,
+            message: readJson<Record<string, unknown>>(resolve(dir, file)),
+          })),
+        invalid: files
+          .filter((f) => f.startsWith("invalid-"))
+          .map((file) => ({ file, fixture: readJson<InvalidFixture>(resolve(dir, file)) })),
+      };
+    });
+}
+
+/** JSON examples of `docs/protocol.md` between two headings, keyed by message `type` (one block may hold one object per line). */
+export function protocolExamples(
+  fromHeading: string,
+  toHeading: string,
+): Map<string, Record<string, unknown>[]> {
+  const doc = readFileSync(PROTOCOL_DOC, "utf8");
+  const start = doc.indexOf(fromHeading);
+  const end = doc.indexOf(toHeading);
+  if (start < 0 || end < 0)
+    throw new Error(
+      `heading not found in docs/protocol.md: ${start < 0 ? fromHeading : toHeading}`,
+    );
+  const section = doc.slice(start, end);
+  const out = new Map<string, Record<string, unknown>[]>();
+  for (const [, block] of section.matchAll(/```json\n([\s\S]*?)```/g)) {
+    const texts =
+      block!.trim().startsWith("{") &&
+      block!
+        .trim()
+        .split("\n")
+        .every((l) => l.startsWith("{"))
+        ? block!.trim().split("\n")
+        : [block!];
+    for (const text of texts) {
+      const message = JSON.parse(text) as Record<string, unknown>;
+      const list = out.get(message.type as string) ?? [];
+      list.push(message);
+      out.set(message.type as string, list);
+    }
+  }
+  return out;
+}

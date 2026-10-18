@@ -1,0 +1,21 @@
+{
+  "$comment": "session.create carries no token field (§4.1, ADR 0008 errata)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "not"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "session.create",
+    "id": "p-1",
+    "ts": 1792238400000,
+    "clientInfo": {
+      "app": "SlicerRemoteView",
+      "version": "0.3.0",
+      "platform": "Slicer 5.12.4 / win32"
+    },
+    "preferredCode": null,
+    "profile": "mobile",
+    "publisherToken": "pt_Mn3Vq8YtK2cR9xLwZaBdE7fGhJ4uP6sTvW1yXoNQ5kA"
+  }
+}

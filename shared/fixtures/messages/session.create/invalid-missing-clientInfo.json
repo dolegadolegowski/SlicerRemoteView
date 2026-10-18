@@ -1,0 +1,15 @@
+{
+  "$comment": "session.create without required `clientInfo` (§4.1)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "session.create",
+    "id": "p-1",
+    "ts": 1792238400000,
+    "preferredCode": null,
+    "profile": "mobile"
+  }
+}

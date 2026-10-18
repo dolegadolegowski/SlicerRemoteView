@@ -1,0 +1,20 @@
+{
+  "$comment": "`type` must be the const session.create",
+  "expect": {
+    "instancePath": "/type",
+    "keyword": "const"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "session.open",
+    "id": "p-1",
+    "ts": 1792238400000,
+    "clientInfo": {
+      "app": "SlicerRemoteView",
+      "version": "0.3.0",
+      "platform": "Slicer 5.12.4 / win32"
+    },
+    "preferredCode": null,
+    "profile": "mobile"
+  }
+}

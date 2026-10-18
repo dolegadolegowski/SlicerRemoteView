@@ -1,0 +1,19 @@
+{
+  "$comment": "session.resume without required `sessionId` (§4.3)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "session.resume",
+    "id": "p-9",
+    "publisherToken": "pt_Mn3Vq8YtK2cR9xLwZaBdE7fGhJ4uP6sTvW1yXoNQ5kA",
+    "clientInfo": {
+      "app": "SlicerRemoteView",
+      "version": "0.3.0",
+      "platform": "Slicer 5.12.4 / win32"
+    },
+    "lastSceneVersion": 42
+  }
+}
