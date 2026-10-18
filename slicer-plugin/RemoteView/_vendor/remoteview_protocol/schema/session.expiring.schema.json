@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/session.expiring.schema.json",
+  "title": "session.expiring (relay → publisher)",
+  "description": "Sent 60 s before the idle timer closes a session that has no connected viewers; the publisher MAY answer session.renew (docs/protocol.md §4.4).",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.schema.json" }],
+  "properties": {
+    "type": { "type": "string", "const": "session.expiring" },
+    "reason": { "$ref": "defs.schema.json#/definitions/sessionExpiringReason" },
+    "closesAt": {
+      "description": "When the session will expire unless renewed (§4.4).",
+      "$ref": "defs.schema.json#/definitions/timestampMs"
+    }
+  },
+  "required": ["type", "reason", "closesAt"]
+}

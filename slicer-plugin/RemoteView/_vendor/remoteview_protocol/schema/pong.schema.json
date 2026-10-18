@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/pong.schema.json",
+  "title": "pong (relay → publisher or viewer)",
+  "description": "Answer to ping; `serverTs` is the relay clock in ms, informational only (docs/protocol.md §9.1).",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.schema.json" }],
+  "properties": {
+    "type": { "type": "string", "const": "pong" },
+    "serverTs": { "$ref": "defs.schema.json#/definitions/timestampMs" }
+  },
+  "required": ["type"]
+}

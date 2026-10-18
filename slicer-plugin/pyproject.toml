@@ -40,6 +40,8 @@ max-line-length = 120
 "tests/conftest.py" = ["N802", "N803", "N806", "N815"]
 # Tests use assert and run fixed local commands (node validator, git).
 "tests/**" = ["S101", "S603", "S607"]
+# Development scripts run fixed argv lists (node, shared/scripts) — never user input.
+"scripts/**" = ["S603"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["remoteview_core", "remoteview_protocol", "RemoteView"]

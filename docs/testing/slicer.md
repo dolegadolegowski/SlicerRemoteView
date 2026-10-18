@@ -38,6 +38,23 @@ Expected results:
 - Step 6: no connection beyond the baseline (opt-in rule — FR-02, Extension Index tier 1); no pip/installation
   dialog appears.
 
+Re-run after SLC-03 (vendored protocol package in `RemoteView/_vendor/`): repeat steps 2–5 with the updated checkout and
+additionally run in the Python console:
+
+```python
+from remoteview_core import vendored
+print(vendored.PACKAGE_DIR)
+print(vendored.chunk_header.CHUNK_HEADER_BYTES, vendored.alphabet.is_code("7KQ4X"))
+import sys; print(hasattr(sys.modules["remoteview_protocol"], "compile_schemas"))
+```
+
+Expected: `<repo>/slicer-plugin/RemoteView/_vendor/remoteview_protocol`, then `12 True`, then `False` (the package
+`__init__` with the schema layer never runs in the core, even where `jsonschema` is installed); no traceback; no
+network connection beyond the baseline. For an
+extension built with CMake/CPack the path is inside the extension's `qt-scripted-modules/` directory. `[TODO verify]`
+that `RESOURCES` keep the `_vendor/remoteview_protocol/schema/` sub-directory: the 30 `*.schema.json` files must exist
+there.
+
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|
 | | | | | |

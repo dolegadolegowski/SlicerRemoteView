@@ -148,3 +148,43 @@ def test_core_purity_detects_forbidden_imports(source):
 )
 def test_core_purity_allows_pure_imports(source):
     assert forbidden_imports(source) == []
+
+
+def _imports_protocol_package(source: str) -> bool:
+    for node in ast.walk(ast.parse(source)):
+        names = []
+        if isinstance(node, ast.Import):
+            names = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names = [node.module]
+        elif isinstance(node, ast.Call):
+            func = node.func
+            callee = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if callee in ("import_module", "__import__", "find_spec", "spec_from_file_location"):
+                args = list(node.args[:1]) + [k.value for k in node.keywords if k.arg == "name"]
+                names = [str(a.value) for a in args if isinstance(a, ast.Constant)]
+        if any(n == "remoteview_protocol" or n.startswith("remoteview_protocol.") for n in names):
+            return True
+    return False
+
+
+def test_core_purity_protocol_only_through_vendored():
+    """SLC-03: core modules reach the protocol package only via `remoteview_core.vendored`, which pins the vendored
+    copy and the jsonschema-free mode used in Slicer."""
+    offenders = [
+        f.name
+        for f in sorted(CORE_DIR.rglob("*.py"))
+        if f.name != "vendored.py" and _imports_protocol_package(f.read_text())
+    ]
+    assert offenders == []
+    assert _imports_protocol_package("from remoteview_protocol.chunk_header import chunkify")
+    assert _imports_protocol_package(
+        "import importlib\nimportlib.import_module('remoteview_protocol.envelope')"
+    )
+    assert _imports_protocol_package(
+        "import importlib as il\nil.import_module(name='remoteview_protocol.envelope')"
+    )
+    assert not _imports_protocol_package("from remoteview_core.vendored import chunk_header")
+    assert not _imports_protocol_package(
+        'raise RuntimeError("remoteview_protocol.schemas needs jsonschema")'
+    )

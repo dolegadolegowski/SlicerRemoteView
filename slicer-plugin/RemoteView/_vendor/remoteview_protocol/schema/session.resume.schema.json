@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/session.resume.schema.json",
+  "title": "session.resume (publisher → relay, first message after reconnect)",
+  "description": "Reclaim a session during grace or while the old socket is still open (docs/protocol.md §4.3).",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.schema.json" }],
+  "properties": {
+    "type": { "type": "string", "const": "session.resume" },
+    "sessionId": { "$ref": "defs.schema.json#/definitions/sessionId" },
+    "publisherToken": { "$ref": "defs.schema.json#/definitions/token" },
+    "clientInfo": { "$ref": "defs.schema.json#/definitions/clientInfo" },
+    "lastSceneVersion": {
+      "description": "Highest sceneVersion the publisher has sent so far (§4.3, §8.4).",
+      "$ref": "defs.schema.json#/definitions/sceneVersion"
+    }
+  },
+  "required": ["type", "sessionId", "publisherToken", "clientInfo", "lastSceneVersion"]
+}

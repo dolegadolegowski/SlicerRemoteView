@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/session.resumed.schema.json",
+  "title": "session.resumed (relay → publisher)",
+  "description": "Successful session.resume: the code is unchanged; snapshotVersion says which snapshot the relay still caches (null = none) (docs/protocol.md §4.3).",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.schema.json" }],
+  "properties": {
+    "type": { "type": "string", "const": "session.resumed" },
+    "sessionId": { "$ref": "defs.schema.json#/definitions/sessionId" },
+    "code": { "$ref": "defs.schema.json#/definitions/code" },
+    "sceneVersion": { "$ref": "defs.schema.json#/definitions/sceneVersion" },
+    "snapshotVersion": {
+      "description": "Version of the cached snapshot, or null when the relay holds none; if null or older than the publisher's scene, a new snapshot MUST follow (§4.3).",
+      "type": ["integer", "null"],
+      "minimum": 1
+    },
+    "viewerCount": { "type": "integer", "minimum": 0 },
+    "ttl": { "$ref": "defs.schema.json#/definitions/ttl" }
+  },
+  "required": ["type", "sessionId", "code", "sceneVersion", "snapshotVersion", "viewerCount", "ttl"]
+}
