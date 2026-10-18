@@ -71,6 +71,15 @@ deployments. `NODE_OPTIONS` (`--max-old-space-size-percentage=75`, architecture 
 
 Logs are JSON lines (`level`, `time`, `message`) on stdout; per-request logging is disabled.
 
+## Design notes
+
+| Module | What it does |
+| --- | --- |
+| `src/config.ts` | environment → validated `Config` (fail fast, protocol maximums) |
+| `src/codes.ts` | 5-symbol session codes (`crypto.randomInt` per symbol over `23456789ABCDEFGHJKMNPQRSTUVWXYZ`, redraw on collision), the release quarantine (`CODE_QUARANTINE_S`, bounded), `pt_`/`vt_` tokens (256 bit, base64url), SHA-256 storage and constant-time comparison |
+| `src/app.ts` | Fastify factory: `/healthz`, `/api/version`, 404 handling, client-IP policy |
+| `src/logger.ts` | pino JSON lines with redaction of codes and tokens |
+
 ## Test and lint commands
 
 ```bash
