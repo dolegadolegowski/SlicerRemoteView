@@ -3,8 +3,9 @@
  *
  * Accepts one publisher (`session.create`), answers `session.created` with a code from the protocol
  * alphabet, lets viewers `viewer.join` by code and forwards every publisher frame to the joined viewers
- * byte-for-byte, text and binary (§11). Validation stops at the envelope: this is not the relay — no limits,
- * no TTL, no rate limiting, no snapshot cache, no heartbeat. Full behaviour is `relay-server` (SRV-*) and its
+ * byte-for-byte, text and binary (§11), and answers `scene.snapshot.end` with `scene.snapshot.ack` (§6.4).
+ * Validation stops at the envelope: this is not the relay — no limits, no TTL, no rate limiting, no snapshot
+ * cache, no heartbeat. Tests steer it through `RelayStubOptions` and `sendToPublisher`/`closePublisher`. Full behaviour is `relay-server` (SRV-*) and its
  * E2E tests (QA-*). The stub logs nothing: codes and tokens never reach a log (NFR-12).
  */
 import { randomBytes, randomInt } from "node:crypto";
@@ -24,6 +25,14 @@ export interface RelayStubOptions {
   port?: number;
   /** Interface to bind (default loopback only). */
   host?: string;
+  /** Answer `scene.snapshot.end` with `scene.snapshot.ack` (default `true`); `false` lets a test reply itself. */
+  autoAck?: boolean;
+  /**
+   * Hold publisher frames back until this many viewers have joined, then forward them in order. Makes
+   * "a viewer receives the whole snapshot" deterministic although the code is only known after
+   * `session.created`. Default `0` = forward at once, like the relay.
+   */
+  holdFramesUntilViewers?: number;
 }
 
 /** One frame as the publisher sent it. */
@@ -38,9 +47,25 @@ export interface RelayStub {
   port: number;
   /** Frames the publisher sent after `session.create`, in order (assertions in tests). */
   publisherFrames: RecordedFrame[];
-  /** The session code once a publisher created one (tests only). */
+  /** The code of the last session a publisher created, also after it ended (tests only). */
   readonly code: string | undefined;
+  /** Sends an envelope to the connected publisher (`protocolVersion` and `ts` are filled in). */
+  sendToPublisher(message: Record<string, unknown>): void;
+  /** Closes the publisher socket with a WebSocket close code (e.g. `4008`). */
+  closePublisher(closeCode: number): void;
   close(): Promise<void>;
+}
+
+/** A text frame as a JSON object, `undefined` when it is not one. */
+function parseObject(data: Buffer): Record<string, unknown> | undefined {
+  try {
+    const parsed: unknown = JSON.parse(data.toString());
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 const base64url = (bytes: number): string => randomBytes(bytes).toString("base64url");
@@ -68,6 +93,9 @@ export async function startRelayStub(options: RelayStubOptions = {}): Promise<Re
   });
   const port = (server.address() as AddressInfo).port;
   let session: Session | undefined;
+  let publisher: WebSocket | undefined;
+  let lastCode: string | undefined;
+  let releaseHeld = (): void => {};
   const publisherFrames: RecordedFrame[] = [];
 
   const send = (socket: WebSocket, message: Record<string, unknown>): void =>
@@ -84,14 +112,7 @@ export async function startRelayStub(options: RelayStubOptions = {}): Promise<Re
   };
 
   function onFirstMessage(socket: WebSocket, data: RawData, isBinary: boolean): void {
-    let message: Record<string, unknown> | undefined;
-    try {
-      const parsed: unknown = isBinary ? undefined : JSON.parse(data.toString());
-      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed))
-        message = parsed as Record<string, unknown>;
-    } catch {
-      /* falls through to INVALID_MESSAGE */
-    }
+    const message = isBinary ? undefined : parseObject(Buffer.from(data as Buffer));
     if (typeof message?.["protocolVersion"] !== "string" || typeof message["type"] !== "string")
       return fail(socket, "INVALID_MESSAGE", undefined, 4007);
     const replyTo = message["id"];
@@ -109,6 +130,7 @@ export async function startRelayStub(options: RelayStubOptions = {}): Promise<Re
         viewers: new Set(),
       };
       const created = session;
+      lastCode = created.code;
       send(socket, {
         type: "session.created",
         ...(typeof replyTo === "string" ? { replyTo } : {}),
@@ -124,14 +146,37 @@ export async function startRelayStub(options: RelayStubOptions = {}): Promise<Re
           maxChanges: LIMITS.MAX_CHANGES,
         },
       });
-      socket.on("message", (frame, binary) => {
-        publisherFrames.push({ binary, data: Buffer.from(frame as Buffer) });
+      publisher = socket;
+      const held: RecordedFrame[] = [];
+      /** Forwards to the joined viewers; `scene.snapshot.end` is acknowledged once it has been forwarded. */
+      const forward = (frame: RecordedFrame): void => {
         for (const viewer of created.viewers)
-          if (viewer.readyState === WebSocket.OPEN) viewer.send(frame, { binary }); // byte-for-byte (§11)
+          if (viewer.readyState === WebSocket.OPEN)
+            viewer.send(frame.data, { binary: frame.binary }); // byte-for-byte (§11)
+        const text = frame.binary ? undefined : parseObject(frame.data);
+        if (options.autoAck !== false && text?.["type"] === "scene.snapshot.end")
+          send(socket, {
+            type: "scene.snapshot.ack",
+            sceneVersion: text["sceneVersion"],
+            viewersStreamed: created.viewers.size,
+            viewersDeferred: 0,
+          });
+      };
+      releaseHeld = (): void => {
+        if (created.viewers.size < (options.holdFramesUntilViewers ?? 0)) return;
+        for (const frame of held.splice(0)) forward(frame);
+      };
+      socket.on("message", (data, binary) => {
+        const frame = { binary, data: Buffer.from(data as Buffer) };
+        publisherFrames.push(frame);
+        if (held.length > 0 || created.viewers.size < (options.holdFramesUntilViewers ?? 0))
+          held.push(frame);
+        else forward(frame);
       });
       socket.on("close", () => {
         for (const viewer of created.viewers) viewer.close(4001);
         session = undefined;
+        publisher = undefined;
       });
     } else if (message["type"] === "viewer.join") {
       const code = typeof message["code"] === "string" ? normalizeCode(message["code"]) : null;
@@ -140,6 +185,7 @@ export async function startRelayStub(options: RelayStubOptions = {}): Promise<Re
       const joined = session;
       joined.viewers.add(socket);
       socket.on("close", () => joined.viewers.delete(socket));
+      queueMicrotask(() => releaseHeld());
       send(socket, {
         type: "viewer.joined",
         ...(typeof replyTo === "string" ? { replyTo } : {}),
@@ -168,7 +214,13 @@ export async function startRelayStub(options: RelayStubOptions = {}): Promise<Re
     port,
     publisherFrames,
     get code() {
-      return session?.code;
+      return lastCode;
+    },
+    sendToPublisher(message) {
+      if (publisher) send(publisher, message);
+    },
+    closePublisher(closeCode) {
+      publisher?.close(closeCode);
     },
     close: () =>
       new Promise<void>((resolve) => {

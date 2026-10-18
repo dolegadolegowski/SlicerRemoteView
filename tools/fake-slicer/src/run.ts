@@ -1,7 +1,8 @@
 /**
- * `fake-slicer` entry logic (PRO-13): parse options, connect as publisher, `session.create` → `session.created`,
- * hand the code to `--code-fd`. Snapshot playback arrives with PRO-14, update scripts with PRO-15 and
- * reconnects with PRO-16; until then the process stays connected until SIGINT or relay close.
+ * `fake-slicer` entry logic: parse options, connect as publisher, `session.create` → `session.created`,
+ * hand the code to `--code-fd` (PRO-13), then stream the fixture GLB as snapshot version 1 and wait for
+ * `scene.snapshot.ack` (PRO-14). Update scripts arrive with PRO-15 and reconnects with PRO-16; until then
+ * the process stays connected after the ack until SIGINT, relay close or `--exit-after-ack`.
  *
  * Session codes and tokens are never written to stdout/stderr (NFR-12): the only sink is the `--code-fd` file
  * descriptor, which the SRV-22 / WEB-10 / QA-02 harnesses read through a pipe.
@@ -10,8 +11,11 @@ import { readFileSync, writeSync } from "node:fs";
 import { compileSchemas, parseEnvelope } from "@slicerremoteview/shared";
 import type { Message, Validators } from "@slicerremoteview/shared";
 import { WebSocket } from "ws";
+import { loadGlb, resolveFixture } from "./glb.js";
+import type { LoadedGlb } from "./glb.js";
 import { HELP, parseCliArgs } from "./options.js";
 import type { Options } from "./options.js";
+import { envelope, sendSnapshot } from "./snapshot.js";
 
 export interface Io {
   stdout(text: string): void;
@@ -28,7 +32,7 @@ export const nodeIo: Io = {
   writeFd: (fd, text) => void writeSync(fd, text),
 };
 
-/** Exit codes: 0 ok, 1 usage or local failure, 2 the relay answered with an `error` (PRO-14). */
+/** Exit codes: 0 ok, 1 usage or local failure, 2 the relay answered with an `error`. */
 export const EXIT = { ok: 0, usage: 1, relayError: 2 } as const;
 
 const version = (): string => {
@@ -56,10 +60,21 @@ const inboundValidators = (): Validators =>
   (validators ??= compileSchemas({ tolerateUnknownEnums: true })); // inbound relay messages (§14)
 
 export async function run(options: Options, io: Io): Promise<number> {
+  let glb: LoadedGlb;
+  try {
+    glb = await loadGlb(resolveFixture(options.fixture));
+  } catch (error) {
+    io.stderr(`fake-slicer: ${(error as Error).message}\n`);
+    return EXIT.usage;
+  }
+  if (io.signal?.aborted) return EXIT.ok;
   return new Promise<number>((resolve) => {
     const socket = new WebSocket(options.relay, { perMessageDeflate: false });
     let exit: number = EXIT.ok;
     let finished = false;
+    let acked = false;
+    let counter = 0;
+    const nextId = (): string => `p-${++counter}`;
     const finish = (code: number): void => {
       finished = true;
       exit = code;
@@ -67,13 +82,27 @@ export async function run(options: Options, io: Io): Promise<number> {
       else socket.close();
     };
     io.signal?.addEventListener("abort", () => finish(EXIT.ok), { once: true });
+    const startSnapshot = (): void => {
+      const sceneVersion = 1;
+      sendSnapshot(
+        socket,
+        { glb, sceneVersion, chunkSize: options.chunkSize, profile: options.profile },
+        nextId,
+      ).then(
+        (chunks) =>
+          io.stderr(
+            `snapshot ${sceneVersion}: ${glb.bytes.byteLength} bytes in ${chunks} chunks sent\n`,
+          ),
+        (error: unknown) => {
+          if (finished) return;
+          io.stderr(`snapshot failed: ${(error as Error).message}\n`);
+          finish(EXIT.usage);
+        },
+      );
+    };
     socket.on("open", () =>
       socket.send(
-        JSON.stringify({
-          protocolVersion: "1.0",
-          type: "session.create",
-          id: "p-1",
-          ts: Date.now(),
+        envelope("session.create", nextId(), {
           clientInfo: { app: "fake-slicer", version: version(), platform: "fake-slicer / node" },
           preferredCode: options.preferredCode,
           profile: options.profile,
@@ -90,10 +119,18 @@ export async function run(options: Options, io: Io): Promise<number> {
           emitCode(options, io, message.code);
         } catch (error) {
           io.stderr(`--code-fd ${options.codeFd}: ${(error as Error).message}\n`);
-          finish(EXIT.usage);
+          return finish(EXIT.usage);
         }
+        startSnapshot();
+      } else if (message.type === "scene.snapshot.ack" && message.sceneVersion === 1) {
+        acked = true;
+        io.stderr(`snapshot ${message.sceneVersion} acknowledged\n`);
+        if (options.exitAfterAck) finish(EXIT.ok);
       } else if (message.type === "error") {
-        io.stderr(`relay error: ${message.code}\n`); // the error code only, never session data
+        // the error code only, never session data; a non-conforming relay cannot inject text through it
+        io.stderr(
+          `relay error: ${/^[A-Z_]{1,32}$/.test(message.code) ? message.code : "UNKNOWN"}\n`,
+        );
         finish(EXIT.relayError);
       }
     });
@@ -102,7 +139,14 @@ export async function run(options: Options, io: Io): Promise<number> {
       io.stderr(`connection failed: ${(error as NodeJS.ErrnoException).code ?? "error"}\n`);
       exit = EXIT.usage;
     });
-    socket.on("close", () => resolve(exit));
+    socket.on("close", (closeCode) => {
+      if (!finished && options.exitAfterAck && !acked) {
+        // --exit-after-ack promises "0 = acknowledged": a close before the ack is a failure
+        io.stderr(`relay closed the connection (code ${closeCode}) before the snapshot ack\n`);
+        exit = EXIT.usage;
+      }
+      resolve(exit);
+    });
   });
 }
 

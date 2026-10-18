@@ -17,6 +17,8 @@ describe("CLI options (PRO-13)", () => {
     expect(run()).toEqual({
       relay: DEFAULT_RELAY,
       fixture: undefined,
+      chunkSize: 1_048_576,
+      exitAfterAck: false,
       profile: "mobile",
       preferredCode: null,
       codeFd: undefined,
@@ -29,10 +31,13 @@ describe("CLI options (PRO-13)", () => {
       run(
         ...["--relay", "wss://relay.example/ws", "--fixture", "a.glb", "--profile", "quest3"],
         ...["--preferred-code", " 7kq-4x ", "--code-fd", "3", "--json"],
+        ...["--chunk-size", "65536", "--exit-after-ack"],
       ),
     ).toEqual({
       relay: "wss://relay.example/ws",
       fixture: "a.glb",
+      chunkSize: 65536,
+      exitAfterAck: true,
       profile: "quest3",
       preferredCode: "7KQ4X",
       codeFd: 3,
@@ -46,6 +51,8 @@ describe("CLI options (PRO-13)", () => {
     for (const flag of [
       "--relay",
       "--fixture",
+      "--chunk-size",
+      "--exit-after-ack",
       "--profile",
       "--preferred-code",
       "--code-fd",
@@ -70,6 +77,12 @@ describe("CLI options (PRO-13)", () => {
     expect(error("--relay", "nope")).toMatch(/not a URL/);
     expect(run("--relay", "ws://[::1]:8787/ws").relay).toBe("ws://[::1]:8787/ws");
     expect(run("--relay", "ws://dev.localhost/ws").relay).toBe("ws://dev.localhost/ws");
+  });
+
+  it("accepts chunk sizes 64 KiB … 1 MiB only", () => {
+    expect(run("--chunk-size", "1048576").chunkSize).toBe(1_048_576);
+    for (const size of ["65535", "1048577", "0", "x", "70000.5"])
+      expect(error("--chunk-size", size)).toMatch(/--chunk-size/);
   });
 
   it("rejects unknown profiles, unknown options and positionals", () => {
