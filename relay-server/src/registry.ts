@@ -62,6 +62,23 @@ export interface AssemblingSnapshot {
   sceneVersion: number;
 }
 
+/**
+ * A connected socket as the registry sees it: something that takes a protocol message and can be
+ * closed. The WebSocket `Connection` implements it; tests use in-memory peers.
+ */
+export interface Peer {
+  /** Sends one JSON message; the transport adds `protocolVersion` and `ts`. */
+  send(message: { type: string } & Record<string, unknown>): void;
+  close(closeCode: number): void;
+}
+
+/** A joined viewer (SRV-07 adds the token hash, platform and rejoin bookkeeping). */
+export interface Viewer {
+  readonly id: string;
+  /** `undefined` while the viewer is disconnected (entry kept for rejoin, architecture §3). */
+  peer: Peer | undefined;
+}
+
 export interface Session {
   /** `sess_` + 16 Crockford base32 symbols; internal and safe to log. */
   readonly id: string;
@@ -89,6 +106,10 @@ export interface Session {
   assembling: AssemblingSnapshot | undefined;
   /** Merged `scene.update` / `scene.nodeRemoved` since the snapshot (SRV-12); never names. */
   readonly nodeState: Map<string, NodeState | "removed">;
+  /** The publisher's socket; `undefined` while in grace and after the session ended. */
+  publisher: Peer | undefined;
+  /** Joined viewers by `viewerId`; filled by SRV-07. Kept on release so the ending can be announced. */
+  readonly viewers: Map<string, Viewer>;
 }
 
 export interface RegistryLimits {
@@ -238,6 +259,8 @@ export class Registry extends EventEmitter<RegistryEvents> {
       snapshot: undefined,
       assembling: undefined,
       nodeState: new Map(),
+      publisher: undefined,
+      viewers: new Map(),
     };
     this.#byId.set(session.id, session);
     this.#byCode.set(code, session);
@@ -289,6 +312,21 @@ export class Registry extends EventEmitter<RegistryEvents> {
   renew(session: Session): void {
     session.idleSince = this.#clock.now();
     session.idleWarned = false;
+  }
+
+  /** The `ttl` object of `session.created` / `session.resumed` / `session.renewed` (§4.2). */
+  ttl(session: Session): {
+    graceS: number;
+    idleS: number;
+    maxLifetimeS: number;
+    expiresAt: number;
+  } {
+    return {
+      graceS: this.#limits.publisherGraceS,
+      idleS: this.#limits.sessionTtlS,
+      maxLifetimeS: this.#limits.sessionMaxLifetimeS,
+      expiresAt: session.expiresAt,
+    };
   }
 
   /** Deadline of the idle expiry while no viewer is connected, else `undefined`. */

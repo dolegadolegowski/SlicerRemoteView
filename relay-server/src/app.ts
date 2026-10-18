@@ -9,10 +9,10 @@ import type { Duplex } from "node:stream";
 import Fastify, { LogController } from "fastify";
 import type { FastifyBaseLogger, FastifyInstance, FastifyReply } from "fastify";
 import type { Logger } from "pino";
-import { defaultSchemas, LIMITS } from "@slicerremoteview/shared";
+import { defaultSchemas } from "@slicerremoteview/shared";
 import { systemClock } from "./clock.js";
 import type { Clock } from "./clock.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, publicLimits } from "./config.js";
 import type { Config } from "./config.js";
 import { createLogger } from "./logger.js";
 import { Registry } from "./registry.js";
@@ -20,15 +20,8 @@ import { PROTOCOL_VERSIONS, RELAY_NAME, RELAY_VERSION } from "./version.js";
 import { createDispatcher } from "./ws/dispatch.js";
 import type { HandlerTable } from "./ws/dispatch.js";
 import { registerWsEndpoint } from "./ws/endpoint.js";
+import { publisherHandlers } from "./ws/publisher.js";
 import type { FrameHandlers } from "./ws/endpoint.js";
-
-/** The `limits` object of `GET /api/version` (§10). */
-export interface PublicLimits {
-  maxSnapshotBytes: number;
-  maxChunkBytes: number;
-  maxTextBytes: number;
-  maxViewers: number;
-}
 
 export interface AppOptions {
   /** Defaults to `loadConfig({})`, i.e. every documented default (architecture §9). */
@@ -43,16 +36,6 @@ export interface AppOptions {
   wsHandlers?: Partial<FrameHandlers>;
   /** Extra message-type handlers merged into the dispatch table (tests). */
   messageHandlers?: HandlerTable;
-}
-
-/** Effective limits: configured snapshot and viewer caps, protocol maximums otherwise (§3.3, §14). */
-export function publicLimits(config: Config): PublicLimits {
-  return {
-    maxSnapshotBytes: config.maxSnapshotBytes,
-    maxChunkBytes: LIMITS.MAX_CHUNK_BYTES,
-    maxTextBytes: LIMITS.MAX_TEXT_BYTES_PUBLISHER,
-    maxViewers: config.maxViewers,
-  };
 }
 
 const NOT_FOUND = { error: "NOT_FOUND" } as const;
@@ -138,6 +121,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
 
   // Compile every protocol schema now, not on the first client message (≈ 250 ms of blocked loop).
   const validators = defaultSchemas();
+  const publisher = publisherHandlers({ registry, config, logger });
 
   // First: the WebSocket plugin wraps every route registered after it (upgrade interception).
   await registerWsEndpoint(app, {
@@ -148,10 +132,12 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
       text: createDispatcher({
         clock,
         validators,
-        ...(options.messageHandlers && { handlers: options.messageHandlers }),
+        handlers: { ...publisher.handlers, ...options.messageHandlers },
       }),
       binary: () => {}, // snapshot chunks: SRV-09
-      closed: () => {},
+      closed: (connection, closeCode) => {
+        if (connection.role === "publisher") publisher.publisherClosed(connection, closeCode);
+      },
       ...options.wsHandlers,
     },
     errorCode: systemErrorCode,
@@ -159,7 +145,10 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
 
   // The TTL sweep runs while the server is up (architecture §5).
   app.addHook("onReady", async () => registry.start());
-  app.addHook("onClose", async () => registry.stop());
+  app.addHook("onClose", async () => {
+    registry.stop();
+    publisher.dispose();
+  });
 
   // No endpoint takes a request body (§10); without parsers a POST to an unknown path is a plain 404.
   app.removeAllContentTypeParsers();

@@ -239,3 +239,21 @@ export function loadConfig(env: Env = process.env): Config {
     testFastTimers: nodeEnv === "test" && boolean(env, "RELAY_TEST_FAST_TIMERS", false),
   };
 }
+
+/** The effective limits a relay announces (`GET /api/version` §10; `session.created.limits` §4.2, §14). */
+export interface PublicLimits {
+  maxSnapshotBytes: number;
+  maxChunkBytes: number;
+  maxTextBytes: number;
+  maxViewers: number;
+}
+
+/** Configured snapshot and viewer caps, protocol maximums for the rest (§3.3, §14). */
+export function publicLimits(config: Config): PublicLimits {
+  return {
+    maxSnapshotBytes: config.maxSnapshotBytes,
+    maxChunkBytes: LIMITS.MAX_CHUNK_BYTES,
+    maxTextBytes: LIMITS.MAX_TEXT_BYTES_PUBLISHER,
+    maxViewers: config.maxViewers,
+  };
+}

@@ -5,11 +5,13 @@ import type { RawData } from "ws";
 import { buildApp } from "../../src/app.js";
 import type { AppOptions } from "../../src/app.js";
 import { loadConfig } from "../../src/config.js";
+import { Registry } from "../../src/registry.js";
 import { ManualClock } from "./manual-clock.js";
 
 export interface TestRelay {
   app: FastifyInstance;
   clock: ManualClock;
+  registry: Registry;
   /** `ws://127.0.0.1:<port>/ws` */
   url: string;
   close(): Promise<void>;
@@ -20,14 +22,24 @@ export async function startRelay(
   options: AppOptions & { clock?: ManualClock } = {},
 ): Promise<TestRelay> {
   const clock = options.clock ?? new ManualClock();
-  const app = await buildApp({
-    config: loadConfig({ TRUST_PROXY: "false", ALLOWED_ORIGINS: "https://relay.example.org" }),
-    ...options,
-    clock,
-  });
+  const config =
+    options.config ??
+    loadConfig({ TRUST_PROXY: "false", ALLOWED_ORIGINS: "https://relay.example.org" });
+  const registry =
+    options.registry ??
+    new Registry({
+      ...config,
+      clock,
+      // A throwing expiry listener must fail the test, not vanish (the app would log it).
+      onListenerError: (error) =>
+        queueMicrotask(() => {
+          throw error;
+        }),
+    });
+  const app = await buildApp({ ...options, config, clock, registry });
   await app.listen({ port: 0, host: "127.0.0.1" });
   const { port } = app.server.address() as AddressInfo;
-  return { app, clock, url: `ws://127.0.0.1:${port}/ws`, close: () => app.close() };
+  return { app, clock, registry, url: `ws://127.0.0.1:${port}/ws`, close: () => app.close() };
 }
 
 export type Received = Record<string, unknown> & { type: string };

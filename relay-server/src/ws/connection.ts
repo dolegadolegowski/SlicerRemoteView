@@ -7,6 +7,7 @@ import { PROTOCOL_VERSION } from "@slicerremoteview/shared";
 import type { ErrorCode } from "@slicerremoteview/shared";
 import { WebSocket } from "ws";
 import type { Clock, TimerHandle } from "../clock.js";
+import type { Peer, Session } from "../registry.js";
 
 export type Role = "publisher" | "viewer";
 
@@ -29,11 +30,13 @@ export interface ErrorOptions {
 
 let nextConnectionId = 1;
 
-export class Connection {
+export class Connection implements Peer {
   /** Process-local number for log lines; carries no client data. */
   readonly id = nextConnectionId++;
   /** Fixed by the type of the first message (§3.1); `undefined` until then. */
   role: Role | undefined;
+  /** The session this socket is bound to (publisher or viewer); set by create/resume/join. */
+  session: Session | undefined;
   /** `INVALID_MESSAGE` answers so far (3 → close `4007`, §9.2). */
   invalidMessages = 0;
   /** `UNAUTHORIZED` answers so far (2 → close `1008`, §11). */
