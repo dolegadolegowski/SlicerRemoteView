@@ -17,6 +17,8 @@ import type { Config } from "./config.js";
 import { createLogger } from "./logger.js";
 import { Registry } from "./registry.js";
 import { PROTOCOL_VERSIONS, RELAY_NAME, RELAY_VERSION } from "./version.js";
+import { IGNORE_FRAMES, registerWsEndpoint } from "./ws/endpoint.js";
+import type { FrameHandlers } from "./ws/endpoint.js";
 
 /** The `limits` object of `GET /api/version` (§10). */
 export interface PublicLimits {
@@ -35,6 +37,8 @@ export interface AppOptions {
   clock?: Clock;
   /** Session registry; by default one is built from `config` and `clock`. */
   registry?: Registry;
+  /** What happens to accepted WebSocket frames (tests record them; SRV-23 dispatches them). */
+  wsHandlers?: FrameHandlers;
 }
 
 /** Effective limits: configured snapshot and viewer caps, protocol maximums otherwise (§3.3, §14). */
@@ -50,7 +54,7 @@ export function publicLimits(config: Config): PublicLimits {
 const NOT_FOUND = { error: "NOT_FOUND" } as const;
 
 /**
- * The `code` of a Fastify (`FST_ERR_*`), Node (`ERR_*`), HTTP parser (`HPE_*`) or system error
+ * The `code` of a Fastify (`FST_ERR_*`), Node (`ERR_*`), HTTP parser (`HPE_*`), `ws` (`WS_ERR_*`) or system error
  * (`E*` with `errno`/`syscall`) — fixed identifiers that carry no request data and are safe to log.
  * Anything else (which could be arbitrary text, even a session code) becomes `INTERNAL`.
  */
@@ -61,7 +65,7 @@ export function systemErrorCode(error: unknown): string {
     syscall?: unknown;
   };
   if (typeof code !== "string") return "INTERNAL";
-  if (/^(FST_ERR|ERR|HPE)_[A-Z0-9_]+$/.test(code)) return code;
+  if (/^(FST_ERR|ERR|HPE|WS_ERR)_[A-Z0-9_]+$/.test(code)) return code;
   const isSystemError = typeof errno === "number" || typeof syscall === "string";
   return isSystemError && /^E[A-Z0-9]+$/.test(code) ? code : "INTERNAL";
 }
@@ -126,6 +130,15 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
         void plain.code(404).send(NOT_FOUND);
       else void plain.code(400).send({ error: "BAD_REQUEST" });
     },
+  });
+
+  // First: the WebSocket plugin wraps every route registered after it (upgrade interception).
+  await registerWsEndpoint(app, {
+    allowedOrigins: config.allowedOrigins,
+    clock,
+    logger,
+    handlers: options.wsHandlers ?? IGNORE_FRAMES,
+    errorCode: systemErrorCode,
   });
 
   // The TTL sweep runs while the server is up (architecture §5).

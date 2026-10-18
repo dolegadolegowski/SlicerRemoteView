@@ -65,6 +65,7 @@ deployments. `NODE_OPTIONS` (`--max-old-space-size-percentage=75`, architecture 
 | ------------------ | --------------------------------------------------------------------------------------------------- |
 | `GET /healthz`     | `200 {"status":"ok","uptimeS":…,"sessions":…,"version":"…"}` — no codes, IPs or memory figures      |
 | `GET /api/version` | `200 {"name":"slicer-remote-view-relay","version":…,"protocolVersions":["1.0"],"limits":{…}}` (§10) |
+| `GET /ws` (Upgrade) | WebSocket for both roles (§3): browser `Origin` must be in `ALLOWED_ORIGINS` (else HTTP 403), no `Origin` (Slicer, Unity) is fine; a plain HTTP `GET /ws` is a 404 |
 | anything else      | `404 {"error":"NOT_FOUND"}` — no SPA fallback, the path is never echoed                             |
 
 `GET /api/version` announces the effective `MAX_SNAPSHOT_BYTES` and `MAX_VIEWERS` (§14).
@@ -80,6 +81,8 @@ Logs are JSON lines (`level`, `time`, `message`) on stdout; per-request logging 
 | `src/registry.ts` | in-memory sessions (architecture §3): phases `allocated → active → grace → closed/expired`, code index, quarantine, TTL sweep every 10 s (grace `PUBLISHER_GRACE_S`, idle `SESSION_TTL_S` only while no viewer is connected, lifetime `SESSION_MAX_LIFETIME_S`), `MAX_SESSIONS` → `CAPACITY`, `expiring`/`expired` events; releasing a session drops its snapshot buffers — nothing is written to disk |
 | `src/clock.ts` | injectable time source; tests drive TTLs with `test/helpers/manual-clock.ts` |
 | `src/app.ts` | Fastify factory: `/healthz`, `/api/version`, 404 handling, client-IP policy; starts/stops the registry sweep with the server |
+| `src/ws/endpoint.ts` | `/ws` transport (§3): `maxPayload` 1 MiB + 64 KiB (`1009` before reading), no `permessage-deflate`, Origin check before the upgrade, `4012` when no session is bound 10 s after the upgrade, first message fixes the role (`session.create`/`session.resume` → publisher, `viewer.join` → viewer, else `UNAUTHORIZED` + `1008`), text limits 256 KiB / 16 KiB (the first message gets the limit of the role its type fixes; `PAYLOAD_TOO_LARGE` + `1009`), binary only from the publisher (`UNAUTHORIZED` + `1008`), upgrades to any other route refused with 404 before the upgrade, every hook guarded against throws and rejected promises (`INTERNAL` + `1011`) |
+| `src/ws/connection.ts` | one socket: role, envelope fields on send (`protocolVersion`, `ts`), `error` + close helpers, handshake timer |
 | `src/logger.ts` | pino JSON lines with redaction of codes and tokens |
 
 ## Test and lint commands

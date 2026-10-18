@@ -27,6 +27,9 @@ export const REDACT_PATHS: readonly string[] = [
   "*.metricsToken",
   "rawPacket",
   "*.rawPacket",
+  // @fastify/websocket logs `{path: request.url}` (query string included) for upgrades to non-WS routes.
+  "path",
+  "*.path",
   "req.headers.authorization",
   "headers.authorization",
 ];

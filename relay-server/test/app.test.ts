@@ -160,6 +160,7 @@ describe("systemErrorCode", () => {
     [{ code: "FST_ERR_BAD_URL" }, "FST_ERR_BAD_URL"],
     [{ code: "ERR_HTTP_REQUEST_TIMEOUT" }, "ERR_HTTP_REQUEST_TIMEOUT"],
     [{ code: "HPE_INVALID_METHOD" }, "HPE_INVALID_METHOD"],
+    [{ code: "WS_ERR_INVALID_UTF8" }, "WS_ERR_INVALID_UTF8"],
     [{ code: "EADDRINUSE", errno: -98, syscall: "listen" }, "EADDRINUSE"],
     [{ code: "E7KQ4" }, "INTERNAL"],
     [{ code: "EADDRINUSE" }, "INTERNAL"],
@@ -245,7 +246,8 @@ describe("src/index.ts (npm run dev entry)", () => {
     await (await fetch(`http://127.0.0.1:${port}/healthz`)).arrayBuffer(); // warm up the client
     const started = performance.now();
     const res = await fetch(`http://127.0.0.1:${port}/healthz`);
-    expect(performance.now() - started).toBeLessThan(100);
+    // Generous across processes under parallel CI load; the strict 100 ms bound is the in-process test.
+    expect(performance.now() - started).toBeLessThan(250);
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ status: "ok", sessions: 0 });
   }, 20_000);
