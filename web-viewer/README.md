@@ -60,12 +60,38 @@ loads nothing from a CDN (NFR-09; asserted in `test/toolchain.test.ts`).
 
 `@slicerremoteview/shared` is resolved to its **sources** (`shared/ts/index.ts`) by a Vite/vitest alias and a
 `tsconfig` path (same approach as `tools/fake-slicer`), so dev, build, tests and typecheck need no prior
-`npm run build -w shared`. Only what the viewer imports ends up in the bundle (Ajv is tree-shaken out until the
-connection layer, WEB-04, needs it).
+`npm run build -w shared`. Only what the viewer imports ends up in the bundle. Ajv is deliberately **not** in it:
+it compiles schemas with `new Function`, which the relay's CSP (no `unsafe-eval`) forbids — see "Connection
+client" below.
 
 ### Code entry (WEB-03)
 
 `src/ui/code-entry.ts` — five cells, paste of a whole code, hints for `0/O` and `1/I/L` from the shared
 `normalizeCode`. The form has no `action`/`method` and the inputs no `name`, so the code cannot reach a URL; the
-connection layer is wired through `onJoin` (until WEB-04 `Join` only shows the busy state). Unit tests:
+connection layer is wired through `onJoin` in `src/main.ts`. Unit tests:
 `test/ui/code-entry.test.ts`; device E2E: `e2e/code-entry.spec.ts`.
+
+### Connection client (WEB-04)
+
+`src/protocol/connection.ts` is one WebSocket's lifetime (no DOM, no three.js); reconnect with backoff is WEB-14.
+
+```ts
+const connection = createConnection(); // wss://<location.host>/ws, or ws:// on localhost only (T5)
+connection.on("state", (s) => …);      // idle | connecting | connected | disconnected | enterCode | sessionEnded | stopped
+connection.onMessage("viewer.joined", (m) => …); // typed per message type
+connection.on("binary", (chunk) => …); // snapshot chunks (WEB-05)
+connection.connect({ code });          // or { sessionId, viewerToken } to rejoin; viewer.join is the first frame
+```
+
+- **Heartbeat** (§9.1): `ping` every 15 s; no answer within 10 s closes the socket and emits `dead`. Any inbound frame
+  after a `ping` also proves the link is alive, so a `pong` queued behind a snapshot stream cannot kill a slow link.
+- **Close codes** (§9.3) become states: `4004`/`4003`/`4011` → `enterCode`, `4001`/`4002` → `sessionEnded`,
+  `4000`/`1008`/`1009` (and a refused insecure transport) → `stopped`, everything else → `disconnected` (retry;
+  `immediate` for `4008`, `retryAfterS` from the relay's `error.details`). Every state carries the localised
+  `Description` from `src/state/errors.ts`.
+- **Validation without Ajv**: inbound text frames go through `src/protocol/envelope.ts`, a CSP-friendly guard
+  that checks the envelope (`protocolVersion` major 1, §11 direction) and the required fields of each relay → viewer
+  message. `createConnection({ parse })` accepts the full Ajv-based `parseEnvelope` from `@slicerremoteview/shared`
+  (tests run all valid fixtures through both). Unknown message types are ignored and logged by `type` only; the
+  log never contains codes, tokens or payload.
+- Tests: `npm test -w web-viewer -- connection envelope` (mock socket in `test/protocol/mock-socket.ts`, fake timers).
