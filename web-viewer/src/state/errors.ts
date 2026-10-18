@@ -151,7 +151,8 @@ export type AppState =
   | { readonly kind: "presenterOffline" }
   | { readonly kind: "sessionEnded" }
   | { readonly kind: "webgl2Unavailable" }
-  | { readonly kind: "snapshotTooLarge" };
+  | { readonly kind: "snapshotTooLarge" }
+  | { readonly kind: "snapshotInvalid" };
 
 const STATE_ENTRIES: Readonly<Record<AppState["kind"], Entry>> = {
   connecting: entry("connecting", "none"),
@@ -162,6 +163,7 @@ const STATE_ENTRIES: Readonly<Record<AppState["kind"], Entry>> = {
   sessionEnded: entry("sessionEnded", "enterCode", true),
   webgl2Unavailable: entry("webgl2Unavailable", "none", true),
   snapshotTooLarge: entry("snapshotTooLarge", "askPresenter"),
+  snapshotInvalid: entry("snapshotInvalid", "askPresenter"),
 };
 
 export function describeState(state: AppState, lang: Lang = detectLang()): Description {

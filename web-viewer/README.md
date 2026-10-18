@@ -145,3 +145,32 @@ token. A broken stream asks for the snapshot
 only after that version's `scene.snapshot.end`, when the relay has cached it. Tests:
 `npm test -w web-viewer -- scene-http scene-loader` (mocked `fetch` with WHATWG `Response`s,
 `test/protocol/http-fixtures.ts`).
+
+### GLB parse and node map (WEB-07)
+
+`src/render/scene-model.ts` turns a verified GLB into three.js objects (§7):
+
+```ts
+const models = createSceneModelStore();       // disposes the previous model on every successful load
+bindModelLifecycle(connection, [stream, loader], models, showInvalid); // what main.ts does
+const result = await models.load(bytes);      // { ok: true, model } | { ok: false, reason }
+scene.add(result.model.root);                 // glTF scene rotated 180° about Y for presentation
+result.model.nodes.get(nodeId);               // { T, M, material, manifest } — manifest order (§7.2, §7.3)
+```
+
+`validateGlb()` (`src/render/glb-validate.ts`, no three.js, never throws) checks the container and the JSON chunk
+against §7.1 **before** `GLTFLoader` sees the bytes, so a small file cannot make the loader fetch anything, run a
+plugin or spend memory, GPU uploads or triangles out of proportion to its size: aligned JSON chunk of at most 8 MiB
+(refused before decoding) then at most one BIN chunk ending the file; material factors in range; one scene, one root with extras, the node graph a tree; one buffer without `uri`; no
+images/textures/animations/cameras/texture references in any form; only `KHR_mesh_quantization` and no `extensions`
+objects at all (three.js runs its plugins — instancing, lights, `KHR_materials_*` — for any of them); disjoint views
+inside the BIN chunk, every accessor inside a view, accessor bytes ≤ BIN and GPU uploads ≤ 2 × BIN (counted like the
+loader's InterleavedBuffer cache); one TRIANGLES primitive with POSITION + NORMAL per mesh; every mesh, accessor and
+material used once (§7.2). A refused or unparsable snapshot yields `snapshotInvalid` and keeps the previous model. No
+Draco/meshopt decoder is registered (ADR 0001). Translucent materials (`opacity < 1`) get `transparent`,
+`depthWrite = false` and `renderOrder = 1 + manifest position` (`applyOpacity(node, opacity)`); the loader's shared
+default material is cloned per node. `bindModelLifecycle()` (`src/render/model-lifecycle.ts`) parses every snapshot
+from the stream and the HTTP loader and drops the model when the session ends or another session is joined (kept
+while reconnecting); the HTTP loader forgets its loaded version at the same moments. Tests run in jsdom with the real
+`GLTFLoader` (no WebGL needed): `npm test -w web-viewer -- scene-model glb-validate model-lifecycle` (the
+memory-release checks enable `gc` at runtime via `v8.setFlagsFromString`).

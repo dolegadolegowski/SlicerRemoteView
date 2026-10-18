@@ -373,6 +373,43 @@ describe("createSceneLoader", () => {
     );
   });
 
+  it.each([
+    ["leave()", () => conn.leave()],
+    ["a stop (1009)", () => socket.serverClose(1009)],
+    ["refused credentials (4003)", () => socket.serverClose(4003)],
+  ])(
+    "after %s, joining the same session downloads its snapshot again (the model was dropped)",
+    async (_label, end) => {
+      const fetch = serving(SMALL);
+      make(fetch);
+      socket.receive(joined());
+      await vi.waitFor(() => expect(events.ready).toHaveLength(1));
+      end();
+      expect(loader.loadedVersion).toBeNull();
+      conn.connect({ code: "7KQ4X" });
+      socket = MockSocket.last;
+      socket.open();
+      socket.receive(joined());
+      await vi.waitFor(() => expect(events.ready).toHaveLength(2));
+      expect(fetch).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("after a retryable drop (1006), rejoining the same session keeps the loaded snapshot (no second download)", async () => {
+    const fetch = serving(SMALL);
+    make(fetch);
+    socket.receive(joined());
+    await vi.waitFor(() => expect(events.ready).toHaveLength(1));
+    socket.serverClose(1006);
+    expect(loader.loadedVersion).toBe(1);
+    conn.connect({ code: "7KQ4X" });
+    socket = MockSocket.last;
+    socket.open();
+    socket.receive(joined());
+    await vi.advanceTimersByTimeAsync(10);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
   it("leaving the session drops the token", () => {
     make(hanging());
     socket.receive(joined());

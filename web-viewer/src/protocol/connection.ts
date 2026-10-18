@@ -83,6 +83,25 @@ export type ConnectionState =
     })
   | (Closed & { readonly kind: "enterCode" | "sessionEnded" | "stopped" });
 
+/**
+ * True when the state means the session is over for this viewer — left (`idle`), ended, credentials refused or
+ * stopped — as opposed to connecting or a retryable drop. The scene model and the HTTP loader's version state are
+ * dropped on exactly these states (WEB-06, WEB-07); the switch is exhaustive so a new kind must be classified.
+ */
+export function endsSession(state: ConnectionState): boolean {
+  switch (state.kind) {
+    case "idle":
+    case "enterCode":
+    case "sessionEnded":
+    case "stopped":
+      return true;
+    case "connecting":
+    case "connected":
+    case "disconnected":
+      return false;
+  }
+}
+
 type ClosedState = Extract<
   ConnectionState,
   { kind: "disconnected" | "enterCode" | "sessionEnded" | "stopped" }

@@ -94,6 +94,7 @@ describe("app state catalogue", () => {
     { kind: "sessionEnded" },
     { kind: "webgl2Unavailable" },
     { kind: "snapshotTooLarge" },
+    { kind: "snapshotInvalid" },
   ];
 
   it.each(LANGS.flatMap((lang) => states.map((s) => [lang, s] as const)))(
@@ -119,6 +120,10 @@ describe("app state catalogue", () => {
       fatal: true,
     });
     expect(describeState({ kind: "snapshotTooLarge" }, "en").action).toBe("askPresenter");
+    expect(describeState({ kind: "snapshotInvalid" }, "en")).toMatchObject({
+      action: "askPresenter",
+      fatal: false,
+    });
     expect(describeState({ kind: "webgl2Unavailable" }, "en")).toMatchObject({
       action: "none",
       fatal: true,

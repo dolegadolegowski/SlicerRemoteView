@@ -12,6 +12,7 @@ import type { Lang } from "../i18n/strings";
 import { detectLang } from "../i18n/strings";
 import { describe } from "../state/errors";
 import type { Description } from "../state/errors";
+import { endsSession } from "./connection";
 import type { Connection, LogFn } from "./connection";
 import { fetchScene } from "./scene-http";
 import type { FailureReason, FetchSceneOptions, SceneTarget } from "./scene-http";
@@ -114,8 +115,16 @@ export function createSceneLoader(
     pending = null;
   }
 
+  /**
+   * The session is over for this viewer (left, ended, credentials refused, stopped). The scene model is dropped at
+   * the same moment (WEB-07 `bindModelLifecycle`), so the loaded version must go too: joining the same session
+   * again has to download its snapshot again instead of skipping it as "already loaded".
+   */
   function forget(): void {
     token = null;
+    sessionId = null;
+    loaded = null;
+    resynced.clear();
     cancel();
   }
 
@@ -255,19 +264,9 @@ export function createSceneLoader(
     }),
     connection.onMessage("scene.snapshot.ready", (m) => load(m)),
     connection.on("state", (s) => {
-      switch (s.kind) {
-        case "sessionEnded":
-        case "enterCode":
-        case "stopped":
-        case "idle":
-          return forget();
-        case "disconnected":
-          // 4008: the relay instance restarts and its tokens die with it (§9.3); a retry would only get 401.
-          if (s.immediate) cancel();
-          return;
-        default:
-          return;
-      }
+      if (endsSession(s)) return forget();
+      // 4008: the relay instance restarts and its tokens die with it (§9.3); a retry would only get 401.
+      if (s.kind === "disconnected" && s.immediate) cancel();
     }),
   ];
 

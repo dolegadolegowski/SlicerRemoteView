@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { validateMessage } from "@slicerremoteview/shared";
-import { createConnection, isLocalHost, relayUrl } from "../../src/protocol/connection";
+import {
+  createConnection,
+  endsSession,
+  isLocalHost,
+  relayUrl,
+} from "../../src/protocol/connection";
 import type { Connection, ConnectionState, LogFn } from "../../src/protocol/connection";
 import { describe as describeCode } from "../../src/state/errors";
 import { MockSocket } from "./mock-socket";
@@ -408,5 +413,21 @@ describe("send and leave", () => {
     expect(first.closedWith?.code).toBe(1000);
     first.onclose?.({ code: 1000 });
     expect(conn.state.kind).toBe("connecting");
+  });
+});
+
+describe("endsSession", () => {
+  it("is true exactly for left, ended, refused and stopped", () => {
+    const closed = { description: describeCode(1000, "en"), closeCode: 1000 };
+    const states: [ConnectionState, boolean][] = [
+      [{ kind: "idle" }, true],
+      [{ kind: "connecting" }, false],
+      [{ kind: "connected" }, false],
+      [{ kind: "disconnected", ...closed, immediate: false, dead: false }, false],
+      [{ kind: "enterCode", ...closed }, true],
+      [{ kind: "sessionEnded", ...closed }, true],
+      [{ kind: "stopped", ...closed }, true],
+    ];
+    for (const [state, expected] of states) expect(endsSession(state), state.kind).toBe(expected);
   });
 });
