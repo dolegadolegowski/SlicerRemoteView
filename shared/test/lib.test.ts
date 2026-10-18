@@ -191,9 +191,13 @@ describe("TS validation library (PRO-06)", () => {
   });
 
   it("generated schema bundle and fixtures/messages/expected.json are up to date", () => {
-    execFileSync(process.execPath, [resolve(__dirname, "../scripts/generate.mjs"), "--check"], {
-      stdio: "pipe",
-    });
+    execFileSync(
+      process.execPath,
+      [resolve(__dirname, "../scripts/generate.mjs"), "--check", "--skip-python"],
+      {
+        stdio: "pipe",
+      },
+    );
     const expected = readJson<{
       fixtures: { file: string; type: string; valid: boolean; instancePath?: string }[];
     }>(resolve(FIXTURES_DIR, "expected.json"));

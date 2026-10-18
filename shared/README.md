@@ -17,13 +17,13 @@ valid/invalid fixtures shared by every language, and generated types (`ts/`, `py
 | `fixtures/messages/<type>/` | `valid-*.json` / `invalid-*.json` conformance fixtures, one directory per message type |
 | `ts/` | TypeScript sources of `@slicerremoteview/shared` (entry `ts/index.ts`), built to `dist/`: `validate.ts` (`compileSchemas`, `parseEnvelope`, `validateMessage`), `permissions.ts` (§11 `PERMISSIONS`, `isAllowed`), `constants.ts` (`ERROR_CODES`, `CLOSE_CODES`, `LIMITS`), `chunk.ts` (§6.3 chunk header, `chunkify`, `checkChunk`, `sha256Hex`), `code.ts` (session-code alphabet, `normalizeCode`) |
 | `py/` | Python package `remoteview_protocol` (pyproject, `remoteview_protocol/`, `tests/`, own `README.md`) — vendored into the Slicer extension (ADR 0007 §3); `py/remoteview_protocol/schema/` is a **generated** copy of `schema/` |
-| `ts/generated/` | **generated, committed** (`npm run generate -w shared`): `schemas.ts` embeds every file of `schema/` so validation needs no file system (browsers, bundlers); PRO-11 adds `messages.ts` |
+| `ts/generated/` | **generated, committed** (`npm run generate -w shared`): `schemas.ts` embeds every file of `schema/` so validation needs no file system (browsers, bundlers); `messages.ts` holds one interface per message type + the `AnyMessage` union (PRO-11, types only) |
 | `fixtures/messages/expected.json` | **generated**: the valid/invalid partition of every fixture with the expected `instancePath` — the reference the Python and C# conformance tests must reproduce (PRO-09, PRO-17) |
 | `fixtures/blob/` | binary test vectors of the chunk header (`chunk-header-*.bin`, table in `chunk-headers.json`, see its `README.md`) shared with Python/C# |
 | `fixtures/codes/` | `normalize-cases.json`: `normalizeCode` inputs and expected codes/hints (ADR 0008 §7) |
 | `test/` | vitest suites (`*.test.ts`); file names match the plan's `npm test -w shared -- <name>` filters |
 | `fixtures/glb/` | GLB snapshot fixtures of §7 (`asymmetric-2nodes.glb`, `quantized-1node.glb`, `large-synthetic.glb` ≈ 5 MiB) and five broken files for §7.1 pre-validators; `manifest.json` (byteLength, sha256, nodeIds, triangleCount) — generated, never edited by hand |
-| `scripts/` | generation and check scripts; `generate.mjs` writes `ts/generated/schemas.ts`, `fixtures/messages/expected.json` and `py/remoteview_protocol/schema/` (`npm run generate`, `--check` for drift), `vendor-py.mjs <dir> [--check]` vendors the Python package (ADR 0007 §3, `test/vendor.test.ts`), `make-glb-fixtures.ts` regenerates `fixtures/glb/` (`npm run fixtures`), `check-generators.mjs` = the PRO-02 generator spike |
+| `scripts/` | generation and check scripts; `generate.mjs` writes `ts/generated/schemas.ts`, `fixtures/messages/expected.json` `ts/generated/messages.ts`, `py/remoteview_protocol/schema/` and `py/remoteview_protocol/generated.py` (`npm run generate`, `--check` for drift); `lib/bundle.mjs` bundles the schemas for the generators, `vendor-py.mjs <dir> [--check]` vendors the Python package (ADR 0007 §3, `test/vendor.test.ts`), `make-glb-fixtures.ts` regenerates `fixtures/glb/` (`npm run fixtures`), `check-generators.mjs` = the PRO-02 generator spike |
 
 ## How to run
 
@@ -66,8 +66,26 @@ if (!isAllowed("viewer", result.value.type)) {
 | `validateMessage(message, type?, validators?)` | the same for an already-parsed object, optionally against a named schema (conformance tests, relay-built messages) |
 | `defaultSchemas()` | lazily compiled strict validators used when none are passed |
 | `PERMISSIONS`, `isAllowed(sender, type, recipient = "relay")`, `isBinaryAllowed(sender, recipient?)`, `BINARY_FRAME_PERMISSION` | §11 matrix with the four directions (`publisherToRelay`, `viewerToRelay`, `relayToPublisher`, `relayToViewer`); unknown and `RESERVED_TYPES` (`scene.camera`, `viewer.command`) are never allowed; `test/lib.test.ts` parses the §11 table from `docs/protocol.md` and checks every cell |
-| `MESSAGE_TYPES`, `MessageType`, `isMessageType`, `Message`, `Result`, `ParseError`, `ValidationIssue` | the 28 v1.0 types and the result types; `Message` is the envelope plus `unknown` payload fields until PRO-11 generates per-type interfaces |
+| `MESSAGE_TYPES`, `MessageType`, `isMessageType`, `Message`, `Result`, `ParseError`, `ValidationIssue` | the 28 v1.0 types and the result types; `Message` = the generated `AnyMessage` union; `MessageOfType<"scene.update">` picks one interface |
 | `PROTOCOL_VERSION` (`"1.0"`), `PROTOCOL_MAJOR`, `ERROR_CODES` (15 codes of §9.2), `CLOSE_CODES` (§9.3: `NORMAL` 1000 … `HANDSHAKE_TIMEOUT` 4012), `LIMITS` (§3.3 maximums in bytes / seconds, e.g. `MAX_TEXT_BYTES_PUBLISHER`, `MAX_SNAPSHOT_BYTES`, `MAX_VIEWERS`, `HEARTBEAT_INTERVAL_S`) | constants; the test cross-checks them against the §3.3, §9.2 and §9.3 tables of `docs/protocol.md` |
+
+## Generated types (PRO-11)
+
+`npm run generate -w shared` bundles `schema/*.schema.json` in memory (`scripts/lib/bundle.mjs`: `defs` and every
+message under one `definitions` map, the envelope inlined into each message, `AnyMessage` = `oneOf` of all 28) and feeds
+the bundle to two generators, because neither can follow the schemas' `https://slicerremoteview.dev/...` `$id`s offline
+and both emit `Envelope & X` inheritance that clashes with the narrowed `type` const:
+
+| Output | Generator | Shape |
+|---|---|---|
+| `ts/generated/messages.ts` | `json-schema-to-typescript` 16 (devDependency; `additionalProperties: false` = no index signatures, unknown fields are tolerated at runtime only, §14) | `export interface SceneUpdate { protocolVersion; type: "scene.update"; … }` per message, `AnyMessage` union, the `defs` as aliases (`Code`, `NodeId`, `ErrorCode`, …); re-exported as types from the package: `import type { SceneUpdate, AnyMessage } from "@slicerremoteview/shared"` |
+| `py/remoteview_protocol/generated.py` | `datamodel-code-generator` 0.85.0 (pinned in the `dev` extra; `--output-model-type typing.TypedDict`, `--formatters builtin`, no timestamp) | `class SceneUpdate(TypedDict)` with `NotRequired[...]`, `type AnyMessage = …` (PEP 695, Python ≥ 3.12); `mypy --strict` clean, excluded from ruff |
+
+Naming: `scene.snapshot.begin` → `SceneSnapshotBegin`; `error` → `ErrorMessage` (the global `Error` would be shadowed);
+`viewer.join` is `ViewerJoin` in TS (`({code} | {sessionId, viewerToken}) & Base`) and the union of two TypedDicts in
+Python (`ViewerJoin1 | ViewerJoin2`, §5.1 "exactly one"). `Message` in `validate.ts` is the `AnyMessage` union and
+`MessageOfType<"scene.update">` selects one member. Generated files are committed; drift check =
+`npm run generate -w shared && git diff --exit-code shared/` (or `npm run generate:check -w shared`).
 
 ## Python package (`py/`, PRO-09)
 
@@ -111,7 +129,7 @@ Browser-safe (no `node:` imports, WebCrypto for hashing):
 | `npm run format -w shared` | `prettier --write .` |
 | `npm run typecheck -w shared` | `tsc --noEmit` over `ts/`, `test/` (strict) |
 | `npm run build -w shared` | `tsc -p tsconfig.build.json` → `dist/` (ESM + `.d.ts`) |
-| `npm run generate -w shared` | `node scripts/generate.mjs`: rewrites `ts/generated/schemas.ts`, `fixtures/messages/expected.json` and `py/remoteview_protocol/schema/*.json`; `npm run generate:check -w shared` (= `--check`) exits 1 on drift and is run by `test/lib.test.ts` |
+| `npm run generate -w shared` | `node scripts/generate.mjs`: rewrites `ts/generated/schemas.ts`, `ts/generated/messages.ts`, `fixtures/messages/expected.json`, `py/remoteview_protocol/schema/*.json` and `py/remoteview_protocol/generated.py` (needs the Python venv); `npm run generate:check -w shared` (= `--check`, add `--skip-python` without the venv) exits 1 on drift; vitest (`lib`) runs it with `--skip-python`, pytest (`test_generated.py`) runs the full check |
 | `npm run test:py -w shared` | `py/.venv/bin/pytest py` (needs the venv below) |
 | `npm run lint:py -w shared` | `ruff check` + `ruff format --check` over `py/` |
 | `npm run fixtures -w shared` | `node scripts/make-glb-fixtures.ts`: rewrites `fixtures/glb/*.glb` + `manifest.json` deterministically (Node type stripping, flag `--experimental-strip-types` for 22.12–22.17; `git diff --exit-code shared/fixtures/glb` is the drift check, also run by `test/glb.test.ts` in a temp dir) |

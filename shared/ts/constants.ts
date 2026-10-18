@@ -22,7 +22,8 @@ export const ERROR_CODES = [
   "INTERNAL",
 ] as const;
 
-export type ErrorCode = (typeof ERROR_CODES)[number];
+/** Generated from `defs.schema.json#/definitions/errorCode`; `test/generated.test.ts` checks it equals `ERROR_CODES`. */
+export type { ErrorCode } from "./generated/messages.js";
 
 /**
  * WebSocket close codes of §9.3. Standard codes (1000–1011) carry their RFC 6455 names; the

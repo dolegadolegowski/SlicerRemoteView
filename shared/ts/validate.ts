@@ -10,6 +10,7 @@
  */
 import { Ajv2020 } from "ajv/dist/2020.js";
 import type { ErrorObject, ValidateFunction } from "ajv/dist/2020.js";
+import type { AnyMessage } from "./generated/messages.js";
 import { SCHEMA_FILES } from "./generated/schemas.js";
 import { isMessageType, MESSAGE_TYPES } from "./permissions.js";
 import type { MessageType } from "./permissions.js";
@@ -22,17 +23,13 @@ export const PROTOCOL_MAJOR = 1;
 export const SCHEMA_BASE = "https://slicerremoteview.dev/schema/";
 
 /**
- * A parsed message: the envelope fields of §3.2 plus flat payload fields. PRO-11 narrows this to
- * the generated per-type interfaces; until then payload fields are `unknown`.
+ * A parsed message: the discriminated union of the generated per-type interfaces
+ * (`generated/messages.ts`, PRO-11); narrow it by `type` or with {@link MessageOfType}.
  */
-export interface Message {
-  protocolVersion: string;
-  type: MessageType;
-  id?: string;
-  replyTo?: string;
-  ts?: number;
-  [field: string]: unknown;
-}
+export type Message = AnyMessage;
+
+/** The generated interface of one message type, e.g. `MessageOfType<"scene.update">` = `SceneUpdate`. */
+export type MessageOfType<T extends MessageType> = Extract<AnyMessage, { type: T }>;
 
 export type Result<T, E> = { ok: true; value: T } | { ok: false; error: E };
 
@@ -183,7 +180,7 @@ export function validateMessage(
       ok: false,
       error: invalid(`message does not match the ${target} schema`, toIssues(validate.errors)),
     };
-  return { ok: true, value: message as Message };
+  return { ok: true, value: message as AnyMessage };
 }
 
 const VERSION_PATTERN = /^(\d+)\.(\d+)$/;
