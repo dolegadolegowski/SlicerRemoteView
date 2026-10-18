@@ -23,7 +23,7 @@ valid/invalid fixtures shared by every language, and generated types (`ts/`, `py
 | `fixtures/codes/` | `normalize-cases.json`: `normalizeCode` inputs and expected codes/hints (ADR 0008 §7) |
 | `test/` | vitest suites (`*.test.ts`); file names match the plan's `npm test -w shared -- <name>` filters |
 | `fixtures/glb/` | GLB snapshot fixtures of §7 (`asymmetric-2nodes.glb`, `quantized-1node.glb`, `large-synthetic.glb` ≈ 5 MiB) and five broken files for §7.1 pre-validators; `manifest.json` (byteLength, sha256, nodeIds, triangleCount) — generated, never edited by hand |
-| `scripts/` | generation and check scripts; `generate.mjs` writes `ts/generated/schemas.ts` + `fixtures/messages/expected.json` (`npm run generate`, `--check` for drift), `make-glb-fixtures.ts` regenerates `fixtures/glb/` (`npm run fixtures`), `check-generators.mjs` = the PRO-02 generator spike |
+| `scripts/` | generation and check scripts; `generate.mjs` writes `ts/generated/schemas.ts`, `fixtures/messages/expected.json` and `py/remoteview_protocol/schema/` (`npm run generate`, `--check` for drift), `vendor-py.mjs <dir> [--check]` vendors the Python package (ADR 0007 §3, `test/vendor.test.ts`), `make-glb-fixtures.ts` regenerates `fixtures/glb/` (`npm run fixtures`), `check-generators.mjs` = the PRO-02 generator spike |
 
 ## How to run
 
@@ -32,7 +32,7 @@ From the repository root (Node 22, npm workspaces — one `package-lock.json`):
 ```bash
 npm install            # resolves every workspace, including @slicerremoteview/shared
 npm test -w shared     # vitest, all suites
-npm test -w shared -- toolchain   # one suite by file-name filter (defs, session, viewer, snapshot, scene, lib, chunk, code, glb)
+npm test -w shared -- toolchain   # one suite by file-name filter (defs, session, viewer, snapshot, scene, lib, chunk, code, glb, vendor)
 ```
 
 Consumers import the package as a workspace dependency: `import { PROTOCOL_VERSION } from "@slicerremoteview/shared"`
@@ -76,6 +76,10 @@ ADR 0007 §3; details and API in `py/README.md`). The schemas are **copied into 
 shared` (`py/remoteview_protocol/schema/`, byte-identical to `schema/`, drift-checked by `--check` and by pytest), so the
 vendored copy works without the repository. `tests/test_conformance.py` replays `fixtures/messages/expected.json`: the
 valid/invalid partition and the expected `instancePath` of every fixture are identical to the TypeScript run.
+PRO-10 adds the helpers mirroring `ts/chunk.ts`, `ts/code.ts` and `parseEnvelope` (`chunk_header.py`, `alphabet.py`,
+`envelope.py`, tested against the same `fixtures/blob` and `fixtures/codes` vectors) and the vendoring script
+`node shared/scripts/vendor-py.mjs <target-dir> [--check]` (copies the package + `VENDORED.json` manifest; `--check`
+exits 1 on any modified, missing or extra file — the ADR 0007 §3 CI rule for `slicer-plugin/RemoteView/_vendor/`).
 
 Tooling lives in a local virtual environment (`py/.venv`, git-ignored; the dev Mac has `uv` but no system `pytest`):
 
