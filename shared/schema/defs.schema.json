@@ -52,6 +52,11 @@
       "type": "integer",
       "minimum": 1
     },
+    "updateVersion": {
+      "description": "sceneVersion carried by scene.update, scene.nodeRemoved and scene.nodeAdded: never 0; the relay, not the schema, enforces sceneVersion > baseVersion (§8.1, §8.4).",
+      "type": "integer",
+      "minimum": 1
+    },
     "color": {
       "description": "[r, g, b] floats in 0..1 (§3.2).",
       "type": "array",
@@ -65,6 +70,46 @@
       "items": { "type": "number" },
       "minItems": 16,
       "maxItems": 16
+    },
+    "opacity": {
+      "description": "Opacity in 0..1 (§7.3, §8.1).",
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "nodeKind": {
+      "description": "Kind of an exported Slicer entity: model node or segmentation segment (§7.3, §8.2).",
+      "type": "string",
+      "enum": ["model", "segment"]
+    },
+    "nodeChange": {
+      "description": "Visual properties of one scene node, addressed by its stable nodeId: at least one of visible, color, opacity, matrix (last-writer-wins per property, §8.1). Used by scene.update.changes and scene.state.nodes (§8.3). Never carries a name: the JSON protocol repeats no node names (§7, §8.3).",
+      "type": "object",
+      "properties": {
+        "nodeId": { "$ref": "#/definitions/nodeId" },
+        "visible": { "type": "boolean" },
+        "color": { "$ref": "#/definitions/color" },
+        "opacity": { "$ref": "#/definitions/opacity" },
+        "matrix": {
+          "description": "Replaces T.matrix: 16 numbers, column-major, glTF space (§7.2, §8.1).",
+          "$ref": "#/definitions/matrix"
+        }
+      },
+      "required": ["nodeId"],
+      "anyOf": [
+        { "properties": { "visible": { "type": "boolean" } }, "required": ["visible"] },
+        { "properties": { "color": { "$ref": "#/definitions/color" } }, "required": ["color"] },
+        {
+          "properties": { "opacity": { "$ref": "#/definitions/opacity" } },
+          "required": ["opacity"]
+        },
+        { "properties": { "matrix": { "$ref": "#/definitions/matrix" } }, "required": ["matrix"] }
+      ],
+      "not": {
+        "$comment": "§8.3: updates and the relay state hold visual properties only, never names (PHI).",
+        "properties": { "name": {} },
+        "required": ["name"]
+      }
     },
     "sha256": {
       "description": "SHA-256 digest as 64 lowercase hex characters (§6.2, §6.4).",

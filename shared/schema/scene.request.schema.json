@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/scene.request.schema.json",
+  "title": "scene.request (viewer → relay)",
+  "description": "Viewer asks to re-synchronise after a gap, reconnect, checksum mismatch or user action (docs/protocol.md §8.3). The relay answers with scene.snapshot.ready when haveSnapshotVersion differs from its cached snapshot, then scene.state.",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.schema.json" }],
+  "properties": {
+    "type": { "type": "string", "const": "scene.request" },
+    "haveSnapshotVersion": {
+      "description": "Version of the GLB the viewer holds, or null when it has none (§8.3).",
+      "type": ["integer", "null"],
+      "minimum": 1
+    },
+    "haveSceneVersion": {
+      "description": "Last scene version the viewer applied; 0 when none (§8.3, §8.4).",
+      "$ref": "defs.schema.json#/definitions/sceneVersion"
+    },
+    "reason": { "$ref": "defs.schema.json#/definitions/sceneRequestReason" }
+  },
+  "required": ["type", "haveSnapshotVersion", "haveSceneVersion", "reason"]
+}

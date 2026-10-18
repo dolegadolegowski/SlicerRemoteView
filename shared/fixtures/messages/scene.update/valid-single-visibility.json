@@ -1,0 +1,12 @@
+{
+  "protocolVersion": "1.0",
+  "type": "scene.update",
+  "sceneVersion": 2,
+  "baseVersion": 1,
+  "changes": [
+    {
+      "nodeId": "vtkMRMLModelNode3",
+      "visible": true
+    }
+  ]
+}

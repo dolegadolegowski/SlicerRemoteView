@@ -1,0 +1,15 @@
+{
+  "$comment": "`nodes` holds at least one entry (§8.2)",
+  "expect": {
+    "instancePath": "/nodes",
+    "keyword": "minItems"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.nodeAdded",
+    "sceneVersion": 46,
+    "baseVersion": 45,
+    "nodes": [],
+    "snapshotFollows": true
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "$comment": "`haveSceneVersion` is an integer (§8.3)",
+  "expect": {
+    "instancePath": "/haveSceneVersion",
+    "keyword": "type"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.request",
+    "id": "v-12",
+    "haveSnapshotVersion": 43,
+    "haveSceneVersion": "44",
+    "reason": "GAP"
+  }
+}

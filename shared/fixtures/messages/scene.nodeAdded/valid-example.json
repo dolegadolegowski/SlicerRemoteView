@@ -1,0 +1,13 @@
+{
+  "protocolVersion": "1.0",
+  "type": "scene.nodeAdded",
+  "sceneVersion": 46,
+  "baseVersion": 45,
+  "nodes": [
+    {
+      "nodeId": "vtkMRMLModelNode9",
+      "kind": "model"
+    }
+  ],
+  "snapshotFollows": true
+}

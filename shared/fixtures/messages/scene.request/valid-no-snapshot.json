@@ -1,0 +1,8 @@
+{
+  "protocolVersion": "1.0",
+  "type": "scene.request",
+  "id": "v-13",
+  "haveSnapshotVersion": null,
+  "haveSceneVersion": 0,
+  "reason": "RECONNECT"
+}

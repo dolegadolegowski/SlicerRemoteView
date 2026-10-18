@@ -1,0 +1,13 @@
+{
+  "$comment": "`baseVersion` is required (§8.2)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.nodeRemoved",
+    "sceneVersion": 45,
+    "nodeIds": ["vtkMRMLModelNode5"]
+  }
+}

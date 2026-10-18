@@ -1,0 +1,14 @@
+{
+  "$comment": "`sceneVersion` is never 0 (§8.4)",
+  "expect": {
+    "instancePath": "/sceneVersion",
+    "keyword": "minimum"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.nodeRemoved",
+    "sceneVersion": 0,
+    "baseVersion": 44,
+    "nodeIds": ["vtkMRMLModelNode5"]
+  }
+}

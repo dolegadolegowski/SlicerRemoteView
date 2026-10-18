@@ -1,0 +1,14 @@
+{
+  "$comment": "`reason` is required (§8.3)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.request",
+    "id": "v-12",
+    "haveSnapshotVersion": 43,
+    "haveSceneVersion": 44
+  }
+}

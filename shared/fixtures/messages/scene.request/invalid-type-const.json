@@ -1,0 +1,15 @@
+{
+  "$comment": "`type` must be the const scene.request",
+  "expect": {
+    "instancePath": "/type",
+    "keyword": "const"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.other",
+    "id": "v-12",
+    "haveSnapshotVersion": 43,
+    "haveSceneVersion": 44,
+    "reason": "GAP"
+  }
+}

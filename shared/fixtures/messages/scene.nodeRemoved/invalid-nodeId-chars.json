@@ -1,0 +1,14 @@
+{
+  "$comment": "`nodeId` is [A-Za-z0-9_./:-]{1,128} (§3.3)",
+  "expect": {
+    "instancePath": "/nodeIds/0",
+    "keyword": "pattern"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.nodeRemoved",
+    "sceneVersion": 45,
+    "baseVersion": 44,
+    "nodeIds": ["vtkMRMLModelNode5?"]
+  }
+}

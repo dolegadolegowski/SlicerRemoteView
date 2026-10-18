@@ -1,0 +1,18 @@
+{
+  "protocolVersion": "1.0",
+  "type": "scene.nodeAdded",
+  "id": "p-51",
+  "sceneVersion": 48,
+  "baseVersion": 47,
+  "nodes": [
+    {
+      "nodeId": "vtkMRMLSegmentationNode1/Segment_9",
+      "kind": "segment"
+    },
+    {
+      "nodeId": "vtkMRMLModelNode10",
+      "kind": "model"
+    }
+  ],
+  "snapshotFollows": true
+}

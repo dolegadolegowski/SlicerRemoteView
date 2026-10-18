@@ -54,6 +54,9 @@ Runtime dependency policy: only the schema validator (`ajv`); everything else is
   `{ "$ref": "defs.schema.json#/definitions/code" }`. Message schemas extend the envelope with
   `"allOf": [{ "$ref": "envelope.schema.json" }]` and fix `type` with `"const"` **and** `"type": "string"`.
 - The envelope never sets `additionalProperties: false`: unknown fields must be accepted (`docs/protocol.md` §14).
+- Shapes shared by several messages are `definitions` in `defs.schema.json` (e.g. `nodeChange` = one item of
+  `scene.update.changes` and of `scene.state.nodes`: `nodeId` + at least one of `visible`/`color`/`opacity`/`matrix`
+  via `anyOf`, and a `not` rule that forbids `name` — the JSON protocol never carries node names, §7/§8.3).
 - Conditional requirements use draft-07 `if`/`then` (e.g. `session.publisherState`: `graceEndsAt` required when
   `online` is `false`; `viewer.joined`: `snapshot` required when `snapshotAvailable` is `true`), and
   "exactly one of" rules use `oneOf` (`viewer.join`). Both only list required/forbidden combinations; the property
@@ -84,7 +87,9 @@ Runtime dependency policy: only the schema validator (`ajv`); everything else is
   (e.g. `scene.snapshot.begin/valid-chunk-64k.json`, 3 full 64 KiB chunks + 1 byte) until PRO-08 adds fixtures
   derived from the real GLB files in `fixtures/glb/manifest.json`.
 - The TS runner is `loadFixtures()` in `test/helpers.ts`; `test/session.test.ts` covers `session.*`,
-  `test/viewer.test.ts` covers `viewer.*`, `ping`, `pong` and `error`, `test/snapshot.test.ts` covers `scene.snapshot.*`.
+  `test/viewer.test.ts` covers `viewer.*`, `ping`, `pong` and `error`, `test/snapshot.test.ts` covers `scene.snapshot.*`,
+  `test/scene.test.ts` covers the incremental-update types `scene.update`, `scene.nodeRemoved`, `scene.nodeAdded`,
+  `scene.state`, `scene.request` (it filters the `scene.snapshot.*` directories out of `loadFixtures("scene.")`).
 
 ## Generator spike (PRO-02, ADR 0002 errata)
 

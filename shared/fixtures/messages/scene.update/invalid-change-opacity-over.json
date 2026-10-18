@@ -1,0 +1,21 @@
+{
+  "$comment": "`opacity` is 0..1 (§8.1)",
+  "expect": {
+    "instancePath": "/changes/0/opacity",
+    "keyword": "maximum"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.update",
+    "id": "p-41",
+    "ts": 1792238430000,
+    "sceneVersion": 44,
+    "baseVersion": 43,
+    "changes": [
+      {
+        "nodeId": "vtkMRMLModelNode3",
+        "opacity": 1.5
+      }
+    ]
+  }
+}

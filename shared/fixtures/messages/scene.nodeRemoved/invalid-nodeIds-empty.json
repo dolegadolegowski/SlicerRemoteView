@@ -1,0 +1,14 @@
+{
+  "$comment": "`nodeIds` holds at least one id (§8.2)",
+  "expect": {
+    "instancePath": "/nodeIds",
+    "keyword": "minItems"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.nodeRemoved",
+    "sceneVersion": 45,
+    "baseVersion": 44,
+    "nodeIds": []
+  }
+}

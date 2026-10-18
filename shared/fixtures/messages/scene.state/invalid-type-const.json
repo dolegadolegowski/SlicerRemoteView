@@ -1,0 +1,25 @@
+{
+  "$comment": "`type` must be the const scene.state",
+  "expect": {
+    "instancePath": "/type",
+    "keyword": "const"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.other",
+    "sceneVersion": 46,
+    "snapshotVersion": 43,
+    "nodes": [
+      {
+        "nodeId": "vtkMRMLSegmentationNode1/Segment_2",
+        "visible": false
+      },
+      {
+        "nodeId": "vtkMRMLModelNode3",
+        "color": [0.95, 0.85, 0.7],
+        "opacity": 0.35
+      }
+    ],
+    "removed": ["vtkMRMLModelNode5"]
+  }
+}

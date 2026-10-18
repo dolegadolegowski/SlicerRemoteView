@@ -1,0 +1,20 @@
+{
+  "$comment": "every change names its node (§8.1)",
+  "expect": {
+    "instancePath": "/changes/0",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.update",
+    "id": "p-41",
+    "ts": 1792238430000,
+    "sceneVersion": 44,
+    "baseVersion": 43,
+    "changes": [
+      {
+        "visible": false
+      }
+    ]
+  }
+}

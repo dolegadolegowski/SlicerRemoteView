@@ -1,0 +1,19 @@
+{
+  "$comment": "`type` is required (§3.2)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "sceneVersion": 46,
+    "baseVersion": 45,
+    "nodes": [
+      {
+        "nodeId": "vtkMRMLModelNode9",
+        "kind": "model"
+      }
+    ],
+    "snapshotFollows": true
+  }
+}

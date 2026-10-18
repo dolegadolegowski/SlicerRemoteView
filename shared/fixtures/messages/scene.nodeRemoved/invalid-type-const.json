@@ -1,0 +1,14 @@
+{
+  "$comment": "`type` must be the const scene.nodeRemoved",
+  "expect": {
+    "instancePath": "/type",
+    "keyword": "const"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.other",
+    "sceneVersion": 45,
+    "baseVersion": 44,
+    "nodeIds": ["vtkMRMLModelNode5"]
+  }
+}

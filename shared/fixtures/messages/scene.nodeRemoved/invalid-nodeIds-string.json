@@ -1,0 +1,14 @@
+{
+  "$comment": "`nodeIds` is an array (§8.2)",
+  "expect": {
+    "instancePath": "/nodeIds",
+    "keyword": "type"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.nodeRemoved",
+    "sceneVersion": 45,
+    "baseVersion": 44,
+    "nodeIds": "vtkMRMLModelNode5"
+  }
+}

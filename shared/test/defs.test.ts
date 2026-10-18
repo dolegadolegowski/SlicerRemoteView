@@ -107,4 +107,36 @@ describe("defs + envelope schemas (PRO-02)", () => {
     expect(def("matrix")(Array<number>(16).fill(0))).toBe(true);
     expect(def("matrix")(Array<number>(12).fill(0))).toBe(false);
   });
+
+  it("every property used in a oneOf/anyOf/if/then branch is declared in the enclosing properties (generator rule)", () => {
+    // shared/README.md: branches only repeat required/forbidden sets; shapes live in `properties`.
+    const check = (schema: Record<string, unknown>, file: string, path: string): void => {
+      const props = Object.keys((schema.properties as object | undefined) ?? {});
+      for (const key of ["anyOf", "oneOf", "allOf"]) {
+        for (const [i, branch] of (
+          (schema[key] as Record<string, unknown>[] | undefined) ?? []
+        ).entries()) {
+          if ("$ref" in branch) continue;
+          for (const name of (branch.required as string[] | undefined) ?? [])
+            expect(props, `${file} ${path}/${key}/${i}: ${name}`).toContain(name);
+        }
+      }
+      for (const key of ["then", "else"]) {
+        const branch = schema[key] as Record<string, unknown> | undefined;
+        for (const name of (branch?.required as string[] | undefined) ?? [])
+          expect(props, `${file} ${path}/${key}: ${name}`).toContain(name);
+      }
+      for (const [name, sub] of Object.entries(
+        (schema.properties as Record<string, Record<string, unknown>> | undefined) ?? {},
+      ))
+        check(sub, file, `${path}/properties/${name}`);
+      if (schema.items && typeof schema.items === "object")
+        check(schema.items as Record<string, unknown>, file, `${path}/items`);
+      for (const [name, sub] of Object.entries(
+        (schema.definitions as Record<string, Record<string, unknown>> | undefined) ?? {},
+      ))
+        check(sub, file, `${path}/definitions/${name}`);
+    };
+    for (const [file, schema] of loadSchemas()) check(schema, file, "#");
+  });
 });

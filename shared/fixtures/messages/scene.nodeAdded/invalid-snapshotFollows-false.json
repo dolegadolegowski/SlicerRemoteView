@@ -1,0 +1,20 @@
+{
+  "$comment": "v1 has no per-node GLB: `snapshotFollows` is always true (§8.2)",
+  "expect": {
+    "instancePath": "/snapshotFollows",
+    "keyword": "const"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.nodeAdded",
+    "sceneVersion": 46,
+    "baseVersion": 45,
+    "nodes": [
+      {
+        "nodeId": "vtkMRMLModelNode9",
+        "kind": "model"
+      }
+    ],
+    "snapshotFollows": false
+  }
+}

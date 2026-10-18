@@ -1,0 +1,19 @@
+{
+  "$comment": "each node has nodeId and kind (§8.2)",
+  "expect": {
+    "instancePath": "/nodes/0",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.nodeAdded",
+    "sceneVersion": 46,
+    "baseVersion": 45,
+    "nodes": [
+      {
+        "nodeId": "vtkMRMLModelNode9"
+      }
+    ],
+    "snapshotFollows": true
+  }
+}

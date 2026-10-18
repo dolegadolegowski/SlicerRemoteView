@@ -1,0 +1,16 @@
+{
+  "protocolVersion": "1.0",
+  "type": "scene.update",
+  "id": "p-42",
+  "sceneVersion": 45,
+  "baseVersion": 44,
+  "changes": [
+    {
+      "nodeId": "vtkMRMLSegmentationNode1/Segment_2",
+      "visible": true,
+      "color": [0, 0.5, 1],
+      "opacity": 0,
+      "matrix": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "$comment": "`type` must be the const scene.nodeAdded",
+  "expect": {
+    "instancePath": "/type",
+    "keyword": "const"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.other",
+    "sceneVersion": 46,
+    "baseVersion": 45,
+    "nodes": [
+      {
+        "nodeId": "vtkMRMLModelNode9",
+        "kind": "model"
+      }
+    ],
+    "snapshotFollows": true
+  }
+}

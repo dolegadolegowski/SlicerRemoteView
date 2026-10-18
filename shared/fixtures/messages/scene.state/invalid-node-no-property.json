@@ -1,0 +1,19 @@
+{
+  "$comment": "a state entry carries at least one of visible/color/opacity/matrix (§8.3)",
+  "expect": {
+    "instancePath": "/nodes/0",
+    "keyword": "anyOf"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.state",
+    "sceneVersion": 46,
+    "snapshotVersion": 43,
+    "nodes": [
+      {
+        "nodeId": "vtkMRMLModelNode3"
+      }
+    ],
+    "removed": ["vtkMRMLModelNode5"]
+  }
+}

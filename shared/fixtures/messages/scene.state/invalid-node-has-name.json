@@ -1,0 +1,21 @@
+{
+  "$comment": "the relay state holds visual properties only, never names (§8.3, T7)",
+  "expect": {
+    "instancePath": "/nodes/0",
+    "keyword": "not"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.state",
+    "sceneVersion": 46,
+    "snapshotVersion": 43,
+    "nodes": [
+      {
+        "nodeId": "vtkMRMLModelNode3",
+        "visible": false,
+        "name": "Liver"
+      }
+    ],
+    "removed": ["vtkMRMLModelNode5"]
+  }
+}

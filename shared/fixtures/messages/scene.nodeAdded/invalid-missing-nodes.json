@@ -1,0 +1,14 @@
+{
+  "$comment": "`nodes` is required (§8.2)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.nodeAdded",
+    "sceneVersion": 46,
+    "baseVersion": 45,
+    "snapshotFollows": true
+  }
+}

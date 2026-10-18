@@ -1,0 +1,20 @@
+{
+  "$comment": "`kind` ∈ model | segment (§7.3)",
+  "expect": {
+    "instancePath": "/nodes/0/kind",
+    "keyword": "enum"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.nodeAdded",
+    "sceneVersion": 46,
+    "baseVersion": 45,
+    "nodes": [
+      {
+        "nodeId": "vtkMRMLModelNode9",
+        "kind": "volume"
+      }
+    ],
+    "snapshotFollows": true
+  }
+}

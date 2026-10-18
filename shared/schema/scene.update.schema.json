@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/scene.update.schema.json",
+  "title": "scene.update (publisher → relay → viewers)",
+  "description": "Incremental change of visual properties for 1..1000 nodes (docs/protocol.md §8.1). The relay enforces baseVersion == session.sceneVersion and sceneVersion > baseVersion (BAD_SEQUENCE otherwise) and rejects it while a snapshot is in flight (§6.2); the schema checks shapes and the 1000-change limit (§3.3).",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.schema.json" }],
+  "properties": {
+    "type": { "type": "string", "const": "scene.update" },
+    "sceneVersion": {
+      "description": "New scene version, greater than baseVersion (§8.1, §8.4).",
+      "$ref": "defs.schema.json#/definitions/updateVersion"
+    },
+    "baseVersion": {
+      "description": "Version the receiver must currently hold (§8.1).",
+      "$ref": "defs.schema.json#/definitions/sceneVersion"
+    },
+    "changes": {
+      "description": "Per-node changes; unknown nodeIds are ignored by viewers (§8.1).",
+      "type": "array",
+      "items": { "$ref": "defs.schema.json#/definitions/nodeChange" },
+      "minItems": 1,
+      "maxItems": 1000
+    }
+  },
+  "required": ["type", "sceneVersion", "baseVersion", "changes"]
+}

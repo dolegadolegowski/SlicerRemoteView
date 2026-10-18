@@ -1,0 +1,14 @@
+{
+  "$comment": "`protocolVersion` is required (§3.2)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "type": "scene.request",
+    "id": "v-12",
+    "haveSnapshotVersion": 43,
+    "haveSceneVersion": 44,
+    "reason": "GAP"
+  }
+}

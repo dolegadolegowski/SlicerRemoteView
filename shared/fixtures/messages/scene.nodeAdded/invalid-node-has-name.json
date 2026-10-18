@@ -1,0 +1,21 @@
+{
+  "$comment": "node names travel only inside the GLB, never in JSON (§7, §8.3)",
+  "expect": {
+    "instancePath": "/nodes/0",
+    "keyword": "not"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.nodeAdded",
+    "sceneVersion": 46,
+    "baseVersion": 45,
+    "nodes": [
+      {
+        "nodeId": "vtkMRMLModelNode9",
+        "kind": "model",
+        "name": "Liver"
+      }
+    ],
+    "snapshotFollows": true
+  }
+}
