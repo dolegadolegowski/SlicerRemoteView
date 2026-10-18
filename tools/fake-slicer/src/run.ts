@@ -1,8 +1,9 @@
 /**
  * `fake-slicer` entry logic: parse options, connect as publisher, `session.create` → `session.created`,
  * hand the code to `--code-fd` (PRO-13), then stream the fixture GLB as snapshot version 1 and wait for
- * `scene.snapshot.ack` (PRO-14). Update scripts arrive with PRO-15 and reconnects with PRO-16; until then
- * the process stays connected after the ack until SIGINT, relay close or `--exit-after-ack`.
+ * `scene.snapshot.ack` (PRO-14). `--script` then plays update entries (PRO-15; `--loop`, `--close-after`);
+ * reconnects arrive with PRO-16. Without `--exit-after-ack` the process stays connected until SIGINT,
+ * `--close-after` or relay close.
  *
  * Session codes and tokens are never written to stdout/stderr (NFR-12): the only sink is the `--code-fd` file
  * descriptor, which the SRV-22 / WEB-10 / QA-02 harnesses read through a pipe.
@@ -15,7 +16,9 @@ import { loadGlb, resolveFixture } from "./glb.js";
 import type { LoadedGlb } from "./glb.js";
 import { HELP, parseCliArgs } from "./options.js";
 import type { Options } from "./options.js";
-import { envelope, sendSnapshot } from "./snapshot.js";
+import { loadScript, scriptDuration, updateMessage } from "./script.js";
+import type { ScriptEntry } from "./script.js";
+import { envelope, sendFrame, sendSnapshot } from "./snapshot.js";
 
 export interface Io {
   stdout(text: string): void;
@@ -59,10 +62,30 @@ let validators: Validators | undefined; // compiled on first use: importing the 
 const inboundValidators = (): Validators =>
   (validators ??= compileSchemas({ tolerateUnknownEnums: true })); // inbound relay messages (§14)
 
+/** Resolves `true` after `ms`, or `false` as soon as `signal` aborts (the timer is cleared either way). */
+function pause(ms: number, signal: AbortSignal): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve(false);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve(true);
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export async function run(options: Options, io: Io): Promise<number> {
   let glb: LoadedGlb;
+  let script: ScriptEntry[] = [];
   try {
     glb = await loadGlb(resolveFixture(options.fixture));
+    if (options.script !== undefined) script = await loadScript(options.script);
+    if (options.loop && scriptDuration(script) === 0)
+      throw new Error("--loop needs a script with at least one non-zero afterMs");
   } catch (error) {
     io.stderr(`fake-slicer: ${(error as Error).message}\n`);
     return EXIT.usage;
@@ -70,36 +93,81 @@ export async function run(options: Options, io: Io): Promise<number> {
   if (io.signal?.aborted) return EXIT.ok;
   return new Promise<number>((resolve) => {
     const socket = new WebSocket(options.relay, { perMessageDeflate: false });
+    const stop = new AbortController(); // ends the script player and the --close-after timer
     let exit: number = EXIT.ok;
     let finished = false;
     let acked = false;
     let counter = 0;
+    /** Last `sceneVersion` this publisher used; the counter is strictly increasing (§8.4). */
+    let sceneVersion = 0;
+    let pendingAck: { version: number; resolve: () => void } | undefined;
     const nextId = (): string => `p-${++counter}`;
     const finish = (code: number): void => {
       finished = true;
       exit = code;
+      stop.abort();
       if (socket.readyState === WebSocket.CONNECTING) socket.terminate();
       else socket.close();
     };
     io.signal?.addEventListener("abort", () => finish(EXIT.ok), { once: true });
-    const startSnapshot = (): void => {
-      const sceneVersion = 1;
-      sendSnapshot(
+
+    /** Sends a snapshot as the next version and resolves when the relay acknowledged it. */
+    const publishSnapshot = async (source: LoadedGlb): Promise<void> => {
+      const version = ++sceneVersion;
+      const acknowledged = new Promise<void>((done) => (pendingAck = { version, resolve: done }));
+      const chunks = await sendSnapshot(
         socket,
-        { glb, sceneVersion, chunkSize: options.chunkSize, profile: options.profile },
-        nextId,
-      ).then(
-        (chunks) =>
-          io.stderr(
-            `snapshot ${sceneVersion}: ${glb.bytes.byteLength} bytes in ${chunks} chunks sent\n`,
-          ),
-        (error: unknown) => {
-          if (finished) return;
-          io.stderr(`snapshot failed: ${(error as Error).message}\n`);
-          finish(EXIT.usage);
+        {
+          glb: source,
+          sceneVersion: version,
+          chunkSize: options.chunkSize,
+          profile: options.profile,
         },
+        nextId,
       );
+      io.stderr(`snapshot ${version}: ${source.bytes.byteLength} bytes in ${chunks} chunks sent\n`);
+      await acknowledged;
     };
+
+    /** Plays the script once per pass; entry `afterMs` is the pause since the previous entry (or the ack). */
+    const playScript = async (): Promise<void> => {
+      do {
+        for (const entry of script) {
+          if (!(await pause(entry.afterMs, stop.signal))) return;
+          if (entry.type === "scene.snapshot") await publishSnapshot(entry.glb ?? glb);
+          else {
+            const base = sceneVersion;
+            sceneVersion = base + 1;
+            await sendFrame(
+              socket,
+              JSON.stringify(updateMessage(entry.type, entry.fields, base, nextId())),
+            );
+            io.stderr(`${entry.type} ${sceneVersion} sent\n`);
+          }
+          if (stop.signal.aborted) return;
+        }
+      } while (options.loop);
+    };
+
+    /** After the first snapshot ack: arm `--close-after`, start the script. */
+    const afterFirstSnapshot = (): void => {
+      if (options.closeAfterMs !== undefined)
+        void pause(options.closeAfterMs, stop.signal).then(async (elapsed) => {
+          if (!elapsed) return;
+          await sendFrame(
+            socket,
+            envelope("session.close", nextId(), { reason: "USER_STOPPED" }),
+          ).catch(() => undefined);
+          finish(EXIT.ok);
+        });
+      if (script.length > 0)
+        playScript().catch((error: unknown) => {
+          if (finished) return;
+          io.stderr(`script failed: ${(error as Error).message}\n`);
+          finish(EXIT.usage);
+        });
+    };
+
     socket.on("open", () =>
       socket.send(
         envelope("session.create", nextId(), {
@@ -121,11 +189,21 @@ export async function run(options: Options, io: Io): Promise<number> {
           io.stderr(`--code-fd ${options.codeFd}: ${(error as Error).message}\n`);
           return finish(EXIT.usage);
         }
-        startSnapshot();
-      } else if (message.type === "scene.snapshot.ack" && message.sceneVersion === 1) {
-        acked = true;
+        publishSnapshot(glb).then(
+          () => {
+            acked = true;
+            if (options.exitAfterAck) finish(EXIT.ok);
+            else afterFirstSnapshot();
+          },
+          (error: unknown) => {
+            if (finished) return;
+            io.stderr(`snapshot failed: ${(error as Error).message}\n`);
+            finish(EXIT.usage);
+          },
+        );
+      } else if (message.type === "scene.snapshot.ack") {
         io.stderr(`snapshot ${message.sceneVersion} acknowledged\n`);
-        if (options.exitAfterAck) finish(EXIT.ok);
+        if (pendingAck?.version === message.sceneVersion) pendingAck.resolve();
       } else if (message.type === "error") {
         // the error code only, never session data; a non-conforming relay cannot inject text through it
         io.stderr(
@@ -140,11 +218,13 @@ export async function run(options: Options, io: Io): Promise<number> {
       exit = EXIT.usage;
     });
     socket.on("close", (closeCode) => {
+      stop.abort();
       if (!finished && options.exitAfterAck && !acked) {
         // --exit-after-ack promises "0 = acknowledged": a close before the ack is a failure
         io.stderr(`relay closed the connection (code ${closeCode}) before the snapshot ack\n`);
         exit = EXIT.usage;
       }
+      finished = true; // later send failures are consequences of this close, not new errors
       resolve(exit);
     });
   });

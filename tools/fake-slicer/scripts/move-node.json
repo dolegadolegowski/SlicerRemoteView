@@ -1,0 +1,39 @@
+[
+  {
+    "afterMs": 500,
+    "type": "scene.update",
+    "changes": [
+      {
+        "nodeId": "vtkMRMLModelNode2",
+        "matrix": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.02, 0, 0, 1]
+      }
+    ]
+  },
+  {
+    "afterMs": 500,
+    "type": "scene.update",
+    "changes": [
+      {
+        "nodeId": "vtkMRMLModelNode2",
+        "matrix": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.04, 0.02, 0, 1]
+      }
+    ]
+  },
+  {
+    "afterMs": 500,
+    "type": "scene.update",
+    "changes": [
+      {
+        "nodeId": "vtkMRMLModelNode2",
+        "matrix": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.02, 0.04, -0.02, 1]
+      }
+    ]
+  },
+  {
+    "afterMs": 500,
+    "type": "scene.update",
+    "changes": [
+      { "nodeId": "vtkMRMLModelNode2", "matrix": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] }
+    ]
+  }
+]

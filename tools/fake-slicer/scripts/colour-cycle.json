@@ -1,0 +1,26 @@
+[
+  {
+    "afterMs": 1000,
+    "type": "scene.update",
+    "changes": [
+      { "nodeId": "vtkMRMLSegmentationNode1/Segment_1", "color": [0.9, 0.2, 0.2] },
+      { "nodeId": "vtkMRMLModelNode2", "color": [0.2, 0.4, 0.9], "opacity": 0.5 }
+    ]
+  },
+  {
+    "afterMs": 1000,
+    "type": "scene.update",
+    "changes": [
+      { "nodeId": "vtkMRMLSegmentationNode1/Segment_1", "color": [0.2, 0.8, 0.3] },
+      { "nodeId": "vtkMRMLModelNode2", "color": [0.9, 0.7, 0.1], "opacity": 0.35 }
+    ]
+  },
+  {
+    "afterMs": 1000,
+    "type": "scene.update",
+    "changes": [
+      { "nodeId": "vtkMRMLSegmentationNode1/Segment_1", "color": [0.3, 0.3, 0.95] },
+      { "nodeId": "vtkMRMLModelNode2", "color": [0.8, 0.3, 0.8], "opacity": 0.65 }
+    ]
+  }
+]

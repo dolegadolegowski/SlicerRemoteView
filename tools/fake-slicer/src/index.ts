@@ -3,4 +3,5 @@ export * from "./glb.js";
 export * from "./options.js";
 export * from "./relay-stub.js";
 export * from "./run.js";
+export * from "./script.js";
 export * from "./snapshot.js";

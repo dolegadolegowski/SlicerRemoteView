@@ -90,7 +90,7 @@ describe("in-process relay stub (PRO-13)", () => {
 
     // Deliberately odd spacing and key order: forwarding must not re-serialise.
     const text =
-      '{ "type" :"scene.update",  "protocolVersion":"1.0",\n"sceneVersion":2,"baseVersion":1,"changes":[] }';
+      '{ "type" :"scene.update",  "protocolVersion":"1.0",\n"sceneVersion":1,"baseVersion":0,"changes":[] }';
     const binary = Buffer.from([0x53, 0x52, 0x56, 0x43, 0, 255, 128, 1, 2, 3]);
     publisher.socket.send(text);
     publisher.socket.send(binary);
@@ -134,5 +134,46 @@ describe("in-process relay stub (PRO-13)", () => {
     await viewer.nextJson();
     publisher.socket.close();
     expect((await once(viewer.socket, "close"))[0]).toBe(4001);
+  });
+});
+
+describe("stub version checker (PRO-15)", () => {
+  async function publisher() {
+    stub = await startRelayStub();
+    const p = await connect(stub.url);
+    p.socket.send(create());
+    await p.nextJson(); // session.created
+    const send = (message: object) =>
+      p.socket.send(JSON.stringify({ protocolVersion: "1.0", ...message }));
+    return { p, send };
+  }
+
+  it("accepts a clean sequence and flags every §6.2 / §8.1 / §8.4 violation with BAD_SEQUENCE", async () => {
+    const { p, send } = await publisher();
+    const begin = (sceneVersion: number) =>
+      send({ type: "scene.snapshot.begin", id: `b${sceneVersion}`, sceneVersion });
+    begin(1);
+    send({ type: "scene.snapshot.end", sceneVersion: 1 });
+    expect((await p.nextJson())["type"]).toBe("scene.snapshot.ack");
+    send({ type: "scene.update", sceneVersion: 2, baseVersion: 1, changes: [] });
+    send({ type: "scene.update", id: "bad-base", sceneVersion: 4, baseVersion: 1, changes: [] });
+    expect(await p.nextJson()).toMatchObject({
+      type: "error",
+      code: "BAD_SEQUENCE",
+      replyTo: "bad-base",
+    });
+    send({ type: "scene.update", id: "bad-order", sceneVersion: 2, baseVersion: 2, changes: [] });
+    expect((await p.nextJson())["code"]).toBe("BAD_SEQUENCE");
+    begin(2);
+    expect((await p.nextJson())["code"]).toBe("BAD_SEQUENCE");
+    begin(3);
+    send({ type: "scene.update", sceneVersion: 4, baseVersion: 3, changes: [] });
+    expect((await p.nextJson())["code"]).toBe("BAD_SEQUENCE");
+    expect(stub!.versionViolations).toEqual([
+      "baseVersion 1 is not 2",
+      "sceneVersion 2 is not above 2",
+      "snapshot version 2 is not above 2",
+      "scene.update inside a snapshot",
+    ]);
   });
 });

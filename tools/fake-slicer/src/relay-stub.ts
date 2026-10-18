@@ -45,6 +45,13 @@ export interface RelayStub {
   /** `ws://127.0.0.1:<port>/ws` */
   url: string;
   port: number;
+  /**
+   * Version bookkeeping violations of the publisher, one text per offending message (§6.2, §8.1, §8.4): a
+   * `scene.snapshot.begin` not above every version used so far, an update whose `baseVersion` is not the last
+   * version or whose `sceneVersion` does not exceed it, an update inside a snapshot, `scene.nodeAdded` not
+   * followed by a snapshot (stricter than the relay needs to be: §8.2 only obliges the publisher). The stub also answers each with `error BAD_SEQUENCE` and does not forward it.
+   */
+  versionViolations: string[];
   /** Frames the publisher sent after `session.create`, in order (assertions in tests). */
   publisherFrames: RecordedFrame[];
   /** The code of the last session a publisher created, also after it ended (tests only). */
@@ -95,6 +102,7 @@ export async function startRelayStub(options: RelayStubOptions = {}): Promise<Re
   let session: Session | undefined;
   let publisher: WebSocket | undefined;
   let lastCode: string | undefined;
+  const versionViolations: string[] = [];
   let releaseHeld = (): void => {};
   const publisherFrames: RecordedFrame[] = [];
 
@@ -166,9 +174,46 @@ export async function startRelayStub(options: RelayStubOptions = {}): Promise<Re
         if (created.viewers.size < (options.holdFramesUntilViewers ?? 0)) return;
         for (const frame of held.splice(0)) forward(frame);
       };
+      const versions = { last: 0, snapshotInFlight: false, snapshotExpected: false };
+      /** §6.2 / §8.1 / §8.4 checks; returns the violation or `undefined` and advances the counters. */
+      const checkVersions = (text: Record<string, unknown>): string | undefined => {
+        const type = text["type"];
+        const version = text["sceneVersion"];
+        if (type === "scene.snapshot.end") {
+          versions.snapshotInFlight = false;
+          return undefined;
+        }
+        if (typeof version !== "number") return undefined;
+        if (type === "scene.snapshot.begin") {
+          if (version <= versions.last)
+            return `snapshot version ${version} is not above ${versions.last}`;
+          versions.last = version;
+          versions.snapshotInFlight = true;
+          versions.snapshotExpected = false;
+          return undefined;
+        }
+        if (type !== "scene.update" && type !== "scene.nodeRemoved" && type !== "scene.nodeAdded")
+          return undefined;
+        const base = text["baseVersion"];
+        if (versions.snapshotInFlight) return `${String(type)} inside a snapshot`;
+        if (versions.snapshotExpected)
+          return `${String(type)} while a snapshot is due after scene.nodeAdded`;
+        if (base !== versions.last) return `baseVersion ${String(base)} is not ${versions.last}`;
+        if (version <= versions.last)
+          return `sceneVersion ${version} is not above ${versions.last}`;
+        versions.last = version;
+        versions.snapshotExpected = type === "scene.nodeAdded";
+        return undefined;
+      };
       socket.on("message", (data, binary) => {
         const frame = { binary, data: Buffer.from(data as Buffer) };
         publisherFrames.push(frame);
+        const text = binary ? undefined : parseObject(frame.data);
+        const violation = text && checkVersions(text);
+        if (violation) {
+          versionViolations.push(violation);
+          return fail(socket, "BAD_SEQUENCE", text["id"]);
+        }
         if (held.length > 0 || created.viewers.size < (options.holdFramesUntilViewers ?? 0))
           held.push(frame);
         else forward(frame);
@@ -213,6 +258,7 @@ export async function startRelayStub(options: RelayStubOptions = {}): Promise<Re
     url: `ws://127.0.0.1:${port}/ws`,
     port,
     publisherFrames,
+    versionViolations,
     get code() {
       return lastCode;
     },

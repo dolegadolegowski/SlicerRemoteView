@@ -16,6 +16,12 @@ export interface Options {
   fixture: string | undefined;
   /** Payload bytes per snapshot chunk, 64 KiB … 1 MiB (§6.2). */
   chunkSize: number;
+  /** Update script (PRO-15): a path or the name of a bundled `scripts/*.json`; played after the first snapshot. */
+  script: string | undefined;
+  /** Replay the script from its first entry after the last one (versions keep increasing). */
+  loop: boolean;
+  /** Send `session.close{USER_STOPPED}` this many ms after the first snapshot ack and exit 0. */
+  closeAfterMs: number | undefined;
   /** End the run with exit code 0 as soon as the snapshot is acknowledged (default: stay connected). */
   exitAfterAck: boolean;
   profile: Profile;
@@ -39,6 +45,11 @@ Options:
   --fixture <glb>         GLB to publish: a path, or a file name from shared/fixtures/glb
                           (default: asymmetric-2nodes.glb)
   --chunk-size <bytes>    snapshot chunk payload, ${MIN_CHUNK_SIZE} … ${MAX_CHUNK_SIZE} (default ${MAX_CHUNK_SIZE}, §6.2)
+  --script <name|file>    play an update script after the snapshot: a JSON array of {afterMs, type, ...}
+                          (afterMs = pause since the previous entry); bundled: toggle-visibility,
+                          colour-cycle, move-node, reload-scene
+  --loop                  with --script: start over after the last entry; sceneVersion keeps increasing
+  --close-after <ms>      ms after the first snapshot ack send session.close{USER_STOPPED}, then exit 0
   --exit-after-ack        exit 0 once the relay acknowledged the snapshot; by default the publisher stays
                           connected (so viewers can join) until Ctrl-C
   --profile <name>        ${PROFILES.join(" | ")} (default mobile); informational for viewers (§4.1)
@@ -79,6 +90,9 @@ export function parseCliArgs(argv: readonly string[]): ParseResult {
         relay: { type: "string" },
         fixture: { type: "string" },
         "chunk-size": { type: "string" },
+        script: { type: "string" },
+        loop: { type: "boolean", default: false },
+        "close-after": { type: "string" },
         "exit-after-ack": { type: "boolean", default: false },
         profile: { type: "string" },
         "preferred-code": { type: "string" },
@@ -118,6 +132,20 @@ export function parseCliArgs(argv: readonly string[]): ParseResult {
       };
   }
 
+  if (values.loop && values.script === undefined)
+    return { kind: "error", message: "--loop needs --script" };
+  let closeAfterMs: number | undefined;
+  if (values["close-after"] !== undefined) {
+    closeAfterMs = Number(values["close-after"]);
+    if (!Number.isInteger(closeAfterMs) || closeAfterMs < 0)
+      return { kind: "error", message: "--close-after: expected a non-negative integer (ms)" };
+  }
+  if (values["exit-after-ack"] && (values.script !== undefined || closeAfterMs !== undefined))
+    return {
+      kind: "error",
+      message: "--exit-after-ack cannot be combined with --script, --loop or --close-after",
+    };
+
   let codeFd: number | undefined;
   if (values["code-fd"] !== undefined) {
     const fd = Number(values["code-fd"]);
@@ -137,6 +165,9 @@ export function parseCliArgs(argv: readonly string[]): ParseResult {
       relay,
       fixture: values.fixture,
       chunkSize,
+      script: values.script,
+      loop: values.loop,
+      closeAfterMs,
       exitAfterAck: values["exit-after-ack"],
       profile: profile as Profile,
       preferredCode,

@@ -18,6 +18,9 @@ describe("CLI options (PRO-13)", () => {
       relay: DEFAULT_RELAY,
       fixture: undefined,
       chunkSize: 1_048_576,
+      script: undefined,
+      loop: false,
+      closeAfterMs: undefined,
       exitAfterAck: false,
       profile: "mobile",
       preferredCode: null,
@@ -31,13 +34,16 @@ describe("CLI options (PRO-13)", () => {
       run(
         ...["--relay", "wss://relay.example/ws", "--fixture", "a.glb", "--profile", "quest3"],
         ...["--preferred-code", " 7kq-4x ", "--code-fd", "3", "--json"],
-        ...["--chunk-size", "65536", "--exit-after-ack"],
+        ...["--chunk-size", "65536", "--script", "move-node", "--loop", "--close-after", "5000"],
       ),
     ).toEqual({
       relay: "wss://relay.example/ws",
       fixture: "a.glb",
       chunkSize: 65536,
-      exitAfterAck: true,
+      script: "move-node",
+      loop: true,
+      closeAfterMs: 5000,
+      exitAfterAck: false,
       profile: "quest3",
       preferredCode: "7KQ4X",
       codeFd: 3,
@@ -53,6 +59,9 @@ describe("CLI options (PRO-13)", () => {
       "--fixture",
       "--chunk-size",
       "--exit-after-ack",
+      "--script",
+      "--loop",
+      "--close-after",
       "--profile",
       "--preferred-code",
       "--code-fd",
@@ -77,6 +86,16 @@ describe("CLI options (PRO-13)", () => {
     expect(error("--relay", "nope")).toMatch(/not a URL/);
     expect(run("--relay", "ws://[::1]:8787/ws").relay).toBe("ws://[::1]:8787/ws");
     expect(run("--relay", "ws://dev.localhost/ws").relay).toBe("ws://dev.localhost/ws");
+  });
+
+  it("validates the script options", () => {
+    expect(error("--loop")).toMatch(/--loop needs --script/);
+    expect(error("--close-after", "-5")).toMatch(/--close-after/);
+    expect(error("--close-after", "1.5")).toMatch(/--close-after/);
+    expect(error("--exit-after-ack", "--script", "move-node")).toMatch(/cannot be combined/);
+    expect(error("--exit-after-ack", "--close-after", "10")).toMatch(/cannot be combined/);
+    expect(run("--exit-after-ack").exitAfterAck).toBe(true);
+    expect(run("--close-after", "0").closeAfterMs).toBe(0);
   });
 
   it("accepts chunk sizes 64 KiB … 1 MiB only", () => {
