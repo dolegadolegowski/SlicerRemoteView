@@ -1,0 +1,50 @@
+{
+  "name": "@slicerremoteview/fake-slicer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Slicer simulator for relay, viewer and QA development: connects as a publisher, plays a fixture GLB and update scripts (docs/protocol.md v1.0).",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18 <23"
+  },
+  "bin": {
+    "fake-slicer": "./bin/fake-slicer.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./relay-stub": {
+      "types": "./dist/relay-stub.d.ts",
+      "default": "./dist/relay-stub.js"
+    }
+  },
+  "files": [
+    "bin",
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@slicerremoteview/shared": "^0.1.0",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.20.5",
+    "@types/ws": "^8.18.2",
+    "eslint": "^10.13.0",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.9.10",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.71.2",
+    "vitest": "^5.0.5"
+  }
+}
