@@ -88,6 +88,9 @@ const en = {
   "state.snapshotTooLarge.title": "Scene is too large for this device",
   "state.snapshotTooLarge.body":
     "The scene is larger than this device can load. Ask the presenter to share a lighter scene.",
+  "state.snapshotInvalid.title": "Scene could not be opened",
+  "state.snapshotInvalid.body":
+    "The scene that was shared is damaged or uses features this viewer does not support. Ask the presenter to share it again.",
   "codeEntry.title": "Join a session",
   "codeEntry.lead": "Enter the 5-character code shown in 3D Slicer.",
   "codeEntry.cellLabel": "Code character {n} of {total}",
@@ -182,6 +185,9 @@ const pl: Record<StringKey, string> = {
   "state.snapshotTooLarge.title": "Scena jest za duża dla tego urządzenia",
   "state.snapshotTooLarge.body":
     "Scena jest większa, niż to urządzenie może wczytać. Poproś prezentera o lżejszą scenę.",
+  "state.snapshotInvalid.title": "Nie udało się otworzyć sceny",
+  "state.snapshotInvalid.body":
+    "Udostępniona scena jest uszkodzona albo używa funkcji, których podgląd nie obsługuje. Poproś prezentera o ponowne udostępnienie.",
   "codeEntry.title": "Dołącz do sesji",
   "codeEntry.lead": "Wpisz 5-znakowy kod widoczny w 3D Slicerze.",
   "codeEntry.cellLabel": "Znak kodu {n} z {total}",
