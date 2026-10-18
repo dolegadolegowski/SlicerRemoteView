@@ -21,6 +21,9 @@ describe("CLI options (PRO-13)", () => {
       script: undefined,
       loop: false,
       closeAfterMs: undefined,
+      disconnectAfterMs: undefined,
+      lateJoinTest: false,
+      lateJoinViewers: 1,
       exitAfterAck: false,
       profile: "mobile",
       preferredCode: null,
@@ -35,6 +38,7 @@ describe("CLI options (PRO-13)", () => {
         ...["--relay", "wss://relay.example/ws", "--fixture", "a.glb", "--profile", "quest3"],
         ...["--preferred-code", " 7kq-4x ", "--code-fd", "3", "--json"],
         ...["--chunk-size", "65536", "--script", "move-node", "--loop", "--close-after", "5000"],
+        ...["--disconnect-after", "1500"],
       ),
     ).toEqual({
       relay: "wss://relay.example/ws",
@@ -43,6 +47,9 @@ describe("CLI options (PRO-13)", () => {
       script: "move-node",
       loop: true,
       closeAfterMs: 5000,
+      disconnectAfterMs: 1500,
+      lateJoinTest: false,
+      lateJoinViewers: 1,
       exitAfterAck: false,
       profile: "quest3",
       preferredCode: "7KQ4X",
@@ -62,6 +69,9 @@ describe("CLI options (PRO-13)", () => {
       "--script",
       "--loop",
       "--close-after",
+      "--disconnect-after",
+      "--late-join-test",
+      "--late-join-viewers",
       "--profile",
       "--preferred-code",
       "--code-fd",
@@ -96,6 +106,20 @@ describe("CLI options (PRO-13)", () => {
     expect(error("--exit-after-ack", "--close-after", "10")).toMatch(/cannot be combined/);
     expect(run("--exit-after-ack").exitAfterAck).toBe(true);
     expect(run("--close-after", "0").closeAfterMs).toBe(0);
+  });
+
+  it("validates the resilience options", () => {
+    expect(error("--disconnect-after", "-1")).toMatch(/--disconnect-after/);
+    expect(error("--late-join-viewers", "2")).toMatch(/needs --late-join-test/);
+    expect(error("--late-join-test", "--late-join-viewers", "0")).toMatch(/1 … 20/);
+    expect(error("--late-join-test", "--script", "move-node")).toMatch(/cannot be combined/);
+    expect(error("--late-join-test", "--exit-after-ack")).toMatch(/cannot be combined/);
+    expect(error("--exit-after-ack", "--disconnect-after", "5")).toMatch(/cannot be combined/);
+    expect(run("--late-join-test", "--late-join-viewers", "2")).toMatchObject({
+      lateJoinTest: true,
+      lateJoinViewers: 2,
+    });
+    expect(run("--disconnect-after", "0").disconnectAfterMs).toBe(0);
   });
 
   it("accepts chunk sizes 64 KiB … 1 MiB only", () => {

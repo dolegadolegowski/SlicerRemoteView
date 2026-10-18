@@ -20,6 +20,8 @@ export interface LoadedGlb {
   extensionsRequired: string[];
   /** glTF nodes carrying `extras.nodeId` (the `T` nodes of §7.2, excluding the root). */
   nodeCount: number;
+  /** `extras.nodeId` of those nodes, in file order (the ids a script or `--late-join-test` can address). */
+  nodeIds: string[];
   triangleCount: number;
 }
 
@@ -77,14 +79,18 @@ export async function loadGlb(path: string): Promise<LoadedGlb> {
   } catch (error) {
     throw new Error(`${basename(path)}: ${(error as Error).message}`, { cause: error });
   }
+  const nodeIds = (gltf.nodes ?? []).flatMap((node) =>
+    typeof node.extras?.nodeId === "string" && node.extras.kind !== "root"
+      ? [node.extras.nodeId]
+      : [],
+  );
   return {
     bytes,
     sha256: await sha256Hex(bytes),
     extensionsUsed: gltf.extensionsUsed ?? [],
     extensionsRequired: gltf.extensionsRequired ?? [],
-    nodeCount: (gltf.nodes ?? []).filter(
-      (node) => typeof node.extras?.nodeId === "string" && node.extras.kind !== "root",
-    ).length,
+    nodeCount: nodeIds.length,
+    nodeIds,
     triangleCount: countTriangles(gltf),
   };
 }

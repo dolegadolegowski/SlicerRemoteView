@@ -22,6 +22,11 @@ export interface Options {
   loop: boolean;
   /** Send `session.close{USER_STOPPED}` this many ms after the first snapshot ack and exit 0. */
   closeAfterMs: number | undefined;
+  /** Drop the socket once, this many ms after the first snapshot ack, to exercise reconnect/resume (§4.3). */
+  disconnectAfterMs: number | undefined;
+  /** QA late-join mode: after the snapshot wait for `lateJoinViewers`, send one update, exit 0. */
+  lateJoinTest: boolean;
+  lateJoinViewers: number;
   /** End the run with exit code 0 as soon as the snapshot is acknowledged (default: stay connected). */
   exitAfterAck: boolean;
   profile: Profile;
@@ -50,6 +55,11 @@ Options:
                           colour-cycle, move-node, reload-scene
   --loop                  with --script: start over after the last entry; sceneVersion keeps increasing
   --close-after <ms>      ms after the first snapshot ack send session.close{USER_STOPPED}, then exit 0
+  --disconnect-after <ms> drop the connection once, ms after the first snapshot ack; the publisher then
+                          resumes the session (session.resume, falling back to session.create)
+  --late-join-test        after the snapshot wait until viewer.count >= --late-join-viewers, send one
+                          scene.update and exit 0 (QA late-join assertions)
+  --late-join-viewers <n> viewers to wait for in --late-join-test (default 1)
   --exit-after-ack        exit 0 once the relay acknowledged the snapshot; by default the publisher stays
                           connected (so viewers can join) until Ctrl-C
   --profile <name>        ${PROFILES.join(" | ")} (default mobile); informational for viewers (§4.1)
@@ -93,6 +103,9 @@ export function parseCliArgs(argv: readonly string[]): ParseResult {
         script: { type: "string" },
         loop: { type: "boolean", default: false },
         "close-after": { type: "string" },
+        "disconnect-after": { type: "string" },
+        "late-join-test": { type: "boolean", default: false },
+        "late-join-viewers": { type: "string" },
         "exit-after-ack": { type: "boolean", default: false },
         profile: { type: "string" },
         "preferred-code": { type: "string" },
@@ -140,10 +153,34 @@ export function parseCliArgs(argv: readonly string[]): ParseResult {
     if (!Number.isInteger(closeAfterMs) || closeAfterMs < 0)
       return { kind: "error", message: "--close-after: expected a non-negative integer (ms)" };
   }
-  if (values["exit-after-ack"] && (values.script !== undefined || closeAfterMs !== undefined))
+  let disconnectAfterMs: number | undefined;
+  if (values["disconnect-after"] !== undefined) {
+    disconnectAfterMs = Number(values["disconnect-after"]);
+    if (!Number.isInteger(disconnectAfterMs) || disconnectAfterMs < 0)
+      return { kind: "error", message: "--disconnect-after: expected a non-negative integer (ms)" };
+  }
+  const lateJoinViewers =
+    values["late-join-viewers"] === undefined ? 1 : Number(values["late-join-viewers"]);
+  if (!Number.isInteger(lateJoinViewers) || lateJoinViewers < 1 || lateJoinViewers > 20)
+    return { kind: "error", message: "--late-join-viewers: expected an integer 1 … 20" };
+  if (values["late-join-viewers"] !== undefined && !values["late-join-test"])
+    return { kind: "error", message: "--late-join-viewers needs --late-join-test" };
+  if (
+    values["exit-after-ack"] &&
+    (values.script !== undefined ||
+      closeAfterMs !== undefined ||
+      disconnectAfterMs !== undefined ||
+      values["late-join-test"])
+  )
     return {
       kind: "error",
-      message: "--exit-after-ack cannot be combined with --script, --loop or --close-after",
+      message:
+        "--exit-after-ack cannot be combined with --script, --close-after, --disconnect-after or --late-join-test",
+    };
+  if (values["late-join-test"] && (values.script !== undefined || closeAfterMs !== undefined))
+    return {
+      kind: "error",
+      message: "--late-join-test cannot be combined with --script or --close-after",
     };
 
   let codeFd: number | undefined;
@@ -168,6 +205,9 @@ export function parseCliArgs(argv: readonly string[]): ParseResult {
       script: values.script,
       loop: values.loop,
       closeAfterMs,
+      disconnectAfterMs,
+      lateJoinTest: values["late-join-test"],
+      lateJoinViewers,
       exitAfterAck: values["exit-after-ack"],
       profile: profile as Profile,
       preferredCode,

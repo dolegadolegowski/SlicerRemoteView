@@ -87,6 +87,8 @@ describe("in-process relay stub (PRO-13)", () => {
     const joined = await viewer.nextJson();
     expect(validateMessage(joined)).toMatchObject({ ok: true });
     expect(joined).toMatchObject({ type: "viewer.joined", replyTo: "v-1", viewerCount: 1 });
+    expect(await viewer.nextJson()).toMatchObject({ type: "viewer.count", viewerCount: 1 });
+    expect(await publisher.nextJson()).toMatchObject({ type: "viewer.count", viewerCount: 1 });
 
     // Deliberately odd spacing and key order: forwarding must not re-serialise.
     const text =

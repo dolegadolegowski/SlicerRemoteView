@@ -1,12 +1,14 @@
 /**
  * Minimal in-process relay for tests (PRO-13; `[stub allowed]` target for WEB-10 until `relay-server` lands).
  *
- * Accepts one publisher (`session.create`), answers `session.created` with a code from the protocol
- * alphabet, lets viewers `viewer.join` by code and forwards every publisher frame to the joined viewers
- * byte-for-byte, text and binary (§11), and answers `scene.snapshot.end` with `scene.snapshot.ack` (§6.4).
- * Validation stops at the envelope: this is not the relay — no limits, no TTL, no rate limiting, no snapshot
- * cache, no heartbeat. Tests steer it through `RelayStubOptions` and `sendToPublisher`/`closePublisher`. Full behaviour is `relay-server` (SRV-*) and its
- * E2E tests (QA-*). The stub logs nothing: codes and tokens never reach a log (NFR-12).
+ * Accepts one publisher (`session.create`, or `session.resume` while the session is in grace), answers
+ * `session.created`/`session.resumed` with a code from the protocol alphabet, lets viewers `viewer.join` by code,
+ * forwards every publisher frame to the joined viewers byte-for-byte, text and binary (§11), answers
+ * `scene.snapshot.end` with `scene.snapshot.ack` (§6.4) and `ping` with `pong` (§9.1), and tells publisher and
+ * viewers the `viewer.count`. Validation stops at the envelope and the version bookkeeping: this is not the
+ * relay — no limits, no TTL, no rate limiting, no snapshot cache. Tests steer it through `RelayStubOptions`,
+ * `sendToPublisher`, `closePublisher` and `restart`. Full behaviour is `relay-server` (SRV-*) and its E2E tests
+ * (QA-*). The stub logs nothing: codes and tokens never reach a log (NFR-12).
  */
 import { randomBytes, randomInt } from "node:crypto";
 import type { AddressInfo } from "node:net";
@@ -28,11 +30,25 @@ export interface RelayStubOptions {
   /** Answer `scene.snapshot.end` with `scene.snapshot.ack` (default `true`); `false` lets a test reply itself. */
   autoAck?: boolean;
   /**
-   * Hold publisher frames back until this many viewers have joined, then forward them in order. Makes
+   * Hold publisher frames back while fewer than this many viewers are joined, then forward them in order. Makes
    * "a viewer receives the whole snapshot" deterministic although the code is only known after
    * `session.created`. Default `0` = forward at once, like the relay.
    */
   holdFramesUntilViewers?: number;
+  /**
+   * How long a session survives its publisher's socket (the relay's `PUBLISHER_GRACE_S`, §9.1) so that
+   * `session.resume` can succeed. Default `0` = the session ends with the socket and viewers get close `4001`.
+   */
+  publisherGraceMs?: number;
+  /**
+   * Close the first publisher connection with `4008` after this many binary chunk frames, i.e. in the middle of
+   * a snapshot upload (the relay never saw `scene.snapshot.end`, so `session.resumed.snapshotVersion` is `null`).
+   */
+  dropPublisherAfterChunks?: number;
+  /** Never grant `preferredCode` (§4.1: "otherwise a fresh code is generated silently"). */
+  ignorePreferredCode?: boolean;
+  /** Answer the publisher's `ping` with `pong` (default `true`); `false` simulates a dead link (§9.1). */
+  answerPings?: boolean;
 }
 
 /** One frame as the publisher sent it. */
@@ -49,17 +65,24 @@ export interface RelayStub {
    * Version bookkeeping violations of the publisher, one text per offending message (§6.2, §8.1, §8.4): a
    * `scene.snapshot.begin` not above every version used so far, an update whose `baseVersion` is not the last
    * version or whose `sceneVersion` does not exceed it, an update inside a snapshot, `scene.nodeAdded` not
-   * followed by a snapshot (stricter than the relay needs to be: §8.2 only obliges the publisher). The stub also answers each with `error BAD_SEQUENCE` and does not forward it.
+   * followed by a snapshot (stricter than the relay needs to be: §8.2 only obliges the publisher). The stub also
+   * answers each with `error BAD_SEQUENCE` and does not forward it.
    */
   versionViolations: string[];
-  /** Frames the publisher sent after `session.create`, in order (assertions in tests). */
+  /** Frames the publisher sent after its first message, over all its connections, in order (assertions in tests). */
   publisherFrames: RecordedFrame[];
+  /** First message of every publisher connection (`session.create` / `session.resume`), parsed (tests only: it holds the token). */
+  handshakes: Record<string, unknown>[];
+  /** Number of application `ping`s received from publishers. */
+  readonly pings: number;
   /** The code of the last session a publisher created, also after it ended (tests only). */
   readonly code: string | undefined;
   /** Sends an envelope to the connected publisher (`protocolVersion` and `ts` are filled in). */
   sendToPublisher(message: Record<string, unknown>): void;
   /** Closes the publisher socket with a WebSocket close code (e.g. `4008`). */
   closePublisher(closeCode: number): void;
+  /** Forgets the session and closes publisher and viewers with `4008`, like a relay redeploy (§9.3, §13 step 9). */
+  restart(): void;
   close(): Promise<void>;
 }
 
@@ -82,9 +105,18 @@ const randomCode = (): string =>
 interface Session {
   id: string;
   code: string;
+  token: string;
   profile: string;
-  publisher: WebSocket;
+  /** The attached publisher socket; `undefined` while the session is in grace. */
+  publisher: WebSocket | undefined;
   viewers: Set<WebSocket>;
+  /** Publisher frames waiting for `holdFramesUntilViewers`. */
+  held: RecordedFrame[];
+  /** §6.2 / §8.1 / §8.4 bookkeeping; survives a publisher reconnect. */
+  versions: { last: number; snapshotInFlight: boolean; snapshotExpected: boolean };
+  /** Version of the last completed snapshot (`session.resumed.snapshotVersion`). */
+  snapshotVersion: number | null;
+  graceTimer: NodeJS.Timeout | undefined;
 }
 
 export async function startRelayStub(options: RelayStubOptions = {}): Promise<RelayStub> {
@@ -100,11 +132,18 @@ export async function startRelayStub(options: RelayStubOptions = {}): Promise<Re
   });
   const port = (server.address() as AddressInfo).port;
   let session: Session | undefined;
-  let publisher: WebSocket | undefined;
   let lastCode: string | undefined;
+  let pings = 0;
+  let chunkFrames = 0;
   const versionViolations: string[] = [];
-  let releaseHeld = (): void => {};
   const publisherFrames: RecordedFrame[] = [];
+  const handshakes: Record<string, unknown>[] = [];
+  const ttl = () => ({
+    graceS: 120,
+    idleS: 1800,
+    maxLifetimeS: 43200,
+    expiresAt: Date.now() + 43200_000,
+  });
 
   const send = (socket: WebSocket, message: Record<string, unknown>): void =>
     socket.send(JSON.stringify({ protocolVersion: PROTOCOL_VERSION, ts: Date.now(), ...message }));
@@ -118,35 +157,156 @@ export async function startRelayStub(options: RelayStubOptions = {}): Promise<Re
     });
     if (closeCode !== undefined) socket.close(closeCode);
   };
+  const reply = (replyTo: unknown): Record<string, unknown> =>
+    typeof replyTo === "string" ? { replyTo } : {};
+
+  function endSession(ended: Session, closeCode: number): void {
+    clearTimeout(ended.graceTimer);
+    for (const viewer of ended.viewers) viewer.close(closeCode);
+    if (session === ended) session = undefined;
+  }
+
+  const broadcastCount = (target: Session): void => {
+    const count = {
+      type: "viewer.count",
+      viewerCount: target.viewers.size,
+      viewerLimit: LIMITS.MAX_VIEWERS,
+      platforms: { web: target.viewers.size },
+    };
+    if (target.publisher?.readyState === WebSocket.OPEN) send(target.publisher, count);
+    for (const viewer of target.viewers)
+      if (viewer.readyState === WebSocket.OPEN) send(viewer, count);
+  };
+
+  /** Forwards to the joined viewers; `scene.snapshot.end` is acknowledged once it has been forwarded. */
+  function forward(target: Session, socket: WebSocket, frame: RecordedFrame): void {
+    for (const viewer of target.viewers)
+      if (viewer.readyState === WebSocket.OPEN) viewer.send(frame.data, { binary: frame.binary }); // byte-for-byte (§11)
+    const text = frame.binary ? undefined : parseObject(frame.data);
+    if (options.autoAck !== false && text?.["type"] === "scene.snapshot.end")
+      send(socket, {
+        type: "scene.snapshot.ack",
+        sceneVersion: text["sceneVersion"],
+        viewersStreamed: target.viewers.size,
+        viewersDeferred: 0,
+      });
+  }
+
+  const releaseHeld = (target: Session): void => {
+    const socket = target.publisher;
+    if (!socket || target.viewers.size < (options.holdFramesUntilViewers ?? 0)) return;
+    for (const frame of target.held.splice(0)) forward(target, socket, frame);
+  };
+
+  /** §6.2 / §8.1 / §8.4 checks; returns the violation or `undefined` and advances the counters. */
+  function checkVersions(target: Session, text: Record<string, unknown>): string | undefined {
+    const { versions } = target;
+    const type = text["type"];
+    const version = text["sceneVersion"];
+    if (type === "scene.snapshot.end") {
+      versions.snapshotInFlight = false;
+      if (typeof version === "number") target.snapshotVersion = version;
+      return undefined;
+    }
+    if (typeof version !== "number") return undefined;
+    if (type === "scene.snapshot.begin") {
+      if (version <= versions.last)
+        return `snapshot version ${version} is not above ${versions.last}`;
+      versions.last = version;
+      versions.snapshotInFlight = true;
+      versions.snapshotExpected = false;
+      return undefined;
+    }
+    if (type !== "scene.update" && type !== "scene.nodeRemoved" && type !== "scene.nodeAdded")
+      return undefined;
+    const base = text["baseVersion"];
+    if (versions.snapshotInFlight) return `${String(type)} inside a snapshot`;
+    if (versions.snapshotExpected)
+      return `${String(type)} while a snapshot is due after scene.nodeAdded`;
+    if (base !== versions.last) return `baseVersion ${String(base)} is not ${versions.last}`;
+    if (version <= versions.last) return `sceneVersion ${version} is not above ${versions.last}`;
+    versions.last = version;
+    versions.snapshotExpected = type === "scene.nodeAdded";
+    return undefined;
+  }
+
+  /** Wires a publisher socket to its session after `session.created` / `session.resumed`. */
+  function attachPublisher(socket: WebSocket, target: Session): void {
+    clearTimeout(target.graceTimer);
+    target.publisher = socket;
+    socket.on("message", (data, binary) => {
+      const frame = { binary, data: Buffer.from(data as Buffer) };
+      publisherFrames.push(frame);
+      const text = binary ? undefined : parseObject(frame.data);
+      if (text?.["type"] === "ping") {
+        pings++;
+        if (options.answerPings !== false)
+          send(socket, { type: "pong", ...reply(text["id"]), serverTs: Date.now() });
+        return; // the relay answers heartbeats itself, viewers never see them
+      }
+      if (
+        binary &&
+        options.dropPublisherAfterChunks !== undefined &&
+        ++chunkFrames === options.dropPublisherAfterChunks
+      ) {
+        socket.close(4008);
+        return;
+      }
+      const violation = text && checkVersions(target, text);
+      if (violation) {
+        versionViolations.push(violation);
+        return fail(socket, "BAD_SEQUENCE", text["id"]);
+      }
+      if (target.held.length > 0 || target.viewers.size < (options.holdFramesUntilViewers ?? 0))
+        target.held.push(frame);
+      else forward(target, socket, frame);
+    });
+    socket.on("close", () => {
+      if (target.publisher !== socket) return; // replaced by a resumed connection (4011)
+      target.publisher = undefined;
+      if ((options.publisherGraceMs ?? 0) > 0) {
+        target.graceTimer = setTimeout(() => endSession(target, 4002), options.publisherGraceMs);
+        target.graceTimer.unref();
+      } else endSession(target, 4001);
+    });
+  }
 
   function onFirstMessage(socket: WebSocket, data: RawData, isBinary: boolean): void {
     const message = isBinary ? undefined : parseObject(Buffer.from(data as Buffer));
     if (typeof message?.["protocolVersion"] !== "string" || typeof message["type"] !== "string")
       return fail(socket, "INVALID_MESSAGE", undefined, 4007);
     const replyTo = message["id"];
+    if (message["type"] === "session.create" || message["type"] === "session.resume")
+      handshakes.push(message);
     if (message["type"] === "session.create") {
-      if (session) return fail(socket, "CAPACITY", replyTo, 4006); // the stub hosts one session
+      if (session?.publisher) return fail(socket, "CAPACITY", replyTo, 4006); // the stub hosts one session
+      if (session) endSession(session, 4002); // an offline session makes room for a fresh create
       const preferred =
-        typeof message["preferredCode"] === "string"
+        typeof message["preferredCode"] === "string" && !options.ignorePreferredCode
           ? normalizeCode(message["preferredCode"])
           : null;
-      session = {
+      const created: Session = {
         id: `sess_${base64url(12)}`,
         code: preferred && "code" in preferred ? preferred.code : randomCode(),
+        token: `pt_${base64url(32)}`,
         profile: typeof message["profile"] === "string" ? message["profile"] : "mobile",
-        publisher: socket,
+        publisher: undefined,
         viewers: new Set(),
+        held: [],
+        versions: { last: 0, snapshotInFlight: false, snapshotExpected: false },
+        snapshotVersion: null,
+        graceTimer: undefined,
       };
-      const created = session;
+      session = created;
       lastCode = created.code;
       send(socket, {
         type: "session.created",
-        ...(typeof replyTo === "string" ? { replyTo } : {}),
+        ...reply(replyTo),
         sessionId: created.id,
         code: created.code,
-        publisherToken: `pt_${base64url(32)}`,
+        publisherToken: created.token,
         viewerLimit: LIMITS.MAX_VIEWERS,
-        ttl: { graceS: 120, idleS: 1800, maxLifetimeS: 43200, expiresAt: Date.now() + 43200_000 },
+        ttl: ttl(),
         limits: {
           maxSnapshotBytes: LIMITS.MAX_SNAPSHOT_BYTES,
           maxChunkBytes: LIMITS.MAX_CHUNK_BYTES,
@@ -154,74 +314,28 @@ export async function startRelayStub(options: RelayStubOptions = {}): Promise<Re
           maxChanges: LIMITS.MAX_CHANGES,
         },
       });
-      publisher = socket;
-      const held: RecordedFrame[] = [];
-      /** Forwards to the joined viewers; `scene.snapshot.end` is acknowledged once it has been forwarded. */
-      const forward = (frame: RecordedFrame): void => {
-        for (const viewer of created.viewers)
-          if (viewer.readyState === WebSocket.OPEN)
-            viewer.send(frame.data, { binary: frame.binary }); // byte-for-byte (§11)
-        const text = frame.binary ? undefined : parseObject(frame.data);
-        if (options.autoAck !== false && text?.["type"] === "scene.snapshot.end")
-          send(socket, {
-            type: "scene.snapshot.ack",
-            sceneVersion: text["sceneVersion"],
-            viewersStreamed: created.viewers.size,
-            viewersDeferred: 0,
-          });
-      };
-      releaseHeld = (): void => {
-        if (created.viewers.size < (options.holdFramesUntilViewers ?? 0)) return;
-        for (const frame of held.splice(0)) forward(frame);
-      };
-      const versions = { last: 0, snapshotInFlight: false, snapshotExpected: false };
-      /** §6.2 / §8.1 / §8.4 checks; returns the violation or `undefined` and advances the counters. */
-      const checkVersions = (text: Record<string, unknown>): string | undefined => {
-        const type = text["type"];
-        const version = text["sceneVersion"];
-        if (type === "scene.snapshot.end") {
-          versions.snapshotInFlight = false;
-          return undefined;
-        }
-        if (typeof version !== "number") return undefined;
-        if (type === "scene.snapshot.begin") {
-          if (version <= versions.last)
-            return `snapshot version ${version} is not above ${versions.last}`;
-          versions.last = version;
-          versions.snapshotInFlight = true;
-          versions.snapshotExpected = false;
-          return undefined;
-        }
-        if (type !== "scene.update" && type !== "scene.nodeRemoved" && type !== "scene.nodeAdded")
-          return undefined;
-        const base = text["baseVersion"];
-        if (versions.snapshotInFlight) return `${String(type)} inside a snapshot`;
-        if (versions.snapshotExpected)
-          return `${String(type)} while a snapshot is due after scene.nodeAdded`;
-        if (base !== versions.last) return `baseVersion ${String(base)} is not ${versions.last}`;
-        if (version <= versions.last)
-          return `sceneVersion ${version} is not above ${versions.last}`;
-        versions.last = version;
-        versions.snapshotExpected = type === "scene.nodeAdded";
-        return undefined;
-      };
-      socket.on("message", (data, binary) => {
-        const frame = { binary, data: Buffer.from(data as Buffer) };
-        publisherFrames.push(frame);
-        const text = binary ? undefined : parseObject(frame.data);
-        const violation = text && checkVersions(text);
-        if (violation) {
-          versionViolations.push(violation);
-          return fail(socket, "BAD_SEQUENCE", text["id"]);
-        }
-        if (held.length > 0 || created.viewers.size < (options.holdFramesUntilViewers ?? 0))
-          held.push(frame);
-        else forward(frame);
-      });
-      socket.on("close", () => {
-        for (const viewer of created.viewers) viewer.close(4001);
-        session = undefined;
-        publisher = undefined;
+      attachPublisher(socket, created);
+    } else if (message["type"] === "session.resume") {
+      if (!session || session.id !== message["sessionId"]) {
+        // §4.3: the socket stays open so the publisher can fall back to session.create{preferredCode}
+        fail(socket, "SESSION_NOT_FOUND", replyTo);
+        socket.once("message", (next, binary) => onFirstMessage(socket, next, binary));
+        return;
+      }
+      if (session.token !== message["publisherToken"])
+        return fail(socket, "UNAUTHORIZED", replyTo, 4003);
+      const resumed = session;
+      if (resumed.publisher?.readyState === WebSocket.OPEN) resumed.publisher.close(4011); // half-open old socket
+      attachPublisher(socket, resumed);
+      send(socket, {
+        type: "session.resumed",
+        ...reply(replyTo),
+        sessionId: resumed.id,
+        code: resumed.code,
+        sceneVersion: resumed.versions.last,
+        snapshotVersion: resumed.snapshotVersion,
+        viewerCount: resumed.viewers.size,
+        ttl: ttl(),
       });
     } else if (message["type"] === "viewer.join") {
       const code = typeof message["code"] === "string" ? normalizeCode(message["code"]) : null;
@@ -229,22 +343,25 @@ export async function startRelayStub(options: RelayStubOptions = {}): Promise<Re
         return fail(socket, "INVALID_CODE", replyTo, 4004);
       const joined = session;
       joined.viewers.add(socket);
-      socket.on("close", () => joined.viewers.delete(socket));
-      queueMicrotask(() => releaseHeld());
+      socket.on("close", () => {
+        if (joined.viewers.delete(socket)) broadcastCount(joined);
+      });
+      queueMicrotask(() => releaseHeld(joined));
       send(socket, {
         type: "viewer.joined",
-        ...(typeof replyTo === "string" ? { replyTo } : {}),
+        ...reply(replyTo),
         sessionId: joined.id,
         viewerId: `vw_${base64url(3)}`,
         viewerToken: `vt_${base64url(32)}`,
         sceneVersion: 0,
         snapshotVersion: null,
         snapshotAvailable: false,
-        publisherOnline: true,
+        publisherOnline: joined.publisher !== undefined,
         viewerCount: joined.viewers.size,
         viewerLimit: LIMITS.MAX_VIEWERS,
         profile: joined.profile,
       });
+      broadcastCount(joined);
     } else {
       fail(socket, "UNSUPPORTED_TYPE", replyTo);
     }
@@ -259,17 +376,30 @@ export async function startRelayStub(options: RelayStubOptions = {}): Promise<Re
     port,
     publisherFrames,
     versionViolations,
+    handshakes,
+    get pings() {
+      return pings;
+    },
     get code() {
       return lastCode;
     },
     sendToPublisher(message) {
-      if (publisher) send(publisher, message);
+      if (session?.publisher) send(session.publisher, message);
     },
     closePublisher(closeCode) {
-      publisher?.close(closeCode);
+      session?.publisher?.close(closeCode);
+    },
+    restart() {
+      const ended = session;
+      if (!ended) return;
+      const attached = ended.publisher;
+      ended.publisher = undefined; // its close handler must not start a grace period for a forgotten session
+      attached?.close(4008);
+      endSession(ended, 4008);
     },
     close: () =>
       new Promise<void>((resolve) => {
+        clearTimeout(session?.graceTimer);
         for (const client of server.clients) client.terminate();
         server.close(() => resolve());
       }),
