@@ -20,5 +20,5 @@
     "sourceMap": true,
     "noEmit": true
   },
-  "include": ["ts/**/*.ts", "test/**/*.ts", "vitest.config.ts"]
+  "include": ["ts/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "vitest.config.ts"]
 }

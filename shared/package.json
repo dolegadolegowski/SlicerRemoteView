@@ -6,7 +6,7 @@
   "license": "MIT",
   "type": "module",
   "engines": {
-    "node": ">=22.12 <23"
+    "node": ">=22.18 <23"
   },
   "files": [
     "dist",
@@ -27,6 +27,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "fixtures": "node --experimental-strip-types scripts/make-glb-fixtures.ts",
     "test": "vitest run",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
@@ -40,6 +41,7 @@
     "@types/node": "^22.20.5",
     "eslint": "^10.13.0",
     "eslint-config-prettier": "^10.1.8",
+    "gltf-validator": "^2.0.0-dev.3.10",
     "prettier": "^3.9.10",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.71.2",

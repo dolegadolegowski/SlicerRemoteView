@@ -1,0 +1,16 @@
+{
+  "protocolVersion": "1.0",
+  "type": "scene.snapshot.begin",
+  "id": "p-32",
+  "sceneVersion": 1,
+  "byteLength": 3400,
+  "sha256": "2a3bb2bcf4ae09c2bebda8e29dbfb9f3ef18324f95790ca8e2accef95829e89c",
+  "chunkCount": 1,
+  "chunkSize": 65536,
+  "format": "glb",
+  "extensionsUsed": [],
+  "extensionsRequired": [],
+  "profile": "mobile",
+  "nodeCount": 2,
+  "triangleCount": 36
+}

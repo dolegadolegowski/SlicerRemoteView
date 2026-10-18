@@ -1,0 +1,16 @@
+{
+  "protocolVersion": "1.0",
+  "type": "scene.snapshot.begin",
+  "id": "p-34",
+  "sceneVersion": 3,
+  "byteLength": 4920532,
+  "sha256": "2807ee954deb1600d78b736f14fc352caed82d49e195ffaf6a5afb3b3425895e",
+  "chunkCount": 5,
+  "chunkSize": 1048576,
+  "format": "glb",
+  "extensionsUsed": [],
+  "extensionsRequired": [],
+  "profile": "mobile",
+  "nodeCount": 4,
+  "triangleCount": 229376
+}

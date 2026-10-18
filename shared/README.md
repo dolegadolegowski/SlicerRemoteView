@@ -19,7 +19,8 @@ valid/invalid fixtures shared by every language, and generated types (`ts/`, `py
 | `fixtures/blob/` | binary test vectors of the chunk header (`chunk-header-*.bin`, table in `chunk-headers.json`, see its `README.md`) shared with Python/C# |
 | `fixtures/codes/` | `normalize-cases.json`: `normalizeCode` inputs and expected codes/hints (ADR 0008 §7) |
 | `test/` | vitest suites (`*.test.ts`); file names match the plan's `npm test -w shared -- <name>` filters |
-| `scripts/` | generation and check scripts (`*.mjs`); `check-generators.mjs` = the PRO-02 generator spike |
+| `fixtures/glb/` | GLB snapshot fixtures of §7 (`asymmetric-2nodes.glb`, `quantized-1node.glb`, `large-synthetic.glb` ≈ 5 MiB) and five broken files for §7.1 pre-validators; `manifest.json` (byteLength, sha256, nodeIds, triangleCount) — generated, never edited by hand |
+| `scripts/` | generation and check scripts; `make-glb-fixtures.ts` regenerates `fixtures/glb/` (`npm run fixtures`), `check-generators.mjs` = the PRO-02 generator spike |
 
 ## How to run
 
@@ -56,9 +57,11 @@ Browser-safe (no `node:` imports, WebCrypto for hashing):
 | `npm run format -w shared` | `prettier --write .` |
 | `npm run typecheck -w shared` | `tsc --noEmit` over `ts/`, `test/` (strict) |
 | `npm run build -w shared` | `tsc -p tsconfig.build.json` → `dist/` (ESM + `.d.ts`) |
+| `npm run fixtures -w shared` | `node scripts/make-glb-fixtures.ts`: rewrites `fixtures/glb/*.glb` + `manifest.json` deterministically (Node type stripping, flag `--experimental-strip-types` for 22.12–22.17; `git diff --exit-code shared/fixtures/glb` is the drift check, also run by `test/glb.test.ts` in a temp dir) |
 
 Runtime dependency policy: only the schema validator (`ajv`); everything else is a devDependency
-(`prompts/01-protocol.md`). Python (`py/`, pytest) and C# (`cs/`) toolchains arrive with PRO-09 and PRO-17.
+(`prompts/01-protocol.md`). `gltf-validator` (Khronos, Dart compiled to JS, offline) is a devDependency used as a
+**library** by `test/glb.test.ts` (`validateBytes`); the package ships no CLI, so there is no `npx gltf-validator`. Python (`py/`, pytest) and C# (`cs/`) toolchains arrive with PRO-09 and PRO-17.
 
 ## Schema conventions
 
@@ -98,13 +101,30 @@ Runtime dependency policy: only the schema validator (`ajv`); everything else is
   Python `jsonschema` both report it on the parent); `keyword` is optional. There is one invalid fixture per
   required field (including the envelope-required `type` and `protocolVersion`) and per enum, plus the boundary cases
   named in the plan's acceptance criteria.
-- Valid fixtures other than `valid-example.json` are shape fixtures: their `byteLength`/`sha256` values are synthetic
-  (e.g. `scene.snapshot.begin/valid-chunk-64k.json`, 3 full 64 KiB chunks + 1 byte) until PRO-08 adds fixtures
-  derived from the real GLB files in `fixtures/glb/manifest.json`.
+- Valid fixtures other than `valid-example.json` are shape fixtures with synthetic `byteLength`/`sha256` values
+  (e.g. `scene.snapshot.begin/valid-chunk-64k.json`, 3 full 64 KiB chunks + 1 byte), **except**
+  `scene.snapshot.begin/valid-<name>.json` where `<name>.glb` exists in `fixtures/glb/manifest.json`: those carry the
+  manifest's `byteLength`/`sha256`/`nodeCount`/`triangleCount` and `test/glb.test.ts` fails when they drift.
 - The TS runner is `loadFixtures()` in `test/helpers.ts`; `test/session.test.ts` covers `session.*`,
   `test/viewer.test.ts` covers `viewer.*`, `ping`, `pong` and `error`, `test/snapshot.test.ts` covers `scene.snapshot.*`,
   `test/scene.test.ts` covers the incremental-update types `scene.update`, `scene.nodeRemoved`, `scene.nodeAdded`,
-  `scene.state`, `scene.request` (it filters the `scene.snapshot.*` directories out of `loadFixtures("scene.")`).
+  `scene.state`, `scene.request` (it filters the `scene.snapshot.*` directories out of `loadFixtures("scene.")`),
+  `test/chunk.test.ts` / `test/code.test.ts` cover the runtime helpers and `test/glb.test.ts` the GLB fixtures.
+
+## GLB fixtures (`fixtures/glb/`, PRO-08)
+
+`make-glb-fixtures.ts` builds every file from procedural geometry that uses only additions and square roots (an
+octahedron subdivided onto a sphere, an asymmetric tetrahedron), so the output is byte-identical on every platform:
+
+| File | Content |
+|---|---|
+| `asymmetric-2nodes.glb` | §7 reference scene: root `SlicerRemoteView` with the §7.1 extras; segment `Liver` (opaque tetrahedron with vertices at glTF `(+0.1, 0, 0)` and `(0, 0, −0.1)` — a mirrored load shows up immediately) and model `Tumor` (translucent, `T.matrix` translation) |
+| `quantized-1node.glb` | `KHR_mesh_quantization` in `extensionsUsed`/`extensionsRequired`: `POSITION` as `SHORT` (8-byte stride), dequantisation scale/offset in `M.matrix`, `M.extras = {"role": "mesh"}` |
+| `large-synthetic.glb` | ≈ 5 MiB, four spheres, the first with > 65,535 vertices (`UNSIGNED_INT` indices), one translucent, one hidden — load tests and multi-chunk snapshots |
+| `bad-magic.glb`, `truncated.glb`, `external-uri.glb`, `two-scenes.glb`, `no-root-extras.glb` | broken on purpose: each fails the §7.1 pre-validation a viewer runs before its loader (WEB / QST plans); all but `no-root-extras.glb` also fail `gltf-validator` |
+
+`manifest.json` lists `byteLength`, `sha256`, `nodeIds`, `nodeCount`, `triangleCount`, `extensionsRequired` per file;
+fake-slicer (PRO-14) and the derived `scene.snapshot.begin` fixtures read these values.
 
 ## Generator spike (PRO-02, ADR 0002 errata)
 
