@@ -27,6 +27,8 @@ extend-exclude = [".venv", "RemoteView/_vendor"] # _vendor is a generated copy o
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "N", "RUF", "SIM", "PL", "S", "BLE"] # S = bandit security rules
 ignore = ["PLR2004"] # magic numbers are protocol constants with a § reference next to them
+# Maths in docstrings/comments uses the real signs (protocol.md writes them too).
+allowed-confusables = ["×", "−", "–"]
 
 [tool.ruff.lint.pycodestyle]
 # Code is formatted at 100 columns (ruff format); docstrings and comments may run to 120 (E501).
