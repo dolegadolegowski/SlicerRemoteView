@@ -21,6 +21,8 @@ MODULE_DIR = PLUGIN_ROOT / "RemoteView"
 
 #: Runtime dependencies that must only be imported after the user clicks Start (FR-02, FR-16).
 LAZY_MODULES = ("websockets", "segno", "jsonschema", "remoteview_protocol")
+#: The module's own packages: re-imported inside the guard so cached imports cannot hide eager work.
+PROJECT_PACKAGES = ("RemoteView", "remoteview_core", "remoteview_protocol")
 #: Modules ``RemoteView.py`` may import while Slicer loads it (everything else only inside functions).
 IMPORT_ALLOWLIST = {"__future__", "ctk", "logging", "os", "qt", "slicer"}
 #: Words the help text must contain so the consent statement names what is sent (NFR-16, T7).
@@ -85,17 +87,30 @@ def no_side_effects(monkeypatch: pytest.MonkeyPatch, slicer_stubs):
     monkeypatch.setattr(slicer.util, "pip_install", _forbid("slicer.util.pip_install"))
     monkeypatch.setattr(slicer.packaging, "pip_install", _forbid("slicer.packaging.pip_install"))
     monkeypatch.setattr(slicer.packaging, "pip_ensure", _forbid("slicer.packaging.pip_ensure"))
+    # Forget runtime dependencies and the project's own modules, so whatever RemoteView.py pulls in at import
+    # (also transitively through remoteview_core) is imported afresh inside the guard; restored afterwards.
+    watched = (*LAZY_MODULES, *PROJECT_PACKAGES)
     for loaded in list(sys.modules):
-        if loaded.split(".")[0] in LAZY_MODULES:
+        if loaded.split(".")[0] in watched:
             monkeypatch.delitem(sys.modules, loaded)
     yield _CALLS
+    # Modules first imported inside the guard belong to the discarded package objects; drop them so later tests
+    # import fresh copies (monkeypatch then restores the original entries).
+    for loaded in list(sys.modules):
+        if loaded.split(".")[0] in watched:
+            del sys.modules[loaded]
 
 
 def test_skeleton_import_and_construct_have_no_side_effects(no_side_effects, import_remote_view):
     threads_before = set(threading.enumerate())
     before = set(sys.modules)
     module = import_remote_view()
-    assert set(sys.modules) - before == {"RemoteView"}, "RemoteView.py imported extra modules"
+    extra = {
+        m
+        for m in set(sys.modules) - before
+        if m != "RemoteView" and not m.startswith("remoteview_core")
+    }
+    assert extra == set(), f"RemoteView.py imported extra modules: {sorted(extra)}"
 
     parent = mock.MagicMock(name="qSlicerScriptedLoadableModule")
     module.RemoteView(parent)
@@ -131,7 +146,7 @@ def test_skeleton_side_effect_guard_detects_calls(no_side_effects, slicer_stubs)
     with pytest.raises(ForbiddenSideEffectError):
         subprocess.run(["true"], check=False)
     with pytest.raises(ForbiddenSideEffectError):
-        os.system("true")
+        os.system("true")  # noqa: S605 — guarded: the patched os.system raises
     with pytest.raises(ForbiddenSideEffectError):
         sys.modules["slicer"].util.pip_install("websockets")
     try:  # a swallowed call is still recorded
@@ -145,9 +160,9 @@ def test_skeleton_side_effect_guard_detects_calls(no_side_effects, slicer_stubs)
     with pytest.raises(AttributeError):
         qt.QNetworkAccessManager  # noqa: B018 — strict stub: network/process Qt classes do not exist
     with pytest.raises(ForbiddenSideEffectError):  # deferred work runs inside the guard
-        slicer_stubs["slicer"].app.connect("startupCompleted()", lambda: socket.socket())
+        slicer_stubs["slicer"].app.connect("startupCompleted()", socket.socket)
     with pytest.raises(ForbiddenSideEffectError):
-        qt.QTimer.singleShot(0, lambda: socket.socket())
+        qt.QTimer.singleShot(0, socket.socket)
 
 
 def _import_time_modules(source: str) -> set[str]:

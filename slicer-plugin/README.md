@@ -17,8 +17,11 @@ opt-in rule, FR-02). Design: `docs/architecture.md` §6, ADR 0005; tasks: `docs/
 | `CMakeLists.txt` | extension (`project(SlicerRemoteView)`, category `Remote`) — Slicer 5.12.4 extension template |
 | `RemoteView/CMakeLists.txt` | `slicerMacroBuildScriptedModule(... WITH_GENERIC_TESTS)`; **every** file under `RemoteView/` is listed (`.py` in `MODULE_PYTHON_SCRIPTS`, everything else in `MODULE_PYTHON_RESOURCES`) — `tests/test_skeleton.py` enforces it |
 | `RemoteView/RemoteView.py` | thin Slicer adapter: `RemoteView`, `RemoteViewWidget`, `RemoteViewLogic`, `RemoteViewTest`; import-light (no network, subprocess, pip or runtime-dependency import at import or construction) |
+| `RemoteView/remoteview_core/` | pure-Python core (Python 3.12 + numpy, `vtk` for geometry filters only); never imports `slicer`/`qt`/`ctk` — `tests/test_core_purity.py` enforces it; `__version__` lives in `__init__.py` |
 | `RemoteView/Resources/Icons/RemoteView.png` | module icon (128×128), own work generated with a small Python script (no third-party artwork, MIT like the repository) |
-| `tests/` | pytest suites run outside Slicer; `conftest.py` provides stub `slicer`/`qt`/`ctk` modules |
+| `tests/` | pytest suites run outside Slicer; `conftest.py` provides strict stub `slicer`/`qt`/`ctk` modules and puts `RemoteView/` on `sys.path` like Slicer does |
+| `pyproject.toml` | ruff and pytest configuration, direct dev pins (`dev` extra) — development only, Slicer never reads it |
+| `requirements-dev.txt` | exact pins of every dev/test package (compiled from the `dev` extra) |
 
 ## Install in 3D Slicer (developer mode)
 
@@ -35,16 +38,22 @@ The manual checks are in `docs/testing/slicer.md` (§1 module loads).
 
 ## Development (outside Slicer)
 
-The pure-Python parts and the adapter (against stub modules) are tested with `pytest` in a local virtual
+The pure-Python core and the adapter (against stub modules) are tested with `pytest` in a local virtual
 environment `slicer-plugin/.venv` (git-ignored). Use Python **3.12** to match Slicer 5.12.x. From the repository root:
 
 ```bash
 python3.12 -m venv slicer-plugin/.venv
-slicer-plugin/.venv/bin/python -m pip install pytest==9.1.1 ruff==0.17.1
-slicer-plugin/.venv/bin/pytest slicer-plugin
+slicer-plugin/.venv/bin/python -m pip install -r slicer-plugin/requirements-dev.txt
+slicer-plugin/.venv/bin/pytest slicer-plugin                  # all tests (or -k skeleton, -k purity, …)
 slicer-plugin/.venv/bin/ruff check slicer-plugin
-slicer-plugin/.venv/bin/ruff format --check --line-length 100 slicer-plugin
+slicer-plugin/.venv/bin/ruff format --check slicer-plugin
 ```
+
+`requirements-dev.txt` pins numpy, the `vtk` wheel (9.6.x like Slicer 5.12), `pygltflib` (test-only GLB reader),
+`jsonschema` and `websockets`; none of these is installed into Slicer by these commands. To change a pin, edit the
+`dev` extra in `pyproject.toml` and regenerate the file with the `uv pip compile` command in its header (a test
+checks that every direct pin appears in it). It installs wheels only (`--only-binary :all:`) and carries no hashes —
+the reasoning is in its header.
 
 Anything that needs a running Slicer is a manual step in `docs/testing/slicer.md`; the sandbox never claims to
 have run it (CLAUDE.md rule 10).

@@ -22,6 +22,10 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 #: scripted module (``Base/QTGUI/qSlicerScriptedLoadableModuleFactory.cxx``, tag v5.12.4).
 MODULE_DIR = PLUGIN_ROOT / "RemoteView"
 
+# Like Slicer, append the module directory to sys.path, so `remoteview_core` imports from the source tree.
+if str(MODULE_DIR) not in sys.path:
+    sys.path.append(str(MODULE_DIR))
+
 
 class _ScriptedLoadableModule:
     """Mirror of ``slicer.ScriptedLoadableModule.ScriptedLoadableModule.__init__`` (5.12.4)."""
@@ -135,7 +139,6 @@ def slicer_stubs(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, types.Mo
     stubs = _make_stub_modules()
     for name, module in stubs.items():
         monkeypatch.setitem(sys.modules, name, module)
-    monkeypatch.syspath_prepend(str(MODULE_DIR))
     monkeypatch.delitem(sys.modules, "RemoteView", raising=False)
     yield stubs
     sys.modules.pop("RemoteView", None)
