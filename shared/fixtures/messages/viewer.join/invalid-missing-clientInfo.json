@@ -1,0 +1,14 @@
+{
+  "$comment": "viewer.join without required `clientInfo` (§5.1)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "viewer.join",
+    "id": "v-1",
+    "ts": 1792238405000,
+    "code": "7KQ4X"
+  }
+}

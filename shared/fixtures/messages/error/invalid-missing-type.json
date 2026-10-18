@@ -1,0 +1,19 @@
+{
+  "$comment": "error without required `type` (§9.2)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "replyTo": "v-1",
+    "ts": 1792238405090,
+    "code": "SESSION_FULL",
+    "message": "Session has reached its viewer limit",
+    "retryable": true,
+    "details": {
+      "viewerLimit": 20,
+      "retryAfterS": 30
+    }
+  }
+}

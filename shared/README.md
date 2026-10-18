@@ -80,13 +80,13 @@ Runtime dependency policy: only the schema validator (`ajv`); everything else is
   Python `jsonschema` both report it on the parent); `keyword` is optional. There is one invalid fixture per
   required field (including the envelope-required `type` and `protocolVersion`) and per enum, plus the boundary cases
   named in the plan's acceptance criteria.
-- The TS runner is `loadFixtures()` in `test/helpers.ts`; `test/session.test.ts` covers `session.*`.
+- The TS runner is `loadFixtures()` in `test/helpers.ts`; `test/session.test.ts` covers `session.*`,
+  `test/viewer.test.ts` covers `viewer.*`, `ping`, `pong` and `error`.
 
 ## Generator spike (PRO-02, ADR 0002 errata)
 
 `node shared/scripts/check-generators.mjs` runs quicktype (C# and TypeScript) over every file in `schema/` — so the
-evidence grows with each schema task — and, when `nswag` is on `PATH`, NJsonSchema's CLI. The `oneOf` row below was
-checked the same way on an ad-hoc `viewer.join`-like schema (PRO-04 adds the real one). Result recorded 2026-10-18 (quicktype 26.0.0; NJsonSchema checked in
+evidence grows with each schema task — and, when `nswag` is on `PATH`, NJsonSchema's CLI. Result recorded 2026-10-18 (quicktype 26.0.0; NJsonSchema checked in
 its sources and issue tracker because `.NET` is not in the sandbox):
 
 | Feature | quicktype 26 | NJsonSchema (master, 2026-10) |
@@ -95,7 +95,7 @@ its sources and issue tracker because `.NET` is not in the sandbox):
 | `$defs` | consumed | **not resolved** — open PR RicoSuter/NJsonSchema#1913, issue #1536 |
 | `const` | → single-value enum (`type Type = "viewer.join"`, C# `enum TypeEnum { ViewerJoin }`) | **not supported** for generation — issue #1329, PRs #1891/#1897 open; the sibling `"type": "string"` keeps the property a `string` |
 | `if`/`then` (draft-07) | ignored for typing: output identical with and without the conditional (`graceEndsAt?: number`, C# `long? GraceEndsAt`), checked 2026-10-18 on `session.publisherState` | parsed into `If`/`Then`/`Else`, not used for C# generation — `[TODO verify]` with the first `dotnet` run (PRO-17) |
-| `oneOf` of required-sets | branches merged into optional properties (checked with an ad-hoc `viewer.join`-like schema, not committed); a property that appears **only** as `required` in a branch, without a schema anywhere, becomes `unknown`/`object` — a property with a `$ref` in the branch is typed correctly | `[TODO verify]` with the first `dotnet` run (PRO-17) |
+| `oneOf` of required-sets | branches merged into optional properties (re-checked 2026-10-18 on the real `viewer.join`: `code?: string`, `sessionId?: string`, `viewerToken?: string`); a property that appears **only** as `required` in a branch, without a schema anywhere, becomes `unknown`/`object` — a property with a `$ref` in the branch is typed correctly | `[TODO verify]` with the first `dotnet` run (PRO-17) |
 
 Decisions taken from the spike: (1) schemas use `definitions`, never `$defs`; (2) every `type` keyword is
 `{"type": "string", "const": "…"}`; (3) `oneOf` and `if`/`then` are used only for required/forbidden combinations, while

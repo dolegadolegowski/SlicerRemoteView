@@ -1,0 +1,19 @@
+{
+  "$comment": "details MUST NOT carry tokens (§9.2)",
+  "expect": {
+    "instancePath": "/details",
+    "keyword": "not"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "error",
+    "replyTo": "v-1",
+    "ts": 1792238405090,
+    "code": "SESSION_FULL",
+    "message": "Session has reached its viewer limit",
+    "retryable": true,
+    "details": {
+      "viewerToken": "vt_8dKq2ZrT7nWbY4mCfH6vJ9xLpA3sE5uG1oRtN0iQkDw"
+    }
+  }
+}

@@ -10,12 +10,7 @@
     "sessionId": { "$ref": "defs.schema.json#/definitions/sessionId" },
     "code": { "$ref": "defs.schema.json#/definitions/code" },
     "publisherToken": { "$ref": "defs.schema.json#/definitions/token" },
-    "viewerLimit": {
-      "description": "Effective MAX_VIEWERS, at most the protocol maximum of 20 (§3.3).",
-      "type": "integer",
-      "minimum": 1,
-      "maximum": 20
-    },
+    "viewerLimit": { "$ref": "defs.schema.json#/definitions/viewerLimit" },
     "ttl": { "$ref": "defs.schema.json#/definitions/ttl" },
     "limits": { "$ref": "defs.schema.json#/definitions/limits" }
   },

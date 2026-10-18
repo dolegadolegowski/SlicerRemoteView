@@ -1,0 +1,20 @@
+{
+  "$comment": "message is a non-empty string (§9.2)",
+  "expect": {
+    "instancePath": "/message",
+    "keyword": "minLength"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "error",
+    "replyTo": "v-1",
+    "ts": 1792238405090,
+    "code": "SESSION_FULL",
+    "message": "",
+    "retryable": true,
+    "details": {
+      "viewerLimit": 20,
+      "retryAfterS": 30
+    }
+  }
+}

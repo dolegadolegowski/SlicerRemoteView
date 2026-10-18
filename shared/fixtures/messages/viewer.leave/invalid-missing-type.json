@@ -1,0 +1,10 @@
+{
+  "$comment": "viewer.leave without required `type` (§5.4)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0"
+  }
+}

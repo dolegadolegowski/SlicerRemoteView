@@ -1,0 +1,13 @@
+{
+  "$comment": "id ≤ 32 chars (§3.2)",
+  "expect": {
+    "instancePath": "/id",
+    "keyword": "maxLength"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "ping",
+    "id": "hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh",
+    "ts": 1792238445000
+  }
+}

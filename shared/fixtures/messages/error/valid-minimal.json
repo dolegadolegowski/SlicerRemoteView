@@ -1,0 +1,6 @@
+{
+  "protocolVersion": "1.0",
+  "type": "error",
+  "code": "INVALID_MESSAGE",
+  "message": "schema validation failed at /clientInfo"
+}

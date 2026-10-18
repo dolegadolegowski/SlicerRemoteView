@@ -47,6 +47,11 @@
       "type": "integer",
       "minimum": 0
     },
+    "snapshotVersion": {
+      "description": "sceneVersion of a GLB snapshot; never 0, because 0 means nothing published (§4.2, §6.2, §8.4).",
+      "type": "integer",
+      "minimum": 1
+    },
     "color": {
       "description": "[r, g, b] floats in 0..1 (§3.2).",
       "type": "array",
@@ -66,6 +71,34 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
+    "byteLength": {
+      "description": "Size of a complete GLB snapshot in bytes, at most MAX_SNAPSHOT_BYTES = 64 MiB (§3.3, §6.2).",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 67108864
+    },
+    "snapshotFormat": {
+      "description": "Container format of a snapshot; v1 knows only binary glTF (§6.2).",
+      "type": "string",
+      "enum": ["glb"]
+    },
+    "viewerLimit": {
+      "description": "Effective MAX_VIEWERS, at most the protocol maximum of 20 (§3.3, §4.2, §5.2).",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 20
+    },
+    "snapshotInfo": {
+      "description": "Cached snapshot a viewer can fetch over GET /api/scene/:sceneVersion (§5.2, §6.5).",
+      "type": "object",
+      "properties": {
+        "sceneVersion": { "$ref": "#/definitions/snapshotVersion" },
+        "byteLength": { "$ref": "#/definitions/byteLength" },
+        "sha256": { "$ref": "#/definitions/sha256" },
+        "format": { "$ref": "#/definitions/snapshotFormat" }
+      },
+      "required": ["sceneVersion", "byteLength", "sha256", "format"]
+    },
     "profile": {
       "description": "Decimation budget profile the publisher exported for (§4.1, §7.5).",
       "type": "string",
@@ -73,6 +106,7 @@
     },
     "platform": {
       "description": "Viewer platform (§5.1). Publishers send a free-form platform string instead (§4.1); receivers treat unknown values as `other` (§14).",
+      "$comment": "Not referenced by a message schema on purpose: clientInfo.platform stays a lenient string (§14). Kept as the documented viewer set for generated constants (PRO-06) and the C# enum with an Other fallback (PRO-17).",
       "type": "string",
       "enum": ["web", "quest-browser", "quest2", "quest3", "other"]
     },

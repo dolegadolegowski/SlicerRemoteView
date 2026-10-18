@@ -1,0 +1,11 @@
+{
+  "$comment": "`type` must be the const viewer.leave",
+  "expect": {
+    "instancePath": "/type",
+    "keyword": "const"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "viewer.other"
+  }
+}

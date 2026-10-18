@@ -1,0 +1,16 @@
+{
+  "$comment": "viewer.count without envelope-required `protocolVersion` (§3.2)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "type": "viewer.count",
+    "viewerCount": 4,
+    "viewerLimit": 20,
+    "platforms": {
+      "web": 3,
+      "quest3": 1
+    }
+  }
+}

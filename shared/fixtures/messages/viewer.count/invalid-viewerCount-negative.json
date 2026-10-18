@@ -1,0 +1,17 @@
+{
+  "$comment": "viewerCount ≥ 0 (§5.3)",
+  "expect": {
+    "instancePath": "/viewerCount",
+    "keyword": "minimum"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "viewer.count",
+    "viewerCount": -1,
+    "viewerLimit": 20,
+    "platforms": {
+      "web": 3,
+      "quest3": 1
+    }
+  }
+}

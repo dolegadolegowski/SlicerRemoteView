@@ -1,0 +1,24 @@
+{
+  "$comment": "`type` must be the const viewer.join",
+  "expect": {
+    "instancePath": "/type",
+    "keyword": "const"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "viewer.other",
+    "id": "v-1",
+    "ts": 1792238405000,
+    "code": "7KQ4X",
+    "clientInfo": {
+      "app": "web-viewer",
+      "version": "0.3.0",
+      "platform": "web",
+      "profile": "mobile",
+      "capabilities": {
+        "httpScene": true,
+        "maxSnapshotBytes": 33554432
+      }
+    }
+  }
+}

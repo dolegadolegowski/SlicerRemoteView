@@ -1,0 +1,16 @@
+{
+  "$comment": "viewer.count without required `type` (§5.3)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "viewerCount": 4,
+    "viewerLimit": 20,
+    "platforms": {
+      "web": 3,
+      "quest3": 1
+    }
+  }
+}

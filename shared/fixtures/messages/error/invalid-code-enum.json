@@ -1,0 +1,20 @@
+{
+  "$comment": "code is one of the 15 codes of §9.2",
+  "expect": {
+    "instancePath": "/code",
+    "keyword": "enum"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "error",
+    "replyTo": "v-1",
+    "ts": 1792238405090,
+    "code": "SESSION_EXPIRED",
+    "message": "Session has reached its viewer limit",
+    "retryable": true,
+    "details": {
+      "viewerLimit": 20,
+      "retryAfterS": 30
+    }
+  }
+}

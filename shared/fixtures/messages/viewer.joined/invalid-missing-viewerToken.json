@@ -1,0 +1,28 @@
+{
+  "$comment": "viewer.joined without required `viewerToken` (§5.2)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "viewer.joined",
+    "replyTo": "v-1",
+    "ts": 1792238405080,
+    "sessionId": "sess_01K7Q4XMB2TJ9RD6",
+    "viewerId": "vw_4f2a",
+    "sceneVersion": 42,
+    "snapshotVersion": 40,
+    "snapshotAvailable": true,
+    "snapshot": {
+      "sceneVersion": 40,
+      "byteLength": 18874368,
+      "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "format": "glb"
+    },
+    "publisherOnline": true,
+    "viewerCount": 4,
+    "viewerLimit": 20,
+    "profile": "mobile"
+  }
+}

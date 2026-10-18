@@ -1,0 +1,16 @@
+{
+  "$comment": "platforms values are integer counts (§5.3)",
+  "expect": {
+    "instancePath": "/platforms/web",
+    "keyword": "type"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "viewer.count",
+    "viewerCount": 4,
+    "viewerLimit": 20,
+    "platforms": {
+      "web": "3"
+    }
+  }
+}

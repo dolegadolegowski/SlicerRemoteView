@@ -1,0 +1,23 @@
+{
+  "$comment": "clientInfo.app is required (defs.clientInfo)",
+  "expect": {
+    "instancePath": "/clientInfo",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "viewer.join",
+    "id": "v-1",
+    "ts": 1792238405000,
+    "code": "7KQ4X",
+    "clientInfo": {
+      "version": "0.3.0",
+      "platform": "web",
+      "profile": "mobile",
+      "capabilities": {
+        "httpScene": true,
+        "maxSnapshotBytes": 33554432
+      }
+    }
+  }
+}

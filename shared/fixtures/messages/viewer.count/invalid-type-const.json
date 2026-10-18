@@ -1,0 +1,17 @@
+{
+  "$comment": "`type` must be the const viewer.count",
+  "expect": {
+    "instancePath": "/type",
+    "keyword": "const"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "viewer.other",
+    "viewerCount": 4,
+    "viewerLimit": 20,
+    "platforms": {
+      "web": 3,
+      "quest3": 1
+    }
+  }
+}

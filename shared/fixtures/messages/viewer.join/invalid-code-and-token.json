@@ -1,0 +1,26 @@
+{
+  "$comment": "exactly one of code or (sessionId + viewerToken), not both (§5.1)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "oneOf"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "viewer.join",
+    "id": "v-1",
+    "ts": 1792238405000,
+    "code": "7KQ4X",
+    "clientInfo": {
+      "app": "web-viewer",
+      "version": "0.3.0",
+      "platform": "web",
+      "profile": "mobile",
+      "capabilities": {
+        "httpScene": true,
+        "maxSnapshotBytes": 33554432
+      }
+    },
+    "sessionId": "sess_01K7Q4XMB2TJ9RD6",
+    "viewerToken": "vt_8dKq2ZrT7nWbY4mCfH6vJ9xLpA3sE5uG1oRtN0iQkDw"
+  }
+}

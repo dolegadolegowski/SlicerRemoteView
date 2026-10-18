@@ -1,0 +1,13 @@
+{
+  "$comment": "pong without required `type` (§9.1)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "replyTo": "hb-102",
+    "ts": 1792238445031,
+    "serverTs": 1792238445031
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "$comment": "code together with viewerToken (no sessionId) is neither form of \u00a75.1",
+  "expect": {
+    "instancePath": "",
+    "keyword": "oneOf"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "viewer.join",
+    "id": "v-1",
+    "ts": 1792238405000,
+    "code": "7KQ4X",
+    "clientInfo": {
+      "app": "web-viewer",
+      "version": "0.3.0",
+      "platform": "web",
+      "profile": "mobile",
+      "capabilities": {
+        "httpScene": true,
+        "maxSnapshotBytes": 33554432
+      }
+    },
+    "viewerToken": "vt_8dKq2ZrT7nWbY4mCfH6vJ9xLpA3sE5uG1oRtN0iQkDw"
+  }
+}

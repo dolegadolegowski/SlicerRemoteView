@@ -1,0 +1,23 @@
+{
+  "$comment": "rejoin needs sessionId and viewerToken together (§5.1)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "oneOf"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "viewer.join",
+    "id": "v-1",
+    "viewerToken": "vt_8dKq2ZrT7nWbY4mCfH6vJ9xLpA3sE5uG1oRtN0iQkDw",
+    "clientInfo": {
+      "app": "quest-app",
+      "version": "0.1.0",
+      "platform": "quest3",
+      "profile": "quest3",
+      "capabilities": {
+        "httpScene": true,
+        "maxSnapshotBytes": 67108864
+      }
+    }
+  }
+}

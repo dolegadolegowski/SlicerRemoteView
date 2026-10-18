@@ -1,0 +1,13 @@
+{
+  "protocolVersion": "1.0",
+  "type": "error",
+  "code": "BAD_SEQUENCE",
+  "message": "chunkIndex out of order",
+  "retryable": true,
+  "details": {
+    "field": "chunkIndex",
+    "expected": 3,
+    "received": 5,
+    "sceneVersion": 43
+  }
+}

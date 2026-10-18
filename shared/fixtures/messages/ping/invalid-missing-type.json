@@ -1,0 +1,12 @@
+{
+  "$comment": "ping without required `type` (§9.1)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "id": "hb-102",
+    "ts": 1792238445000
+  }
+}

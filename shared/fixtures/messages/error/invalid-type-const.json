@@ -1,0 +1,20 @@
+{
+  "$comment": "`type` must be the const error",
+  "expect": {
+    "instancePath": "/type",
+    "keyword": "const"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "errorOther",
+    "replyTo": "v-1",
+    "ts": 1792238405090,
+    "code": "SESSION_FULL",
+    "message": "Session has reached its viewer limit",
+    "retryable": true,
+    "details": {
+      "viewerLimit": 20,
+      "retryAfterS": 30
+    }
+  }
+}

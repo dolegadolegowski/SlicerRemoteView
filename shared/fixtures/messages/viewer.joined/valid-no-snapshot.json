@@ -1,0 +1,15 @@
+{
+  "protocolVersion": "1.0",
+  "type": "viewer.joined",
+  "replyTo": "v-1",
+  "sessionId": "sess_01K7Q4XMB2TJ9RD6",
+  "viewerId": "vw_4f2a",
+  "viewerToken": "vt_8dKq2ZrT7nWbY4mCfH6vJ9xLpA3sE5uG1oRtN0iQkDw",
+  "sceneVersion": 0,
+  "snapshotVersion": null,
+  "snapshotAvailable": false,
+  "publisherOnline": true,
+  "viewerCount": 1,
+  "viewerLimit": 20,
+  "profile": "quest3"
+}

@@ -1,0 +1,24 @@
+{
+  "$comment": "viewerToken is ≥ 43 base64url chars (§5.2, NFR-17)",
+  "expect": {
+    "instancePath": "/viewerToken",
+    "keyword": "minLength"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "viewer.join",
+    "id": "v-1",
+    "sessionId": "sess_01K7Q4XMB2TJ9RD6",
+    "viewerToken": "vt_short",
+    "clientInfo": {
+      "app": "quest-app",
+      "version": "0.1.0",
+      "platform": "quest3",
+      "profile": "quest3",
+      "capabilities": {
+        "httpScene": true,
+        "maxSnapshotBytes": 67108864
+      }
+    }
+  }
+}

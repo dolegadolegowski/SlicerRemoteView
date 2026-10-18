@@ -1,0 +1,24 @@
+{
+  "$comment": "O is not in the code alphabet (§4.2, ADR 0008)",
+  "expect": {
+    "instancePath": "/code",
+    "keyword": "pattern"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "viewer.join",
+    "id": "v-1",
+    "ts": 1792238405000,
+    "code": "7KQOX",
+    "clientInfo": {
+      "app": "web-viewer",
+      "version": "0.3.0",
+      "platform": "web",
+      "profile": "mobile",
+      "capabilities": {
+        "httpScene": true,
+        "maxSnapshotBytes": 33554432
+      }
+    }
+  }
+}

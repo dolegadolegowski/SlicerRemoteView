@@ -1,0 +1,20 @@
+{
+  "$comment": "retryable is a boolean (§9.2)",
+  "expect": {
+    "instancePath": "/retryable",
+    "keyword": "type"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "error",
+    "replyTo": "v-1",
+    "ts": 1792238405090,
+    "code": "SESSION_FULL",
+    "message": "Session has reached its viewer limit",
+    "retryable": "true",
+    "details": {
+      "viewerLimit": 20,
+      "retryAfterS": 30
+    }
+  }
+}
