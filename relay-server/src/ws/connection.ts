@@ -10,6 +10,13 @@ import type { Clock, TimerHandle } from "../clock.js";
 
 export type Role = "publisher" | "viewer";
 
+/** First-message types and the role they fix (§3.1, §11). A `Map`, so `"constructor"` is no key. */
+export const HANDSHAKE_ROLES: ReadonlyMap<string, Role> = new Map([
+  ["session.create", "publisher"],
+  ["session.resume", "publisher"],
+  ["viewer.join", "viewer"],
+]);
+
 /** An outgoing message before the envelope fields are added. */
 export type Outgoing = { type: string } & Record<string, unknown>;
 
@@ -27,6 +34,11 @@ export class Connection {
   readonly id = nextConnectionId++;
   /** Fixed by the type of the first message (§3.1); `undefined` until then. */
   role: Role | undefined;
+  /** `INVALID_MESSAGE` answers so far (3 → close `4007`, §9.2). */
+  invalidMessages = 0;
+  /** `UNAUTHORIZED` answers so far (2 → close `1008`, §11). */
+  offences = 0;
+  #bound = false;
   #closing = false;
   #handshakeTimer: TimerHandle | undefined;
 
@@ -95,7 +107,13 @@ export class Connection {
 
   /** The socket is bound to a session (create, resume or join succeeded). */
   completeHandshake(): void {
+    this.#bound = true;
     this.#clearHandshakeTimer();
+  }
+
+  /** True once `completeHandshake()` was called. */
+  get bound(): boolean {
+    return this.#bound;
   }
 
   get handshakePending(): boolean {

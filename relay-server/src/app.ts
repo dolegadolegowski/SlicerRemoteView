@@ -9,7 +9,7 @@ import type { Duplex } from "node:stream";
 import Fastify, { LogController } from "fastify";
 import type { FastifyBaseLogger, FastifyInstance, FastifyReply } from "fastify";
 import type { Logger } from "pino";
-import { LIMITS } from "@slicerremoteview/shared";
+import { defaultSchemas, LIMITS } from "@slicerremoteview/shared";
 import { systemClock } from "./clock.js";
 import type { Clock } from "./clock.js";
 import { loadConfig } from "./config.js";
@@ -17,7 +17,9 @@ import type { Config } from "./config.js";
 import { createLogger } from "./logger.js";
 import { Registry } from "./registry.js";
 import { PROTOCOL_VERSIONS, RELAY_NAME, RELAY_VERSION } from "./version.js";
-import { IGNORE_FRAMES, registerWsEndpoint } from "./ws/endpoint.js";
+import { createDispatcher } from "./ws/dispatch.js";
+import type { HandlerTable } from "./ws/dispatch.js";
+import { registerWsEndpoint } from "./ws/endpoint.js";
 import type { FrameHandlers } from "./ws/endpoint.js";
 
 /** The `limits` object of `GET /api/version` (§10). */
@@ -37,8 +39,10 @@ export interface AppOptions {
   clock?: Clock;
   /** Session registry; by default one is built from `config` and `clock`. */
   registry?: Registry;
-  /** What happens to accepted WebSocket frames (tests record them; SRV-23 dispatches them). */
-  wsHandlers?: FrameHandlers;
+  /** Overrides for the WebSocket frame hooks (tests record frames); default: dispatch (SRV-23). */
+  wsHandlers?: Partial<FrameHandlers>;
+  /** Extra message-type handlers merged into the dispatch table (tests). */
+  messageHandlers?: HandlerTable;
 }
 
 /** Effective limits: configured snapshot and viewer caps, protocol maximums otherwise (§3.3, §14). */
@@ -132,12 +136,24 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     },
   });
 
+  // Compile every protocol schema now, not on the first client message (≈ 250 ms of blocked loop).
+  const validators = defaultSchemas();
+
   // First: the WebSocket plugin wraps every route registered after it (upgrade interception).
   await registerWsEndpoint(app, {
     allowedOrigins: config.allowedOrigins,
     clock,
     logger,
-    handlers: options.wsHandlers ?? IGNORE_FRAMES,
+    handlers: {
+      text: createDispatcher({
+        clock,
+        validators,
+        ...(options.messageHandlers && { handlers: options.messageHandlers }),
+      }),
+      binary: () => {}, // snapshot chunks: SRV-09
+      closed: () => {},
+      ...options.wsHandlers,
+    },
     errorCode: systemErrorCode,
   });
 

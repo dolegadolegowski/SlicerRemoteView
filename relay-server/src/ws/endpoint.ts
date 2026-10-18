@@ -1,23 +1,19 @@
 /**
- * WebSocket endpoint `/ws`, part 1: upgrade, origin, handshake, role and frame limits
- * (docs/protocol.md §3.1–§3.3, §9.3; architecture §5). Envelope validation, the permissions
- * matrix and the per-type dispatch are part 2 (SRV-23).
+ * WebSocket endpoint `/ws`, part 1: upgrade, origin, handshake timeout and frame limits
+ * (docs/protocol.md §3.1–§3.3, §9.3; architecture §5). The role gate, envelope validation, the
+ * permissions matrix and the per-type dispatch are part 2 (`dispatch.ts`, SRV-23).
  *
  * - One `ws` server for both roles with `maxPayload` 1 MiB + 64 KiB and no `permessage-deflate`:
  *   `ws` closes an oversized message with `1009` before reading its payload.
  * - A browser `Origin` outside `ALLOWED_ORIGINS` gets HTTP 403 before the upgrade; requests without
  *   `Origin` (Slicer, Unity) pass. A plain HTTP `GET /ws` is just an unknown path (404).
- * - The type of the first message fixes the role: `session.create`/`session.resume` → publisher,
- *   `viewer.join` → viewer, anything else → `error UNAUTHORIZED` + `1008`. A socket that is not
- *   bound to a session (`Connection.completeHandshake()`, called by the create/resume/join
- *   handlers) 10 s after the upgrade is closed `4012`.
+ * - A socket that is not bound to a session (`Connection.completeHandshake()`, called by the
+ *   create/resume/join handlers) 10 s after the upgrade is closed `4012`.
  * - Text limits per role: publisher 256 KiB, viewer 16 KiB → `error PAYLOAD_TOO_LARGE` + `1009`. The
  *   first message gets the limit of the role its type would fix (16 KiB if none). Binary frames
  *   from anyone but a publisher → `error UNAUTHORIZED` + `1008`.
  * - Upgrade requests to any other route are refused with 404 before the upgrade (the plugin would
  *   otherwise accept them on every HTTP route and close them right after).
- * - SRV-23 replaces the role gate by the dispatcher, which checks the protocol major *before* the
- *   role (§2: a 2.x first message gets `UNSUPPORTED_VERSION` + `4000`, not `1008`).
  * - `message` listeners catch everything themselves (`@fastify/websocket` error handlers do not
  *   see them): an unexpected failure answers `error INTERNAL` + `1011` and logs only an error code.
  */
@@ -28,15 +24,8 @@ import { WebSocket } from "ws";
 import type { RawData } from "ws";
 import { CLOSE_CODES, LIMITS } from "@slicerremoteview/shared";
 import type { Clock } from "../clock.js";
-import { Connection } from "./connection.js";
+import { Connection, HANDSHAKE_ROLES } from "./connection.js";
 import type { Role } from "./connection.js";
-
-/** First-message types and the role they fix (§3.1, §11). */
-export const HANDSHAKE_ROLES: ReadonlyMap<string, Role> = new Map([
-  ["session.create", "publisher"],
-  ["session.resume", "publisher"],
-  ["viewer.join", "viewer"],
-]);
 
 export const HANDSHAKE_TIMEOUT_MS = LIMITS.HANDSHAKE_TIMEOUT_S * 1000;
 
@@ -47,16 +36,13 @@ export const HANDSHAKE_TIMEOUT_MS = LIMITS.HANDSHAKE_TIMEOUT_S * 1000;
  * SRV-07) must not rely on running before the connection's next frame.
  */
 export interface FrameHandlers {
-  /** A text frame within the role's size limit; `first` is true for the message that fixed the role. */
-  text(connection: Connection, text: string, first: boolean): void | Promise<void>;
+  /** A text frame within the role's size limit; `connection.role` is `undefined` for the first one. */
+  text(connection: Connection, text: string): void | Promise<void>;
   /** A binary frame from a publisher (snapshot chunks, SRV-09). */
   binary(connection: Connection, frame: Buffer): void | Promise<void>;
   /** The socket closed, by either side. */
   closed(connection: Connection, closeCode: number): void | Promise<void>;
 }
-
-/** Until SRV-23/SRV-09 plug in: accept and ignore. */
-export const IGNORE_FRAMES: FrameHandlers = { text() {}, binary() {}, closed() {} };
 
 export interface WsEndpointOptions {
   allowedOrigins: readonly string[];
@@ -185,10 +171,11 @@ export async function registerWsEndpoint(
   function onFrame(connection: Connection, frame: Buffer, isBinary: boolean): void | Promise<void> {
     if (!connection.isOpen) return;
     if (isBinary) {
-      if (connection.role !== "publisher") {
+      // Snapshot chunks only from a publisher whose session exists (§3.2, §11).
+      if (connection.role !== "publisher" || !connection.bound) {
         connection.fail(
           "UNAUTHORIZED",
-          "binary frames are accepted only from the publisher (§3.2)",
+          "binary frames are accepted only from the publisher of a session (§3.2)",
           CLOSE_CODES.POLICY_VIOLATION,
           { retryable: false },
         );
@@ -209,24 +196,14 @@ export async function registerWsEndpoint(
     // Before the role is known, nothing above the publisher limit is even parsed.
     if (tooBig(textLimit(connection.role ?? "publisher"))) return;
     const text = frame.toString("utf8");
-    let first = false;
-    if (connection.role === undefined) {
-      // The first message's own type decides its limit: 256 KiB for session.create/resume (§3.3
-      // allows unknown fields, §14), 16 KiB for viewer.join and for anything that is no handshake.
-      const role = HANDSHAKE_ROLES.get(peekType(text) ?? "");
-      if (tooBig(textLimit(role))) return;
-      if (role === undefined) {
-        connection.fail(
-          "UNAUTHORIZED",
-          "the first message must be session.create, session.resume or viewer.join (§3.1)",
-          CLOSE_CODES.POLICY_VIOLATION,
-          { retryable: false },
-        );
-        return;
-      }
-      connection.role = role;
-      first = true;
-    }
-    return handlers.text(connection, text, first);
+    // The first message's own type decides its limit: 256 KiB for session.create/resume (§3.3
+    // allows unknown fields, §14), 16 KiB for viewer.join and for anything that is no handshake.
+    // The role itself is fixed by the dispatcher, after the protocol version check (§2).
+    if (
+      connection.role === undefined &&
+      tooBig(textLimit(HANDSHAKE_ROLES.get(peekType(text) ?? "")))
+    )
+      return;
+    return handlers.text(connection, text);
   }
 }

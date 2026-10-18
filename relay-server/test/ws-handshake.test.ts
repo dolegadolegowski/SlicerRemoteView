@@ -1,18 +1,20 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createLogger } from "../src/logger.js";
 import type { FrameHandlers } from "../src/ws/endpoint.js";
+import { BIND_ON_HANDSHAKE } from "./helpers/binding.js";
+import { fixture } from "./helpers/fixtures.js";
 import { connectClient, startRelay } from "./helpers/ws-client.js";
-import type { TestRelay } from "./helpers/ws-client.js";
+import type { TestClient, TestRelay } from "./helpers/ws-client.js";
 
 const ALLOWED = "https://relay.example.org";
 
-/** Records what the endpoint hands on to part 2, so tests can see a frame was accepted. */
+/** Records what the endpoint hands on (instead of dispatching it), so tests see a frame passed. */
 function recordingHandlers() {
-  const texts: { text: string; first: boolean }[] = [];
+  const texts: string[] = [];
   const binaries: number[] = [];
   const handlers: FrameHandlers = {
-    text: (_connection, text, first) => {
-      texts.push({ text, first });
+    text: (_connection, text) => {
+      texts.push(text);
     },
     binary: (_connection, frame) => {
       binaries.push(frame.byteLength);
@@ -22,10 +24,19 @@ function recordingHandlers() {
   return { handlers, texts, binaries };
 }
 
-/** A JSON text frame of exactly `bytes` bytes. */
+/** A JSON text frame of exactly `bytes` bytes (valid `ping` when `type` is "ping"). */
 function frameOf(type: string, bytes: number): string {
-  const head = JSON.stringify({ protocolVersion: "1.0", type, pad: "" });
+  const head = JSON.stringify({ protocolVersion: "1.0", type, id: "big", pad: "" });
   return head.replace('"pad":""', `"pad":"${"x".repeat(bytes - head.length)}"`);
+}
+
+/** Sends a valid first message of `type` (the dispatcher fixes the role) and drains its answer. */
+async function handshake(
+  client: TestClient,
+  type: "session.create" | "viewer.join",
+): Promise<void> {
+  client.sendRaw(JSON.stringify(fixture(type)));
+  await client.next();
 }
 
 let relay: TestRelay | undefined;
@@ -77,10 +88,10 @@ describe("handshake timeout (SRV-05 criterion 1, §3.1)", () => {
   });
 
   it("still closes 4012 when the socket never gets bound to a session", async () => {
-    const { handlers } = recordingHandlers();
-    relay = await startRelay({ wsHandlers: handlers });
+    relay = await startRelay();
     const client = await connectClient(relay.url);
-    client.send({ type: "session.create" });
+    client.sendRaw(JSON.stringify(fixture("session.create", "invalid-missing-profile")));
+    expect(await client.next()).toMatchObject({ type: "error", code: "INVALID_MESSAGE" });
     relay.clock.advance(10_000);
     expect(await client.closed).toBe(4012);
   });
@@ -96,8 +107,7 @@ describe("role fixed by the first message (SRV-05 criterion 1, §3.1)", () => {
     ["an inherited property name", JSON.stringify({ protocolVersion: "1.0", type: "constructor" })],
     ["__proto__", '{"protocolVersion":"1.0","type":"__proto__"}'],
   ])("first message %s → error UNAUTHORIZED + 1008", async (_name, frame) => {
-    const { handlers, texts } = recordingHandlers();
-    relay = await startRelay({ wsHandlers: handlers });
+    relay = await startRelay();
     const client = await connectClient(relay.url);
     client.sendRaw(frame);
     expect(await client.next()).toMatchObject({
@@ -107,26 +117,20 @@ describe("role fixed by the first message (SRV-05 criterion 1, §3.1)", () => {
       ts: relay.clock.now(),
     });
     expect(await client.closed).toBe(1008);
-    expect(texts).toEqual([]);
   });
 
-  it.each([
-    ["session.create", "publisher"],
-    ["session.resume", "publisher"],
-    ["viewer.join", "viewer"],
-  ])("first message %s is handed on (role %s)", async (type) => {
-    const { handlers, texts } = recordingHandlers();
-    relay = await startRelay({ wsHandlers: handlers });
-    const client = await connectClient(relay.url);
-    client.send({ type });
-    client.send({ type: "ping" });
-    await expect.poll(() => texts.length).toBe(2);
-    expect(texts.map((t) => [JSON.parse(t.text).type, t.first])).toEqual([
-      [type, true],
-      ["ping", false],
-    ]);
-    client.ws.close();
-  });
+  it.each(["session.create", "session.resume", "viewer.join"])(
+    "first message %s is accepted and keeps the socket open",
+    async (type) => {
+      relay = await startRelay();
+      const client = await connectClient(relay.url);
+      client.sendRaw(JSON.stringify(fixture(type)));
+      await client.next();
+      client.send({ type: "ping", id: "hb-1" });
+      expect(await client.next()).toMatchObject({ type: "pong", replyTo: "hb-1" });
+      client.ws.close();
+    },
+  );
 });
 
 describe("binary frames (SRV-05 criterion 2, §3.2, §3.3)", () => {
@@ -140,9 +144,21 @@ describe("binary frames (SRV-05 criterion 2, §3.2, §3.3)", () => {
 
   it("a viewer's binary frame → error UNAUTHORIZED + 1008", async () => {
     const { handlers, binaries } = recordingHandlers();
-    relay = await startRelay({ wsHandlers: handlers });
+    relay = await startRelay({ wsHandlers: { binary: handlers.binary } });
     const client = await connectClient(relay.url, { origin: ALLOWED });
-    client.send({ type: "viewer.join" });
+    await handshake(client, "viewer.join");
+    client.sendRaw(Buffer.alloc(64), true);
+    expect(await client.next()).toMatchObject({ type: "error", code: "UNAUTHORIZED" });
+    expect(await client.closed).toBe(1008);
+    expect(binaries).toEqual([]);
+  });
+
+  it("a publisher without a session (handshake not complete) → error UNAUTHORIZED + 1008", async () => {
+    const { handlers, binaries } = recordingHandlers();
+    relay = await startRelay({ wsHandlers: { binary: handlers.binary } });
+    const client = await connectClient(relay.url);
+    client.sendRaw(JSON.stringify(fixture("session.create", "invalid-missing-profile")));
+    expect(await client.next()).toMatchObject({ code: "INVALID_MESSAGE" });
     client.sendRaw(Buffer.alloc(64), true);
     expect(await client.next()).toMatchObject({ type: "error", code: "UNAUTHORIZED" });
     expect(await client.closed).toBe(1008);
@@ -151,9 +167,12 @@ describe("binary frames (SRV-05 criterion 2, §3.2, §3.3)", () => {
 
   it("a publisher's binary frame up to maxPayload is handed on", async () => {
     const { handlers, binaries } = recordingHandlers();
-    relay = await startRelay({ wsHandlers: handlers });
+    relay = await startRelay({
+      messageHandlers: BIND_ON_HANDSHAKE,
+      wsHandlers: { binary: handlers.binary },
+    });
     const client = await connectClient(relay.url);
-    client.send({ type: "session.create" });
+    await handshake(client, "session.create");
     client.sendRaw(Buffer.alloc(1_114_112), true);
     await expect.poll(() => binaries).toEqual([1_114_112]);
     client.ws.close();
@@ -161,9 +180,12 @@ describe("binary frames (SRV-05 criterion 2, §3.2, §3.3)", () => {
 
   it("a publisher's binary frame of 1,114,113 B → 1009 before the payload is read", async () => {
     const { handlers, binaries } = recordingHandlers();
-    relay = await startRelay({ wsHandlers: handlers });
+    relay = await startRelay({
+      messageHandlers: BIND_ON_HANDSHAKE,
+      wsHandlers: { binary: handlers.binary },
+    });
     const client = await connectClient(relay.url);
-    client.send({ type: "session.create" });
+    await handshake(client, "session.create");
     client.sendRaw(Buffer.alloc(1_114_113), true);
     expect(await client.closed).toBe(1009);
     expect(binaries).toEqual([]);
@@ -174,24 +196,24 @@ describe("text limits per role (SRV-05 criterion 3, §3.3)", () => {
   it.each([
     ["viewer.join", 16_384, 16_385],
     ["session.create", 262_144, 262_145],
-  ])("after %s: %i B accepted, %i B → PAYLOAD_TOO_LARGE + 1009", async (first, ok, tooBig) => {
-    const { handlers, texts } = recordingHandlers();
-    relay = await startRelay({ wsHandlers: handlers });
-    const client = await connectClient(relay.url);
-    client.send({ type: first });
-    client.sendRaw(frameOf("ping", ok));
-    await expect.poll(() => texts.length).toBe(2);
-    expect(Buffer.byteLength(texts[1]!.text)).toBe(ok);
-    client.sendRaw(frameOf("ping", tooBig));
-    expect(await client.next()).toMatchObject({
-      type: "error",
-      code: "PAYLOAD_TOO_LARGE",
-      retryable: false,
-      details: { maxTextBytes: ok },
-    });
-    expect(await client.closed).toBe(1009);
-    expect(texts).toHaveLength(2);
-  });
+  ] as const)(
+    "after %s: %i B accepted, %i B → PAYLOAD_TOO_LARGE + 1009",
+    async (first, ok, tooBig) => {
+      relay = await startRelay();
+      const client = await connectClient(relay.url);
+      await handshake(client, first);
+      client.sendRaw(frameOf("ping", ok));
+      expect(await client.next()).toMatchObject({ type: "pong", replyTo: "big" });
+      client.sendRaw(frameOf("ping", tooBig));
+      expect(await client.next()).toMatchObject({
+        type: "error",
+        code: "PAYLOAD_TOO_LARGE",
+        retryable: false,
+        details: { maxTextBytes: ok },
+      });
+      expect(await client.closed).toBe(1009);
+    },
+  );
 
   it.each([
     ["session.create", 262_144, 262_145],
@@ -203,12 +225,8 @@ describe("text limits per role (SRV-05 criterion 3, §3.3)", () => {
     relay = await startRelay({ wsHandlers: handlers });
     const accepted = await connectClient(relay.url);
     accepted.sendRaw(frameOf(type, ok));
-    if (type === "ping") {
-      expect(await accepted.next()).toMatchObject({ type: "error", code: "UNAUTHORIZED" });
-    } else {
-      await expect.poll(() => texts.length).toBe(1);
-      accepted.ws.close();
-    }
+    await expect.poll(() => texts.length).toBe(1);
+    accepted.ws.close();
     const refused = await connectClient(relay.url);
     refused.sendRaw(frameOf(type, tooBig));
     expect(await refused.next()).toMatchObject({
@@ -237,7 +255,7 @@ describe("handler failures (architecture §5)", () => {
       },
     });
     const client = await connectClient(relay.url);
-    client.send({ type: "viewer.join" });
+    client.sendRaw(JSON.stringify(fixture("viewer.join")));
     if (hook === "text") {
       expect(await client.next()).toMatchObject({
         type: "error",
@@ -263,12 +281,10 @@ describe("handler failures (architecture §5)", () => {
         text: () => {
           throw new Error("boom");
         },
-        binary: () => {},
-        closed: () => {},
       },
     });
     const client = await connectClient(relay.url);
-    client.send({ type: "viewer.join" });
+    client.sendRaw(JSON.stringify(fixture("viewer.join")));
     expect(await client.next()).toMatchObject({ type: "error", code: "INTERNAL", retryable: true });
     expect(await client.closed).toBe(1011);
     const other = await connectClient(relay.url);
