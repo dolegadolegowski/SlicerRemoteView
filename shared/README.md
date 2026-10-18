@@ -13,11 +13,11 @@ valid/invalid fixtures shared by every language, and generated types (`ts/`, `py
 
 | Path | Content |
 |---|---|
-| `schema/` | JSON Schema files, one per message type plus `envelope` and `defs` (PRO-02…) |
+| `schema/` | JSON Schema files: `envelope.schema.json`, `defs.schema.json` (common definitions) and one `<type>.schema.json` per message type |
 | `fixtures/messages/<type>/` | `valid-*.json` / `invalid-*.json` conformance fixtures (PRO-03…) |
 | `ts/` | TypeScript sources of `@slicerremoteview/shared` (entry `ts/index.ts`), built to `dist/` |
 | `test/` | vitest suites (`*.test.ts`); file names match the plan's `npm test -w shared -- <name>` filters |
-| `scripts/` | generation and check scripts (`*.mjs`) |
+| `scripts/` | generation and check scripts (`*.mjs`); `check-generators.mjs` = the PRO-02 generator spike |
 
 ## How to run
 
@@ -44,3 +44,36 @@ Consumers import the package as a workspace dependency: `import { PROTOCOL_VERSI
 
 Runtime dependency policy: only the schema validator (`ajv`); everything else is a devDependency
 (`prompts/01-protocol.md`). Python (`py/`, pytest) and C# (`cs/`) toolchains arrive with PRO-09 and PRO-17.
+
+## Schema conventions
+
+- Declared draft: **JSON Schema 2020-12** (`$schema` in every file), but restricted to a
+  **draft-07-compatible subset**: shared definitions live under `definitions` (not `$defs`), and
+  `unevaluatedProperties` / `$dynamicRef` / `$dynamicAnchor` are not used (`test/defs.test.ts` enforces this).
+- Cross-file references are relative to the `$id` base `https://slicerremoteview.dev/schema/`, e.g.
+  `{ "$ref": "defs.schema.json#/definitions/code" }`. Message schemas extend the envelope with
+  `"allOf": [{ "$ref": "envelope.schema.json" }]` and fix `type` with `"const"` **and** `"type": "string"`.
+- The envelope never sets `additionalProperties: false`: unknown fields must be accepted (`docs/protocol.md` §14).
+- Validation in TS: Ajv 2020 (`ajv/dist/2020.js`) in `strict` mode with `allowUnionTypes` (for `string|null`),
+  all files registered with `addSchema` — see `test/helpers.ts`.
+
+## Generator spike (PRO-02, ADR 0002 errata)
+
+`node shared/scripts/check-generators.mjs` runs quicktype (C# and TypeScript) over every file in `schema/` — so the
+evidence grows with each schema task — and, when `nswag` is on `PATH`, NJsonSchema's CLI. The `oneOf` row below was
+checked the same way on an ad-hoc `viewer.join`-like schema (PRO-04 adds the real one). Result recorded 2026-10-18 (quicktype 26.0.0; NJsonSchema checked in
+its sources and issue tracker because `.NET` is not in the sandbox):
+
+| Feature | quicktype 26 | NJsonSchema (master, 2026-10) |
+|---|---|---|
+| `definitions` + cross-file `$ref` | consumed (`Profile` enum, `ClientInfo` class generated from `defs`) | consumed (`definitions` is the only container it resolves) |
+| `$defs` | consumed | **not resolved** — open PR RicoSuter/NJsonSchema#1913, issue #1536 |
+| `const` | → single-value enum (`type Type = "viewer.join"`, C# `enum TypeEnum { ViewerJoin }`) | **not supported** for generation — issue #1329, PRs #1891/#1897 open; the sibling `"type": "string"` keeps the property a `string` |
+| `oneOf` of required-sets | branches merged into optional properties (checked with an ad-hoc `viewer.join`-like schema, not committed); a property that appears **only** as `required` in a branch, without a schema anywhere, becomes `unknown`/`object` — a property with a `$ref` in the branch is typed correctly | `[TODO verify]` with the first `dotnet` run (PRO-17) |
+
+Decisions taken from the spike: (1) schemas use `definitions`, never `$defs`; (2) every `type` keyword is
+`{"type": "string", "const": "…"}`; (3) `oneOf` is used only for required/forbidden combinations, while the
+property shapes are declared in the top-level `properties` (PRO-04 `viewer.join`); (4) C# generation (PRO-17)
+defaults to quicktype with `--framework NewtonSoft` unless NJsonSchema ships `$defs`/`const` by then.
+Sources: https://github.com/RicoSuter/NJsonSchema/pull/1913, https://github.com/RicoSuter/NJsonSchema/issues/1536,
+https://github.com/RicoSuter/NJsonSchema/issues/1329.

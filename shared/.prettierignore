@@ -10,3 +10,5 @@ fixtures/glb/
 fixtures/blob/
 # Markdown follows .editorconfig (110 cols, hand-formatted tables), not Prettier.
 *.md
+# Kept at <= 10 lines by the plan (PRO-02, ADR 0002 errata); Prettier would expand it.
+scripts/check-generators.mjs
