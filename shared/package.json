@@ -1,0 +1,48 @@
+{
+  "name": "@slicerremoteview/shared",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SlicerRemoteView protocol contract: JSON Schema, fixtures and generated TS/Python/C# types.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12 <23"
+  },
+  "files": [
+    "dist",
+    "schema",
+    "fixtures"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./ts": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./schema/*.json": "./schema/*.json",
+    "./fixtures/*": "./fixtures/*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "ajv": "^8.20.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.20.5",
+    "eslint": "^10.13.0",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.9.10",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.71.2",
+    "vitest": "^5.0.5"
+  }
+}

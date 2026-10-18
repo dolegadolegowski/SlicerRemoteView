@@ -1,0 +1,12 @@
+dist/
+node_modules/
+coverage/
+# Generated code is formatted by its generator (PRO-11, PRO-17).
+ts/generated/
+py/
+cs/
+# Binary and fixture blobs
+fixtures/glb/
+fixtures/blob/
+# Markdown follows .editorconfig (110 cols, hand-formatted tables), not Prettier.
+*.md
