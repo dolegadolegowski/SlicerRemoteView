@@ -1,0 +1,91 @@
+{
+  "$comment": "Test vectors for the 12-byte chunk header of docs/protocol.md §6.3 (PRO-07); Python (PRO-10) and C# (PRO-17) decode and re-encode the same files. Each entry is either a valid header (sceneVersion, chunkIndex) or an expected BAD_SEQUENCE field.",
+  "headerBytes": 12,
+  "magic": "SRVC",
+  "valid": [
+    {
+      "file": "chunk-header-v1-i0.bin",
+      "sceneVersion": 1,
+      "chunkIndex": 0
+    },
+    {
+      "file": "chunk-header-v43-i17.bin",
+      "sceneVersion": 43,
+      "chunkIndex": 17
+    },
+    {
+      "file": "chunk-header-v258-i1023.bin",
+      "sceneVersion": 258,
+      "chunkIndex": 1023
+    },
+    {
+      "file": "chunk-header-vmax-i0.bin",
+      "sceneVersion": 4294967295,
+      "chunkIndex": 0
+    }
+  ],
+  "invalid": [
+    {
+      "file": "chunk-header-bad-magic.bin",
+      "field": "magic",
+      "$comment": "magic SRVX"
+    },
+    {
+      "file": "chunk-header-index-over.bin",
+      "field": "chunkIndex",
+      "$comment": "chunkIndex 1024 > 1023 (§3.3: at most 1024 chunks)"
+    },
+    {
+      "file": "chunk-header-short.bin",
+      "field": "length",
+      "$comment": "11 bytes, one short of the header"
+    }
+  ],
+  "frames": [
+    {
+      "file": "chunk-frame-v43-i2-5bytes.bin",
+      "sceneVersion": 43,
+      "chunkIndex": 2,
+      "payloadHex": "0001020304"
+    }
+  ],
+  "chunkify": [
+    {
+      "$comment": "§6.2 example: 2.5 MiB at 1 MiB → 3 chunks, last 0.5 MiB",
+      "byteLength": 2621440,
+      "chunkSize": 1048576,
+      "chunkCount": 3,
+      "lastPayloadLength": 524288
+    },
+    {
+      "byteLength": 196609,
+      "chunkSize": 65536,
+      "chunkCount": 4,
+      "lastPayloadLength": 1
+    },
+    {
+      "byteLength": 1048576,
+      "chunkSize": 1048576,
+      "chunkCount": 1,
+      "lastPayloadLength": 1048576
+    },
+    {
+      "byteLength": 67108864,
+      "chunkSize": 65536,
+      "chunkCount": 1024,
+      "lastPayloadLength": 65536
+    }
+  ],
+  "sha256": [
+    {
+      "$comment": "empty input",
+      "inputHex": "",
+      "hex": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "$comment": "ASCII abc (FIPS 180-2 example)",
+      "inputHex": "616263",
+      "hex": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    }
+  ]
+}

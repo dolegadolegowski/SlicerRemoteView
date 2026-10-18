@@ -15,7 +15,9 @@ valid/invalid fixtures shared by every language, and generated types (`ts/`, `py
 |---|---|
 | `schema/` | JSON Schema files: `envelope.schema.json`, `defs.schema.json` (common definitions) and one `<type>.schema.json` per message type |
 | `fixtures/messages/<type>/` | `valid-*.json` / `invalid-*.json` conformance fixtures, one directory per message type |
-| `ts/` | TypeScript sources of `@slicerremoteview/shared` (entry `ts/index.ts`), built to `dist/` |
+| `ts/` | TypeScript sources of `@slicerremoteview/shared` (entry `ts/index.ts`), built to `dist/`: `chunk.ts` (§6.3 chunk header, `chunkify`, `checkChunk`, `sha256Hex`), `code.ts` (session-code alphabet, `normalizeCode`) |
+| `fixtures/blob/` | binary test vectors of the chunk header (`chunk-header-*.bin`, table in `chunk-headers.json`, see its `README.md`) shared with Python/C# |
+| `fixtures/codes/` | `normalize-cases.json`: `normalizeCode` inputs and expected codes/hints (ADR 0008 §7) |
 | `test/` | vitest suites (`*.test.ts`); file names match the plan's `npm test -w shared -- <name>` filters |
 | `scripts/` | generation and check scripts (`*.mjs`); `check-generators.mjs` = the PRO-02 generator spike |
 
@@ -26,11 +28,24 @@ From the repository root (Node 22, npm workspaces — one `package-lock.json`):
 ```bash
 npm install            # resolves every workspace, including @slicerremoteview/shared
 npm test -w shared     # vitest, all suites
-npm test -w shared -- toolchain   # one suite by file-name filter (e.g. defs, session from PRO-02/03)
+npm test -w shared -- toolchain   # one suite by file-name filter (defs, session, viewer, snapshot, scene, chunk, code)
 ```
 
 Consumers import the package as a workspace dependency: `import { PROTOCOL_VERSION } from "@slicerremoteview/shared"`
 (also exported as `@slicerremoteview/shared/ts`; schemas via `@slicerremoteview/shared/schema/<name>.schema.json`).
+
+## Runtime helpers (`ts/`)
+
+Browser-safe (no `node:` imports, WebCrypto for hashing):
+
+| Export | Purpose |
+|---|---|
+| `encodeChunkHeader({sceneVersion, chunkIndex})`, `decodeChunkHeader(frame)` | 12-byte little-endian `SRVC` header of `docs/protocol.md` §6.3; decode returns `{ok, value: {sceneVersion, chunkIndex, payload}}` or `{ok: false, error: {code: "BAD_SEQUENCE", field, message}}` |
+| `checkChunk(chunk, expected)` | §6.3 receiver rules (known `sceneVersion`, strict order, payload size) → `offset` to copy to, or `BAD_SEQUENCE` naming the field (`magic`, `length`, `sceneVersion`, `chunkIndex`, `payload` — the vocabulary Python/C# mirror) |
+| `chunkify(glb, chunkSize = 1 MiB)`, `encodeChunkFrame`, `chunkCountFor`, `expectedPayloadLength` | publisher side of §6.2: views over the GLB, `ceil(byteLength / chunkSize)` chunks, `RangeError` outside 64 KiB..1 MiB / 1024 chunks / 64 MiB |
+| `sha256Hex(bytes)` | SHA-256 as 64 lowercase hex (the `sha256` def), Node and browsers |
+| `normalizeCode(input)`, `isCode`, `ALPHABET`, `CODE_PATTERN`, `CODE_HINTS` | ADR 0008 §7: trim, strip `-`/spaces, upper-case; `{code}` or `{error: "INVALID_CODE", hint, offendingChar?}` with the `0`/`O` and `1`/`I`/`L` hints — confusables are rejected, never mapped |
+| `MIN_CHUNK_SIZE`, `MAX_CHUNK_SIZE`, `MAX_CHUNK_COUNT`, `MAX_SNAPSHOT_BYTES`, `CHUNK_HEADER_BYTES` | the §3.3 limits the helpers enforce (PRO-06 folds them into `LIMITS`) |
 
 ## Test, lint and build commands
 

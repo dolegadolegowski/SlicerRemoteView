@@ -1,0 +1,81 @@
+{
+  "$comment": "normalizeCode() cases of ADR 0008 §7 / FR-35 (PRO-07); Python normalize_code (PRO-10) and the viewers reproduce them. `hint` names a key of CODE_HINTS, not the English text.",
+  "cases": [
+    {
+      "input": " 7kq4x ",
+      "code": "7KQ4X"
+    },
+    {
+      "input": "7KQ4X",
+      "code": "7KQ4X"
+    },
+    {
+      "input": "7kq-4x",
+      "code": "7KQ4X"
+    },
+    {
+      "input": "7 KQ 4X",
+      "code": "7KQ4X"
+    },
+    {
+      "input": "abcde",
+      "code": "ABCDE"
+    },
+    {
+      "input": "7KQ0X",
+      "error": "INVALID_CODE",
+      "hint": "zeroOrO",
+      "offendingChar": "0"
+    },
+    {
+      "input": "7KQOX",
+      "error": "INVALID_CODE",
+      "hint": "zeroOrO",
+      "offendingChar": "O"
+    },
+    {
+      "input": "7KQ1X",
+      "error": "INVALID_CODE",
+      "hint": "oneIorL",
+      "offendingChar": "1"
+    },
+    {
+      "input": "7kqix",
+      "error": "INVALID_CODE",
+      "hint": "oneIorL",
+      "offendingChar": "I"
+    },
+    {
+      "input": "7KQLX",
+      "error": "INVALID_CODE",
+      "hint": "oneIorL",
+      "offendingChar": "L"
+    },
+    {
+      "input": "7KQ#X",
+      "error": "INVALID_CODE",
+      "hint": "notInAlphabet",
+      "offendingChar": "#"
+    },
+    {
+      "input": "7KQ4",
+      "error": "INVALID_CODE",
+      "hint": "length"
+    },
+    {
+      "input": "7KQ4XY",
+      "error": "INVALID_CODE",
+      "hint": "length"
+    },
+    {
+      "input": "   ",
+      "error": "INVALID_CODE",
+      "hint": "empty"
+    },
+    {
+      "input": "",
+      "error": "INVALID_CODE",
+      "hint": "empty"
+    }
+  ]
+}
