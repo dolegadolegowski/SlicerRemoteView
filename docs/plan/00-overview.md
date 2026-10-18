@@ -2,7 +2,8 @@
 
 Active milestone: M0
 
-Status: v1, written by `architect` on 2026-10-17 (Phase D of `prompts/00-goal.md`). Owned by `release` on
+Status: v1.1, written by `architect` on 2026-10-17 (Phase D of `prompts/00-goal.md`; pre-implementation review
+applied the same day — split tasks PRO-18/19, SRV-23/24, SLC-22, DEP-13, QA-13/14). Owned by `release` on
 `main` (CLAUDE.md rule 4): workstreams read this file, only `release` edits it. Component plans
 (`docs/plan/<component>.md`) are owned by their workstreams. Requirements: `docs/requirements.md` (FR/NFR);
 contract: `docs/protocol.md` v1.0; design and threat model: `docs/architecture.md`; decisions: `docs/adr/`.
@@ -46,7 +47,8 @@ Definition of Done:
 - [ ] GitHub Actions runs lint, typecheck, unit tests and the Docker build for every push; Python tests run for
   `shared/py` and `slicer-plugin` (NFR-39).
 
-Tasks: PRO-01…PRO-14 · SRV-01, SRV-02, SRV-03, SRV-20 · WEB-01 · SLC-01, SLC-02 · DEP-01, DEP-02, DEP-03 · QA-01.
+Tasks: PRO-01…PRO-14, PRO-18, PRO-19 · SRV-01, SRV-02, SRV-03, SRV-20 · WEB-01 · SLC-01, SLC-02 · DEP-01, DEP-02,
+DEP-03 · QA-01.
 
 ### M1 — MVP web
 
@@ -67,8 +69,8 @@ Definition of Done:
 - [ ] Automated E2E (fake-slicer → relay → web viewer, iPhone and Pixel descriptors) and a relay log-grep test
   pass in CI; Railway IaC exists and the first deploy is verified manually (NFR-37, NFR-39).
 
-Tasks: PRO-15 · SRV-04…SRV-11, SRV-14, SRV-16, SRV-18, SRV-22 · WEB-02…WEB-10 · SLC-03…SLC-10 ·
-DEP-04, DEP-05, DEP-06, DEP-09, DEP-12 · QA-02, QA-03, QA-05, QA-07.
+Tasks: PRO-15 · SRV-04…SRV-11, SRV-23, SRV-24, SRV-14, SRV-16, SRV-18, SRV-22 · WEB-02…WEB-10 · SLC-03…SLC-10,
+SLC-22 · DEP-04, DEP-13, DEP-05, DEP-06, DEP-09, DEP-12 · QA-02, QA-03, QA-05, QA-07.
 
 ### M2 — Live scene
 
@@ -87,11 +89,12 @@ Definition of Done:
   (US-17, FR-10, FR-15, FR-17, FR-49, NFR-03, NFR-04, NFR-23).
 - [ ] Viewer frees memory on new snapshots, survives WebGL context loss, keeps the screen awake, is installable
   as a PWA; bundle ≤ 1 MB gzipped (FR-45, FR-46, NFR-08, NFR-09).
-- [ ] Negative tests for T1–T12 that can run without devices pass; load test with 20 viewers meets NFR-05;
-  `docs/security.md` maps every threat to a test (NFR-18).
+- [ ] Automated negative tests for T1–T4 and T6–T11 pass (QA-05, QA-06, QA-14, QA-07, QA-13); T5 and T12 are
+  covered by audit (DEP-06/DEP-07 TLS checks, DEP-09 dependency and actions audit); load test with 20 viewers
+  meets NFR-05; `docs/security.md` maps every threat to a test or an audit entry (NFR-18).
 
 Tasks: PRO-16 · SRV-12, SRV-13, SRV-15, SRV-17, SRV-21 · WEB-11…WEB-18 · SLC-11…SLC-19 · DEP-07, DEP-08,
-DEP-10 · QA-04, QA-06, QA-08, QA-09, QA-10.
+DEP-10 · QA-04, QA-06, QA-14, QA-08, QA-13, QA-09, QA-10.
 
 ### M3a — Quest WebXR
 
@@ -179,29 +182,36 @@ using stubs; `slicer` needs only `protocol` (vendored Python) and a relay to tes
 
 Critical path to the M1 demo (Slicer → relay → phone), in order; every ID below carries `⚑` in its plan:
 
-1. `PRO-01 → PRO-02 → PRO-03 → PRO-04 → PRO-05 → PRO-06 → PRO-07 → PRO-08 → PRO-13 → PRO-14`
-   (schemas, TS validation library, chunk codec, GLB fixtures, fake-slicer streaming a snapshot).
-2. `SRV-04 → SRV-05 → SRV-06 → SRV-07 → SRV-09 → SRV-10 → SRV-11 → SRV-22`
-   (registry, handshake, publisher, viewer join, snapshot ingest, fan-out, HTTP scene, integration test with
-   fake-slicer). `SRV-08` (rate limit), `SRV-14` (heartbeat), `SRV-16` (static viewer), `SRV-18` (log redaction)
-   are M1 but off the path.
+1. `PRO-01 → PRO-02 → {PRO-03 ‖ PRO-18 ‖ PRO-04 ‖ PRO-05 ‖ PRO-19} → PRO-06 → PRO-13 → PRO-14`
+   (schemas, TS validation library, fake-slicer streaming a snapshot). The five schema tasks depend only on
+   PRO-02 and run side by side; `PRO-07` (chunk codec) and `PRO-08` (GLB fixtures) depend only on `PRO-01` and
+   run in parallel with the schemas — PRO-13/PRO-14 need them, the schemas do not.
+2. `SRV-04 → SRV-05 → SRV-23 → SRV-06 → SRV-07 → SRV-09 → SRV-24 → SRV-10 → SRV-11 → SRV-22`
+   (registry, upgrade/role handshake, envelope + permissions, publisher, viewer join, chunk ingest, verify +
+   cache swap, fan-out, HTTP scene, integration test with fake-slicer). `SRV-08` (rate limit), `SRV-14`
+   (heartbeat), `SRV-16` (static viewer), `SRV-18` (log redaction) are M1 but off the path.
 3. `WEB-02 → WEB-03 → WEB-04 → WEB-05 → WEB-06 → WEB-07 → WEB-08 → WEB-09 → WEB-10`
    (errors catalogue, code entry, ws client, reassembly, HTTP fetch, GLTF parse + nodeId map, controls, node
-   panel, Playwright mobile smoke).
-4. `SLC-03 → SLC-04 → SLC-05 → SLC-06 → SLC-07 → SLC-08 → SLC-09`
-   (vendoring, GLB writer, coordinates, protocol client, MRML collection, IO thread, UI with first snapshot).
-5. `QA-02 → QA-03` (harness and happy-path E2E) → manual E2E with a real Slicer (`docs/testing/slicer.md` §M1)
-   → `release M1`.
+   panel, Playwright mobile smoke). WEB-10 runs against the PRO-13 relay stub (`[stub allowed]` for SRV-22), so
+   the web chain never waits for the server chain.
+4. `SLC-03 → SLC-04 → SLC-05 → SLC-06 → SLC-07 → SLC-08 → SLC-09 → SLC-22`
+   (vendoring, GLB writer, coordinates, protocol client, MRML collection, IO thread, UI panel, consent + first
+   snapshot). This chain runs **in parallel with chains 2 and 3** (pure Python against the PRO-13 stub); it does
+   not wait for QA-03 — only the manual §2 run with a phone needs `relay-server` on `main`.
+5. `QA-02 → QA-03` (harness and happy-path E2E; waits for SRV-22 and WEB-10 on `main`) → manual E2E with a real
+   Slicer (`docs/testing/slicer.md` §2) → `release M1`.
 
-Compact form: PRO-01 → … → PRO-14 → SRV-05 → … → SRV-22 → WEB-04 → … → WEB-10 → QA-03 → SLC-09 → release M1.
+Compact form: PRO-01 → PRO-02 → {PRO-03 ‖ PRO-18 ‖ PRO-04 ‖ PRO-05 ‖ PRO-19} → PRO-06 → PRO-13 → PRO-14 →
+[SRV-04 → SRV-05 → SRV-23 → SRV-06 → SRV-07 → SRV-09 → SRV-24 → SRV-10 → SRV-11 → SRV-22 ‖ WEB-02 → … → WEB-10 ‖
+SLC-03 → … → SLC-09 → SLC-22] → QA-02 → QA-03 → release M1.
 
 Parallelism per milestone:
 
 | Milestone | Can run in parallel | Must wait |
 |---|---|---|
-| M0 | `protocol` (PRO-01…14); `server` SRV-01…03, SRV-20 with `[stub: PRO-06/07]`; `web` WEB-01; `slicer` SLC-01, SLC-02; `deploy` DEP-01…03; `qa` QA-01 | DEP-03 waits for SRV-20; PRO-13/14 wait for PRO-06…08 |
-| M1 | `server` SRV-04…11 and `web` WEB-02…09 side by side (web uses PRO-13 relay stub until SRV-22); `slicer` SLC-03…08 (pure Python) alongside; `deploy` DEP-04/05/09/12 | WEB-10 and QA-03 wait for SRV-22 on `main`; SLC-09/10 need a relay (fake stub or SRV-07+); DEP-06 is a manual first deploy after DEP-04 |
-| M2 | `server` SRV-12/13/15/17/21; `web` WEB-11…18; `slicer` SLC-11…19; `deploy` DEP-07/08 | WEB-12/14 may stub SRV-12/13/15; QA-04/06/08 wait for the server and web tasks they test; DEP-10 waits for QA-02/05 |
+| M0 | `protocol` (PRO-01…14, PRO-18, PRO-19 — PRO-03/18/04/05/19 side by side after PRO-02, PRO-07/08 right after PRO-01); `server` SRV-01…03, SRV-20 with `[stub: PRO-06/07]`; `web` WEB-01; `slicer` SLC-01, SLC-02; `deploy` DEP-01…03; `qa` QA-01 | DEP-03 waits for SRV-20; PRO-06 waits for the five schema tasks; PRO-13/14 wait for PRO-06…08 |
+| M1 | `server` SRV-04…11, SRV-23, SRV-24 and `web` WEB-02…10 side by side (WEB-10 marks SRV-22 `[stub allowed]` and runs against the PRO-13 relay stub, so it does not wait); `slicer` SLC-03…09, SLC-22 (pure Python + the PRO-13 stub) in parallel with both; `deploy` DEP-04 → DEP-13 → DEP-05, DEP-09, DEP-12 | QA-03 waits for SRV-22 and WEB-10 on `main`; the manual §2 run of SLC-22/SLC-10 with a phone needs `relay-server` on `main` (SRV-07+); DEP-06 is a manual first deploy after DEP-04 and SRV-22 |
+| M2 | `server` SRV-12/13/15/17/21; `web` WEB-11…18; `slicer` SLC-11…19; `deploy` DEP-07/08 | WEB-12/14 may stub SRV-12/13/15; QA-04/06/14/08/13 wait for the server and web tasks they test; DEP-10 waits for QA-02/05 |
 | M3a | `web` WEB-19/20; `qa` QA-11 | device testing on Quest 2 and 3 (manual) |
 | M3b | `protocol` PRO-17 then `quest` QST-01…16 | QST-02 (wss smoke) needs DEP-06 (a deployed relay); QST-03 needs PRO-17 |
 | M4 | SRV-19, WEB-21, SLC-20/21, DEP-11, QA-12 all independent | `release` steps (user guide, tag) last |
@@ -223,12 +233,9 @@ Parallelism per milestone:
    with `grep -m1 '^Active milestone:' docs/plan/00-overview.md`.
 4. **Updates to shared documents.** Only `release` edits `CLAUDE.md`, this file, `docs/architecture.md`,
    `docs/requirements.md`; discrepancies found by workstreams are reported in the PR description or in
-   `docs/testing/reports/`. Known items for `release` at the time of writing: `docs/requirements.md` FR-13 and
-   FR-63 still use pre-contract message names (`create_session`, `end_session`, `scene_reset`) — the protocol
-   names (`session.create`, `session.close`, new snapshot after scene close) are authoritative; FR-26/NFR-13 say
-   lockout 15 min while `docs/protocol.md` §12 says 10 min (plans follow the protocol); ADR 0008 specifies a
-   10-minute code quarantine while `docs/architecture.md` §3 says "no cooldown" (plans implement the quarantine,
-   configurable).
+   `docs/testing/reports/`. The discrepancies found during the pre-implementation review (pre-contract message
+   names in requirements, lockout 15 vs 10 min, code quarantine vs "no cooldown", 64 vs 16 KiB viewer limit)
+   were resolved on 2026-10-17 in favour of `docs/protocol.md`; ADRs carry errata sections instead of edits.
 5. **Reports.** Bugs in another component go to `docs/testing/reports/<date>-<reporter>-<n>.md`; the owner
    triages at its next start (CLAUDE.md rule 9).
 
@@ -236,14 +243,14 @@ Parallelism per milestone:
 
 | Plan | Component | Branch | Tasks | M0 | M1 | M2 | M3a | M3b | M4 |
 |---|---|---|---|---|---|---|---|---|---|
-| `docs/plan/protocol.md` | `protocol` | `ws/protocol` | 17 | 14 | 1 | 1 | 0 | 1 | 0 |
-| `docs/plan/server.md` | `server` | `ws/server` | 22 | 4 | 12 | 5 | 0 | 0 | 1 |
+| `docs/plan/protocol.md` | `protocol` | `ws/protocol` | 19 | 16 | 1 | 1 | 0 | 1 | 0 |
+| `docs/plan/server.md` | `server` | `ws/server` | 24 | 4 | 14 | 5 | 0 | 0 | 1 |
 | `docs/plan/web.md` | `web` | `ws/web` | 21 | 1 | 9 | 8 | 2 | 0 | 1 |
-| `docs/plan/slicer.md` | `slicer` | `ws/slicer` | 21 | 2 | 8 | 9 | 0 | 0 | 2 |
+| `docs/plan/slicer.md` | `slicer` | `ws/slicer` | 22 | 2 | 9 | 9 | 0 | 0 | 2 |
 | `docs/plan/quest.md` | `quest` | `ws/quest` | 16 | 0 | 0 | 0 | 0 | 16 | 0 |
-| `docs/plan/deploy.md` | `deploy` | `ws/deploy` | 12 | 3 | 5 | 3 | 0 | 0 | 1 |
-| `docs/plan/qa.md` | `qa` | `ws/qa` | 12 | 1 | 4 | 5 | 1 | 0 | 1 |
-| **Total** | | | **121** | 25 | 39 | 31 | 3 | 17 | 6 |
+| `docs/plan/deploy.md` | `deploy` | `ws/deploy` | 13 | 3 | 6 | 3 | 0 | 0 | 1 |
+| `docs/plan/qa.md` | `qa` | `ws/qa` | 14 | 1 | 4 | 7 | 1 | 0 | 1 |
+| **Total** | | | **129** | 27 | 43 | 33 | 3 | 17 | 6 |
 
 ## 7. Retro
 

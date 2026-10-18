@@ -51,7 +51,7 @@ and tokens never in URL paths or logs. Verified facts (`docs/research/relay.md`,
    first WebSocket message (`join { code }`). The viewer calls `history.replaceState(null, '', '/j')` after reading
    it. The relay never accepts a code in a path, query string, header or cookie (such requests 404/400 without echo).
 6. **Anti-guessing:** (a) HTTP: `@fastify/rate-limit` on the upgrade route, 60/min/IP, `trustProxy: true`;
-   (b) WebSocket join: in-process per-IP limiter **10 join attempts/min**, **ban for 15 min after 20 failed joins**
+   (b) WebSocket join: in-process per-IP limiter **10 join attempts/min**, **ban for 10 min after 20 failed joins**
    (sliding window, HMAC-hashed IP keys); after 3 failures on one socket the relay closes it with 4xxx
    `too_many_attempts`; (c) **global failed-join alarm**: > 1,000 failed joins/hour logs a `warn` with counts only
    and tightens the per-IP limit to 3/min until the hour resets; operators may switch to 6 symbols by config;
@@ -118,3 +118,20 @@ and tokens never in URL paths or logs. Verified facts (`docs/research/relay.md`,
 - pino redaction (belt-and-braces for `code`/`token` keys): https://github.com/pinojs/pino/blob/main/docs/redaction.md
 - Code-space and guessing figures: `docs/research/relay.md` §4 (architect's recomputation 2026-10-17 in this ADR)
 - MDN `CloseEvent.code` (4000–4999 application codes): https://developer.mozilla.org/en-US/docs/Web/API/CloseEvent/code
+
+## Errata (2026-10-17, pre-implementation review)
+
+- 2026-10-17 — Message names: `create_session` → **`session.create`**, `session_created` → **`session.created`**,
+  `resume { code, token }` → **`session.resume{sessionId, publisherToken, lastSceneVersion}`**, `join { code }` →
+  **`viewer.join{code}`**, `joined` → **`viewer.joined`** (protocol §4, §5). **`session.create` has no token
+  field** — only `clientInfo`, `profile` and `preferredCode`; `preferredCode` is honoured when the code is free,
+  i.e. neither in `byCode` (active or grace session) nor in the quarantine set (protocol §4.1, architecture §3).
+- 2026-10-17 — Error/close names: `invalid_code` → **`INVALID_CODE`** (close `4004`), `session_full` →
+  **`SESSION_FULL`** (`4005`), `too_many_attempts` → **`RATE_LIMITED`** (`4006`), `session_ended` →
+  `session.closed` + `4001` / `session.expired` + `4002` (protocol §9.2, §9.3).
+- 2026-10-17 — Decision 4: the viewer token allows rejoin **for the whole session** (not "within 120 s"); rejoins by
+  token are never rate-limited (protocol §5.1, §12).
+- 2026-10-17 — Decision 6a: the HTTP upgrade limit is **30/min/IP** (not 60) — protocol §12, architecture §8 T3.
+- 2026-10-17 — Decision 6b: the per-socket rule "after 3 failures on one socket … `too_many_attempts`" is
+  **dropped**. A socket is closed `4004` right after its first failed `viewer.join{code}`; the per-IP limits
+  (10 join attempts/min, **ban 10 min after 20 failed joins in 10 min** — unchanged) are the only lockout.

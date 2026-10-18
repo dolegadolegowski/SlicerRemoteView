@@ -74,7 +74,7 @@ the publisher's scene to viewers: a **GLB snapshot** (full geometry) plus **incr
 | `ws` `maxPayload` (server-wide) | 1 MiB + 64 KiB (1,114,112 B) | relay | `@fastify/websocket` has one server-wide limit (relay.md §2); chunking lets it be small for everyone |
 | Max snapshot (`MAX_SNAPSHOT_BYTES`) | 64 MiB (67,108,864 B) hard | relay (`PAYLOAD_TOO_LARGE` on `scene.snapshot.begin`) | 1 M quantized triangles with normals ≈ 20–30 MiB; 64 MiB leaves headroom and bounds relay memory at 2× per session (architecture.md §5) |
 | Recommended snapshot, `mobile` profile | ≤ 32 MiB (33,554,432 B) | publisher (decimation) | Safari WebContent process limit ≈ 1.5 GB (web.md §2); GLB + three.js copies ≈ 4× the file; keep well under 1 GB |
-| Max chunks per snapshot | 64 | derived | 64 MiB / 1 MiB |
+| Max chunks per snapshot | 1,024 | relay (`INVALID_MESSAGE` on `scene.snapshot.begin`) | 64 MiB / 64 KiB (smallest `chunkSize`); the relay checks `chunkCount == ceil(byteLength / chunkSize) <= 1024` |
 | Chunk inter-arrival timeout | 120 s | relay (abort snapshot, `BAD_SEQUENCE`) | stalled publisher must not pin memory |
 | Global snapshot budget (`MAX_TOTAL_SNAPSHOT_BYTES`) | 512 MiB default (cached + in-flight, all sessions) | relay (`CAPACITY` on `scene.snapshot.begin`) | `Buffer`s are off-heap, so an application budget is the only effective guard (relay.md §6); ≈ 50 % of a 1 GiB container |
 | Max live sessions (`MAX_SESSIONS`) | 100 default | relay (`CAPACITY` on `session.create`) | bounds memory and the live-code population `S` (section 12) |
@@ -88,7 +88,7 @@ the publisher's scene to viewers: a **GLB snapshot** (full geometry) plus **incr
 | Idle TTL without viewers (`SESSION_TTL_S`) | 1,800 s | relay | shrinks the live-code population (anti-guessing) |
 | Max session lifetime (`SESSION_MAX_LIFETIME_S`) | 43,200 s (12 h) | relay | memory hygiene |
 | Handshake timeout | 10 s | relay (`4012`) | idle upgraded sockets |
-| Viewer slow-consumer watermark | skip live chunks at `bufferedAmount` > 8 MiB; close `4010` at > 32 MiB or stuck > 60 s | relay | `ws` backpressure is `bufferedAmount` only (relay.md §2) |
+| Viewer slow-consumer watermarks | soft **4 MiB**: stop forwarding live chunks to that viewer (it fetches via HTTP after `scene.snapshot.ready`); hard **8 MiB** or stuck > 60 s: close `4010` `SLOW_CONSUMER` | relay | `ws` backpressure is `bufferedAmount` only (relay.md §2); Σ over all viewers is capped by `MAX_TOTAL_BUFFERED_BYTES` (architecture.md §4) |
 
 ## 4. Session lifecycle (publisher)
 
@@ -147,9 +147,10 @@ Success → `session.resumed`:
   publisher socket is still open (then the old socket is closed with `4011` — handles half-open sockets).
 - `snapshotVersion` tells the publisher which snapshot the relay still caches; if `null` or older than the
   publisher's current scene, the publisher MUST send a new snapshot.
-- Failure (`SESSION_NOT_FOUND` after a relay redeploy, or `UNAUTHORIZED` on token mismatch): the relay replies
-  `error` and keeps the socket open for 10 s so the publisher can fall back to `session.create` with
-  `preferredCode` set to the old code. Viewers meanwhile retry the same code (section 11, walkthrough step 9).
+- Failure `SESSION_NOT_FOUND` (after a relay redeploy): the relay replies `error` and keeps the socket open
+  for 10 s so the publisher can fall back to `session.create` with `preferredCode` set to the old code. Failure
+  `UNAUTHORIZED` (token mismatch): `error` then close `4003` **immediately** — no fallback on that socket
+  (section 9.2). Viewers meanwhile retry the same code (section 11, walkthrough step 9).
 
 ### 4.4 `session.renew`, `session.expiring`, `session.renewed`
 
@@ -215,8 +216,9 @@ Rejoin after a disconnect, without spending a rate-limit slot on the code:
                   "capabilities": { "httpScene": true, "maxSnapshotBytes": 67108864 } } }
 ```
 
-`platform` ∈ `web | quest-browser | quest2 | quest3 | other`; no device identifiers, no user names.
-Exactly one of `code` or (`sessionId` + `viewerToken`) is present.
+`platform` ∈ `web | quest-browser | quest2 | quest3 | other`; `clientInfo.profile` (`mobile | quest2 | quest3`)
+is **informational** — the budget is chosen by the publisher (section 7.5). No device identifiers, no user
+names. Exactly one of `code` or (`sessionId` + `viewerToken`) is present.
 
 ### 5.2 `viewer.joined` (relay → viewer)
 
@@ -231,8 +233,9 @@ Exactly one of `code` or (`sessionId` + `viewerToken`) is present.
 
 - `viewerToken` (≥ 128-bit, base64url, relay stores the hash) authorises `GET /api/scene/:sceneVersion`
   and rejoin. It is bound to the session and dies with it.
-- `snapshotAvailable: true` means the viewer SHOULD immediately fetch the cached GLB over HTTP (section 6.5)
-  and expect a `scene.state` message right after `viewer.joined` (section 8.3).
+- `snapshotAvailable: true` means the viewer SHOULD immediately fetch the cached GLB over HTTP (section 6.5).
+  A `scene.state` message **always** follows `viewer.joined` (empty when nothing changed since the snapshot;
+  section 8.3), so clients have one code path.
 - Failure: `error` with `code` ∈ `INVALID_CODE | SESSION_NOT_FOUND | SESSION_FULL | RATE_LIMITED |
   UNAUTHORIZED | CAPACITY`, then close `4004`–`4006` (section 9). `INVALID_CODE` covers both "malformed"
   and "no such live session" so that responses do not reveal which codes are live.
@@ -278,15 +281,17 @@ relay    → viewers:  … or scene.snapshot.ready {sceneVersion, byteLength, sh
 ```
 
 - `sceneVersion` MUST be greater than every version used so far in the session (section 8.4).
-- `chunkSize` is fixed for the snapshot (all chunks but the last have exactly this payload size);
-  `chunkCount = ceil(byteLength / chunkSize)`; `chunkSize` ≤ 1 MiB; SHOULD be 1 MiB (or ≥ 64 KiB).
+- `chunkSize` MUST be between 64 KiB and 1 MiB (SHOULD be 1 MiB) and is identical for all chunks except the
+  last; the relay checks `chunkCount == ceil(byteLength / chunkSize) <= 1024` (`INVALID_MESSAGE` otherwise).
 - `extensionsUsed` MUST be a subset of what v1 allows: `KHR_mesh_quantization` only (Draco is planned for
   v1.1 — ADR-0001; meshopt is excluded because Unity's decoder is experimental, quest.md §4).
 - The relay rejects the message with `error` `PAYLOAD_TOO_LARGE` if `byteLength > MAX_SNAPSHOT_BYTES`, or
   `CAPACITY` if the global snapshot budget would be exceeded; it then ignores the chunks of that version.
 - A `scene.snapshot.begin` while another snapshot is in flight **aborts** the in-flight one (relay sends
-  `scene.snapshot.abort` for the old version to viewers). Any `scene.update` sent between `begin` and `end`
-  MUST have `baseVersion ≥ sceneVersion` of the snapshot (it applies on top of it).
+  `scene.snapshot.abort` for the old version to viewers). The publisher MUST NOT send `scene.update` or
+  `scene.nodeRemoved` between `scene.snapshot.begin` and `scene.snapshot.end`: the relay answers `error`
+  `BAD_SEQUENCE` (`retryable: true`) and ignores the message. The publisher queues state changes locally and
+  sends them after `end` with `baseVersion` = the new snapshot version.
 
 ### 6.3 Binary chunk format
 
@@ -341,7 +346,7 @@ publisher (user cancelled export) or by the relay. Receivers free the partial bu
 ```
 
 `scene.snapshot.ready` tells a viewer "fetch this version over HTTP". The relay sends it (a) to viewers that
-were connected but skipped during streaming because their `bufferedAmount` exceeded the watermark,
+were connected but skipped during streaming because their `bufferedAmount` exceeded the soft watermark (4 MiB),
 (b) to viewers that joined while a snapshot was in flight, (c) in answer to `scene.request`.
 
 ### 6.5 Late joiners and the HTTP path — which one viewers should prefer
@@ -360,7 +365,7 @@ Two ways exist to obtain the latest complete snapshot:
 Rule: a viewer MUST support the HTTP path (`capabilities.httpScene: true`) and SHOULD use it whenever the
 relay announces an existing snapshot (`viewer.joined.snapshotAvailable`, `scene.snapshot.ready`). Streaming is
 what a connected viewer receives for *new* snapshots; the relay decides per viewer at `scene.snapshot.begin`
-(stream if `bufferedAmount` < 8 MiB, otherwise defer to `scene.snapshot.ready`). A viewer that cannot keep the
+(stream if `bufferedAmount` < 4 MiB, otherwise defer to `scene.snapshot.ready`). A viewer that cannot keep the
 HTTP path (e.g. a future constrained client) MAY instead send `scene.request` after `viewer.joined` and will
 get a streamed copy only if the relay has spare budget — this is a best-effort fallback, not a guarantee.
 
@@ -432,11 +437,15 @@ Viewers map `extras.nodeId → T`, set visibility/transform on `T`, and material
 
 ### 7.5 Budget profiles (publisher-side decimation, ADR-0005)
 
-| Profile | Total triangles | Snapshot size target | Max visible nodes | Source |
-|---|---|---|---|---|
-| `mobile` | ≤ 500 k | ≤ 32 MiB | ≤ 120 meshes | Safari memory (web.md §2), mid-range Android draw calls `[TODO verify]` |
-| `quest2` | ≤ 500 k | ≤ 32 MiB | ≤ 60 | Meta: < 750 k tris, < 100 draw calls (quest.md §7) |
-| `quest3` | ≤ 1 M | ≤ 64 MiB | ≤ 120 | Meta: < 1.5 M tris, < 200 draw calls (quest.md §7) |
+| Profile | Total triangles | Per node (after decimation) | Snapshot size target | Max visible nodes | Source |
+|---|---|---|---|---|---|
+| `mobile` | ≤ 500 k | ≤ 100,000 | ≤ 32 MiB recommended (64 MiB hard) | ≤ 120 meshes | Safari memory (web.md §2), mid-range Android draw calls `[TODO verify]` |
+| `quest2` | ≤ 500 k | ≤ 100,000 | ≤ 32 MiB recommended (64 MiB hard) | ≤ 60 | Meta: < 750 k tris, < 100 draw calls (quest.md §7) |
+| `quest3` | ≤ 1 M | ≤ 100,000 | ≤ 64 MiB (hard) | ≤ 120 | Meta: < 1.5 M tris, < 200 draw calls (quest.md §7) |
+
+The profile is **chosen by the publisher** (Slicer UI) and announced in `session.create.profile`; viewers only
+report `platform` and an informational `profile` (section 5.1). Nodes above the per-node cap are decimated
+further, **never dropped** (requirements FR-10 / NFR-04).
 
 ## 8. Incremental updates
 
@@ -458,7 +467,10 @@ Viewers map `extras.nodeId → T`, set visibility/transform on `T`, and material
   last-writer-wins per property. Unknown `nodeId` → viewer ignores the item (and MAY log).
 - `baseVersion` is the version the receiver must currently hold; `sceneVersion` is the new version.
   The relay enforces `baseVersion == session.sceneVersion` and `sceneVersion > baseVersion`, else `error`
-  `BAD_SEQUENCE` to the publisher (the publisher then re-syncs by sending a snapshot).
+  `BAD_SEQUENCE` to the publisher (the publisher then re-syncs by sending a snapshot). A `scene.update` or
+  `scene.nodeRemoved` received **while a snapshot is in flight** (between `begin` and `end`) is always
+  `BAD_SEQUENCE` (`retryable: true`) and ignored (section 6.2); the publisher resends it after `end` with
+  `baseVersion` = the snapshot version.
 - Debounce guidance for the publisher: coalesce MRML events for 100–250 ms; mesh-level events 500–1000 ms
   (slicer.md §3).
 
@@ -496,9 +508,10 @@ visual properties only — never names — so the relay stays free of PHI beyond
   "removed": ["vtkMRMLModelNode5"] }
 ```
 
-Sent (a) right after `viewer.joined` when `sceneVersion > snapshotVersion`, (b) after `scene.snapshot.ready`
-for the same reason, (c) in reply to `scene.request`. A viewer applies it after the GLB of `snapshotVersion`
-is loaded and then continues with live messages whose `baseVersion ≥ sceneVersion` of the state.
+Sent (a) **always** right after `viewer.joined` — with `nodes: []`, `removed: []` when nothing accumulated
+since the snapshot (and `snapshotVersion: null` while no snapshot exists), so clients have one code path —,
+(b) after `scene.snapshot.ready`, (c) in reply to `scene.request`. A viewer applies it after the GLB of
+`snapshotVersion` is loaded and then continues with live messages whose `baseVersion ≥ sceneVersion` of the state.
 
 ```json
 { "protocolVersion": "1.0", "type": "scene.request", "id": "v-12",
@@ -563,7 +576,7 @@ version unchanged once v1.1 defines them; in v1.0 they are rejected with `UNSUPP
 | `BAD_SEQUENCE` | version/chunk ordering violated; `details` names the field | true | none; snapshot discarded |
 | `CHECKSUM_MISMATCH` | SHA-256 mismatch at `scene.snapshot.end` | true | none |
 | `UNAUTHORIZED` | wrong token, role not allowed to send this type, binary from viewer | false | `4003` / `1008` |
-| `SLOW_CONSUMER` | viewer buffer over hard watermark | true | `4010` |
+| `SLOW_CONSUMER` | viewer `bufferedAmount` over the hard watermark (8 MiB), stuck > 60 s, or evicted under `MAX_TOTAL_BUFFERED_BYTES` | true | `4010` |
 | `CAPACITY` | relay global budget (sessions/bytes) exhausted | true | `4006` |
 | `INTERNAL` | unexpected relay failure | true | `1011` |
 
@@ -648,7 +661,8 @@ close `1008`. The relay never originates scene content; it forwards publisher me
   the first deploy): WebSocket upgrades 30/min; `viewer.join` with a `code` **10/min**, counted inside the
   socket handler as well as at the HTTP layer; after **20 failed joins within 10 min** the IP is banned for
   **10 min** (`RATE_LIMITED`, `details.retryAfterS: 600`); `session.create` 5/min; `GET /api/scene` 30/min
-  per token. Rejoins with a valid `viewerToken` do not count.
+  per token. Rejoins with a valid `viewerToken` do not count. Every failed `viewer.join` closes its socket
+  (`4004`–`4006`, section 5.2) — there is no per-socket retry allowance; the limits above are per IP only.
 - Global alarm: > 1,000 failed joins/hour across all IPs → `warn` log event (counts only), per-IP join limit
   tightened to 3/min for one hour, `/metrics` counter `join_failures_total` for operators.
 - Responses to failed joins are uniform (`INVALID_CODE`, same timing ± jitter) so they do not reveal which
@@ -665,7 +679,8 @@ close `1008`. The relay never originates scene content; it forwards publisher me
    Relay verifies the hash, caches the buffer, replies `scene.snapshot.ack`. No viewers yet; idle timer runs.
 3. Phone A scans the QR → `GET /j` (fragment stays local) → SPA reads `#7KQ4X`, cleans the URL, opens the
    WebSocket, sends `viewer.join{code:"7KQ4X"}` → `viewer.joined{sceneVersion:1, snapshotVersion:1,
-   snapshotAvailable:true, viewerToken}`; relay sends `viewer.count{1}` to Slicer and A.
+   snapshotAvailable:true, viewerToken}` + empty `scene.state{sceneVersion:1, snapshotVersion:1, nodes:[],
+   removed:[]}`; relay sends `viewer.count{1}` to Slicer and A.
 4. A fetches `GET /api/scene/1` with the Bearer token, verifies SHA-256, parses the GLB, builds its node list
    from `extras`, renders. Elapsed since scan: a few seconds on Wi-Fi.
 5. Lecturer hides the liver: Slicer `scene.update{sceneVersion:2, baseVersion:1, changes:[{nodeId:
@@ -676,12 +691,14 @@ close `1008`. The relay never originates scene content; it forwards publisher me
    equals A. `viewer.count{2}` to all.
 7. Lecturer loads a new model: plugin sends `scene.nodeAdded{sceneVersion:3, baseVersion:2, snapshotFollows:true}`
    then `scene.snapshot.begin{sceneVersion:4, …}` + chunks + `end`. A has `bufferedAmount` ≈ 0 → streamed;
-   B is on slow 4G with 9 MiB buffered → deferred, gets `scene.snapshot.ready{sceneVersion:4}` after `end`
-   and fetches over HTTP. Both end at version 4; relay state is reset to empty.
+   B is on slow 4G with 5 MiB buffered (over the 4 MiB soft watermark) → deferred, gets
+   `scene.snapshot.ready{sceneVersion:4}` after `end` and fetches over HTTP. A visibility change made in
+   Slicer during the upload is queued by the plugin and sent after `end` as `scene.update{sceneVersion:5,
+   baseVersion:4}`. Both viewers end at version 5; relay state holds that one change.
 8. B's Safari goes to the background; the relay's WS ping gets no pong, B is removed, `viewer.count{1}`.
    B returns, `visibilitychange` triggers reconnect with `viewer.join{sessionId, viewerToken}` (no rate-limit
-   cost), gets `viewer.joined{sceneVersion:4, snapshotVersion:4}`; its cached GLB version matches, so it only
-   applies the (empty) `scene.state` and continues.
+   cost), gets `viewer.joined{sceneVersion:5, snapshotVersion:4}` and the `scene.state` that always follows;
+   its cached GLB version matches, so it only applies the state and continues.
 9. Operator redeploys the relay. The new instance passes `/healthz`; the old one receives SIGTERM and, within
    `RAILWAY_DEPLOYMENT_DRAINING_SECONDS`, sends close `4008` to every socket (no `session.*` message —
    sessions cannot survive a redeploy, relay.md §1.8). Slicer reconnects after 0–3 s and sends
@@ -689,11 +706,11 @@ close `1008`. The relay never originates scene content; it forwards publisher me
    `session.create{preferredCode:"7KQ4X"}` → granted (registry empty) → re-sends the snapshot as version 1.
    Viewers reconnect with `viewer.join{sessionId, viewerToken}` → `error SESSION_NOT_FOUND` → they fall back
    to `viewer.join{code:"7KQ4X"}` with the code they still hold → `viewer.joined{sceneVersion:0,
-   snapshotAvailable:false, publisherOnline:true}` and wait for the stream. Total disruption: seconds; the
-   code on the lecture screen never changed.
+   snapshotAvailable:false, publisherOnline:true}` + empty `scene.state{snapshotVersion:null}` and wait for
+   the stream. Total disruption: seconds; the code on the lecture screen never changed.
 10. Lecturer's laptop loses Wi-Fi for 40 s: relay marks the publisher offline, viewers get
     `session.publisherState{online:false, graceEndsAt}` and keep the frozen scene; Slicer reconnects within
-    grace with `session.resume` → `session.resumed{sceneVersion:4, snapshotVersion:4}` → no re-upload
+    grace with `session.resume` → `session.resumed{sceneVersion:5, snapshotVersion:4}` → no re-upload
     needed; viewers get `session.publisherState{online:true}`.
 11. Lecture ends: Slicer `session.close{reason:"USER_STOPPED"}` → viewers receive `session.closed` and close
     `4001`, show "presentation ended". Relay frees the buffer and the code.
@@ -718,3 +735,4 @@ close `1008`. The relay never originates scene content; it forwards publisher me
 | Version | Date | Changes |
 |---|---|---|
 | `1.0` | 2026-10-17 | Initial contract: session lifecycle with resume token, viewer join by code or token, chunked GLB snapshot with 12-byte chunk header and SHA-256, HTTP cached-scene endpoint, incremental `scene.update`/`scene.nodeRemoved`, relay-merged `scene.state`, heartbeat, error model, close codes `4000–4012`, permissions matrix, rate limits. Reserved: `scene.camera`, `viewer.command` (v1.1 / M4), Draco (`KHR_draco_mesh_compression`) and per-node GLB in `scene.nodeAdded` (v1.1 candidates). |
+| `1.0` | 2026-10-17 | Review fixes before any implementation: chunk limit 1024 (`chunkSize` 64 KiB–1 MiB), in-flight update rule (`BAD_SEQUENCE`, publisher queues until `end`), `scene.state` always sent after `viewer.joined`, slow-consumer watermarks 4/8 MiB, per-node triangle cap 100 k, `UNAUTHORIZED` on resume closes `4003` immediately. |

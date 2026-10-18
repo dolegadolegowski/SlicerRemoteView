@@ -115,3 +115,19 @@ Verified facts (`docs/research/relay.md`, `web.md`, `quest.md`, checked 2026-10-
 - Vitest 5: https://registry.npmjs.org/vitest/latest ; Playwright 1.64.1: https://registry.npmjs.org/@playwright/test/latest
 - FastAPI / Starlette WebSockets: https://fastapi.tiangolo.com/advanced/websockets/ ; https://starlette.dev/websockets/ ; uvicorn settings: https://github.com/encode/uvicorn/blob/master/docs/settings.md ; python-websockets compression/memory: https://websockets.readthedocs.io/en/stable/topics/compression.html ; https://websockets.readthedocs.io/en/stable/topics/memory.html
 - Newtonsoft for Unity 3.2: https://docs.unity3d.com/Packages/com.unity.nuget.newtonsoft-json@3.2/changelog/CHANGELOG.html ; NJsonSchema: https://github.com/RicoSuter/NJsonSchema
+
+## Errata (2026-10-17, pre-implementation review)
+
+- 2026-10-17 — Decision 2 proposes server-wide `maxPayload` = publisher maximum (64 MiB). Protocol §3.3 fixes
+  **`maxPayload` = 1 MiB + 64 KiB (1,114,112 B) server-wide** because snapshots are chunked (§6.2, chunks
+  64 KiB–1 MiB); the per-role **text** limits are 256 KiB (publisher) and **16 KiB (viewer)**, enforced in the
+  message handler with close `1009`. The "64 KiB viewer limit" wording is superseded.
+- 2026-10-17 — Decision 4 ("draft-07 unless …") is superseded: the schemas use **JSON Schema 2020-12**
+  (`docs/protocol.md` §14, `docs/plan/protocol.md`). Task PRO-02 includes a spike — a ≤ 10-line check committed
+  under `shared/scripts/` — verifying that NJsonSchema and quicktype consume the features actually used (`$defs`,
+  `oneOf`, `const`); if either fails, the schemas are restricted to a draft-07-compatible subset of 2020-12 rather
+  than declaring a different draft per consumer.
+- 2026-10-17 — Backpressure numbers referenced in Decision 2 are set by protocol §3.3: soft watermark **4 MiB**
+  (stop live chunks to that viewer, it receives `scene.snapshot.ready` and fetches over HTTP), hard **8 MiB** or
+  stuck > 60 s (`SLOW_CONSUMER`, close `4010`), and a global cap `MAX_TOTAL_BUFFERED_BYTES` (160 MiB default) under
+  which the slowest consumer is evicted first. `trustProxy` is the env var `TRUST_PROXY` (default true).

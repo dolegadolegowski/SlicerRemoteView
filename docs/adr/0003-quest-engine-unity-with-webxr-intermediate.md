@@ -118,3 +118,14 @@ Verified facts (`docs/research/quest.md`, `web.md`, 2026-10-17):
 - Unreal: https://developers.meta.com/horizon/documentation/unreal/unreal-quick-start-install-prerequisites/ ; https://developers.meta.com/horizon/downloads/package/unreal-engine-5-integration/
 - WebXR: Meta Quest Browser release notes: https://developers.meta.com/horizon/documentation/web/browser-release-notes/ ; MR in Browser: https://developers.meta.com/horizon/documentation/web/webxr-mixed-reality/ ; hands: https://developers.meta.com/horizon/documentation/web/webxr-hands/ ; WebXR secure context: https://immersive-web.github.io/webxr/#navigator-xr-attribute ; caniuse WebXR: https://caniuse.com/webxr
 - three.js `XRButton.js` / `XRControllerModelFactory.js`: https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/jsm/webxr/XRButton.js ; https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/jsm/webxr/XRControllerModelFactory.js
+
+## Errata (2026-10-17, pre-implementation review)
+
+- 2026-10-17 — Decision 3 mentions a "one-time viewer token (reserved in `docs/protocol.md`)" for the HTTPS
+  fallback. Nothing is reserved: late join and the fallback both use the **normal Bearer `viewerToken`** returned in
+  `viewer.joined`, sent as `Authorization: Bearer` on `GET /api/scene/:sceneVersion` (protocol §6.5, §10); the
+  token is valid for the whole session.
+- 2026-10-17 — Follow-ups name the smoke test "`QST-01`". In `docs/plan/quest.md` the Unity project skeleton is
+  `QST-01` and the **`wss://` IL2CPP smoke test is `QST-02`** (it needs a deployed relay — DEP-06).
+- 2026-10-17 — Profiles: the Quest client reports `platform` `quest2 | quest3` and an informational `profile`
+  (protocol §5.1); the decimation profile itself is chosen by the publisher (§7.5).

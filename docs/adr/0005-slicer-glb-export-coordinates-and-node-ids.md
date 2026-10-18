@@ -119,3 +119,19 @@ VTK 9.6):
 - `vtkSlicerSegmentationsModuleLogic.cxx` (GetSegmentClosedSurfaceRepresentation, ExportSegmentsToModels): https://raw.githubusercontent.com/Slicer/Slicer/main/Modules/Loadable/Segmentations/Logic/vtkSlicerSegmentationsModuleLogic.cxx ; segment IDs: https://slicer.readthedocs.io/en/latest/developer_guide/modules/segmentations.html
 - `slicer/util.py` (arrayFromModelPoints, VTKObservationMixin): https://raw.githubusercontent.com/Slicer/Slicer/main/Base/Python/slicer/util.py ; `vtkCellArray`: https://vtk.org/doc/nightly/html/classvtkCellArray.html ; Python FAQ (no pip at import, `pip_ensure`): https://slicer.readthedocs.io/en/latest/developer_guide/python_faq.html ; `slicer/packaging.py`: https://raw.githubusercontent.com/Slicer/Slicer/v5.12.4/Base/Python/slicer/packaging.py
 - Decimation: https://vtk.org/doc/nightly/html/classvtkQuadricDecimation.html ; https://vtk.org/doc/nightly/html/classvtkDecimatePro.html ; conversion rule: https://raw.githubusercontent.com/Slicer/Slicer/main/Libs/vtkSegmentationCore/vtkBinaryLabelmapToClosedSurfaceConversionRule.cxx ; glTFast handedness contrast (UnityGLTF #257): https://github.com/KhronosGroup/UnityGLTF/issues/257
+
+## Errata (2026-10-17, pre-implementation review)
+
+- 2026-10-17 — Transforms (Decisions 2 and 3): protocol §7.2/§8.1 and architecture §6.4 are authoritative.
+  Segment surfaces are fetched with **`applyParentTransform=False`**; **only non-linear parent transforms are
+  baked** into the vertices (`baked: true`, identity `T.matrix`); for linear (or no) parent transforms the
+  geometry stays in the node's own frame and **`T.matrix` carries the absolute world matrix** `C · M_world · C⁻¹`.
+  `scene.update.changes[].matrix` **replaces** `T.matrix`; there is no delta `D = M_new · M_old⁻¹`.
+- 2026-10-17 — Decision 6: `roughnessFactor` is **0.6** (protocol §7.4; the publisher may tune 0.4–0.9), not ≈ 0.8.
+- 2026-10-17 — Decision 5 / Follow-ups: **`scene.reset` does not exist** in protocol v1.0. `EndCloseEvent` /
+  `EndImportEvent` produce `scene.nodeRemoved` for the vanished nodes (or `scene.nodeAdded{snapshotFollows:true}`)
+  followed by a **new snapshot** with a higher `sceneVersion` (§8.2–8.4).
+- 2026-10-17 — Decision 7 stands as written: "Hide node names" defaults to **off**; the anonymised label format in
+  protocol §7.3 is `Model <n>` with root `extras.anonymizedNames: true` (not `node-<n>`).
+- 2026-10-17 — Decision 1 / ADR 0001 erratum: the writer emits **two glTF nodes per entity** — `T` (extras,
+  matrix) with one mesh child `M` (protocol §7.2).

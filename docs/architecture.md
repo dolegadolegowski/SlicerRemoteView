@@ -91,7 +91,7 @@ sequenceDiagram
   R->>R: rate limit per IP (10/min), lookup code
   alt valid
     R-->>P: viewer.joined {viewerToken, sceneVersion, snapshotVersion, snapshotAvailable}
-    R-->>P: scene.state (if sceneVersion above snapshotVersion)
+    R-->>P: scene.state (always; empty nodes/removed when nothing changed since the snapshot)
     R-->>S: viewer.count {viewerCount, platforms}
     P->>R: GET /api/scene/:snapshotVersion  Authorization: Bearer viewerToken
     R-->>P: 200 model/gltf-binary (streamed Buffer)
@@ -107,10 +107,11 @@ sequenceDiagram
   participant S as Slicer plugin
   participant R as Relay
   participant A as Viewer A (fast)
-  participant B as Viewer B (slow, bufferedAmount over 8 MiB)
-  S->>R: scene.snapshot.begin {sceneVersion 43, byteLength, sha256, chunkCount}
-  R->>R: check MAX_SNAPSHOT_BYTES and global budget, allocate assembly buffer
+  participant B as Viewer B (slow, bufferedAmount over 4 MiB soft watermark)
+  S->>R: scene.snapshot.begin {sceneVersion 43, byteLength, sha256, chunkCount, chunkSize}
+  R->>R: check MAX_SNAPSHOT_BYTES, global budget, chunkCount == ceil(byteLength/chunkSize) <= 1024; allocate assembly buffer
   R->>R: classify viewers: A stream, B defer
+  Note over S,R: no scene.update / scene.nodeRemoved until end (relay answers BAD_SEQUENCE); plugin queues changes
   R-->>A: scene.snapshot.begin
   loop chunk i = 0..N-1
     S->>R: binary [SRVC | 43 | i | payload]
@@ -122,8 +123,10 @@ sequenceDiagram
   R-->>A: scene.snapshot.end
   R-->>B: scene.snapshot.ready {sceneVersion 43, byteLength, sha256}
   R-->>S: scene.snapshot.ack {viewersStreamed 1, viewersDeferred 1}
+  S->>R: scene.update {sceneVersion 44, baseVersion 43} (queued changes, sent only after end)
   B->>R: GET /api/scene/43 (Bearer viewerToken)
   R-->>B: 200 GLB
+  Note over R,B: B crossing the 8 MiB hard watermark (or Σ bufferedAmount over MAX_TOTAL_BUFFERED_BYTES) is closed 4010 SLOW_CONSUMER
 ```
 
 ### 2.4 Incremental update
@@ -150,7 +153,7 @@ sequenceDiagram
   participant R as Relay
   L->>R: viewer.join {code}
   R-->>L: viewer.joined {sceneVersion 46, snapshotVersion 43, snapshotAvailable true, snapshot{...}}
-  R-->>L: scene.state {sceneVersion 46, snapshotVersion 43, nodes[], removed[]}
+  R-->>L: scene.state {sceneVersion 46, snapshotVersion 43, nodes[], removed[]}  (always sent, even when empty)
   L->>R: GET /api/scene/43 (Bearer viewerToken)
   R-->>L: 200 GLB (ETag = sha256)
   L->>L: verify sha256, parse GLB, build nodeId map, apply scene.state, apply queued updates (baseVersion at least 46)
@@ -169,7 +172,7 @@ sequenceDiagram
   V->>R: viewer.join {sessionId, viewerToken}   (no code, not rate-limited as a guess)
   alt session alive
     R-->>V: viewer.joined {sceneVersion, snapshotVersion}
-    R-->>V: scene.state (if needed)
+    R-->>V: scene.state (always; possibly empty)
     V->>V: snapshotVersion unchanged -> keep geometry, apply state
   else session gone (expired or relay restarted)
     R-->>V: error SESSION_NOT_FOUND
@@ -268,7 +271,7 @@ interface Viewer {
   joinedAt: number; lastSeen: number;
   platform: "web" | "quest-browser" | "quest2" | "quest3" | "other";
   streaming?: number;               // sceneVersion currently being streamed to this viewer
-  watermarks: { softBytes: 8 * 2 ** 20; hardBytes: 32 * 2 ** 20; stuckMs: 60_000 }; // bufferedAmount policy
+  watermarks: { softBytes: 4 * 2 ** 20; hardBytes: 8 * 2 ** 20; stuckMs: 60_000 }; // bufferedAmount policy (protocol §3.3)
   sceneRequests: number;            // throttle scene.request to 1 per 5 s
 }
 interface Registry {
@@ -276,6 +279,7 @@ interface Registry {
   viewerTokens: Map<string /*hash hex*/, { sessionId: string; viewerId: string }>;
   ipJoinWindow: Map<string /*hashed ip*/, { count: number; windowStart: number; failures: number; bannedUntil?: number }>;
   totalSnapshotBytes: number;                                         // vs MAX_TOTAL_SNAPSHOT_BYTES
+  totalBufferedBytes: number;                                         // Σ socket.bufferedAmount of all viewers vs MAX_TOTAL_BUFFERED_BYTES
 }
 ```
 
@@ -296,9 +300,9 @@ stateDiagram-v2
 
 Code allocation: `crypto.randomInt(31)` per symbol, retry on collision with `byCode` (collision probability
 with 1,000 live sessions ≈ 3.5e-5 per draw, relay.md §4). `preferredCode` is honoured only when absent from
-`byCode`. There is no cooldown on reuse: a freed code may be reissued immediately, which is acceptable because a
-viewer that types a stale code sees a different presenter's *empty or current* scene only if that presenter's
-session is live and the viewer limit allows — the residual risk is listed in section 8 (T1).
+`byCode` or the quarantine set. A freed code enters a **10-minute quarantine** (`CODE_QUARANTINE_S`, ADR 0008) before
+it can be reissued, so a viewer who types a code from a just-ended session gets `SESSION_NOT_FOUND` rather than a
+different presenter's scene; after quarantine the residual risk is listed in section 8 (T1).
 
 ## 4. Limits and budgets
 
@@ -307,13 +311,16 @@ session is live and the viewer limit allows — the residual risk is listed in s
 | Viewers per session | 20 (`MAX_VIEWERS`) | relay env | one lecture room / one ward round; 20 × 32 MiB = 640 MiB egress per snapshot ≈ $0.03 at $0.05/GB (relay.md §1.7); fan-out CPU is header-only per socket (relay.md §3) |
 | Snapshot hard cap | 64 MiB (`MAX_SNAPSHOT_BYTES`) | relay env; protocol max | 1 M quantized triangles ≈ 20–30 MiB `[TODO verify]` with real exports; Quest 3 profile ceiling (quest.md §7) |
 | Snapshot recommended, `mobile`/`quest2` | ≤ 32 MiB | publisher decimation | Safari WebContent limit ≈ 1.5 GB; peak ≈ GLB + parsed copies + GPU ≈ 4× (web.md §2) |
-| Per-session relay memory | ≤ 2 × snapshot (cached + assembling) + state map (< 1 MiB) | design | the assembling buffer replaces the cached one atomically at `scene.snapshot.end` |
+| Per-session relay memory | ≤ 2 × snapshot (cached + assembling) + state map (< 1 MiB) + Σ viewer send buffers (≤ 20 × 8 MiB) | design | the assembling buffer replaces the cached one atomically at `scene.snapshot.end`; send buffers are bounded by the watermarks below |
+| Viewer send buffer (`bufferedAmount`) | soft 4 MiB (stop forwarding live chunks, viewer fetches via HTTP) / hard 8 MiB or stuck > 60 s (close `4010 SLOW_CONSUMER`) per viewer; Σ all viewers ≤ `MAX_TOTAL_BUFFERED_BYTES` = 160 MiB | relay env | protocol §3.3; theoretical worst case `MAX_SESSIONS` 100 × 20 viewers × 8 MiB = 16 GiB, so the global cap is what makes the memory bound real: above it the relay closes the slowest consumers `4010` until under budget |
 | Global snapshot budget | `MAX_TOTAL_SNAPSHOT_BYTES` = 512 MiB default | relay env | ≈ 50 % of a 1 GiB container; `Buffer`s are off-heap so `--max-old-space-size` does **not** bound them — the application budget is the real guard (relay.md §6) |
+| Global memory bound | `MAX_TOTAL_SNAPSHOT_BYTES` 512 MiB + `MAX_TOTAL_BUFFERED_BYTES` 160 MiB + heap/baseline (< 200 MiB) < 1 GiB | design | the two application budgets plus the heap cap are what let a **1 GiB** container suffice |
 | Max sessions | `MAX_SESSIONS` = 100 default | relay env | 100 × typical 10–20 MiB fits the budget; also bounds the live-code population `S` |
 | Text message | 256 KiB publisher / 16 KiB viewer | relay | protocol §3.3 |
 | Binary chunk | 1 MiB + 12 B; `ws maxPayload` 1 MiB + 64 KiB | relay | one server-wide `maxPayload` in `@fastify/websocket` (relay.md §2); browser WS message limits undocumented (web.md §5) |
 | Heartbeat | client `ping` 15 s / `pong` 10 s; relay WS ping 30 s | protocol | browsers cannot send pings; Railway has no WS idle timeout but NATs do (relay.md §1.3) |
 | Publisher grace | 120 s (`PUBLISHER_GRACE_S`) | relay env | covers Wi-Fi roaming and the 30 s drain window |
+| Code quarantine after release | 600 s (`CODE_QUARANTINE_S`) | relay env | a code from a just-ended session is not reissued for 10 min (ADR 0008) |
 | Idle TTL (no viewers) | 1,800 s (`SESSION_TTL_S`) | relay env | anti-guessing: keep `S` small; renewable |
 | Max lifetime | 43,200 s (`SESSION_MAX_LIFETIME_S`) | relay env | memory hygiene; a lecture day |
 | Join attempts | 10/min/IP; ban 10 min after 20 failures/10 min; global alarm 1,000/h | relay | relay.md §4; protocol §12 |
@@ -332,10 +339,12 @@ session is live and the viewer limit allows — the residual risk is listed in s
   `chunkIndex == nextChunk`, copy into `assembling.buffer`, forward the same frame to viewers marked
   `streaming`. The relay never decodes GLB content.
 - **Fan-out and backpressure:** one `Buffer` per snapshot, same reference passed to every `send()` (`ws`
-  only prepends a frame header, relay.md §3). Before `begin`, viewers with `bufferedAmount` > 8 MiB are
-  deferred to `scene.snapshot.ready`; during streaming a viewer crossing 32 MiB or stuck > 60 s is closed with
-  `4010`. Publisher reading is paused (`socket.pause()` on the stream) while `totalSnapshotBytes` plus
-  in-flight exceeds the global budget.
+  only prepends a frame header, relay.md §3). Before `begin`, viewers with `bufferedAmount` > 4 MiB (soft
+  watermark) are deferred to `scene.snapshot.ready`; during streaming a viewer crossing 8 MiB (hard watermark)
+  or stuck > 60 s is closed with `4010` `SLOW_CONSUMER`. The relay also keeps `totalBufferedBytes` = Σ
+  `bufferedAmount` over all viewer sockets; when it exceeds `MAX_TOTAL_BUFFERED_BYTES` (160 MiB) the slowest
+  consumers are closed `4010` until the sum is under budget. Publisher reading is paused (`socket.pause()` on
+  the stream) while `totalSnapshotBytes` plus in-flight exceeds the global budget.
 - **Snapshot cache:** latest complete snapshot only; `GET /api/scene/:v` serves it with
   `Content-Length` and `ETag` and lets Node's HTTP stream handle backpressure. `404` for any other version.
 - **State map:** merged `scene.update`/`scene.nodeRemoved`, sent as `scene.state` to late joiners; reset on
@@ -371,7 +380,9 @@ MRML observers (main thread)  ->  dirty set + debounce  ->  change set
    geometry). `scene.nodeAdded` is sent first as a UI hint.
 4. **Export (main thread, VTK):** per visible model/segment: `GetPolyData()` or
    `vtkSlicerSegmentationsModuleLogic.GetSegmentClosedSurfaceRepresentation(..., applyParentTransform=False)`
-   (parent transform goes into `T.matrix`; non-linear → bake with `vtkTransformPolyDataFilter`, `baked:true`),
+   (the linear parent transform goes into the **absolute world** `T.matrix`, which later `scene.update.matrix`
+   messages replace; **only non-linear** transforms are baked into the vertices with
+   `vtkTransformPolyDataFilter`, `baked:true`, `T.matrix` identity),
    `vtkTriangleFilter` → `vtkQuadricDecimation` to the per-node share of the profile budget (proportional to
    input triangle count, min 2 k per node; fallback `vtkDecimatePro(PreserveTopologyOn)` if degenerate) →
    `vtkPolyDataNormals(SplittingOff)` → numpy copies (`np.array(copy=True)`), one node per timer tick with a
@@ -430,7 +441,7 @@ little as possible; publishers are semi-trusted (anyone with the extension); vie
 |---|---|---|---|---|---|
 | T1 | Code guessing | brute-force `viewer.join` from one or many IPs | unauthorised viewer sees a live scene | 31^5 space; 10 joins/min/IP, ban after 20 failures, global alarm tightening to 3/min; uniform `INVALID_CODE` with jitter; idle sessions expire; `viewer.count` lets the presenter notice an extra viewer; `MAX_SESSIONS` bounds `S` | distributed attacker with many IPs raises odds (0.2 %/h per IP at S = 100); a stale code reissued to a new session; mitigation: presenter can stop/restart to rotate the code (v1.1: optional 6-char or PIN) |
 | T2 | DoS via large blobs | oversized `scene.snapshot.begin`, giant frames, endless chunks, many sessions | relay OOM / eviction, other sessions lost | `ws maxPayload` 1 MiB + 64 KiB (closes `1009` before reading); `MAX_SNAPSHOT_BYTES`, `MAX_TOTAL_SNAPSHOT_BYTES`, `MAX_SESSIONS`; chunk timeout 120 s; `session.create` 5/min/IP; Railway restart policy | an authenticated publisher can still fill its own budget; Railway vertical autoscale bills before OOM — budget caps are the control |
-| T3 | DoS via many connections | socket floods, handshake without first message, slow readers | fd/memory exhaustion | upgrade limit 30/min/IP, handshake timeout 10 s (`4012`), slow-consumer close `4010`, `MAX_VIEWERS` 20, Railway ~10 k connections/domain | volumetric attacks are Railway's edge problem; no WAF in v1 |
+| T3 | DoS via many connections | socket floods, handshake without first message, slow readers | fd/memory exhaustion | upgrade limit 30/min/IP, handshake timeout 10 s (`4012`), slow-consumer watermarks 4/8 MiB with close `4010`, `MAX_TOTAL_BUFFERED_BYTES` 160 MiB, `MAX_VIEWERS` 20, Railway ~10 k connections/domain | volumetric attacks are Railway's edge problem; no WAF in v1 |
 | T4 | Publisher impersonation | theft/replay of `publisherToken` (resume) or hijack of a free code | attacker replaces the scene viewers see | token ≥ 128 bit random, hashed at rest, only in WS body over TLS, bound to `sessionId`, valid only in `grace`/live, never in URL/logs/disk; `4011` closes the older socket so a hijack is visible to the real publisher | malware on the presenter PC has the token in process memory; accepted |
 | T5 | Eavesdropping | network capture between client and edge or edge and container | PHI disclosure | TLS 1.2/1.3 at Railway edge (Let's Encrypt); WSS/HTTPS only; viewer refuses `ws://` outside `localhost`; Slicer client uses `ssl.create_default_context()` and never offers "disable verification" | edge → container hop is Railway-internal; trust in Railway (DPA) `[TODO verify]` for the institution |
 | T6 | Leakage via logs, URL paths, fragments, Referer | codes/tokens in edge HTTP logs, pino logs, browser history, screenshots | code/token exposure, re-use | code only in URL **fragment** (`/j#CODE`, never sent); `history.replaceState` removes it; no code/token in any path/query/header except `Authorization` for `/api/scene`; pino `redact`; no request-body logging; `Referrer-Policy: no-referrer`; only `sessionId`/`viewerId` logged | a user screenshotting the QR shares the code (by design); Railway logs may include query strings `[TODO verify]` — moot because nothing secret is ever there |
@@ -463,14 +474,20 @@ teaching/anonymised cases.
 | `METRICS_TOKEN` | unset → `/metrics` disabled (404) | bearer for Prometheus scrape |
 | `SESSION_TTL_S` | `1800` | idle TTL without viewers |
 | `PUBLISHER_GRACE_S` | `120` | resume window after publisher drop |
+| `CODE_QUARANTINE_S` | `600` | released codes are not reissued for this long (ADR 0008) |
 | `SESSION_MAX_LIFETIME_S` | `43200` | hard cap per session |
 | `MAX_SNAPSHOT_BYTES` | `67108864` | per-snapshot cap (protocol max) |
 | `MAX_TOTAL_SNAPSHOT_BYTES` | `536870912` | global cached + assembling budget |
+| `MAX_TOTAL_BUFFERED_BYTES` | `167772160` | global cap on Σ viewer `bufferedAmount` (160 MiB); slowest consumers closed `4010` above it (section 4) |
 | `MAX_VIEWERS` | `20` | per session |
 | `MAX_SESSIONS` | `100` | live sessions |
+| `TRUST_PROXY` | `true` | Fastify `trustProxy`: take the client IP from `X-Forwarded-For` set by the Railway edge `[TODO verify]` header presence on first deploy; `false` for local development |
 | `ALLOWED_ORIGINS` | `https://${RAILWAY_PUBLIC_DOMAIN}` | browser `Origin` allow-list for `/ws` |
 | `NODE_OPTIONS` | `--max-old-space-size-percentage=75` | heap cap relative to container memory `[TODO verify]` cgroup awareness (relay.md §6) |
 | `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` | `30` (Railway default 0) | SIGTERM → SIGKILL window for `4008` drain |
+
+`RELAY_TEST_FAST_TIMERS` (shortens TTL/heartbeat timers for integration tests) is **test-only**: never set in
+`.railway/railway.ts` and excluded from the env-parity check between the three files above.
 
 - **Healthcheck:** `GET /healthz` → `200 {status, uptimeS, sessions, version}`; returns `503` once SIGTERM is
   received so the edge stops routing. Railway checks only at deploy time; an external pinger is optional.

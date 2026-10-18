@@ -112,3 +112,16 @@ Facts that constrain the choice (from `docs/research/`):
 - Meta device optimisation comparison / Unity perf guide: https://developers.meta.com/horizon/resources/device-optimization-comparison/ ; https://developers.meta.com/horizon/documentation/unity/unity-perf/
 - VTK decimation: https://vtk.org/doc/nightly/html/classvtkQuadricDecimation.html ; https://vtk.org/doc/nightly/html/classvtkDecimatePro.html
 - Slicer forum on mesh sizes: https://discourse.slicer.org/t/size-of-stl-obj-files-too-many-triangles/5137
+
+## Errata (2026-10-17, pre-implementation review)
+
+- 2026-10-17 — Decision 3 says "one glTF node (one mesh, one primitive, one material) per Slicer model/segment".
+  Protocol §7.2 defines **two glTF nodes per Slicer entity**: a transform node `T` (carrying `extras.nodeId`, the
+  §7.3 extras and the world matrix) with exactly one mesh child `M` (one mesh, one primitive, one material).
+  Clients map `nodeId → {T, M}`; `scene.update.matrix` targets `T`, `M.matrix` is reserved for dequantisation.
+- 2026-10-17 — "Alternatives considered" reserves a per-node `meshUpdate` message. No such type exists in protocol
+  v1.0. The reserved per-node geometry update is a v1.1 candidate carried by **`scene.nodeAdded`** (protocol §8.2,
+  §14); in v1 a geometry change produces `scene.nodeAdded{snapshotFollows:true}` followed by a full snapshot.
+- 2026-10-17 — Decision 5 numbers are fixed by protocol §7.5: profiles `mobile | quest2 | quest3`, **chosen by the
+  publisher**, per-node cap **≤ 100,000 triangles after decimation** (nodes are decimated further, never dropped);
+  `MAX_SNAPSHOT_BYTES` 64 MiB is confirmed (protocol §3.3).

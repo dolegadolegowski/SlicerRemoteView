@@ -102,3 +102,18 @@ Facts bearing on the viewer limit (`docs/research/relay.md`, `web.md`, `quest.md
 - `ws` 8.22.0 `bufferedAmount` / `send` callback / `maxPayload`: https://github.com/websockets/ws/blob/master/doc/ws.md ; sender: https://github.com/websockets/ws/blob/master/lib/sender.js
 - WebKit bug 268816 (iPhone WebContent memory budget): https://bugs.webkit.org/show_bug.cgi?id=268816
 - Meta device budgets (viewer-side limits that bound snapshot size): https://developers.meta.com/horizon/resources/device-optimization-comparison/
+
+## Errata (2026-10-17, pre-implementation review)
+
+- 2026-10-17 — Names: the environment variable is **`MAX_VIEWERS`** (not `MAX_VIEWERS_PER_SESSION`), the error is
+  **`SESSION_FULL`** with close `4005` (not `session_full`), the health endpoint is **`/healthz`** (not `/health`)
+  — protocol §9.2, §10; architecture §9.
+- 2026-10-17 — "64 KiB `maxPayload`" for viewers: `maxPayload` is **1 MiB + 64 KiB server-wide**; viewer **text
+  frames are capped at 16 KiB** (close `1009`) and any viewer binary frame is `UNAUTHORIZED` + close `1008`
+  (protocol §3.2, §3.3).
+- 2026-10-17 — Memory budget (Decision 2c, "≥ 2 GB container"): with the slow-consumer **hard watermark 8 MiB**
+  per viewer (close `4010`), the soft watermark 4 MiB, and the global **`MAX_TOTAL_BUFFERED_BYTES` = 160 MiB**
+  (protocol §3.3, architecture §4/§9), buffered sends are bounded at 160 MiB regardless of viewer count; together
+  with `MAX_TOTAL_SNAPSHOT_BYTES` a **1 GiB container is sufficient**. The "≥ 2 GB" remark is superseded.
+- 2026-10-17 — Reserved v1.1 types are **`scene.camera`** and **`viewer.command`** (protocol §8.5, §11), not
+  `camera`/`pointer`/`command`.
