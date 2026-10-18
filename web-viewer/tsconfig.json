@@ -17,7 +17,9 @@
     "verbatimModuleSyntax": true,
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
-    "noEmit": true
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "paths": { "@slicerremoteview/shared": ["../shared/ts/index.ts"] }
   },
   "include": ["src/**/*.ts", "test/**/*.ts", "e2e/**/*.ts", "*.config.ts"]
 }

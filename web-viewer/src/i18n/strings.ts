@@ -88,6 +88,16 @@ const en = {
   "state.snapshotTooLarge.title": "Scene is too large for this device",
   "state.snapshotTooLarge.body":
     "The scene is larger than this device can load. Ask the presenter to share a lighter scene.",
+  "codeEntry.title": "Join a session",
+  "codeEntry.lead": "Enter the 5-character code shown in 3D Slicer.",
+  "codeEntry.cellLabel": "Code character {n} of {total}",
+  "codeEntry.join": "Join",
+  "codeEntry.joining": "Joining…",
+  "codeEntry.hint.zeroOrO": "Codes never contain 0 or O — check that character.",
+  "codeEntry.hint.oneIorL": "Codes never contain 1, I or L — check that character.",
+  "codeEntry.hint.notInAlphabet":
+    "Codes use only the letters A–Z (except I, L, O) and the digits 2–9.",
+  "codeEntry.hint.length": "Codes have exactly 5 characters.",
 } as const;
 
 export type StringKey = keyof typeof en;
@@ -172,6 +182,15 @@ const pl: Record<StringKey, string> = {
   "state.snapshotTooLarge.title": "Scena jest za duża dla tego urządzenia",
   "state.snapshotTooLarge.body":
     "Scena jest większa, niż to urządzenie może wczytać. Poproś prezentera o lżejszą scenę.",
+  "codeEntry.title": "Dołącz do sesji",
+  "codeEntry.lead": "Wpisz 5-znakowy kod widoczny w 3D Slicerze.",
+  "codeEntry.cellLabel": "Znak kodu {n} z {total}",
+  "codeEntry.join": "Dołącz",
+  "codeEntry.joining": "Dołączanie…",
+  "codeEntry.hint.zeroOrO": "Kody nigdy nie zawierają 0 ani O — sprawdź ten znak.",
+  "codeEntry.hint.oneIorL": "Kody nigdy nie zawierają 1, I ani L — sprawdź ten znak.",
+  "codeEntry.hint.notInAlphabet": "Kody składają się z liter A–Z (bez I, L, O) i cyfr 2–9.",
+  "codeEntry.hint.length": "Kod ma dokładnie 5 znaków.",
 };
 
 export const STRINGS: Record<Lang, Record<StringKey, string>> = { en, pl };

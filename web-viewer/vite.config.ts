@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 
 // Dev proxy: the relay (SRV-*) listens on 8787; the viewer derives its WebSocket URL from
@@ -6,6 +7,13 @@ const RELAY = "http://localhost:8787";
 
 export default defineConfig({
   base: "/",
+  resolve: {
+    // Use the sources of `shared/` (like tools/fake-slicer) so dev, build and tests need no prior
+    // `npm run build -w shared`.
+    alias: {
+      "@slicerremoteview/shared": fileURLToPath(new URL("../shared/ts/index.ts", import.meta.url)),
+    },
+  },
   build: {
     // Vite's default (`baseline-widely-available`: Safari/iOS 16.4+, ADR 0002). Stated explicitly so a
     // Vite upgrade cannot move the floor silently.

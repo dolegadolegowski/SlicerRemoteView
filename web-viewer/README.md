@@ -55,3 +55,17 @@ WebKit is **not** Safari — iOS behaviour is verified on a real iPhone (`docs/t
 
 `three` is pinned to an exact version (`0.186.1`, NFR-41); upgrade deliberately, three.js has no LTS. `index.html`
 loads nothing from a CDN (NFR-09; asserted in `test/toolchain.test.ts`).
+
+### Shared protocol package
+
+`@slicerremoteview/shared` is resolved to its **sources** (`shared/ts/index.ts`) by a Vite/vitest alias and a
+`tsconfig` path (same approach as `tools/fake-slicer`), so dev, build, tests and typecheck need no prior
+`npm run build -w shared`. Only what the viewer imports ends up in the bundle (Ajv is tree-shaken out until the
+connection layer, WEB-04, needs it).
+
+### Code entry (WEB-03)
+
+`src/ui/code-entry.ts` — five cells, paste of a whole code, hints for `0/O` and `1/I/L` from the shared
+`normalizeCode`. The form has no `action`/`method` and the inputs no `name`, so the code cannot reach a URL; the
+connection layer is wired through `onJoin` (until WEB-04 `Join` only shows the busy state). Unit tests:
+`test/ui/code-entry.test.ts`; device E2E: `e2e/code-entry.spec.ts`.

@@ -19,6 +19,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@slicerremoteview/shared": "^0.1.0",
     "three": "0.186.1"
   },
   "devDependencies": {
