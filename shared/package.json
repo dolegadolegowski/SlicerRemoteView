@@ -27,6 +27,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "generate": "node scripts/generate.mjs",
+    "generate:check": "node scripts/generate.mjs --check",
     "fixtures": "node --experimental-strip-types scripts/make-glb-fixtures.ts",
     "test": "vitest run",
     "lint": "eslint . && prettier --check .",

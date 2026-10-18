@@ -6,17 +6,19 @@
  * so the same code runs in Node (relay, fake-slicer) and in browsers (web-viewer).
  */
 
+import { LIMITS } from "./constants.js";
+
 /** ASCII `SRVC` (§6.3). */
 export const CHUNK_MAGIC = "SRVC";
 export const CHUNK_HEADER_BYTES = 12;
 /** Smallest `chunkSize` a publisher may announce: 64 KiB (§6.2). */
-export const MIN_CHUNK_SIZE = 65_536;
+export const MIN_CHUNK_SIZE: number = LIMITS.MIN_CHUNK_BYTES;
 /** Largest chunk payload, and the recommended `chunkSize`: 1 MiB (§3.3, §6.2). */
-export const MAX_CHUNK_SIZE = 1_048_576;
+export const MAX_CHUNK_SIZE: number = LIMITS.MAX_CHUNK_BYTES;
 /** Hard cap on one snapshot: 64 MiB (§3.3). */
-export const MAX_SNAPSHOT_BYTES = 67_108_864;
+export const MAX_SNAPSHOT_BYTES: number = LIMITS.MAX_SNAPSHOT_BYTES;
 /** `chunkCount <= 1024` (§3.3), so `chunkIndex` is `0..1023`. */
-export const MAX_CHUNK_COUNT = 1_024;
+export const MAX_CHUNK_COUNT: number = LIMITS.MAX_CHUNK_COUNT;
 const UINT32_MAX = 0xffff_ffff;
 const MAGIC_BYTES = new TextEncoder().encode(CHUNK_MAGIC);
 

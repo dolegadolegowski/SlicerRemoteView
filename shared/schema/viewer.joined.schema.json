@@ -20,7 +20,7 @@
     "snapshotVersion": {
       "description": "Version of the cached snapshot, or null when the relay holds none (§5.2).",
       "type": ["integer", "null"],
-      "minimum": 0
+      "minimum": 1
     },
     "snapshotAvailable": {
       "description": "true = the viewer SHOULD fetch GET /api/scene/:sceneVersion now (§5.2, §6.5); then `snapshot` is present.",

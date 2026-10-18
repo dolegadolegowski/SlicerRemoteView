@@ -15,12 +15,14 @@ valid/invalid fixtures shared by every language, and generated types (`ts/`, `py
 |---|---|
 | `schema/` | JSON Schema files: `envelope.schema.json`, `defs.schema.json` (common definitions) and one `<type>.schema.json` per message type |
 | `fixtures/messages/<type>/` | `valid-*.json` / `invalid-*.json` conformance fixtures, one directory per message type |
-| `ts/` | TypeScript sources of `@slicerremoteview/shared` (entry `ts/index.ts`), built to `dist/`: `chunk.ts` (§6.3 chunk header, `chunkify`, `checkChunk`, `sha256Hex`), `code.ts` (session-code alphabet, `normalizeCode`) |
+| `ts/` | TypeScript sources of `@slicerremoteview/shared` (entry `ts/index.ts`), built to `dist/`: `validate.ts` (`compileSchemas`, `parseEnvelope`, `validateMessage`), `permissions.ts` (§11 `PERMISSIONS`, `isAllowed`), `constants.ts` (`ERROR_CODES`, `CLOSE_CODES`, `LIMITS`), `chunk.ts` (§6.3 chunk header, `chunkify`, `checkChunk`, `sha256Hex`), `code.ts` (session-code alphabet, `normalizeCode`) |
+| `ts/generated/` | **generated, committed** (`npm run generate -w shared`): `schemas.ts` embeds every file of `schema/` so validation needs no file system (browsers, bundlers); PRO-11 adds `messages.ts` |
+| `fixtures/messages/expected.json` | **generated**: the valid/invalid partition of every fixture with the expected `instancePath` — the reference the Python and C# conformance tests must reproduce (PRO-09, PRO-17) |
 | `fixtures/blob/` | binary test vectors of the chunk header (`chunk-header-*.bin`, table in `chunk-headers.json`, see its `README.md`) shared with Python/C# |
 | `fixtures/codes/` | `normalize-cases.json`: `normalizeCode` inputs and expected codes/hints (ADR 0008 §7) |
 | `test/` | vitest suites (`*.test.ts`); file names match the plan's `npm test -w shared -- <name>` filters |
 | `fixtures/glb/` | GLB snapshot fixtures of §7 (`asymmetric-2nodes.glb`, `quantized-1node.glb`, `large-synthetic.glb` ≈ 5 MiB) and five broken files for §7.1 pre-validators; `manifest.json` (byteLength, sha256, nodeIds, triangleCount) — generated, never edited by hand |
-| `scripts/` | generation and check scripts; `make-glb-fixtures.ts` regenerates `fixtures/glb/` (`npm run fixtures`), `check-generators.mjs` = the PRO-02 generator spike |
+| `scripts/` | generation and check scripts; `generate.mjs` writes `ts/generated/schemas.ts` + `fixtures/messages/expected.json` (`npm run generate`, `--check` for drift), `make-glb-fixtures.ts` regenerates `fixtures/glb/` (`npm run fixtures`), `check-generators.mjs` = the PRO-02 generator spike |
 
 ## How to run
 
@@ -29,13 +31,44 @@ From the repository root (Node 22, npm workspaces — one `package-lock.json`):
 ```bash
 npm install            # resolves every workspace, including @slicerremoteview/shared
 npm test -w shared     # vitest, all suites
-npm test -w shared -- toolchain   # one suite by file-name filter (defs, session, viewer, snapshot, scene, chunk, code)
+npm test -w shared -- toolchain   # one suite by file-name filter (defs, session, viewer, snapshot, scene, lib, chunk, code, glb)
 ```
 
 Consumers import the package as a workspace dependency: `import { PROTOCOL_VERSION } from "@slicerremoteview/shared"`
 (also exported as `@slicerremoteview/shared/ts`; schemas via `@slicerremoteview/shared/schema/<name>.schema.json`).
 
-## Runtime helpers (`ts/`)
+## Validation library (`ts/validate.ts`, `ts/permissions.ts`, `ts/constants.ts`, PRO-06)
+
+Browser-safe: the schemas come from `ts/generated/schemas.ts`, Ajv 2020 compiles them in `strict` mode once per
+process. The relay validates client messages with the strict default; clients validate inbound relay messages
+with `compileSchemas({ tolerateUnknownEnums: true })` so a newer relay's error codes or reasons do not break a
+`1.0` viewer (§14 "tolerate unknown enum values", PRO-02 review follow-up).
+
+```ts
+import { compileSchemas, parseEnvelope, isAllowed, ERROR_CODES, CLOSE_CODES, LIMITS } from "@slicerremoteview/shared";
+
+const validators = compileSchemas(); // once; or compileSchemas({ tolerateUnknownEnums: true }) on clients
+const result = parseEnvelope(text, validators);
+if (!result.ok) {
+  // result.error.code is INVALID_MESSAGE | UNSUPPORTED_TYPE | UNSUPPORTED_VERSION (§9.2),
+  // result.error.instancePath a JSON Pointer, result.error.issues Ajv's data-free messages — safe for error.details
+}
+if (!isAllowed("viewer", result.value.type)) {
+  /* error UNAUTHORIZED (§11) */
+}
+```
+
+| Export | Purpose |
+|---|---|
+| `compileSchemas({ allErrors?, tolerateUnknownEnums? })` | one Ajv validator per message type (`byType`) plus the `envelope` validator; `tolerateUnknownEnums` opens `errorCode` and every `*Reason` definition to any 1–64-char string (`LENIENT_ENUM_DEFINITIONS`; `clientInfo.platform` is a plain string in the schema already) |
+| `parseEnvelope(text, validators?)` | text frame → `{ok, value: Message}` or `{ok: false, error: {code, instancePath, message, issues}}`; checks JSON → object → `protocolVersion` major (`UNSUPPORTED_VERSION`, §2) → envelope (`INVALID_MESSAGE`) → known `type` (`UNSUPPORTED_TYPE`) → type schema (`INVALID_MESSAGE`). Unknown fields and higher minors (`1.7`) pass (§2, §14). The error never contains data values. Note for ports: a fixture whose `type` is wrong (`invalid-type-const.json`) or whose major is foreign therefore yields `UNSUPPORTED_TYPE` / `UNSUPPORTED_VERSION` from `parseEnvelope`, and `INVALID_MESSAGE` only from `validateMessage(message, <directory type>)` |
+| `validateMessage(message, type?, validators?)` | the same for an already-parsed object, optionally against a named schema (conformance tests, relay-built messages) |
+| `defaultSchemas()` | lazily compiled strict validators used when none are passed |
+| `PERMISSIONS`, `isAllowed(sender, type, recipient = "relay")`, `isBinaryAllowed(sender, recipient?)`, `BINARY_FRAME_PERMISSION` | §11 matrix with the four directions (`publisherToRelay`, `viewerToRelay`, `relayToPublisher`, `relayToViewer`); unknown and `RESERVED_TYPES` (`scene.camera`, `viewer.command`) are never allowed; `test/lib.test.ts` parses the §11 table from `docs/protocol.md` and checks every cell |
+| `MESSAGE_TYPES`, `MessageType`, `isMessageType`, `Message`, `Result`, `ParseError`, `ValidationIssue` | the 28 v1.0 types and the result types; `Message` is the envelope plus `unknown` payload fields until PRO-11 generates per-type interfaces |
+| `PROTOCOL_VERSION` (`"1.0"`), `PROTOCOL_MAJOR`, `ERROR_CODES` (15 codes of §9.2), `CLOSE_CODES` (§9.3: `NORMAL` 1000 … `HANDSHAKE_TIMEOUT` 4012), `LIMITS` (§3.3 maximums in bytes / seconds, e.g. `MAX_TEXT_BYTES_PUBLISHER`, `MAX_SNAPSHOT_BYTES`, `MAX_VIEWERS`, `HEARTBEAT_INTERVAL_S`) | constants; the test cross-checks them against the §3.3, §9.2 and §9.3 tables of `docs/protocol.md` |
+
+## Runtime helpers (`ts/chunk.ts`, `ts/code.ts`, PRO-07)
 
 Browser-safe (no `node:` imports, WebCrypto for hashing):
 
@@ -46,7 +79,7 @@ Browser-safe (no `node:` imports, WebCrypto for hashing):
 | `chunkify(glb, chunkSize = 1 MiB)`, `encodeChunkFrame`, `chunkCountFor`, `expectedPayloadLength` | publisher side of §6.2: views over the GLB, `ceil(byteLength / chunkSize)` chunks, `RangeError` outside 64 KiB..1 MiB / 1024 chunks / 64 MiB |
 | `sha256Hex(bytes)` | SHA-256 as 64 lowercase hex (the `sha256` def), Node and browsers |
 | `normalizeCode(input)`, `isCode`, `ALPHABET`, `CODE_PATTERN`, `CODE_HINTS` | ADR 0008 §7: trim, strip `-`/spaces, upper-case; `{code}` or `{error: "INVALID_CODE", hint, offendingChar?}` with the `0`/`O` and `1`/`I`/`L` hints — confusables are rejected, never mapped |
-| `MIN_CHUNK_SIZE`, `MAX_CHUNK_SIZE`, `MAX_CHUNK_COUNT`, `MAX_SNAPSHOT_BYTES`, `CHUNK_HEADER_BYTES` | the §3.3 limits the helpers enforce (PRO-06 folds them into `LIMITS`) |
+| `MIN_CHUNK_SIZE`, `MAX_CHUNK_SIZE`, `MAX_CHUNK_COUNT`, `MAX_SNAPSHOT_BYTES`, `CHUNK_HEADER_BYTES` | the §3.3 limits the helpers enforce (same values as `LIMITS.MIN_CHUNK_BYTES`, `MAX_CHUNK_BYTES`, `MAX_CHUNK_COUNT`, `MAX_SNAPSHOT_BYTES`) |
 
 ## Test, lint and build commands
 
@@ -57,6 +90,7 @@ Browser-safe (no `node:` imports, WebCrypto for hashing):
 | `npm run format -w shared` | `prettier --write .` |
 | `npm run typecheck -w shared` | `tsc --noEmit` over `ts/`, `test/` (strict) |
 | `npm run build -w shared` | `tsc -p tsconfig.build.json` → `dist/` (ESM + `.d.ts`) |
+| `npm run generate -w shared` | `node scripts/generate.mjs`: rewrites `ts/generated/schemas.ts` and `fixtures/messages/expected.json`; `npm run generate:check -w shared` (= `--check`) exits 1 on drift and is run by `test/lib.test.ts` |
 | `npm run fixtures -w shared` | `node scripts/make-glb-fixtures.ts`: rewrites `fixtures/glb/*.glb` + `manifest.json` deterministically (Node type stripping, flag `--experimental-strip-types` for 22.12–22.17; `git diff --exit-code shared/fixtures/glb` is the drift check, also run by `test/glb.test.ts` in a temp dir) |
 
 Runtime dependency policy: only the schema validator (`ajv`); everything else is a devDependency
@@ -105,7 +139,12 @@ Runtime dependency policy: only the schema validator (`ajv`); everything else is
   (e.g. `scene.snapshot.begin/valid-chunk-64k.json`, 3 full 64 KiB chunks + 1 byte), **except**
   `scene.snapshot.begin/valid-<name>.json` where `<name>.glb` exists in `fixtures/glb/manifest.json`: those carry the
   manifest's `byteLength`/`sha256`/`nodeCount`/`triangleCount` and `test/glb.test.ts` fails when they drift.
-- The TS runner is `loadFixtures()` in `test/helpers.ts`; `test/session.test.ts` covers `session.*`,
+- `fixtures/messages/expected.json` is generated from the directories above (`npm run generate -w shared`) and lists
+  every fixture with `type` (the schema to validate against — not the message's own `type`, which is wrong on purpose
+  in `invalid-type-const.json`), `valid` and, for invalid ones, the expected `instancePath`; every language's
+  conformance test reproduces this partition.
+- The TS runner is `loadFixtures()` in `test/helpers.ts`; `test/lib.test.ts` runs every fixture through
+  `validateMessage`/`parseEnvelope` (PRO-06), `test/session.test.ts` covers `session.*`,
   `test/viewer.test.ts` covers `viewer.*`, `ping`, `pong` and `error`, `test/snapshot.test.ts` covers `scene.snapshot.*`,
   `test/scene.test.ts` covers the incremental-update types `scene.update`, `scene.nodeRemoved`, `scene.nodeAdded`,
   `scene.state`, `scene.request` (it filters the `scene.snapshot.*` directories out of `loadFixtures("scene.")`),

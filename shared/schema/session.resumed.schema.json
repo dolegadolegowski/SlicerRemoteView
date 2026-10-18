@@ -13,7 +13,7 @@
     "snapshotVersion": {
       "description": "Version of the cached snapshot, or null when the relay holds none; if null or older than the publisher's scene, a new snapshot MUST follow (§4.3).",
       "type": ["integer", "null"],
-      "minimum": 0
+      "minimum": 1
     },
     "viewerCount": { "type": "integer", "minimum": 0 },
     "ttl": { "$ref": "defs.schema.json#/definitions/ttl" }
