@@ -1,0 +1,12 @@
+{
+  "$comment": "scene.snapshot.abort without required `sceneVersion` (§6.4)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.snapshot.abort",
+    "reason": "SUPERSEDED"
+  }
+}

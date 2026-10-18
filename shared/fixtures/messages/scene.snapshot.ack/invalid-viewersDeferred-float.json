@@ -1,0 +1,14 @@
+{
+  "$comment": "viewersDeferred is an integer (§6.4)",
+  "expect": {
+    "instancePath": "/viewersDeferred",
+    "keyword": "type"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.snapshot.ack",
+    "sceneVersion": 43,
+    "viewersStreamed": 3,
+    "viewersDeferred": 1.5
+  }
+}

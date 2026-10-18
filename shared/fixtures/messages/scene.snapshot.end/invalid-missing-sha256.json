@@ -1,0 +1,12 @@
+{
+  "$comment": "scene.snapshot.end without required `sha256` (§6.4)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.snapshot.end",
+    "sceneVersion": 43
+  }
+}

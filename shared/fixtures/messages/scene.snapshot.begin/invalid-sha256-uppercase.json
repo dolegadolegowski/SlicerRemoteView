@@ -1,0 +1,24 @@
+{
+  "$comment": "sha256 is 64 lowercase hex chars (defs.sha256)",
+  "expect": {
+    "instancePath": "/sha256",
+    "keyword": "pattern"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.snapshot.begin",
+    "id": "p-30",
+    "ts": 1792238410000,
+    "sceneVersion": 43,
+    "byteLength": 18874368,
+    "sha256": "9F86D081884C7D659A2FEAA0C55AD015A3BF4F1B2B0B822CD15D6C15B0F00A08",
+    "chunkCount": 18,
+    "chunkSize": 1048576,
+    "format": "glb",
+    "extensionsUsed": ["KHR_mesh_quantization"],
+    "extensionsRequired": ["KHR_mesh_quantization"],
+    "profile": "mobile",
+    "nodeCount": 14,
+    "triangleCount": 412876
+  }
+}

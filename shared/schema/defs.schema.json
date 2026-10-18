@@ -82,6 +82,17 @@
       "type": "string",
       "enum": ["glb"]
     },
+    "gltfExtension": {
+      "description": "glTF extensions allowed in a v1 snapshot: KHR_mesh_quantization only; Draco is v1.1 (ADR 0001) and meshopt is excluded (§6.2, §7.1).",
+      "type": "string",
+      "enum": ["KHR_mesh_quantization"]
+    },
+    "gltfExtensions": {
+      "description": "extensionsUsed / extensionsRequired of a snapshot (§6.2, §6.4).",
+      "type": "array",
+      "items": { "$ref": "#/definitions/gltfExtension" },
+      "uniqueItems": true
+    },
     "viewerLimit": {
       "description": "Effective MAX_VIEWERS, at most the protocol maximum of 20 (§3.3, §4.2, §5.2).",
       "type": "integer",

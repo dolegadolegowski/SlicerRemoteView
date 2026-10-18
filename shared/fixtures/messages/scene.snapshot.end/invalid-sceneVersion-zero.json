@@ -1,0 +1,13 @@
+{
+  "$comment": "a snapshot version is ≥ 1 (§8.4)",
+  "expect": {
+    "instancePath": "/sceneVersion",
+    "keyword": "minimum"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.snapshot.end",
+    "sceneVersion": 0,
+    "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+  }
+}

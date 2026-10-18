@@ -1,0 +1,13 @@
+{
+  "$comment": "reason ∈ SUPERSEDED|CHECKSUM_MISMATCH|BAD_SEQUENCE|PUBLISHER_GONE|TIMEOUT (§6.4)",
+  "expect": {
+    "instancePath": "/reason",
+    "keyword": "enum"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.snapshot.abort",
+    "sceneVersion": 43,
+    "reason": "USER_CANCELLED"
+  }
+}

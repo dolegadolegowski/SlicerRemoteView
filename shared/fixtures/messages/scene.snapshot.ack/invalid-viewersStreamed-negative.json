@@ -1,0 +1,14 @@
+{
+  "$comment": "viewersStreamed ≥ 0 (§6.4)",
+  "expect": {
+    "instancePath": "/viewersStreamed",
+    "keyword": "minimum"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.snapshot.ack",
+    "sceneVersion": 43,
+    "viewersStreamed": -1,
+    "viewersDeferred": 1
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "$comment": "scene.snapshot.ack without required `viewersStreamed` (§6.4)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.snapshot.ack",
+    "sceneVersion": 43,
+    "viewersDeferred": 1
+  }
+}

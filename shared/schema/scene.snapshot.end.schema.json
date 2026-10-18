@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/scene.snapshot.end.schema.json",
+  "title": "scene.snapshot.end (publisher → relay → viewers)",
+  "description": "Closes the chunk stream; receivers verify byteLength and the SHA-256 of the assembled buffer (docs/protocol.md §6.4).",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.schema.json" }],
+  "properties": {
+    "type": { "type": "string", "const": "scene.snapshot.end" },
+    "sceneVersion": { "$ref": "defs.schema.json#/definitions/snapshotVersion" },
+    "sha256": { "$ref": "defs.schema.json#/definitions/sha256" }
+  },
+  "required": ["type", "sceneVersion", "sha256"]
+}

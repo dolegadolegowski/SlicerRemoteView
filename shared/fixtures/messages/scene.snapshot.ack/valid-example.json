@@ -1,0 +1,7 @@
+{
+  "protocolVersion": "1.0",
+  "type": "scene.snapshot.ack",
+  "sceneVersion": 43,
+  "viewersStreamed": 3,
+  "viewersDeferred": 1
+}

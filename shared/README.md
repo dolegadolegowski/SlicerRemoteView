@@ -80,8 +80,11 @@ Runtime dependency policy: only the schema validator (`ajv`); everything else is
   Python `jsonschema` both report it on the parent); `keyword` is optional. There is one invalid fixture per
   required field (including the envelope-required `type` and `protocolVersion`) and per enum, plus the boundary cases
   named in the plan's acceptance criteria.
+- Valid fixtures other than `valid-example.json` are shape fixtures: their `byteLength`/`sha256` values are synthetic
+  (e.g. `scene.snapshot.begin/valid-chunk-64k.json`, 3 full 64 KiB chunks + 1 byte) until PRO-08 adds fixtures
+  derived from the real GLB files in `fixtures/glb/manifest.json`.
 - The TS runner is `loadFixtures()` in `test/helpers.ts`; `test/session.test.ts` covers `session.*`,
-  `test/viewer.test.ts` covers `viewer.*`, `ping`, `pong` and `error`.
+  `test/viewer.test.ts` covers `viewer.*`, `ping`, `pong` and `error`, `test/snapshot.test.ts` covers `scene.snapshot.*`.
 
 ## Generator spike (PRO-02, ADR 0002 errata)
 

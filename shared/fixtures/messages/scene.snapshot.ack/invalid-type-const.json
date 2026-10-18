@@ -1,0 +1,14 @@
+{
+  "$comment": "`type` must be the const scene.snapshot.ack",
+  "expect": {
+    "instancePath": "/type",
+    "keyword": "const"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.snapshot.other",
+    "sceneVersion": 43,
+    "viewersStreamed": 3,
+    "viewersDeferred": 1
+  }
+}

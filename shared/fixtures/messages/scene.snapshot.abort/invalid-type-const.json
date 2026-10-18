@@ -1,0 +1,13 @@
+{
+  "$comment": "`type` must be the const scene.snapshot.abort",
+  "expect": {
+    "instancePath": "/type",
+    "keyword": "const"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.snapshot.other",
+    "sceneVersion": 43,
+    "reason": "SUPERSEDED"
+  }
+}

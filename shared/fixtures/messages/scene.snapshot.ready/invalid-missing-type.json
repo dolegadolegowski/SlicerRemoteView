@@ -1,0 +1,15 @@
+{
+  "$comment": "scene.snapshot.ready without required `type` (§6.4)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "sceneVersion": 43,
+    "byteLength": 18874368,
+    "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+    "format": "glb",
+    "extensionsRequired": ["KHR_mesh_quantization"]
+  }
+}

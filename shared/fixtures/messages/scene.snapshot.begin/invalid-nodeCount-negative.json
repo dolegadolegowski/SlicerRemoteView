@@ -1,0 +1,24 @@
+{
+  "$comment": "nodeCount \u2265 0 (\u00a76.2)",
+  "expect": {
+    "instancePath": "/nodeCount",
+    "keyword": "minimum"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.snapshot.begin",
+    "id": "p-30",
+    "ts": 1792238410000,
+    "sceneVersion": 43,
+    "byteLength": 18874368,
+    "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+    "chunkCount": 18,
+    "chunkSize": 1048576,
+    "format": "glb",
+    "extensionsUsed": ["KHR_mesh_quantization"],
+    "extensionsRequired": ["KHR_mesh_quantization"],
+    "profile": "mobile",
+    "nodeCount": -1,
+    "triangleCount": 412876
+  }
+}
