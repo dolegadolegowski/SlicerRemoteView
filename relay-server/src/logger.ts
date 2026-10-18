@@ -23,6 +23,8 @@ export const REDACT_PATHS: readonly string[] = [
   "*.publisherToken",
   "viewerToken",
   "*.viewerToken",
+  "metricsToken",
+  "*.metricsToken",
   "rawPacket",
   "*.rawPacket",
   "req.headers.authorization",

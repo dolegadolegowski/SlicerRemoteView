@@ -10,6 +10,8 @@ import Fastify, { LogController } from "fastify";
 import type { FastifyBaseLogger, FastifyInstance, FastifyReply } from "fastify";
 import type { Logger } from "pino";
 import { LIMITS } from "@slicerremoteview/shared";
+import { loadConfig } from "./config.js";
+import type { Config } from "./config.js";
 import { createLogger } from "./logger.js";
 import { PROTOCOL_VERSIONS, RELAY_NAME, RELAY_VERSION } from "./version.js";
 
@@ -22,24 +24,25 @@ export interface PublicLimits {
 }
 
 export interface AppOptions {
+  /** Defaults to `loadConfig({})`, i.e. every documented default (architecture §9). */
+  config?: Config;
   /** Defaults to a silent logger, so `buildApp()` in tests prints nothing. */
   logger?: Logger;
-  /** Effective limits announced on `GET /api/version`; defaults to the protocol maximums (§3.3). */
-  limits?: PublicLimits;
   /** Live session count for `GET /healthz`; `0` until the registry exists. */
   sessionCount?: () => number;
-  /** Fastify `trustProxy` (client IP from `X-Forwarded-For` behind the Railway edge). */
-  trustProxy?: boolean;
   /** Clock for `uptimeS`; defaults to `Date.now`. */
   now?: () => number;
 }
 
-export const PROTOCOL_LIMITS: PublicLimits = {
-  maxSnapshotBytes: LIMITS.MAX_SNAPSHOT_BYTES,
-  maxChunkBytes: LIMITS.MAX_CHUNK_BYTES,
-  maxTextBytes: LIMITS.MAX_TEXT_BYTES_PUBLISHER,
-  maxViewers: LIMITS.MAX_VIEWERS,
-};
+/** Effective limits: configured snapshot and viewer caps, protocol maximums otherwise (§3.3, §14). */
+export function publicLimits(config: Config): PublicLimits {
+  return {
+    maxSnapshotBytes: config.maxSnapshotBytes,
+    maxChunkBytes: LIMITS.MAX_CHUNK_BYTES,
+    maxTextBytes: LIMITS.MAX_TEXT_BYTES_PUBLISHER,
+    maxViewers: config.maxViewers,
+  };
+}
 
 const NOT_FOUND = { error: "NOT_FOUND" } as const;
 
@@ -92,14 +95,18 @@ function clientErrorHandler(logger: Logger) {
 export async function buildApp(options: AppOptions = {}): Promise<FastifyInstance> {
   const now = options.now ?? Date.now;
   const startedAt = now();
-  const limits = options.limits ?? PROTOCOL_LIMITS;
+  const config = options.config ?? loadConfig({});
+  const limits = publicLimits(config);
   const sessionCount = options.sessionCount ?? (() => 0);
   const logger = options.logger ?? createLogger({ level: "silent" });
 
   const app = Fastify({
     loggerInstance: logger as FastifyBaseLogger,
     logController: new LogController({ disableRequestLogging: true }),
-    trustProxy: options.trustProxy ?? false,
+    // Trust only the immediate peer (the Railway edge): `request.ip` is the address it appended to
+    // `X-Forwarded-For`, not a leftmost entry a client could forge (T1, T3). `trustProxy: true`
+    // would trust every hop.
+    trustProxy: config.trustProxy ? (_address: string, hop: number) => hop === 0 : false,
     clientErrorHandler: clientErrorHandler(logger),
     // A URL that does not decode (`/7KQ4X%zz`) is just another unknown path: Fastify's default
     // answer would echo it in a 400 body and bypass the not-found handler below.

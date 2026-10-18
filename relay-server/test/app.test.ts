@@ -5,8 +5,10 @@ import type { AddressInfo } from "node:net";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildApp, PROTOCOL_LIMITS, systemErrorCode } from "../src/app.js";
+import { buildApp, systemErrorCode } from "../src/app.js";
+import { loadConfig } from "../src/config.js";
 import { createLogger } from "../src/logger.js";
+import { childEnv } from "./helpers/env.js";
 import { RELAY_VERSION } from "../src/version.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -54,8 +56,33 @@ describe("GET /api/version (SRV-01, §10)", () => {
   });
 
   it("announces configured limits", async () => {
-    const app = await buildApp({ limits: { ...PROTOCOL_LIMITS, maxViewers: 5 } });
-    expect((await app.inject("/api/version")).json().limits.maxViewers).toBe(5);
+    const config = loadConfig({ MAX_VIEWERS: "5", MAX_SNAPSHOT_BYTES: "33554432" });
+    const app = await buildApp({ config });
+    expect((await app.inject("/api/version")).json().limits).toEqual({
+      maxSnapshotBytes: 33_554_432,
+      maxChunkBytes: 1_048_576,
+      maxTextBytes: 262_144,
+      maxViewers: 5,
+    });
+    await app.close();
+  });
+});
+
+describe("client IP behind the Railway edge (TRUST_PROXY, T1, T3)", () => {
+  it.each([
+    ["true", "6.6.6.6, 203.0.113.7", "203.0.113.7"],
+    ["true", "203.0.113.7", "203.0.113.7"],
+    ["true", undefined, "10.0.0.5"],
+    ["false", "6.6.6.6, 203.0.113.7", "10.0.0.5"],
+  ])("TRUST_PROXY=%s, X-Forwarded-For %j → request.ip %s", async (trust, xff, expected) => {
+    const app = await buildApp({ config: loadConfig({ TRUST_PROXY: trust }) });
+    app.get("/ip", async (request) => ({ ip: request.ip }));
+    const res = await app.inject({
+      url: "/ip",
+      remoteAddress: "10.0.0.5",
+      headers: xff === undefined ? {} : { "x-forwarded-for": xff },
+    });
+    expect(res.json()).toEqual({ ip: expected });
     await app.close();
   });
 });
@@ -190,7 +217,7 @@ describe("src/index.ts (npm run dev entry)", () => {
     const wanted = await freePort();
     child = spawn(process.execPath, ["--import", "tsx", "src/index.ts"], {
       cwd: ROOT,
-      env: { ...process.env, PORT: String(wanted), NODE_ENV: "test" },
+      env: childEnv({ PORT: String(wanted), NODE_ENV: "test" }),
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stderr = "";

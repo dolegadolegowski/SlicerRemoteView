@@ -20,13 +20,54 @@ npm run build                      # shared/ first, then relay-server/dist (and 
 npm start -w relay-server          # node dist/index.js (needs the build above)
 ```
 
-`PORT` selects the port (default `8787`; Railway injects it); the relay listens on `0.0.0.0`.
+The relay listens on `0.0.0.0:$PORT`. For local work with the Vite dev server, allow its origin and turn off
+proxy trust (nothing sets `X-Forwarded-For` locally):
+
+```bash
+ALLOWED_ORIGINS=http://localhost:5173 TRUST_PROXY=false npm run dev -w relay-server
+cp relay-server/.env.example relay-server/.env    # or keep settings in a git-ignored .env …
+node --env-file=relay-server/.env relay-server/dist/index.js   # … and load it with Node's --env-file
+```
+
+## Configuration
+
+Environment variables (`src/config.ts`, same names as `docs/architecture.md` §9). Every value is validated at
+start-up; an invalid one stops the process with exit code 1 and a `fatal` log line naming the variable (never
+its value). Empty values count as unset. `relay-server/.env.example` lists exactly these variables with their
+defaults (a test keeps both in sync).
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PORT` | `8787` | listen port (Railway injects it) |
+| `LOG_LEVEL` | `info` | `fatal`, `error`, `warn`, `info`, `debug`, `trace` or `silent` |
+| `METRICS_TOKEN` | unset | Bearer for `GET /metrics` (≥ 32 printable characters, e.g. `openssl rand -base64 32`); unset disables `/metrics` |
+| `SESSION_TTL_S` | `1800` | idle TTL while a session has no connected viewers (§4.4); at most the protocol value |
+| `PUBLISHER_GRACE_S` | `120` | resume window after the publisher's socket is lost (§9.1); at most the protocol value |
+| `SESSION_MAX_LIFETIME_S` | `43200` | hard cap on a session's lifetime; at most the protocol value |
+| `CODE_QUARANTINE_S` | `600` | a released code is not reissued for this long (ADR 0008); at least `60` |
+| `MAX_SNAPSHOT_BYTES` | `67108864` | per-snapshot cap, at most the protocol maximum (64 MiB) |
+| `MAX_TOTAL_SNAPSHOT_BYTES` | `536870912` | cached + in-flight snapshots of all sessions; ≥ 2 × `MAX_SNAPSHOT_BYTES` |
+| `MAX_TOTAL_BUFFERED_BYTES` | `167772160` | Σ of all viewer send buffers (≥ 8 MiB, the per-viewer hard watermark); slowest consumers closed `4010` above it |
+| `MAX_VIEWERS` | `20` | viewers per session, at most the protocol maximum (20) |
+| `MAX_SESSIONS` | `100` | live sessions (`CAPACITY` beyond) |
+| `ALLOWED_ORIGINS` | `https://${RAILWAY_PUBLIC_DOMAIN}` | comma-separated browser origins allowed on `/ws` (exact match, no wildcards, `http:` only for `localhost`/`127.0.0.1`/`[::1]`); without both, only clients that send no `Origin` (Slicer, Unity) |
+| `TRUST_PROXY` | `true` | client IP = the `X-Forwarded-For` entry added by the immediate peer (Railway edge), never a client-sent one; `false` = socket address (direct local access). `true` assumes the relay is reachable only through the Railway edge |
+| `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` | `30` | SIGTERM → SIGKILL window for the `4008` drain on redeploy |
+
+The three session timers are protocol maximums (§3.3, §14): a relay may run shorter, never longer.
+`RELAY_TEST_FAST_TIMERS` is test-only: it is honoured only under `NODE_ENV=test` (SRV-21) and never set in
+deployments. `NODE_OPTIONS` (`--max-old-space-size-percentage=75`, architecture §9) is set by the Dockerfile
+(SRV-20) and read by Node, not by `config.ts`; `RAILWAY_PUBLIC_DOMAIN` is injected by Railway.
+
+## HTTP endpoints
 
 | Endpoint           | Answer                                                                                              |
 | ------------------ | --------------------------------------------------------------------------------------------------- |
 | `GET /healthz`     | `200 {"status":"ok","uptimeS":…,"sessions":…,"version":"…"}` — no codes, IPs or memory figures      |
 | `GET /api/version` | `200 {"name":"slicer-remote-view-relay","version":…,"protocolVersions":["1.0"],"limits":{…}}` (§10) |
 | anything else      | `404 {"error":"NOT_FOUND"}` — no SPA fallback, the path is never echoed                             |
+
+`GET /api/version` announces the effective `MAX_SNAPSHOT_BYTES` and `MAX_VIEWERS` (§14).
 
 Logs are JSON lines (`level`, `time`, `message`) on stdout; per-request logging is disabled.
 
