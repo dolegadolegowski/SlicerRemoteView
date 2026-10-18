@@ -117,3 +117,31 @@ snapshot are dropped silently, a skipped, duplicated or mis-sized chunk discards
 drops the partial buffer when the relay switches this viewer to HTTP mid-stream (`scene.snapshot.ready` for the same
 or a newer version) and whenever the connection is not `connected`. Tests:
 `npm test -w web-viewer -- snapshot-stream` (fixtures from `shared/fixtures/glb`).
+
+### HTTP scene download (WEB-06)
+
+`src/protocol/scene-http.ts` — `fetchScene()`, one `GET /api/scene/:sceneVersion` (§6.5, §10): pre-sized buffer,
+streaming progress, `Content-Length` (skipped for a content-encoded body) and `ETag` checks when present, a 20 s stall
+watchdog, SHA-256 verification; never throws. `src/protocol/scene-loader.ts` decides when to fetch and what the answer
+means:
+
+```ts
+const loader = createSceneLoader(connection, { maxSnapshotBytes }); // fetches on viewer.joined / scene.snapshot.ready
+loader.on("progress", ({ fraction }) => …);
+loader.on("ready", ({ sceneVersion, bytes }) => …);          // hash-verified; the loader keeps no reference
+loader.on("enterCode" | "sessionEnded", ({ description }) => …); // 401 / 410 on a live connection
+loader.requestResync("GAP");                                 // scene.request with what the viewer holds
+bindStreamToLoader(connection, stream, loader);              // stream failures use the same resync path
+```
+
+The viewer token is sent **only** in `Authorization: Bearer …` (never in the URL, never logged) and lives in memory;
+it is dropped on 401, 410 and when the connection reports the session ended, the credentials invalid, a stop or a
+leave. 404 and a SHA-256 mismatch send one `scene.request` (`GAP` / `CHECKSUM_MISMATCH`) per version — a second
+failure of the same version gives up (`failed`) instead of downloading it in a loop. 429 waits `Retry-After`;
+network/stall/5xx/length/ETag failures retry twice (1 s, 2 s). A 401/410 that arrives after the socket dropped drops
+the token and the download without ending the session, and `4008` (relay restart) cancels the download: the rejoin
+decides (§13 step 9). A 401 for a request made with a token that a rejoin has since replaced is retried with the new
+token. A broken stream asks for the snapshot
+only after that version's `scene.snapshot.end`, when the relay has cached it. Tests:
+`npm test -w web-viewer -- scene-http scene-loader` (mocked `fetch` with WHATWG `Response`s,
+`test/protocol/http-fixtures.ts`).
