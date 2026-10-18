@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/scene.snapshot.ready.schema.json",
+  "title": "scene.snapshot.ready (relay → viewer)",
+  "description": "Tells a viewer that was skipped during streaming, joined mid-snapshot or sent scene.request to fetch this version over GET /api/scene/:sceneVersion (docs/protocol.md §6.4, §6.5).",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.schema.json" }],
+  "properties": {
+    "type": { "type": "string", "const": "scene.snapshot.ready" },
+    "sceneVersion": { "$ref": "defs.schema.json#/definitions/snapshotVersion" },
+    "byteLength": { "$ref": "defs.schema.json#/definitions/byteLength" },
+    "sha256": { "$ref": "defs.schema.json#/definitions/sha256" },
+    "format": { "$ref": "defs.schema.json#/definitions/snapshotFormat" },
+    "extensionsRequired": { "$ref": "defs.schema.json#/definitions/gltfExtensions" }
+  },
+  "required": ["type", "sceneVersion", "byteLength", "sha256", "format", "extensionsRequired"]
+}

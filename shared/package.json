@@ -31,7 +31,9 @@
     "generate:check": "node scripts/generate.mjs --check",
     "fixtures": "node --experimental-strip-types scripts/make-glb-fixtures.ts",
     "test": "vitest run",
+    "test:py": "py/.venv/bin/pytest py",
     "lint": "eslint . && prettier --check .",
+    "lint:py": "py/.venv/bin/ruff check py && py/.venv/bin/ruff format --check py",
     "format": "prettier --write .",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

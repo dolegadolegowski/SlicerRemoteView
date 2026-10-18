@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "remoteview-protocol"
+version = "0.1.0"
+description = "SlicerRemoteView protocol contract for Python: JSON Schema validation, binary chunk and session-code helpers (docs/protocol.md v1.0)."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+# Runtime dependency policy (prompts/01-protocol.md): only the schema validator.
+# `referencing` is jsonschema's own dependency (>= 4.18) and is imported directly for the $ref registry.
+dependencies = ["jsonschema>=4.18"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11", "types-jsonschema>=4.23"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["remoteview_protocol"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "N", "RUF", "SIM", "PL"]
+ignore = ["PLR2004"] # magic numbers are protocol constants with a § reference next to them
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+packages = ["remoteview_protocol"]

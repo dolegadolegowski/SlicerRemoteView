@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/ping.schema.json",
+  "title": "ping (publisher or viewer → relay)",
+  "description": "Application heartbeat sent by clients every 15 s; the relay answers pong echoing `id` in `replyTo` (docs/protocol.md §9.1). No payload fields beyond the envelope.",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.schema.json" }],
+  "properties": {
+    "type": { "type": "string", "const": "ping" }
+  },
+  "required": ["type"]
+}

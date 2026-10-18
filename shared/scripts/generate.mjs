@@ -12,9 +12,13 @@
  *    the expected `instancePath`, the reference the Python (PRO-09) and C# conformance tests
  *    compare against so all languages agree with the TypeScript run.
  *
+ * 3. `py/remoteview_protocol/schema/*.schema.json` — a byte-identical copy of `schema/`, so the Python
+ *    package carries its schemas as package data and the vendored copy in the Slicer extension works
+ *    without the repository (PRO-09, ADR 0007 §3).
+ *
  * PRO-11 adds the generated message types (`ts/generated/messages.ts`, `py/.../generated.py`).
  */
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -96,5 +100,21 @@ emit(
     2,
   ) + "\n",
 );
+
+// 3. py/remoteview_protocol/schema/*.schema.json
+const pySchemaDir = resolve(shared, "py/remoteview_protocol/schema");
+for (const file of schemaFiles)
+  emit(resolve(pySchemaDir, file), readFileSync(resolve(schemaDir, file), "utf8"));
+for (const stale of existsSync(pySchemaDir) ? readdirSync(pySchemaDir) : []) {
+  if (stale.endsWith(".schema.json") && !schemaFiles.includes(stale)) {
+    if (check) {
+      drift = true;
+      console.error(`drift: ${resolve(pySchemaDir, stale)} has no source in schema/ — delete it`);
+    } else {
+      rmSync(resolve(pySchemaDir, stale));
+      console.log(`removed ${resolve(pySchemaDir, stale)}`);
+    }
+  }
+}
 
 if (drift) process.exit(1);

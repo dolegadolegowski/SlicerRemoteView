@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/session.closed.schema.json",
+  "title": "session.closed (relay → viewers)",
+  "description": "Broadcast after session.close, followed by WebSocket close 4001 (docs/protocol.md §4.5).",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.schema.json" }],
+  "properties": {
+    "type": { "type": "string", "const": "session.closed" },
+    "sessionId": { "$ref": "defs.schema.json#/definitions/sessionId" },
+    "reason": { "$ref": "defs.schema.json#/definitions/sessionEndReason" }
+  },
+  "required": ["type", "sessionId", "reason"]
+}

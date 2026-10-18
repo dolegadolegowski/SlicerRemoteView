@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/viewer.count.schema.json",
+  "title": "viewer.count (relay → publisher and viewers)",
+  "description": "Aggregated viewer count on every join/leave, no PII; `platforms` maps platform name → count and MAY contain platform names unknown to the receiver (docs/protocol.md §5.3, §14).",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.schema.json" }],
+  "properties": {
+    "type": { "type": "string", "const": "viewer.count" },
+    "viewerCount": { "type": "integer", "minimum": 0 },
+    "viewerLimit": { "$ref": "defs.schema.json#/definitions/viewerLimit" },
+    "platforms": {
+      "type": "object",
+      "additionalProperties": { "type": "integer", "minimum": 0 }
+    }
+  },
+  "required": ["type", "viewerCount", "viewerLimit", "platforms"]
+}

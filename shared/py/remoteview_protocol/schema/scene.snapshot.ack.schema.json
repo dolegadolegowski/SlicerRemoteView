@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/scene.snapshot.ack.schema.json",
+  "title": "scene.snapshot.ack (relay → publisher)",
+  "description": "Relay accepted the snapshot: how many viewers received the stream and how many were deferred to scene.snapshot.ready (docs/protocol.md §6.4).",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.schema.json" }],
+  "properties": {
+    "type": { "type": "string", "const": "scene.snapshot.ack" },
+    "sceneVersion": { "$ref": "defs.schema.json#/definitions/snapshotVersion" },
+    "viewersStreamed": { "type": "integer", "minimum": 0 },
+    "viewersDeferred": { "type": "integer", "minimum": 0 }
+  },
+  "required": ["type", "sceneVersion", "viewersStreamed", "viewersDeferred"]
+}

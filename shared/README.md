@@ -16,6 +16,7 @@ valid/invalid fixtures shared by every language, and generated types (`ts/`, `py
 | `schema/` | JSON Schema files: `envelope.schema.json`, `defs.schema.json` (common definitions) and one `<type>.schema.json` per message type |
 | `fixtures/messages/<type>/` | `valid-*.json` / `invalid-*.json` conformance fixtures, one directory per message type |
 | `ts/` | TypeScript sources of `@slicerremoteview/shared` (entry `ts/index.ts`), built to `dist/`: `validate.ts` (`compileSchemas`, `parseEnvelope`, `validateMessage`), `permissions.ts` (§11 `PERMISSIONS`, `isAllowed`), `constants.ts` (`ERROR_CODES`, `CLOSE_CODES`, `LIMITS`), `chunk.ts` (§6.3 chunk header, `chunkify`, `checkChunk`, `sha256Hex`), `code.ts` (session-code alphabet, `normalizeCode`) |
+| `py/` | Python package `remoteview_protocol` (pyproject, `remoteview_protocol/`, `tests/`, own `README.md`) — vendored into the Slicer extension (ADR 0007 §3); `py/remoteview_protocol/schema/` is a **generated** copy of `schema/` |
 | `ts/generated/` | **generated, committed** (`npm run generate -w shared`): `schemas.ts` embeds every file of `schema/` so validation needs no file system (browsers, bundlers); PRO-11 adds `messages.ts` |
 | `fixtures/messages/expected.json` | **generated**: the valid/invalid partition of every fixture with the expected `instancePath` — the reference the Python and C# conformance tests must reproduce (PRO-09, PRO-17) |
 | `fixtures/blob/` | binary test vectors of the chunk header (`chunk-header-*.bin`, table in `chunk-headers.json`, see its `README.md`) shared with Python/C# |
@@ -68,6 +69,22 @@ if (!isAllowed("viewer", result.value.type)) {
 | `MESSAGE_TYPES`, `MessageType`, `isMessageType`, `Message`, `Result`, `ParseError`, `ValidationIssue` | the 28 v1.0 types and the result types; `Message` is the envelope plus `unknown` payload fields until PRO-11 generates per-type interfaces |
 | `PROTOCOL_VERSION` (`"1.0"`), `PROTOCOL_MAJOR`, `ERROR_CODES` (15 codes of §9.2), `CLOSE_CODES` (§9.3: `NORMAL` 1000 … `HANDSHAKE_TIMEOUT` 4012), `LIMITS` (§3.3 maximums in bytes / seconds, e.g. `MAX_TEXT_BYTES_PUBLISHER`, `MAX_SNAPSHOT_BYTES`, `MAX_VIEWERS`, `HEARTBEAT_INTERVAL_S`) | constants; the test cross-checks them against the §3.3, §9.2 and §9.3 tables of `docs/protocol.md` |
 
+## Python package (`py/`, PRO-09)
+
+`shared/py/remoteview_protocol` is the Python mirror of `ts/` for the Slicer extension (vendored, never pip-installed —
+ADR 0007 §3; details and API in `py/README.md`). The schemas are **copied into the package** by `npm run generate -w
+shared` (`py/remoteview_protocol/schema/`, byte-identical to `schema/`, drift-checked by `--check` and by pytest), so the
+vendored copy works without the repository. `tests/test_conformance.py` replays `fixtures/messages/expected.json`: the
+valid/invalid partition and the expected `instancePath` of every fixture are identical to the TypeScript run.
+
+Tooling lives in a local virtual environment (`py/.venv`, git-ignored; the dev Mac has `uv` but no system `pytest`):
+
+```bash
+uv venv --python 3.12 shared/py/.venv && uv pip install --python shared/py/.venv/bin/python -e "shared/py[dev]"
+npm run test:py -w shared     # = shared/py/.venv/bin/pytest shared/py
+npm run lint:py -w shared     # = ruff check + ruff format --check over shared/py
+```
+
 ## Runtime helpers (`ts/chunk.ts`, `ts/code.ts`, PRO-07)
 
 Browser-safe (no `node:` imports, WebCrypto for hashing):
@@ -90,12 +107,14 @@ Browser-safe (no `node:` imports, WebCrypto for hashing):
 | `npm run format -w shared` | `prettier --write .` |
 | `npm run typecheck -w shared` | `tsc --noEmit` over `ts/`, `test/` (strict) |
 | `npm run build -w shared` | `tsc -p tsconfig.build.json` → `dist/` (ESM + `.d.ts`) |
-| `npm run generate -w shared` | `node scripts/generate.mjs`: rewrites `ts/generated/schemas.ts` and `fixtures/messages/expected.json`; `npm run generate:check -w shared` (= `--check`) exits 1 on drift and is run by `test/lib.test.ts` |
+| `npm run generate -w shared` | `node scripts/generate.mjs`: rewrites `ts/generated/schemas.ts`, `fixtures/messages/expected.json` and `py/remoteview_protocol/schema/*.json`; `npm run generate:check -w shared` (= `--check`) exits 1 on drift and is run by `test/lib.test.ts` |
+| `npm run test:py -w shared` | `py/.venv/bin/pytest py` (needs the venv below) |
+| `npm run lint:py -w shared` | `ruff check` + `ruff format --check` over `py/` |
 | `npm run fixtures -w shared` | `node scripts/make-glb-fixtures.ts`: rewrites `fixtures/glb/*.glb` + `manifest.json` deterministically (Node type stripping, flag `--experimental-strip-types` for 22.12–22.17; `git diff --exit-code shared/fixtures/glb` is the drift check, also run by `test/glb.test.ts` in a temp dir) |
 
-Runtime dependency policy: only the schema validator (`ajv`); everything else is a devDependency
-(`prompts/01-protocol.md`). `gltf-validator` (Khronos, Dart compiled to JS, offline) is a devDependency used as a
-**library** by `test/glb.test.ts` (`validateBytes`); the package ships no CLI, so there is no `npx gltf-validator`. Python (`py/`, pytest) and C# (`cs/`) toolchains arrive with PRO-09 and PRO-17.
+Runtime dependency policy: only the schema validator (`ajv` in TS, `jsonschema` in Python); everything else is a
+devDependency (`prompts/01-protocol.md`). `gltf-validator` (Khronos, Dart compiled to JS, offline) is a devDependency used as a
+**library** by `test/glb.test.ts` (`validateBytes`); the package ships no CLI, so there is no `npx gltf-validator`. The C# (`cs/`) toolchain arrives with PRO-17.
 
 ## Schema conventions
 
