@@ -1,0 +1,5 @@
+dist/
+node_modules/
+coverage/
+# Markdown follows .editorconfig (110 cols, hand-formatted tables), not Prettier.
+*.md
