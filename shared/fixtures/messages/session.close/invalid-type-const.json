@@ -1,0 +1,13 @@
+{
+  "$comment": "`type` must be the const session.close",
+  "expect": {
+    "instancePath": "/type",
+    "keyword": "const"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "session.other",
+    "id": "p-77",
+    "reason": "USER_STOPPED"
+  }
+}

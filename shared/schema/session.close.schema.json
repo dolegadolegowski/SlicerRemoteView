@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/session.close.schema.json",
+  "title": "session.close (publisher → relay)",
+  "description": "Publisher ends the session: the relay frees the code, drops the snapshot buffer and broadcasts session.closed to viewers (docs/protocol.md §4.5).",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.schema.json" }],
+  "properties": {
+    "type": { "type": "string", "const": "session.close" },
+    "reason": { "$ref": "defs.schema.json#/definitions/sessionCloseReason" }
+  },
+  "required": ["type", "reason"]
+}

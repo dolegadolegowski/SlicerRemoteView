@@ -1,0 +1,13 @@
+{
+  "$comment": "`sessionId` is [A-Za-z0-9_-] (defs.sessionId)",
+  "expect": {
+    "instancePath": "/sessionId",
+    "keyword": "pattern"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "session.closed",
+    "sessionId": "sess 01K7",
+    "reason": "PUBLISHER_CLOSED"
+  }
+}

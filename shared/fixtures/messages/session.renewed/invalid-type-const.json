@@ -1,0 +1,18 @@
+{
+  "$comment": "`type` must be the const session.renewed",
+  "expect": {
+    "instancePath": "/type",
+    "keyword": "const"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "session.other",
+    "replyTo": "p-20",
+    "ttl": {
+      "graceS": 120,
+      "idleS": 1800,
+      "maxLifetimeS": 43200,
+      "expiresAt": 1792281600120
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "$comment": "`closesAt` is an integer timestamp in ms (§3.2, §4.4)",
+  "expect": {
+    "instancePath": "/closesAt",
+    "keyword": "type"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "session.expiring",
+    "reason": "IDLE",
+    "closesAt": "1792240260000"
+  }
+}

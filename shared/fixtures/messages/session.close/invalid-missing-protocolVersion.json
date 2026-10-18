@@ -1,0 +1,12 @@
+{
+  "$comment": "session.close without envelope-required `protocolVersion` (§3.2)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "type": "session.close",
+    "id": "p-77",
+    "reason": "USER_STOPPED"
+  }
+}

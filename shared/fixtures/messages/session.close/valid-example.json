@@ -1,0 +1,6 @@
+{
+  "protocolVersion": "1.0",
+  "type": "session.close",
+  "id": "p-77",
+  "reason": "USER_STOPPED"
+}

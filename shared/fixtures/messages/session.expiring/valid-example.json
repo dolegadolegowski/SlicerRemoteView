@@ -1,0 +1,6 @@
+{
+  "protocolVersion": "1.0",
+  "type": "session.expiring",
+  "reason": "IDLE",
+  "closesAt": 1792240260000
+}

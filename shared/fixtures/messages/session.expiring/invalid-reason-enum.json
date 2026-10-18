@@ -1,0 +1,13 @@
+{
+  "$comment": "`reason` of session.expiring is IDLE only in v1.0 (§4.4)",
+  "expect": {
+    "instancePath": "/reason",
+    "keyword": "enum"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "session.expiring",
+    "reason": "MAX_LIFETIME",
+    "closesAt": 1792240260000
+  }
+}

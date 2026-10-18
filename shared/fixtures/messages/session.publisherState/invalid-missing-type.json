@@ -1,0 +1,12 @@
+{
+  "$comment": "session.publisherState without required `type` (§4.6)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "online": false,
+    "graceEndsAt": 1792238520000
+  }
+}

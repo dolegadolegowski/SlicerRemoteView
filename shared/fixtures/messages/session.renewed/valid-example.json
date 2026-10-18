@@ -1,0 +1,11 @@
+{
+  "protocolVersion": "1.0",
+  "type": "session.renewed",
+  "replyTo": "p-20",
+  "ttl": {
+    "graceS": 120,
+    "idleS": 1800,
+    "maxLifetimeS": 43200,
+    "expiresAt": 1792281600120
+  }
+}

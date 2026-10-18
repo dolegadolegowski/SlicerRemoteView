@@ -1,0 +1,13 @@
+{
+  "$comment": "`type` must be the const session.publisherState",
+  "expect": {
+    "instancePath": "/type",
+    "keyword": "const"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "session.other",
+    "online": false,
+    "graceEndsAt": 1792238520000
+  }
+}

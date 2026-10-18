@@ -1,0 +1,17 @@
+{
+  "$comment": "session.renewed without required `type` (§4.4)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "replyTo": "p-20",
+    "ttl": {
+      "graceS": 120,
+      "idleS": 1800,
+      "maxLifetimeS": 43200,
+      "expiresAt": 1792281600120
+    }
+  }
+}

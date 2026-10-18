@@ -1,0 +1,13 @@
+{
+  "$comment": "`type` must be the const session.expired",
+  "expect": {
+    "instancePath": "/type",
+    "keyword": "const"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "session.other",
+    "sessionId": "sess_01K7Q4XMB2TJ9RD6",
+    "reason": "PUBLISHER_GONE"
+  }
+}

@@ -54,6 +54,12 @@ Runtime dependency policy: only the schema validator (`ajv`); everything else is
   `{ "$ref": "defs.schema.json#/definitions/code" }`. Message schemas extend the envelope with
   `"allOf": [{ "$ref": "envelope.schema.json" }]` and fix `type` with `"const"` **and** `"type": "string"`.
 - The envelope never sets `additionalProperties: false`: unknown fields must be accepted (`docs/protocol.md` §14).
+- Conditional requirements use draft-07 `if`/`then` (e.g. `session.publisherState`: `graceEndsAt` required when
+  `online` is `false`; `viewer.joined`: `snapshot` required when `snapshotAvailable` is `true`), and
+  "exactly one of" rules use `oneOf` (`viewer.join`). Both only list required/forbidden combinations; the property
+  shapes stay in the top-level `properties`, so generated types carry them as optional fields and the rule itself is
+  enforced by validators (Ajv, Python `jsonschema`), not by the types. Ajv `strict` (`strictRequired`) demands that
+  every name in a branch's `required` also appears in that branch's `properties`, hence the repeated `$ref`s.
 - Validation in TS: Ajv 2020 (`ajv/dist/2020.js`) in `strict` mode with `allowUnionTypes` (for `string|null`),
   all files registered with `addSchema` — see `test/helpers.ts`.
 
@@ -88,11 +94,12 @@ its sources and issue tracker because `.NET` is not in the sandbox):
 | `definitions` + cross-file `$ref` | consumed (`Profile` enum, `ClientInfo` class generated from `defs`) | consumed (`definitions` is the only container it resolves) |
 | `$defs` | consumed | **not resolved** — open PR RicoSuter/NJsonSchema#1913, issue #1536 |
 | `const` | → single-value enum (`type Type = "viewer.join"`, C# `enum TypeEnum { ViewerJoin }`) | **not supported** for generation — issue #1329, PRs #1891/#1897 open; the sibling `"type": "string"` keeps the property a `string` |
+| `if`/`then` (draft-07) | ignored for typing: output identical with and without the conditional (`graceEndsAt?: number`, C# `long? GraceEndsAt`), checked 2026-10-18 on `session.publisherState` | parsed into `If`/`Then`/`Else`, not used for C# generation — `[TODO verify]` with the first `dotnet` run (PRO-17) |
 | `oneOf` of required-sets | branches merged into optional properties (checked with an ad-hoc `viewer.join`-like schema, not committed); a property that appears **only** as `required` in a branch, without a schema anywhere, becomes `unknown`/`object` — a property with a `$ref` in the branch is typed correctly | `[TODO verify]` with the first `dotnet` run (PRO-17) |
 
 Decisions taken from the spike: (1) schemas use `definitions`, never `$defs`; (2) every `type` keyword is
-`{"type": "string", "const": "…"}`; (3) `oneOf` is used only for required/forbidden combinations, while the
-property shapes are declared in the top-level `properties` (PRO-04 `viewer.join`); (4) C# generation (PRO-17)
+`{"type": "string", "const": "…"}`; (3) `oneOf` and `if`/`then` are used only for required/forbidden combinations, while
+the property shapes are declared in the top-level `properties` (PRO-18 `session.publisherState`, PRO-04 `viewer.join`); (4) C# generation (PRO-17)
 defaults to quicktype with `--framework NewtonSoft` unless NJsonSchema ships `$defs`/`const` by then.
 Sources: https://github.com/RicoSuter/NJsonSchema/pull/1913, https://github.com/RicoSuter/NJsonSchema/issues/1536,
 https://github.com/RicoSuter/NJsonSchema/issues/1329.

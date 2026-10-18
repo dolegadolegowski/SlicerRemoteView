@@ -1,13 +1,36 @@
 import { describe, expect, it } from "vitest";
-import { compile, createAjv, loadFixtures, loadSchemas, protocolExamples } from "./helpers.js";
+import {
+  compile,
+  createAjv,
+  instancePaths,
+  loadFixtures,
+  loadSchemas,
+  protocolExamples,
+} from "./helpers.js";
 
 const ajv = createAjv();
-const SESSION_TYPES = ["session.create", "session.created", "session.resume", "session.resumed"];
+const SESSION_TYPES = [
+  // PRO-03 (§4.1–4.3)
+  "session.create",
+  "session.created",
+  "session.resume",
+  "session.resumed",
+  // PRO-18 (§4.4–4.6)
+  "session.renew",
+  "session.expiring",
+  "session.renewed",
+  "session.close",
+  "session.closed",
+  "session.expired",
+  "session.publisherState",
+];
 const examples = protocolExamples("## 4. Session lifecycle", "## 5. Viewer join");
 const fixtureSet = (type: string) => loadFixtures("session.").find((s) => s.type === type)!;
 
-describe("session establishment schemas + fixtures (PRO-03)", () => {
-  it("has one schema file per type, named as in §4/§11, with `type` as a const", () => {
+describe("session schemas + fixtures (PRO-03 establishment, PRO-18 maintenance and end)", () => {
+  it("has one schema file per type, named as in §4/§11, with `type` as a const, and a fixture directory each", () => {
+    const fixtureTypes = loadFixtures("session.").map((s) => s.type);
+    expect(fixtureTypes).toEqual([...SESSION_TYPES].sort());
     for (const type of SESSION_TYPES) {
       const schema = loadSchemas().get(`${type}.schema.json`);
       expect(schema, type).toBeDefined();
@@ -79,5 +102,54 @@ describe("session establishment schemas + fixtures (PRO-03)", () => {
     expect(validate({ ...base, publisherToken: "A".repeat(43) })).toBe(true);
     expect(validate({ ...base, publisherToken: "A".repeat(42) })).toBe(false);
     expect(validate({ ...base, publisherToken: "A".repeat(42) + "=" })).toBe(false);
+  });
+
+  it("reason enums of session.expiring/close/closed/expired match §4.4–4.6 via the defs (PRO-18)", () => {
+    const schemas = loadSchemas();
+    const reasonRef = (type: string) =>
+      (schemas.get(`${type}.schema.json`)!.properties as Record<string, { $ref?: string }>).reason
+        ?.$ref;
+    expect(reasonRef("session.expiring")).toBe(
+      "defs.schema.json#/definitions/sessionExpiringReason",
+    );
+    expect(reasonRef("session.close")).toBe("defs.schema.json#/definitions/sessionCloseReason");
+    expect(reasonRef("session.closed")).toBe("defs.schema.json#/definitions/sessionEndReason");
+    expect(reasonRef("session.expired")).toBe("defs.schema.json#/definitions/sessionEndReason");
+    const defs = schemas.get("defs.schema.json")!.definitions as Record<string, { enum: string[] }>;
+    expect(defs.sessionEndReason!.enum).toEqual([
+      "PUBLISHER_CLOSED",
+      "PUBLISHER_GONE",
+      "IDLE",
+      "MAX_LIFETIME",
+      "CAPACITY",
+    ]);
+    expect(defs.sessionCloseReason!.enum).toEqual(["USER_STOPPED"]);
+    expect(defs.sessionExpiringReason!.enum).toEqual(["IDLE"]);
+    const closed = compile(ajv, "session.closed.schema.json");
+    const base = fixtureSet("session.closed").valid[0]!.message;
+    for (const reason of defs.sessionEndReason!.enum)
+      expect(closed({ ...base, reason })).toBe(true);
+  });
+
+  it("session.publisherState requires online and, when online:false, graceEndsAt (§4.6)", () => {
+    const validate = compile(ajv, "session.publisherState.schema.json");
+    const base = { protocolVersion: "1.0", type: "session.publisherState" };
+    expect(validate({ ...base, online: true })).toBe(true);
+    expect(validate({ ...base, online: true, graceEndsAt: 1792238520000 })).toBe(true);
+    expect(validate({ ...base, online: false, graceEndsAt: 1792238520000 })).toBe(true);
+    expect(validate({ ...base, online: false })).toBe(false);
+    expect(instancePaths(validate.errors)).toContain("");
+    expect(validate(base)).toBe(false);
+  });
+
+  it("session.renewed.ttl reuses the ttl def (PRO-18)", () => {
+    const schema = loadSchemas().get("session.renewed.schema.json")!;
+    const props = schema.properties as Record<string, { $ref?: string }>;
+    expect(props.ttl?.$ref).toBe("defs.schema.json#/definitions/ttl");
+    const validate = compile(ajv, "session.renewed.schema.json");
+    const created = fixtureSet("session.created").valid[0]!.message;
+    expect(validate({ protocolVersion: "1.0", type: "session.renewed", ttl: created.ttl })).toBe(
+      true,
+    );
   });
 });

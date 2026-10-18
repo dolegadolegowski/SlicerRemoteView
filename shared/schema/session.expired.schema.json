@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/session.expired.schema.json",
+  "title": "session.expired (relay → publisher and viewers)",
+  "description": "Relay-initiated end of a session (grace, idle, lifetime, capacity), followed by WebSocket close 4002 (docs/protocol.md §4.5, §9.1).",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.schema.json" }],
+  "properties": {
+    "type": { "type": "string", "const": "session.expired" },
+    "sessionId": { "$ref": "defs.schema.json#/definitions/sessionId" },
+    "reason": { "$ref": "defs.schema.json#/definitions/sessionEndReason" }
+  },
+  "required": ["type", "sessionId", "reason"]
+}

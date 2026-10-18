@@ -1,0 +1,13 @@
+{
+  "$comment": "`reason` outside PUBLISHER_CLOSED|PUBLISHER_GONE|IDLE|MAX_LIFETIME|CAPACITY (§4.5)",
+  "expect": {
+    "instancePath": "/reason",
+    "keyword": "enum"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "session.closed",
+    "sessionId": "sess_01K7Q4XMB2TJ9RD6",
+    "reason": "USER_STOPPED"
+  }
+}

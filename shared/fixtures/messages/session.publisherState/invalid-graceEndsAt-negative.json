@@ -1,0 +1,13 @@
+{
+  "$comment": "`graceEndsAt` is a non-negative ms timestamp (defs.timestampMs)",
+  "expect": {
+    "instancePath": "/graceEndsAt",
+    "keyword": "minimum"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "session.publisherState",
+    "online": false,
+    "graceEndsAt": -5
+  }
+}

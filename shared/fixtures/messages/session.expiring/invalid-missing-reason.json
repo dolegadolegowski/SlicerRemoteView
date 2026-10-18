@@ -1,0 +1,12 @@
+{
+  "$comment": "session.expiring without required `reason` (§4.4)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "session.expiring",
+    "closesAt": 1792240260000
+  }
+}

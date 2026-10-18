@@ -1,0 +1,12 @@
+{
+  "$comment": "session.renewed without required `ttl` (§4.4)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "session.renewed",
+    "replyTo": "p-20"
+  }
+}

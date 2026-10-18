@@ -1,0 +1,12 @@
+{
+  "$comment": "session.expired without required `type` (§4.5)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "sessionId": "sess_01K7Q4XMB2TJ9RD6",
+    "reason": "PUBLISHER_GONE"
+  }
+}

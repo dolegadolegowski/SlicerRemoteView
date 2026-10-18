@@ -1,0 +1,13 @@
+{
+  "$comment": "`online` is a boolean (§4.6)",
+  "expect": {
+    "instancePath": "/online",
+    "keyword": "type"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "session.publisherState",
+    "online": "false",
+    "graceEndsAt": 1792238520000
+  }
+}

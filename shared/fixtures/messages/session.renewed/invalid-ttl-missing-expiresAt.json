@@ -1,0 +1,17 @@
+{
+  "$comment": "`ttl.expiresAt` is required (defs.ttl, §4.2/§4.4)",
+  "expect": {
+    "instancePath": "/ttl",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "session.renewed",
+    "replyTo": "p-20",
+    "ttl": {
+      "graceS": 120,
+      "idleS": 1800,
+      "maxLifetimeS": 43200
+    }
+  }
+}

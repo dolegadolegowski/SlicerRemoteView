@@ -1,0 +1,12 @@
+{
+  "$comment": "`graceEndsAt` is required while online is false (§4.6)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "session.publisherState",
+    "online": false
+  }
+}

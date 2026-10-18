@@ -1,0 +1,11 @@
+{
+  "$comment": "session.renew without required `type` (§4.4)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "id": "p-20"
+  }
+}

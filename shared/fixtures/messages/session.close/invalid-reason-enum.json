@@ -1,0 +1,13 @@
+{
+  "$comment": "publisher `reason` is USER_STOPPED only (§4.5); relay reasons are not valid here",
+  "expect": {
+    "instancePath": "/reason",
+    "keyword": "enum"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "session.close",
+    "id": "p-77",
+    "reason": "PUBLISHER_CLOSED"
+  }
+}

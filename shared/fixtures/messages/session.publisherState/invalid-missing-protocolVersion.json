@@ -1,0 +1,12 @@
+{
+  "$comment": "session.publisherState without envelope-required `protocolVersion` (§3.2)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "type": "session.publisherState",
+    "online": false,
+    "graceEndsAt": 1792238520000
+  }
+}

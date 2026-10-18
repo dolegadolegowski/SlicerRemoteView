@@ -1,0 +1,12 @@
+{
+  "$comment": "session.closed without envelope-required `protocolVersion` (§3.2)",
+  "expect": {
+    "instancePath": "",
+    "keyword": "required"
+  },
+  "message": {
+    "type": "session.closed",
+    "sessionId": "sess_01K7Q4XMB2TJ9RD6",
+    "reason": "PUBLISHER_CLOSED"
+  }
+}
