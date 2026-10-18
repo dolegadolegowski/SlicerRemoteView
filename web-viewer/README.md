@@ -95,3 +95,25 @@ connection.connect({ code });          // or { sessionId, viewerToken } to rejoi
   (tests run all valid fixtures through both). Unknown message types are ignored and logged by `type` only; the
   log never contains codes, tokens or payload.
 - Tests: `npm test -w web-viewer -- connection envelope` (mock socket in `test/protocol/mock-socket.ts`, fake timers).
+
+### Snapshot reassembly (WEB-05)
+
+`src/protocol/snapshot-stream.ts` assembles a GLB streamed over the WebSocket (§6.2–6.4); `bindSnapshotStream(connection,
+stream)` feeds it from `scene.snapshot.begin|end|abort` and binary frames and drops the partial buffer when the socket
+closes.
+
+```ts
+const stream = createSnapshotStream({ maxSnapshotBytes }); // same value as announced in viewer.join
+stream.on("progress", ({ fraction }) => …);               // 0 < fraction ≤ 1
+stream.on("ready", ({ sceneVersion, bytes }) => …);       // hash-verified; the stream keeps no reference
+stream.on("badSequence", ({ sceneVersion, field }) => …); // caller sends scene.request{reason:"GAP"}
+stream.on("checksumMismatch" | "tooLarge" | "aborted", …);
+```
+
+`begin` is bound-checked before anything is allocated (`chunkSize` 64 KiB–1 MiB, `chunkCount == ceil(byteLength /
+chunkSize) ≤ 1024`, `byteLength ≤ maxSnapshotBytes ≤ 64 MiB`, uint32 `sceneVersion`); chunks of an aborted or failed
+snapshot are dropped silently, a skipped, duplicated or mis-sized chunk discards the snapshot and reports
+`badSequence`. A new `begin` reports `aborted{reason:"SUPERSEDED"}` for the snapshot it replaces. The binding also
+drops the partial buffer when the relay switches this viewer to HTTP mid-stream (`scene.snapshot.ready` for the same
+or a newer version) and whenever the connection is not `connected`. Tests:
+`npm test -w web-viewer -- snapshot-stream` (fixtures from `shared/fixtures/glb`).
