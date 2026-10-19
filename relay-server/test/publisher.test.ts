@@ -231,6 +231,11 @@ describe("session isolation (T11)", () => {
     expect([...vb].map((e) => ("type" in e ? e.type : e.close))).toEqual(["session.closed", 4001]);
     expect([...vc]).toEqual([]);
     expect(c.session.phase).toBe("allocated");
+    // The other publishers' sockets: a round trip on c flushes anything sent to it before.
+    c.client.send({ type: "ping", id: "c-1" });
+    await expect.poll(() => c.client.received.at(-1)?.type).toBe("pong");
+    expect(c.client.received.map((m) => m.type)).toEqual(["session.created", "pong"]);
+    expect(b.client.received.map((m) => m.type)).toEqual(["session.created"]);
     c.client.ws.close();
   });
 });
