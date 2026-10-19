@@ -19,9 +19,11 @@ opt-in rule, FR-02). Design: `docs/architecture.md` §6, ADR 0005; tasks: `docs/
 | `RemoteView/RemoteView.py` | thin Slicer adapter: `RemoteView`, `RemoteViewWidget`, `RemoteViewLogic`, `RemoteViewTest`; import-light (no network, subprocess, pip or runtime-dependency import at import or construction) |
 | `RemoteView/remoteview_core/` | pure-Python core (Python 3.12 + numpy, `vtk` for geometry filters only); never imports `slicer`/`qt`/`ctk` — `tests/test_core_purity.py` enforces it; `__version__` lives in `__init__.py` |
 | `RemoteView/remoteview_core/coords.py` | RAS mm → glTF m, +Y up (`[x,y,z] = [R,S,−A]·0.001`, protocol §7.1): points, normals, `C·M·C⁻¹` matrices, column-major `node.matrix`, TRS check, winding check |
+| `RemoteView/remoteview_core/glb_writer.py` | `write_glb(entities, RootExtras) -> bytes`: one GLB per snapshot (protocol §7): root `SlicerRemoteView` with §7.1 extras, per entity `T` (extras §7.3, TRS `matrix`) + one mesh child `M`, float32 `POSITION`/`NORMAL`, uint16/uint32 indices, one PBR material; deterministic bytes; strict input validation (`GlbWriteError`) |
 | `RemoteView/remoteview_core/vendored.py` | the only entry to the protocol package: registers `RemoteView/_vendor/remoteview_protocol` from its file location without running its `__init__` (no `jsonschema` needed — FR-16), never touches `sys.path`, refuses any `remoteview_protocol` module loaded from elsewhere; exports `chunk_header` and `alphabet` |
 | `RemoteView/_vendor/remoteview_protocol/` | **generated** copy of `shared/py/remoteview_protocol` with `VENDORED.json` (sha256 per file) — never edit; refresh with `scripts/vendor_shared.py` (ADR 0007 §3) |
 | `RemoteView/Resources/Icons/RemoteView.png` | module icon (128×128), own work generated with a small Python script (no third-party artwork, MIT like the repository) |
+| `tests/validate_glb.mjs` | test helper: Khronos `gltf-validator` (devDependency of `shared/`, needs `npm ci`) + the §7.1 viewer pre-checks on GLBs written by the tests |
 | `tests/` | pytest suites run outside Slicer; `conftest.py` provides strict stub `slicer`/`qt`/`ctk` modules and puts `RemoteView/` on `sys.path` like Slicer does |
 | `.gitattributes` | `RemoteView/_vendor/** -text`: the vendored bytes (and their hashes) survive Windows checkouts |
 | `scripts/vendor_shared.py` | vendoring tool: wraps `node shared/scripts/vendor-py.mjs` (Node 22) and has a byte-identical pure-Python port (`--python`, used when Node is missing); `--check` exits 1 on drift |
@@ -67,6 +69,10 @@ slicer-plugin/.venv/bin/pytest slicer-plugin                  # all tests (or -k
 slicer-plugin/.venv/bin/ruff check slicer-plugin
 slicer-plugin/.venv/bin/ruff format --check slicer-plugin
 ```
+
+The GLB tests also run the Khronos glTF validator (`gltf-validator`, a devDependency of `shared/`): run `npm ci` once at
+the repository root (Node 22). Without it those tests are skipped (`pytest -rs` lists them); set
+`REMOTEVIEW_REQUIRE_GLTF_VALIDATOR=1` (CI) to make them fail instead.
 
 `requirements-dev.txt` pins numpy, the `vtk` wheel (9.6.x like Slicer 5.12), `pygltflib` (test-only GLB reader),
 `jsonschema` and `websockets`; none of these is installed into Slicer by these commands. To change a pin, edit the

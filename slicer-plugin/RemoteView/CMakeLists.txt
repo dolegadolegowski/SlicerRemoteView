@@ -10,6 +10,7 @@ set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}.py
   remoteview_core/__init__.py
   remoteview_core/coords.py
+  remoteview_core/glb_writer.py
   remoteview_core/vendored.py
   _vendor/remoteview_protocol/__init__.py
   _vendor/remoteview_protocol/alphabet.py
