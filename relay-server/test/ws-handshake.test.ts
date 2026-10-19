@@ -229,11 +229,14 @@ describe("text limits per role (SRV-05 criterion 3, §3.3)", () => {
     accepted.ws.close();
     const refused = await connectClient(relay.url);
     refused.sendRaw(frameOf(type, tooBig));
-    expect(await refused.next()).toMatchObject({
+    const error = await refused.next();
+    expect(error).toMatchObject({
       type: "error",
       code: "PAYLOAD_TOO_LARGE",
       details: { maxTextBytes: ok },
     });
+    // Above the publisher limit nothing is parsed; below it the frame's id is echoed (§3.2).
+    expect(error.replyTo).toBe(ok === 262_144 ? undefined : "big");
     expect(await refused.closed).toBe(1009);
   });
 });
@@ -260,6 +263,7 @@ describe("handler failures (architecture §5)", () => {
       expect(await client.next()).toMatchObject({
         type: "error",
         code: "INTERNAL",
+        replyTo: fixture("viewer.join").id,
         retryable: true,
       });
       expect(await client.closed).toBe(1011);
@@ -284,8 +288,13 @@ describe("handler failures (architecture §5)", () => {
       },
     });
     const client = await connectClient(relay.url);
-    client.sendRaw(JSON.stringify(fixture("viewer.join")));
-    expect(await client.next()).toMatchObject({ type: "error", code: "INTERNAL", retryable: true });
+    client.sendRaw(JSON.stringify({ ...fixture("viewer.join"), id: "j-77" }));
+    expect(await client.next()).toMatchObject({
+      type: "error",
+      code: "INTERNAL",
+      replyTo: "j-77",
+      retryable: true,
+    });
     expect(await client.closed).toBe(1011);
     const other = await connectClient(relay.url);
     expect(other.ws.readyState).toBe(1);

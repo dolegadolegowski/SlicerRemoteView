@@ -142,6 +142,7 @@ export async function registerWsEndpoint(
     connection: Connection,
     stage: "frame" | "close",
     run: () => void | Promise<void>,
+    replyTo?: string,
   ): void {
     const failed = (error: unknown): void => {
       logger.error(
@@ -150,6 +151,7 @@ export async function registerWsEndpoint(
       );
       if (stage === "frame")
         connection.fail("INTERNAL", "unexpected relay failure", CLOSE_CODES.INTERNAL_ERROR, {
+          replyTo,
           retryable: true,
         });
     };
@@ -176,13 +178,13 @@ export async function registerWsEndpoint(
       }
       return handlers.binary(connection, frame);
     }
-    const tooBig = (limit: number): boolean => {
+    const tooBig = (limit: number, replyTo?: string): boolean => {
       if (frame.byteLength <= limit) return false;
       connection.fail(
         "PAYLOAD_TOO_LARGE",
         `text message above ${limit} bytes (§3.3)`,
         CLOSE_CODES.MESSAGE_TOO_BIG,
-        { retryable: false, details: { maxTextBytes: limit } },
+        { replyTo, retryable: false, details: { maxTextBytes: limit } },
       );
       return true;
     };
@@ -195,9 +197,10 @@ export async function registerWsEndpoint(
     // The role itself is fixed by the dispatcher, after the protocol version check (§2).
     if (
       connection.role === undefined &&
-      tooBig(textLimit(HANDSHAKE_ROLES.get(textFrame.type ?? "")))
+      tooBig(textLimit(HANDSHAKE_ROLES.get(textFrame.type ?? "")), textFrame.id)
     )
       return;
-    return handlers.text(connection, textFrame);
+    // A failure answers the frame it was handling (`replyTo`, §3.2).
+    guarded(connection, "frame", () => handlers.text(connection, textFrame), textFrame.id);
   }
 }
