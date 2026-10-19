@@ -19,10 +19,10 @@ afterEach(async () => {
 type ViewerEvent = Received | { close: number };
 
 /**
- * An in-memory viewer socket (viewer.join arrives with SRV-07): records what the relay sends, when
+ * An in-memory viewer socket (attached without viewer.join): records what the relay sends, when
  * (`at`, performance.now()), and checks every message against the protocol schema on arrival.
  */
-function fakeViewer(session: Session, id: string) {
+function fakeViewer(session: Session) {
   const events: ViewerEvent[] = [];
   const at: number[] = [];
   const peer: Peer = {
@@ -38,7 +38,7 @@ function fakeViewer(session: Session, id: string) {
       at.push(performance.now());
     },
   };
-  session.viewers.set(id, { id, peer });
+  relay!.registry.addViewer(session, peer, "web");
   return Object.assign(events, { at });
 }
 
@@ -126,7 +126,7 @@ describe("session.create → session.created (SRV-06 criterion 1, §4.1, §4.2)"
 describe("session.close (SRV-06 criterion 2, §4.5)", () => {
   it("viewers get session.closed then 4001 within 100 ms, the publisher 1000; code and buffer released", async () => {
     const { client, session } = await createSession();
-    const viewers = [fakeViewer(session, "vw_a"), fakeViewer(session, "vw_b")];
+    const viewers = [fakeViewer(session), fakeViewer(session)];
     session.snapshot = {
       buffer: Buffer.alloc(1024),
       sha256: "x",
@@ -147,13 +147,13 @@ describe("session.close (SRV-06 criterion 2, §4.5)", () => {
     expect(session.phase).toBe("closed");
     expect(session.snapshot).toBeUndefined();
     expect(relay!.registry.getByCode(session.code)).toBeUndefined();
-    // A later viewer.join with this code finds nothing (SRV-07 answers INVALID_CODE on the wire).
+    // A later viewer.join with this code finds nothing (INVALID_CODE on the wire: viewer.test.ts).
     expect(relay!.registry.isCodeQuarantined(session.code)).toBe(true);
   });
 
   it("the messages viewers receive validate against the schema", async () => {
     const { client, session } = await createSession();
-    const events = fakeViewer(session, "vw_a");
+    const events = fakeViewer(session);
     client.send({ type: "session.close", reason: "USER_STOPPED" });
     await client.closed;
     const [closed] = events as Received[];
@@ -164,7 +164,7 @@ describe("session.close (SRV-06 criterion 2, §4.5)", () => {
 describe("publisher socket lost → grace → expiry (SRV-06 criterion 3, §4.6, §9.1)", () => {
   it("viewers get publisherState{online:false}; after PUBLISHER_GRACE_S session.expired{PUBLISHER_GONE} + 4002", async () => {
     const { client, session } = await createSession();
-    const events = fakeViewer(session, "vw_a");
+    const events = fakeViewer(session);
     client.ws.terminate();
     await expect.poll(() => events.length).toBe(1);
     const graceEndsAt = relay!.clock.now() + 120 * S;
@@ -184,7 +184,7 @@ describe("publisher socket lost → grace → expiry (SRV-06 criterion 3, §4.6,
 
   it("a session.close that ends the socket does not start a grace period", async () => {
     const { client, session } = await createSession();
-    const events = fakeViewer(session, "vw_a");
+    const events = fakeViewer(session);
     client.send({ type: "session.close", reason: "USER_STOPPED" });
     await client.closed;
     expect(events.map((e) => ("type" in e ? e.type : e.close))).toEqual(["session.closed", 4001]);
@@ -212,12 +212,7 @@ describe("session isolation (T11)", () => {
     const a = await createSession();
     const b = await createSession();
     const c = await createSession();
-    const [va, vb, vc] = [
-      fakeViewer(a.session, "vw_a"),
-      fakeViewer(b.session, "vw_b"),
-      fakeViewer(c.session, "vw_c"),
-    ];
-    relay!.registry.setConnectedViewers(c.session, 1); // c keeps a viewer: no idle expiry
+    const [va, vb, vc] = [fakeViewer(a.session), fakeViewer(b.session), fakeViewer(c.session)];
     a.client.ws.terminate();
     await expect.poll(() => va.length).toBe(1);
     b.client.send({ type: "session.close", reason: "USER_STOPPED" });

@@ -72,9 +72,17 @@ export interface Peer {
   close(closeCode: number): void;
 }
 
-/** A joined viewer (SRV-07 adds the token hash, platform and rejoin bookkeeping). */
+/** `clientInfo.platform` of a viewer, mapped onto the documented set (§5.1; unknown → `other`, §14). */
+export type ViewerPlatform = "web" | "quest-browser" | "quest2" | "quest3" | "other";
+
+/** A joined viewer (architecture §3). */
 export interface Viewer {
+  /** `vw_` + 8 random symbols; safe to log. */
   readonly id: string;
+  /** SHA-256 of the viewer token; the token itself is never stored (NFR-17). */
+  readonly tokenHash: Buffer;
+  readonly platform: ViewerPlatform;
+  readonly joinedAt: number;
   /** `undefined` while the viewer is disconnected (entry kept for rejoin, architecture §3). */
   peer: Peer | undefined;
 }
@@ -94,7 +102,7 @@ export interface Session {
   lastPublisherSeen: number;
   /** End of the publisher grace period while `phase === "grace"`. */
   graceEndsAt: number | undefined;
-  /** Viewers with an open socket; the idle timer runs only while this is 0 (§4.4). */
+  /** Viewers with an open socket (`peer` set); the idle timer runs only while this is 0 (§4.4). */
   connectedViewers: number;
   /** Start of the current idle period: creation, last viewer leaving, or last renew. */
   idleSince: number;
@@ -108,12 +116,17 @@ export interface Session {
   readonly nodeState: Map<string, NodeState | "removed">;
   /** The publisher's socket; `undefined` while in grace and after the session ended. */
   publisher: Peer | undefined;
-  /** Joined viewers by `viewerId`; filled by SRV-07. Kept on release so the ending can be announced. */
+  /**
+   * Joined viewers by `viewerId`, connected or not (kept for rejoin, architecture §3), oldest first.
+   * Kept on release so the ending can be announced.
+   */
   readonly viewers: Map<string, Viewer>;
 }
 
 export interface RegistryLimits {
   maxSessions: number;
+  /** Viewers with an open socket per session (`MAX_VIEWERS`, §3.3). */
+  maxViewers: number;
   sessionTtlS: number;
   publisherGraceS: number;
   sessionMaxLifetimeS: number;
@@ -140,7 +153,7 @@ export type RegistryEvents = {
 
 export class RegistryError extends Error {
   constructor(
-    readonly code: "CAPACITY",
+    readonly code: "CAPACITY" | "SESSION_FULL",
     message: string,
   ) {
     super(message);
@@ -155,10 +168,19 @@ export const EXPIRING_LEAD_MS = 60_000;
 
 const SESSION_ID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"; // Crockford base32
 const SESSION_ID_LENGTH = 16;
+const VIEWER_ID_LENGTH = 8;
+/**
+ * Viewer entries per session, connected or not, as a multiple of `maxViewers`. Disconnected
+ * entries stay for rejoin; beyond this the oldest disconnected one (and its token) is dropped, so
+ * join/leave cycles cannot grow a session without bound.
+ */
+export const VIEWER_ENTRIES_PER_SLOT = 3;
 
 export class Registry extends EventEmitter<RegistryEvents> {
   readonly #byId = new Map<string, Session>();
   readonly #byCode = new Map<string, Session>();
+  /** Hex SHA-256 of a viewer token → its session and viewer (rejoin SRV-15, scene download SRV-11). */
+  readonly #viewerTokens = new Map<string, { session: Session; viewer: Viewer }>();
   readonly #quarantine: CodeQuarantine;
   readonly #clock: Clock;
   readonly #rng: RandomInt;
@@ -173,6 +195,7 @@ export class Registry extends EventEmitter<RegistryEvents> {
     this.#onListenerError = options.onListenerError ?? (() => {});
     this.#limits = {
       maxSessions: options.maxSessions,
+      maxViewers: options.maxViewers,
       sessionTtlS: options.sessionTtlS,
       publisherGraceS: options.publisherGraceS,
       sessionMaxLifetimeS: options.sessionMaxLifetimeS,
@@ -203,7 +226,7 @@ export class Registry extends EventEmitter<RegistryEvents> {
     return this.#byId.get(sessionId);
   }
 
-  /** Exact lookup of a canonical code; normalisation is the caller's job (SRV-07). */
+  /** Exact lookup of a canonical code; normalisation is the caller's job (`ws/viewer.ts`). */
   getByCode(code: string): Session | undefined {
     return this.#byCode.get(code);
   }
@@ -297,10 +320,55 @@ export class Registry extends EventEmitter<RegistryEvents> {
   }
 
   /**
-   * Number of viewers with an open socket (SRV-07). Dropping to 0 starts a new idle period;
-   * while it is above 0 the idle timer does not run (§4.4).
+   * Adds a viewer with an open socket and returns it with its token, which the caller sends once in
+   * `viewer.joined` and then forgets (§5.2). Throws `RegistryError("SESSION_FULL")` when
+   * `maxViewers` viewers are connected (§3.3). The caller checked that the session is live.
    */
-  setConnectedViewers(session: Session, count: number): void {
+  addViewer(
+    session: Session,
+    peer: Peer,
+    platform: ViewerPlatform,
+  ): { viewer: Viewer; viewerToken: string } {
+    if (session.connectedViewers >= this.#limits.maxViewers)
+      throw new RegistryError("SESSION_FULL", "MAX_VIEWERS reached");
+    const viewerToken = newToken("vt_");
+    const viewer: Viewer = {
+      id: this.#newViewerId(session),
+      tokenHash: hashToken(viewerToken),
+      platform,
+      joinedAt: this.#clock.now(),
+      peer,
+    };
+    session.viewers.set(viewer.id, viewer);
+    this.#viewerTokens.set(viewer.tokenHash.toString("hex"), { session, viewer });
+    this.#pruneViewers(session);
+    this.#countViewers(session);
+    return { viewer, viewerToken };
+  }
+
+  /**
+   * The viewer's socket is gone (`viewer.leave`, a drop, or the session ending): the entry stays for
+   * rejoin until the session ends or, while disconnected, until `VIEWER_ENTRIES_PER_SLOT ×
+   * maxViewers` newer entries exist (architecture §3). The only place `peer` is cleared, so
+   * `connectedViewers` stays in step. Returns false when it was not connected.
+   */
+  viewerDisconnected(session: Session, viewer: Viewer): boolean {
+    if (viewer.peer === undefined || session.viewers.get(viewer.id) !== viewer) return false;
+    viewer.peer = undefined;
+    this.#countViewers(session);
+    return true;
+  }
+
+  /** The live session and viewer a viewer token belongs to (rejoin SRV-15, `GET /api/scene` SRV-11). */
+  viewerByToken(token: string): { session: Session; viewer: Viewer } | undefined {
+    return this.#viewerTokens.get(hashToken(token).toString("hex"));
+  }
+
+  /**
+   * Number of viewers with an open socket, kept in step by `addViewer`/`viewerDisconnected`.
+   * Dropping to 0 starts a new idle period; while it is above 0 the idle timer does not run (§4.4).
+   */
+  #setConnectedViewers(session: Session, count: number): void {
     if (count === 0 && session.connectedViewers > 0) {
       session.idleSince = this.#clock.now();
       session.idleWarned = false;
@@ -423,6 +491,8 @@ export class Registry extends EventEmitter<RegistryEvents> {
     if (this.#byId.get(session.id) !== session) return false;
     this.#byId.delete(session.id);
     this.#byCode.delete(session.code);
+    for (const viewer of session.viewers.values())
+      this.#viewerTokens.delete(viewer.tokenHash.toString("hex"));
     this.#quarantine.add(session.code);
     session.snapshot = undefined;
     session.assembling = undefined;
@@ -431,14 +501,41 @@ export class Registry extends EventEmitter<RegistryEvents> {
     return true;
   }
 
+  #countViewers(session: Session): void {
+    let connected = 0;
+    for (const viewer of session.viewers.values()) if (viewer.peer !== undefined) connected += 1;
+    this.#setConnectedViewers(session, connected);
+  }
+
+  /** Drops the oldest disconnected entries beyond `VIEWER_ENTRIES_PER_SLOT × maxViewers`. */
+  #pruneViewers(session: Session): void {
+    let excess = session.viewers.size - VIEWER_ENTRIES_PER_SLOT * this.#limits.maxViewers;
+    for (const viewer of session.viewers.values()) {
+      if (excess <= 0) return;
+      if (viewer.peer !== undefined) continue;
+      session.viewers.delete(viewer.id);
+      this.#viewerTokens.delete(viewer.tokenHash.toString("hex"));
+      excess -= 1;
+    }
+  }
+
   /** 80 random bits; a repeat means a broken RNG, so give up like `generateCode` does. */
   #newSessionId(): string {
+    return this.#randomId("sess_", SESSION_ID_LENGTH, (id) => this.#byId.has(id), "session id");
+  }
+
+  /** 40 random bits, unique within the session. */
+  #newViewerId(session: Session): string {
+    return this.#randomId("vw_", VIEWER_ID_LENGTH, (id) => session.viewers.has(id), "viewer id");
+  }
+
+  #randomId(prefix: string, length: number, taken: (id: string) => boolean, what: string): string {
     for (let attempt = 0; attempt < MAX_CODE_ATTEMPTS; attempt++) {
-      let id = "sess_";
-      for (let i = 0; i < SESSION_ID_LENGTH; i++)
+      let id = prefix;
+      for (let i = 0; i < length; i++)
         id += SESSION_ID_ALPHABET[this.#rng(0, SESSION_ID_ALPHABET.length)];
-      if (!this.#byId.has(id)) return id;
+      if (!taken(id)) return id;
     }
-    throw new RegistryError("CAPACITY", "no free session id");
+    throw new RegistryError("CAPACITY", `no free ${what}`);
   }
 }

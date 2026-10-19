@@ -30,11 +30,23 @@ function frameOf(type: string, bytes: number): string {
   return head.replace('"pad":""', `"pad":"${"x".repeat(bytes - head.length)}"`);
 }
 
-/** Sends a valid first message of `type` (the dispatcher fixes the role) and drains its answer. */
+/** A valid `viewer.join` with the code of a fresh live session of the current relay. */
+function liveJoin(): Record<string, unknown> {
+  const { session } = relay!.registry.createSession("mobile");
+  return { ...fixture("viewer.join"), code: session.code };
+}
+
+/** Sends a valid first message of `type` (the dispatcher fixes the role) and drains its answers. */
 async function handshake(
   client: TestClient,
   type: "session.create" | "viewer.join",
 ): Promise<void> {
+  if (type === "viewer.join") {
+    client.sendRaw(JSON.stringify(liveJoin()));
+    for (const answer of ["viewer.joined", "scene.state", "viewer.count"])
+      expect((await client.next()).type).toBe(answer);
+    return;
+  }
   client.sendRaw(JSON.stringify(fixture(type)));
   await client.next();
 }
@@ -140,8 +152,11 @@ describe("role fixed by the first message (SRV-05 criterion 1, §3.1)", () => {
     async (type) => {
       relay = await startRelay();
       const client = await connectClient(relay.url);
-      client.sendRaw(JSON.stringify(fixture(type)));
-      await client.next();
+      if (type === "viewer.join") await handshake(client, type);
+      else {
+        client.sendRaw(JSON.stringify(fixture(type)));
+        await client.next();
+      }
       client.send({ type: "ping", id: "hb-1" });
       expect(await client.next()).toMatchObject({ type: "pong", replyTo: "hb-1" });
       client.ws.close();

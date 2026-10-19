@@ -35,8 +35,8 @@ export const HANDSHAKE_TIMEOUT_MS = LIMITS.HANDSHAKE_TIMEOUT_S * 1000;
 /**
  * What the later tasks plug in. Hooks may be async: a synchronous throw and a rejected promise
  * are handled alike (logged as an error code; a frame hook's failure closes `INTERNAL` + `1011`).
- * Async hooks are not serialised per connection — a hook that awaits (e.g. the join jitter of
- * SRV-07) must not rely on running before the connection's next frame.
+ * Async hooks are not serialised per connection — a hook that awaits must not rely on running
+ * before the connection's next frame (a failed join's jitter uses `Connection.awaitClose()`).
  */
 export interface FrameHandlers {
   /**
@@ -177,7 +177,7 @@ export async function registerWsEndpoint(
   }
 
   function onFrame(connection: Connection, frame: Buffer, isBinary: boolean): void | Promise<void> {
-    if (!connection.isOpen) return;
+    if (!connection.isOpen || !connection.reading) return;
     if (isBinary) {
       // Snapshot chunks only from a publisher whose session exists (§3.2, §11).
       if (connection.role !== "publisher" || !connection.bound) {

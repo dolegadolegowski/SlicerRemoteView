@@ -9,6 +9,7 @@ import { ManualClock } from "./helpers/manual-clock.js";
 const S = 1_000;
 const DEFAULTS = {
   maxSessions: 100,
+  maxViewers: 20,
   sessionTtlS: 1_800,
   publisherGraceS: 120,
   sessionMaxLifetimeS: 43_200,
@@ -38,7 +39,11 @@ interface Scenario {
   reason: ExpiryReason;
 }
 
-const withViewer: Step = (r, s) => r.setConnectedViewers(s, 1);
+const stubPeer = { send: () => {}, close: () => {} };
+const withViewer: Step = (r, s) => void r.addViewer(s, stubPeer, "web");
+const viewersLeave: Step = (r, s) => {
+  for (const viewer of s.viewers.values()) r.viewerDisconnected(s, viewer);
+};
 
 const SCENARIOS: Scenario[] = [
   {
@@ -63,7 +68,7 @@ const SCENARIOS: Scenario[] = [
   {
     name: "idle counts from the last viewer leaving",
     setup: withViewer,
-    timeline: [[5_000, (r, s) => r.setConnectedViewers(s, 0)]],
+    timeline: [[5_000, viewersLeave]],
     expiresAtS: 6_800,
     reason: "IDLE",
   },
@@ -108,7 +113,7 @@ const SCENARIOS: Scenario[] = [
           expect(s.phase).toBe("allocated"); // no snapshot yet: back to allocated, not active
         },
       ],
-      [300, (r, s) => r.setConnectedViewers(s, 0)],
+      [300, viewersLeave],
     ],
     expiresAtS: 2_100,
     reason: "IDLE",
@@ -161,7 +166,7 @@ describe("expiry follows the state diagram of architecture §3 (SRV-04 criterion
   it("does not warn or expire while viewers are connected", () => {
     const { clock, registry, expired, expiring } = setup();
     const { session } = registry.createSession("quest3");
-    registry.setConnectedViewers(session, 3);
+    for (let i = 0; i < 3; i++) registry.addViewer(session, stubPeer, "quest3");
     clock.advance(10_000 * S);
     registry.sweep();
     expect(registry.idleDeadline(session)).toBeUndefined();
@@ -392,5 +397,85 @@ describe("createSession (SRV-04 criterion 3, §4.1, §4.2)", () => {
     });
     expect(registry.createSession("mobile", "AAAAA").session.code).toBe("AAAAA");
     expect(registry.createSession("mobile").session.code).toBe("BBBBB");
+  });
+});
+
+describe("viewers (SRV-07, architecture §3)", () => {
+  const peer = () => ({ ...stubPeer });
+
+  it("adds viewers up to maxViewers connected, then throws SESSION_FULL", () => {
+    const { registry } = setup({ maxViewers: 2 });
+    const { session } = registry.createSession("mobile");
+    const a = registry.addViewer(session, peer(), "web");
+    registry.addViewer(session, peer(), "quest3");
+    expect(session.connectedViewers).toBe(2);
+    expect(() => registry.addViewer(session, peer(), "web")).toThrow(
+      expect.objectContaining({ code: "SESSION_FULL" }),
+    );
+    expect(registry.viewerDisconnected(session, a.viewer)).toBe(true);
+    expect(registry.viewerDisconnected(session, a.viewer)).toBe(false);
+    expect(session.connectedViewers).toBe(1);
+    registry.addViewer(session, peer(), "web");
+    expect(session.viewers.size).toBe(3);
+  });
+
+  it("stores only the token hash and finds the viewer by token until the session ends", () => {
+    const { registry } = setup();
+    const { session } = registry.createSession("mobile");
+    const { viewer, viewerToken } = registry.addViewer(session, peer(), "web");
+    expect(viewer.id).toMatch(/^vw_[0-9A-Z]{8}$/);
+    expect(viewerToken).toMatch(/^vt_[A-Za-z0-9_-]{43}$/);
+    expect(viewer.tokenHash.equals(hashToken(viewerToken))).toBe(true);
+    expect(registry.viewerByToken(viewerToken)).toEqual({ session, viewer });
+    registry.viewerDisconnected(session, viewer);
+    expect(registry.viewerByToken(viewerToken)?.viewer).toBe(viewer); // kept for rejoin
+    expect(registry.viewerByToken(`${viewerToken}x`)).toBeUndefined();
+    registry.closeSession(session);
+    expect(registry.viewerByToken(viewerToken)).toBeUndefined();
+  });
+
+  it("keeps at most 3 × maxViewers entries, dropping the oldest disconnected ones and their tokens", () => {
+    const { registry } = setup({ maxViewers: 2 });
+    const { session } = registry.createSession("mobile");
+    const added = Array.from({ length: 6 }, () => {
+      const entry = registry.addViewer(session, peer(), "web");
+      registry.viewerDisconnected(session, entry.viewer);
+      return entry;
+    });
+    expect(session.viewers.size).toBe(6);
+    const connected = registry.addViewer(session, peer(), "web");
+    expect(session.viewers.size).toBe(6);
+    expect(session.viewers.has(added[0]!.viewer.id)).toBe(false);
+    expect(registry.viewerByToken(added[0]!.viewerToken)).toBeUndefined();
+    expect(registry.viewerByToken(added[1]!.viewerToken)?.viewer).toBe(added[1]!.viewer);
+    expect(session.viewers.get(connected.viewer.id)).toBe(connected.viewer);
+  });
+
+  it("never prunes a connected viewer, however many join/leave cycles follow", () => {
+    const { registry } = setup({ maxViewers: 2 });
+    const { session } = registry.createSession("mobile");
+    const kept = registry.addViewer(session, peer(), "web");
+    for (let i = 0; i < 10; i++) {
+      const cycle = registry.addViewer(session, peer(), "web");
+      registry.viewerDisconnected(session, cycle.viewer);
+    }
+    expect(session.viewers.size).toBe(6);
+    expect(session.viewers.get(kept.viewer.id)).toBe(kept.viewer);
+    expect(registry.viewerByToken(kept.viewerToken)?.viewer).toBe(kept.viewer);
+    expect(session.connectedViewers).toBe(1);
+    registry.addViewer(session, peer(), "web");
+    expect(() => registry.addViewer(session, peer(), "web")).toThrow(
+      expect.objectContaining({ code: "SESSION_FULL" }),
+    );
+  });
+
+  it("drives the idle timer from connected viewers (§4.4)", () => {
+    const { clock, registry } = setup();
+    const { session } = registry.createSession("mobile");
+    const { viewer } = registry.addViewer(session, peer(), "web");
+    expect(registry.idleDeadline(session)).toBeUndefined();
+    clock.advance(10 * S);
+    registry.viewerDisconnected(session, viewer);
+    expect(registry.idleDeadline(session)).toBe(clock.now() + 1_800 * S);
   });
 });

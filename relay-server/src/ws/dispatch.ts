@@ -2,7 +2,8 @@
  * WebSocket endpoint `/ws`, part 2: envelope validation, role gate, permissions and dispatch
  * (docs/protocol.md §2, §3.1, §9.2–§9.3, §11, §14).
  *
- * Every text frame arrives parsed once (`frame.ts`) and goes through the checks of `parseEnvelope` of
+ * Every text frame arrives parsed once (`frame.ts`); a `Normalizer` of its type may rewrite the parsed
+ * object (e.g. the code of `viewer.join`, §12) before it goes through the checks of `parseEnvelope` of
  * `@slicerremoteview/shared` (PRO-06), then:
  * 1. protocol major ≠ 1 → `error UNSUPPORTED_VERSION` + `4000` — checked first, so it also applies to
  *    a first message whose type a 2.x client may have renamed (§2);
@@ -48,11 +49,19 @@ export type Handler<T extends MessageType> = (
 ) => void | Promise<void>;
 export type HandlerTable = { [T in MessageType]?: Handler<T> };
 
+/**
+ * Rewrites a parsed object frame of its type in place before schema validation; it must keep
+ * every other field as received (it sees unvalidated input).
+ */
+export type Normalizer = (value: Record<string, unknown>) => void;
+export type NormalizerTable = { [T in MessageType]?: Normalizer };
+
 export interface DispatcherOptions {
   clock: Clock;
   handlers?: HandlerTable;
   /** Shared validators; default: the lazily compiled strict set of `@slicerremoteview/shared`. */
   validators?: Validators;
+  normalizers?: NormalizerTable;
 }
 
 /** Returns the `text` frame handler for the endpoint. */
@@ -83,7 +92,12 @@ export function createDispatcher(
     else connection.sendError("UNAUTHORIZED", reason, { replyTo, retryable: false });
   }
 
+  const normalizers = new Map(Object.entries(options.normalizers ?? {}));
+
   return function onText(connection: Connection, frame: TextFrame): void | Promise<void> {
+    const normalize = frame.type === undefined ? undefined : normalizers.get(frame.type);
+    if (normalize !== undefined && typeof frame.value === "object" && frame.value !== null)
+      normalize(frame.value as Record<string, unknown>);
     const parsed = checkEnvelope(frame, validators);
     const { type, id: replyTo } = parsed.ok
       ? { type: parsed.value.type as string, id: parsed.value.id }

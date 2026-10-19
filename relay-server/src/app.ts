@@ -21,6 +21,7 @@ import { createDispatcher } from "./ws/dispatch.js";
 import type { HandlerTable } from "./ws/dispatch.js";
 import { registerWsEndpoint } from "./ws/endpoint.js";
 import { publisherHandlers } from "./ws/publisher.js";
+import { viewerHandlers } from "./ws/viewer.js";
 import type { FrameHandlers } from "./ws/endpoint.js";
 
 export interface AppOptions {
@@ -122,6 +123,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   // Compile every protocol schema now, not on the first client message (≈ 250 ms of blocked loop).
   const validators = defaultSchemas();
   const publisher = publisherHandlers({ registry, config, logger });
+  const viewer = viewerHandlers({ registry, logger, clock });
 
   // First: the WebSocket plugin wraps every route registered after it (upgrade interception).
   await registerWsEndpoint(app, {
@@ -132,11 +134,13 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
       text: createDispatcher({
         clock,
         validators,
-        handlers: { ...publisher.handlers, ...options.messageHandlers },
+        normalizers: viewer.normalizers,
+        handlers: { ...publisher.handlers, ...viewer.handlers, ...options.messageHandlers },
       }),
       binary: () => {}, // snapshot chunks: SRV-09
       closed: (connection, closeCode) => {
         if (connection.role === "publisher") publisher.publisherClosed(connection, closeCode);
+        else if (connection.role === "viewer") viewer.viewerClosed(connection);
       },
       ...options.wsHandlers,
     },
@@ -148,6 +152,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   app.addHook("onClose", async () => {
     registry.stop();
     publisher.dispose();
+    viewer.dispose();
   });
 
   // No endpoint takes a request body (§10); without parsers a POST to an unknown path is a plain 404.

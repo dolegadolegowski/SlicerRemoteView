@@ -7,7 +7,7 @@ import { PROTOCOL_VERSION } from "@slicerremoteview/shared";
 import type { ErrorCode } from "@slicerremoteview/shared";
 import { WebSocket } from "ws";
 import type { Clock, TimerHandle } from "../clock.js";
-import type { Peer, Session } from "../registry.js";
+import type { Peer, Session, Viewer } from "../registry.js";
 
 export type Role = "publisher" | "viewer";
 
@@ -37,12 +37,15 @@ export class Connection implements Peer {
   role: Role | undefined;
   /** The session this socket is bound to (publisher or viewer); set by create/resume/join. */
   session: Session | undefined;
+  /** The registry entry of a joined viewer (`ws/viewer.ts`). */
+  viewer: Viewer | undefined;
   /** `INVALID_MESSAGE` answers so far (3 → close `4007`, §9.2). */
   invalidMessages = 0;
   /** `UNAUTHORIZED` answers so far (2 → close `1008`, §11). */
   offences = 0;
   #bound = false;
   #closing = false;
+  #reading = true;
   #handshakeTimer: TimerHandle | undefined;
 
   constructor(
@@ -112,6 +115,21 @@ export class Connection implements Peer {
   completeHandshake(): void {
     this.#bound = true;
     this.#clearHandshakeTimer();
+  }
+
+  /**
+   * The socket's last answer is pending and the caller closes it afterwards (e.g. a failed join waits
+   * for its jitter, §12: no retries on one socket): every further frame is ignored, and the
+   * handshake timer no longer fires, so that answer is not pre-empted by `4012`.
+   */
+  awaitClose(): void {
+    this.#reading = false;
+    this.#clearHandshakeTimer();
+  }
+
+  /** False after `awaitClose()`: the endpoint drops incoming frames. */
+  get reading(): boolean {
+    return this.#reading;
   }
 
   /** True once `completeHandshake()` was called. */

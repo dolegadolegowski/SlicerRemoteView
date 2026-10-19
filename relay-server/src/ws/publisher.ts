@@ -26,20 +26,22 @@ export interface PublisherDeps {
   logger: Logger;
 }
 
-/** Sends `message` to every viewer with an open socket, then closes them with `closeCode`. */
-function endViewers(
-  session: Session,
-  message: Parameters<Peer["send"]>[0],
-  closeCode: number,
-): void {
-  for (const viewer of session.viewers.values()) {
-    viewer.peer?.send(message);
-    viewer.peer?.close(closeCode);
-    viewer.peer = undefined;
-  }
-}
-
 export function publisherHandlers({ registry, config, logger }: PublisherDeps) {
+  /** Sends `message` to every viewer with an open socket, then closes them with `closeCode`. */
+  function endViewers(
+    session: Session,
+    message: Parameters<Peer["send"]>[0],
+    closeCode: number,
+  ): void {
+    for (const viewer of session.viewers.values()) {
+      const peer = viewer.peer;
+      if (peer === undefined) continue;
+      registry.viewerDisconnected(session, viewer);
+      peer.send(message);
+      peer.close(closeCode);
+    }
+  }
+
   // The same effective limits as GET /api/version (§14), plus the update cap.
   const announced = publicLimits(config);
   const sessionLimits = {

@@ -47,7 +47,7 @@ export function generateCode(
 /**
  * True for a canonical code: exactly 5 alphabet symbols, already upper-case, no separators.
  * The relay does not normalise `preferredCode` (§4.1: "well-formed" or ignored); `viewer.join`
- * input normalisation is SRV-07.
+ * input is normalised first (`normalizeCode` in `ws/viewer.ts`).
  */
 export function isWellFormed(code: unknown): code is string {
   return typeof code === "string" && isCode(code);
