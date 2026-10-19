@@ -140,6 +140,32 @@ module self-test in Slicer. Rule 10 of `CLAUDE.md` applies: never claim a Slicer
   (the shared `large-synthetic` fixture pairs begin version 3 with root version 1).
 - (SLC-06 review, low) SLC-06 is ~1,850 changed lines (≈ 730 core, ≈ 1,080 tests); split SLC-16 and SLC-17 into smaller rows
   (builders/counter vs state machine/handlers) before starting them.
+- (branch audit, medium) Segment IDs outside the §3.3 `nodeId` set (spaces, non-ASCII, parentheses, > ~100
+  characters — Slicer keeps caller-supplied IDs) make `write_glb` reject the whole snapshot. Until `protocol` answers
+  `docs/testing/reports/2026-10-19-slicer-3.md`, SLC-07/SLC-13 skip such segments and report them as skipped (tests:
+  `"left lung"`, `"Läsion"`, `"Tumor(1)"`, a 110-character ID); then relax the writer's `nodeId == mrmlId/segmentId`
+  rule for the agreed alias. The same alias closes `2026-10-18-slicer-3` (raised to medium): with *Hide node names* the
+  segment ID must not carry a name — gate for SLC-13.
+- (branch audit, low) `begin_snapshot` should check the GLB root `extras.sceneVersion`/`profile` and the entity and
+  triangle totals against `begin` (the JSON chunk is already parsed); rule requested in
+  `docs/testing/reports/2026-10-19-slicer-4.md` (extends the SLC-06 follow-up on the next snapshot version).
+- (branch audit, low) Contract bounds copied into `protocol_client.py` (`PROFILES`, `ALLOWED_EXTENSIONS`, token and
+  `sessionId` lengths, `limits`, `viewerLimit`) are not compared with the vendored `defs.schema.json` by a test (only
+  `KNOWN_PLATFORMS`, `PROTOCOL_VERSION` and the writer's `PROFILES` are); add one with the next change to the client, so
+  a widened bound in a protocol minor cannot make the runtime checks drop valid relay messages.
+- (branch audit, low) Relay text still kept in client state: `ErrorInfo.reply_to` (any ≤ 32-character string, in its
+  `repr`) and unknown keys copied with `ttl`/`limits`; keep `reply_to` only when it is an id this client issued and copy
+  only the schema keys.
+- (branch audit, low) `make_client_info` promises "no device identifiers or user names" but checks only the length;
+  enforce `sys.platform`-style values (`[a-z0-9_.-]{1,16}`) and a version grammar, with tests for a newline and a
+  hostname-like value.
+- (branch audit, low) The FR-02 import guard in `tests/test_skeleton.py` covers what `RemoteView.py` imports, which is
+  no core module yet; parametrise it over every `remoteview_core/*.py` before SLC-08 adds the transport.
+- (branch audit, low) SLC-06 criterion 3 names `session.closed`, but §11 sends only `session.expired` to a publisher;
+  the client handles both — SLC-17/SLC-18 tests should target `session.expired`.
+- (branch audit) The security audit leans to **medium** for the `auto_renew=True` default (NFR-11 idle TTL, T1); the
+  one-line change to `False` with SLC-17/SLC-18 opting in on user activity is `release`'s call before SLC-08/SLC-09
+  use the client.
 
 ## Manual verification needed
 
