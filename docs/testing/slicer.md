@@ -55,6 +55,29 @@ extension built with CMake/CPack the path is inside the extension's `qt-scripted
 that `RESOURCES` keep the `_vendor/remoteview_protocol/schema/` sub-directory: the 30 `*.schema.json` files must exist
 there.
 
+Re-run after SLC-06 (pure core: coordinates, GLB writer, protocol client — Slicer's own Python and numpy): repeat
+steps 2–3, then paste into the Python console:
+
+```python
+import sys
+import numpy as np
+from remoteview_core.coords import ras_to_gltf_points
+from remoteview_core.glb_writer import Entity, RootExtras, write_glb
+from remoteview_core.protocol_client import ProtocolClient, make_client_info
+points = ras_to_gltf_points(np.array([[0, 0, 0], [100, 0, 0], [0, 0, 50]], dtype=float))
+entity = Entity(node_id="vtkMRMLModelNode1", kind="model", name="Smoke", positions=points,
+                normals=np.tile([0.0, 0.0, 1.0], (3, 1)), indices=np.array([[0, 1, 2]]),
+                color=(1.0, 0.5, 0.0), opacity=1.0, visible=True, mrml_id="vtkMRMLModelNode1")
+version = slicer.app.applicationVersion
+glb = write_glb([entity], RootExtras(scene_version=1, profile="mobile", slicer_version=version))
+client = ProtocolClient(make_client_info(version, sys.platform))
+print(glb[:4], len(glb) % 4, client.start("mobile")["type"], client.state.value)
+```
+
+Expected: `b'glTF' 0 session.create connecting`; no traceback (if `make_client_info` raises "≤ 64 characters", note the
+`applicationVersion` string in the results table); no network connection beyond the baseline (the client only builds
+messages — sockets arrive with SLC-08) and no pip dialog.
+
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|
 | | | | | |
