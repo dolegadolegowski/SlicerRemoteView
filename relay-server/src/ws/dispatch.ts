@@ -2,7 +2,8 @@
  * WebSocket endpoint `/ws`, part 2: envelope validation, role gate, permissions and dispatch
  * (docs/protocol.md §2, §3.1, §9.2–§9.3, §11, §14).
  *
- * Every text frame goes through `parseEnvelope` of `@slicerremoteview/shared` (PRO-06), then:
+ * Every text frame arrives parsed once (`frame.ts`) and goes through the checks of `parseEnvelope` of
+ * `@slicerremoteview/shared` (PRO-06), then:
  * 1. protocol major ≠ 1 → `error UNSUPPORTED_VERSION` + `4000` — checked first, so it also applies to
  *    a first message whose type a 2.x client may have renamed (§2);
  * 2. first message: its `type` fixes the role (`session.create`/`session.resume` → publisher,
@@ -21,15 +22,17 @@
  */
 import {
   CLOSE_CODES,
+  defaultSchemas,
   isAllowed,
   isMessageType,
-  parseEnvelope,
   PROTOCOL_VERSION,
 } from "@slicerremoteview/shared";
 import type { MessageOfType, MessageType, Validators } from "@slicerremoteview/shared";
 import type { Clock } from "../clock.js";
 import { HANDSHAKE_ROLES } from "./connection.js";
 import type { Connection } from "./connection.js";
+import { checkEnvelope } from "./frame.js";
+import type { TextFrame } from "./frame.js";
 
 /** `INVALID_MESSAGE` answers per socket before close `4007` (§9.2: "3 strikes"). */
 export const INVALID_MESSAGE_STRIKES = 3;
@@ -45,22 +48,6 @@ export type Handler<T extends MessageType> = (
 ) => void | Promise<void>;
 export type HandlerTable = { [T in MessageType]?: Handler<T> };
 
-/** `type` and a well-formed `id` of a frame that failed validation (for the role gate and `replyTo`). */
-function peek(text: string): { type?: string; id?: string } {
-  try {
-    const value: unknown = JSON.parse(text);
-    if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
-    const { type, id } = value as { type?: unknown; id?: unknown };
-    return {
-      ...(typeof type === "string" && { type }),
-      // Only an id the envelope schema would accept is echoed (§3.2: string, 1–32 chars).
-      ...(typeof id === "string" && id.length > 0 && id.length <= 32 && { id }),
-    };
-  } catch {
-    return {};
-  }
-}
-
 export interface DispatcherOptions {
   clock: Clock;
   handlers?: HandlerTable;
@@ -71,8 +58,9 @@ export interface DispatcherOptions {
 /** Returns the `text` frame handler for the endpoint. */
 export function createDispatcher(
   options: DispatcherOptions,
-): (connection: Connection, text: string) => void | Promise<void> {
-  const { clock, validators } = options;
+): (connection: Connection, frame: TextFrame) => void | Promise<void> {
+  const { clock } = options;
+  const validators = options.validators ?? defaultSchemas();
   const table: HandlerTable = {
     // §9.1: both roles; the heartbeat bookkeeping (TTL refresh, WS pings) is SRV-14.
     ping: (connection, message) =>
@@ -95,11 +83,11 @@ export function createDispatcher(
     else connection.sendError("UNAUTHORIZED", reason, { replyTo, retryable: false });
   }
 
-  return function onText(connection: Connection, text: string): void | Promise<void> {
-    const parsed = parseEnvelope(text, validators);
+  return function onText(connection: Connection, frame: TextFrame): void | Promise<void> {
+    const parsed = checkEnvelope(frame, validators);
     const { type, id: replyTo } = parsed.ok
       ? { type: parsed.value.type as string, id: parsed.value.id }
-      : peek(text);
+      : frame;
 
     if (!parsed.ok && parsed.error.code === "UNSUPPORTED_VERSION") {
       connection.fail(

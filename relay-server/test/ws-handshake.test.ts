@@ -13,8 +13,8 @@ function recordingHandlers() {
   const texts: string[] = [];
   const binaries: number[] = [];
   const handlers: FrameHandlers = {
-    text: (_connection, text) => {
-      texts.push(text);
+    text: (_connection, frame) => {
+      texts.push(frame.text);
     },
     binary: (_connection, frame) => {
       binaries.push(frame.byteLength);

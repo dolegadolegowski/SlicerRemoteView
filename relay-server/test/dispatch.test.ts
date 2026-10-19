@@ -3,6 +3,7 @@ import { defaultSchemas } from "@slicerremoteview/shared";
 import type { Validators } from "@slicerremoteview/shared";
 import type { Connection } from "../src/ws/connection.js";
 import { createDispatcher, MAX_INSTANCE_PATH_LENGTH } from "../src/ws/dispatch.js";
+import { readFrame } from "../src/ws/frame.js";
 import { ManualClock } from "./helpers/manual-clock.js";
 
 /** Records what the dispatcher sends; just enough of `Connection` for these unit tests. */
@@ -41,7 +42,10 @@ describe("createDispatcher (unit)", () => {
     } as unknown as Validators;
     const dispatch = createDispatcher({ clock: new ManualClock(), validators });
     const { connection, sent } = fakeConnection("viewer");
-    void dispatch(connection, JSON.stringify({ protocolVersion: "1.0", type: "ping", id: "p-1" }));
+    void dispatch(
+      connection,
+      readFrame(JSON.stringify({ protocolVersion: "1.0", type: "ping", id: "p-1" })),
+    );
     expect(sent).toHaveLength(1);
     const { details } = sent[0] as { details: { instancePath: string } };
     expect(sent[0]).toMatchObject({ code: "INVALID_MESSAGE", replyTo: "p-1" });

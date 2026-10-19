@@ -26,6 +26,8 @@ import { CLOSE_CODES, LIMITS } from "@slicerremoteview/shared";
 import type { Clock } from "../clock.js";
 import { Connection, HANDSHAKE_ROLES } from "./connection.js";
 import type { Role } from "./connection.js";
+import { readFrame } from "./frame.js";
+import type { TextFrame } from "./frame.js";
 
 export const HANDSHAKE_TIMEOUT_MS = LIMITS.HANDSHAKE_TIMEOUT_S * 1000;
 
@@ -36,8 +38,11 @@ export const HANDSHAKE_TIMEOUT_MS = LIMITS.HANDSHAKE_TIMEOUT_S * 1000;
  * SRV-07) must not rely on running before the connection's next frame.
  */
 export interface FrameHandlers {
-  /** A text frame within the role's size limit; `connection.role` is `undefined` for the first one. */
-  text(connection: Connection, text: string): void | Promise<void>;
+  /**
+   * A text frame within the role's size limit, parsed once (`frame.ts`); `connection.role` is
+   * `undefined` for the first one.
+   */
+  text(connection: Connection, frame: TextFrame): void | Promise<void>;
   /** A binary frame from a publisher (snapshot chunks, SRV-09). */
   binary(connection: Connection, frame: Buffer): void | Promise<void>;
   /** The socket closed, by either side. */
@@ -61,18 +66,6 @@ function asBuffer(data: RawData): Buffer {
   if (Buffer.isBuffer(data)) return data;
   if (Array.isArray(data)) return Buffer.concat(data);
   return Buffer.from(data);
-}
-
-/** The `type` of a JSON object frame, or `undefined` when the frame is not one. */
-function peekType(text: string): string | undefined {
-  try {
-    const value: unknown = JSON.parse(text);
-    if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-    const { type } = value as { type?: unknown };
-    return typeof type === "string" ? type : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 /**
@@ -195,15 +188,16 @@ export async function registerWsEndpoint(
     };
     // Before the role is known, nothing above the publisher limit is even parsed.
     if (tooBig(textLimit(connection.role ?? "publisher"))) return;
-    const text = frame.toString("utf8");
+    // The only JSON.parse of this frame: the dispatcher works on its result.
+    const textFrame = readFrame(frame.toString("utf8"));
     // The first message's own type decides its limit: 256 KiB for session.create/resume (§3.3
     // allows unknown fields, §14), 16 KiB for viewer.join and for anything that is no handshake.
     // The role itself is fixed by the dispatcher, after the protocol version check (§2).
     if (
       connection.role === undefined &&
-      tooBig(textLimit(HANDSHAKE_ROLES.get(peekType(text) ?? "")))
+      tooBig(textLimit(HANDSHAKE_ROLES.get(textFrame.type ?? "")))
     )
       return;
-    return handlers.text(connection, text);
+    return handlers.text(connection, textFrame);
   }
 }

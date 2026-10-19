@@ -110,6 +110,34 @@ describe("INVALID_MESSAGE strikes (SRV-23 criterion 1, §9.2, §9.3)", () => {
     client.ws.close();
   });
 
+  it("parses each frame once, also a large invalid first frame (branch audit, T3)", async () => {
+    relay = await startRelay({ messageHandlers: BIND_ON_HANDSHAKE });
+    const client = await connectClient(relay.url);
+    // Within the publisher limit, invalid (no profile): before, the endpoint, parseEnvelope and the
+    // dispatcher's peek each parsed it.
+    const text = JSON.stringify({
+      ...fixture("session.create", "invalid-missing-profile"),
+      pad: Array.from({ length: 20_000 }, () => [0]),
+    });
+    expect(text.length).toBeGreaterThan(16_384);
+    const parse = JSON.parse;
+    let calls = 0;
+    JSON.parse = ((...args: Parameters<typeof JSON.parse>) => {
+      if (args[0] === text) calls += 1;
+      return parse(...args);
+    }) as typeof JSON.parse;
+    try {
+      for (const strike of [1, 2]) {
+        client.sendRaw(text);
+        expect(await client.next()).toMatchObject({ type: "error", code: "INVALID_MESSAGE" });
+        expect(calls).toBe(strike);
+      }
+    } finally {
+      JSON.parse = parse;
+    }
+    client.ws.close();
+  });
+
   it("a schema-invalid handshake message still fixes the role", async () => {
     relay = await startRelay({ messageHandlers: BIND_ON_HANDSHAKE });
     const client = await connectClient(relay.url);
