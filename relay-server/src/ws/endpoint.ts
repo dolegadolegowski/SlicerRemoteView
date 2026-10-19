@@ -6,7 +6,8 @@
  * - One `ws` server for both roles with `maxPayload` 1 MiB + 64 KiB and no `permessage-deflate`:
  *   `ws` closes an oversized message with `1009` before reading its payload.
  * - A browser `Origin` outside `ALLOWED_ORIGINS` gets HTTP 403 before the upgrade; requests without
- *   `Origin` (Slicer, Unity) pass. A plain HTTP `GET /ws` is just an unknown path (404).
+ *   `Origin` (Slicer, Unity) pass. An upgrade offering a subprotocol gets HTTP 400 (§3.1 keeps codes
+ *   and tokens out of `Sec-WebSocket-Protocol`). A plain HTTP `GET /ws` is just an unknown path (404).
  * - A socket that is not bound to a session (`Connection.completeHandshake()`, called by the
  *   create/resume/join handlers) 10 s after the upgrade is closed `4012`.
  * - Text limits per role: publisher 256 KiB, viewer 16 KiB → `error PAYLOAD_TOO_LARGE` + `1009`. The
@@ -80,7 +81,12 @@ export async function registerWsEndpoint(
   const allowed = new Set(options.allowedOrigins);
 
   await app.register(websocket, {
-    options: { maxPayload: LIMITS.WS_MAX_PAYLOAD_BYTES, perMessageDeflate: false },
+    options: {
+      maxPayload: LIMITS.WS_MAX_PAYLOAD_BYTES,
+      perMessageDeflate: false,
+      // Never select a subprotocol (upgrades offering one are refused below; defence in depth).
+      handleProtocols: () => false,
+    },
     // Called for `error` events of an established socket and for errors thrown by the route
     // handler. The default logs the whole error and terminates the socket, which would drop the
     // close frame `ws` has just queued (e.g. `1009` for an oversized message).
@@ -96,19 +102,26 @@ export async function registerWsEndpoint(
       await reply.code(404).send({ error: "NOT_FOUND" });
   });
 
-  // Cross-site WebSocket hijacking guard (§3.1, FR-33): runs before the upgrade.
-  const checkOrigin = async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
+  // Runs before the upgrade (§3.1): the cross-site WebSocket hijacking guard (FR-33), and no
+  // subprotocols — codes and tokens never travel in `Sec-WebSocket-Protocol`, and selecting one
+  // would reflect the client's value in the 101 response. Neither value is logged.
+  const checkUpgrade = async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
     const { origin } = request.headers;
     if (origin !== undefined && !allowed.has(origin)) {
       logger.info({ errorCode: "FORBIDDEN_ORIGIN" }, "websocket upgrade refused");
       await reply.code(403).send({ error: "FORBIDDEN" });
+      return;
+    }
+    if (request.ws && request.headers["sec-websocket-protocol"] !== undefined) {
+      logger.info({ errorCode: "SUBPROTOCOL_REFUSED" }, "websocket upgrade refused");
+      await reply.code(400).send({ error: "BAD_REQUEST" });
     }
   };
 
   app.route({
     method: "GET",
     url: "/ws",
-    preValidation: checkOrigin,
+    preValidation: checkUpgrade,
     // A plain HTTP request to /ws is just another unknown path (§10).
     handler: async (_request, reply) => reply.code(404).send({ error: "NOT_FOUND" }),
     wsHandler: (socket: WebSocket) => accept(socket),

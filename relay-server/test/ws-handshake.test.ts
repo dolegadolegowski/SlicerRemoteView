@@ -66,6 +66,22 @@ describe("upgrade and Origin (SRV-05 criterion 1, §3.1, FR-33)", () => {
     slicer.ws.close();
   });
 
+  it("refuses an upgrade offering a subprotocol with HTTP 400, without echoing or logging it", async () => {
+    const lines: string[] = [];
+    relay = await startRelay({
+      logger: createLogger({ level: "trace", destination: { write: (s) => lines.push(s) } }),
+    });
+    const secret = "pt_7KQ4XsubprotocolSecretValue";
+    for (const offer of [secret, `${secret}, slicer.v1`])
+      await expect(
+        connectClient(relay.url, { "sec-websocket-protocol": offer }),
+      ).rejects.toMatchObject({ statusCode: 400 });
+    expect(lines.join("")).not.toContain("7KQ4X");
+    expect(lines.map((l) => JSON.parse(l) as { errorCode?: string })).toContainEqual(
+      expect.objectContaining({ errorCode: "SUBPROTOCOL_REFUSED" }),
+    );
+  });
+
   it("disables permessage-deflate", async () => {
     relay = await startRelay();
     const client = await connectClient(relay.url);
@@ -303,10 +319,12 @@ describe("handler failures (architecture §5)", () => {
 });
 
 describe("upgrade requests to other paths (T6)", () => {
-  it("a plain HTTP GET /ws is an unknown path", async () => {
+  it("a plain HTTP GET /ws is an unknown path, also with a Sec-WebSocket-Protocol header", async () => {
     relay = await startRelay();
-    const res = await relay.app.inject("/ws");
-    expect([res.statusCode, res.json()]).toEqual([404, { error: "NOT_FOUND" }]);
+    for (const headers of [{}, { "sec-websocket-protocol": "pt_x" }]) {
+      const res = await relay.app.inject({ url: "/ws", headers });
+      expect([res.statusCode, res.json()]).toEqual([404, { error: "NOT_FOUND" }]);
+    }
   });
 
   it("never logs the URL of an upgrade elsewhere, query string included", async () => {
