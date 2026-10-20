@@ -350,13 +350,13 @@ npm test -w web-viewer -- pwa && npm run e2e -w web-viewer -- pwa
 ### Bundle size (WEB-18)
 
 `npm run build` ends with `scripts/check-bundle.mjs`: the gzipped size of the JS and CSS that `index.html` loads at
-start, failing above 1 MiB (NFR-09). `e2e/network.spec.ts` asserts that the page talks only to its own origin.
+start, failing above 1 MiB (NFR-09) or when `index.html` names no module script (nothing measured). `e2e/network.spec.ts` asserts that the page talks only to its own origin.
 
 | Initial asset (2026-10-20, three 0.186.1, Vite 8.3.4) | Size | gzip (level 9) |
 |---|---|---|
-| `assets/index-*.js` (app + three.js + GLTFLoader + OrbitControls) | 741,763 B | 188,853 B |
+| `assets/index-*.js` (app + three.js + GLTFLoader + OrbitControls) | 742,274 B | 189,023 B |
 | `assets/index-*.css` | 7,776 B | 2,005 B |
-| **Total initial JS + CSS** | 749,539 B | **190,858 B** (18 % of 1,048,576 B) |
+| **Total initial JS + CSS** | 750,050 B | **191,028 B** (18 % of 1,048,576 B) |
 
 ```bash
 npm run build -w web-viewer && npm test -w web-viewer -- bundle && npm run e2e -w web-viewer -- network

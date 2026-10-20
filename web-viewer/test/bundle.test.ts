@@ -38,6 +38,11 @@ describe("bundle budget (WEB-18, NFR-09)", () => {
     ]);
   });
 
+  it("reads double-quoted, single-quoted and unquoted attribute values", () => {
+    const html = `<script type=module src=/assets/a.js></script><link rel='stylesheet' href='/assets/b.css'>`;
+    expect(initialAssets(html)).toEqual(["/assets/a.js", "/assets/b.css"]);
+  });
+
   it("refuses an initial asset from another origin (no third-party scripts, NFR-16)", () => {
     expect(() =>
       initialAssets('<script type="module" src="https://cdn.example/x.js"></script>'),
@@ -73,5 +78,15 @@ describe("bundle budget (WEB-18, NFR-09)", () => {
     const under = spawnSync(process.execPath, [SCRIPT, small], { encoding: "utf8" });
     expect(under.status).toBe(0);
     expect(under.stdout).toMatch(/initial JS \+ CSS: \d+ B gzip \(budget 1048576 B/);
+  });
+
+  it("the CLI fails when index.html names no module script (a parse miss is not 0 B)", () => {
+    const none = dist(
+      { "assets/index.css": "a{}" },
+      '<link rel="stylesheet" href="/assets/index.css">',
+    );
+    const result = spawnSync(process.execPath, [SCRIPT, none], { encoding: "utf8" });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("no module script");
   });
 });
