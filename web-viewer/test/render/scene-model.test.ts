@@ -609,6 +609,28 @@ describe("scene model store and disposal (FR-45)", () => {
     for (const spy of spying.spies) expect(spy).toHaveBeenCalledTimes(1);
   });
 
+  it("onChange reports each new current model and the clear, not refusals; a throwing handler is isolated", async () => {
+    const log = vi.fn();
+    const store = createSceneModelStore({ log });
+    const seen: (SceneModel | null)[] = [];
+    store.onChange(() => {
+      throw new Error("ui bug");
+    });
+    const off = store.onChange((m) => seen.push(m));
+    store.clear(); // nothing loaded: no event
+    await store.load(glb("asymmetric-2nodes.glb"));
+    await store.load(glb("external-uri.glb")); // refused
+    const first = store.current;
+    await store.load(glb("quantized-1node.glb"));
+    store.clear();
+    expect(seen).toEqual([first, expect.anything(), null]);
+    expect(seen[1]).not.toBe(first);
+    expect(log).toHaveBeenCalledWith("scene model handler failed");
+    off();
+    await store.load(glb("asymmetric-2nodes.glb"));
+    expect(seen).toHaveLength(3);
+  });
+
   it("clear() disposes the current model", async () => {
     const { parse, spies } = spyingParse();
     const store = createSceneModelStore({ parse, log: vi.fn() });

@@ -95,6 +95,8 @@ describe("app state catalogue", () => {
     { kind: "webgl2Unavailable" },
     { kind: "snapshotTooLarge" },
     { kind: "snapshotInvalid" },
+    { kind: "snapshotFailed" },
+    { kind: "snapshotUpdateFailed" },
   ];
 
   it.each(LANGS.flatMap((lang) => states.map((s) => [lang, s] as const)))(
@@ -129,5 +131,9 @@ describe("app state catalogue", () => {
       fatal: true,
     });
     expect(describeState({ kind: "reconnecting" }, "en").fatal).toBe(false);
+    expect(describeState({ kind: "snapshotFailed" }, "en")).toMatchObject({
+      action: "retry",
+      fatal: false,
+    });
   });
 });

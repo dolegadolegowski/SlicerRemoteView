@@ -25,6 +25,7 @@ function store(result: () => Promise<StoreLoadResult>) {
     load: vi.fn<SceneModelStore["load"]>(() => result()),
     clear: vi.fn(),
     current: null,
+    onChange: vi.fn(() => () => undefined),
   } satisfies SceneModelStore;
 }
 

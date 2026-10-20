@@ -30,6 +30,11 @@
   box-sizing: border-box;
 }
 
+/* `hidden` must win over component display rules (the viewer and the code entry swap screens). */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
@@ -134,4 +139,236 @@ body {
 .code-entry__join:focus-visible {
   outline: 3px solid var(--text);
   outline-offset: 2px;
+}
+
+/* 3D viewer (WEB-08): the canvas fills the dynamic viewport, also under a notch (viewport-fit=cover); only the
+   canvas blocks browser gestures (touch-action: none), the page keeps native zoom elsewhere (WCAG). */
+.viewer {
+  position: fixed;
+  inset: 0 auto auto 0;
+  width: 100%;
+  height: 100vh; /* fallback for browsers without dynamic viewport units */
+  height: 100dvh;
+  background: var(--bg);
+}
+
+.viewer__canvas {
+  outline: none; /* focused from script only (tabindex=-1), for its screen-reader label */
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.viewer__fit {
+  position: absolute;
+  right: max(12px, var(--safe-right));
+  bottom: max(12px, var(--safe-bottom));
+  min-width: var(--target);
+  min-height: var(--target);
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 1rem;
+  touch-action: manipulation;
+}
+
+.viewer__fit:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* A message over the scene (refused snapshot while the previous one stays visible). */
+.viewer__notice {
+  position: absolute;
+  z-index: 1; /* above the node panel */
+  top: max(12px, var(--safe-top));
+  left: max(12px, var(--safe-left));
+  right: max(12px, var(--safe-right));
+  max-width: 28rem;
+  margin: 0 auto;
+  padding: 12px 16px;
+  border: 1px solid var(--danger);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.viewer__notice-title {
+  margin: 0 0 4px;
+  font-weight: 600;
+}
+
+.viewer__notice-body {
+  margin: 0 0 8px;
+  color: var(--text-muted);
+}
+
+.viewer__notice-close {
+  min-width: var(--target);
+  min-height: var(--target);
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  touch-action: manipulation;
+}
+
+.viewer__notice-close:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Node panel (WEB-09): bottom-left within thumb reach; the list opens above its toggle, beside the Fit button, and
+   covers at most half of a phone screen (NFR-32). The box itself lets touches through to the canvas. */
+.node-panel {
+  position: absolute;
+  left: max(12px, var(--safe-left));
+  bottom: max(12px, var(--safe-bottom));
+  display: flex;
+  flex-direction: column-reverse; /* DOM (and focus) order: toggle, then the list */
+  align-items: flex-start;
+  gap: 8px;
+  width: min(20rem, calc(100% - 24px - var(--safe-left) - var(--safe-right)));
+  max-height: 50%;
+  pointer-events: none;
+}
+
+.node-panel > * {
+  pointer-events: auto;
+}
+
+.node-panel__toggle {
+  flex: none;
+  min-width: var(--target);
+  min-height: var(--target);
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 1rem;
+  touch-action: manipulation;
+}
+
+.node-panel__body {
+  flex: 0 1 auto;
+  align-self: stretch;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.node-panel__show-all {
+  width: 100%;
+  min-height: var(--target);
+  padding: 0 12px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  text-align: left;
+  touch-action: manipulation;
+}
+
+.node-panel__show-all[aria-disabled="true"] {
+  color: var(--text-muted);
+}
+
+.node-panel__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.node-panel__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: var(--target);
+  padding: 0 12px;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  touch-action: manipulation;
+}
+
+.node-panel__swatch {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+}
+
+.node-panel__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.node-panel__eye {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.node-panel__row[data-visible="true"] .node-panel__eye-slash {
+  display: none;
+}
+
+.node-panel__row[data-visible="false"] {
+  color: var(--text-muted);
+}
+
+.node-panel__row[data-visible="false"] .node-panel__swatch {
+  opacity: 0.35;
+}
+
+.node-panel__empty {
+  margin: 0;
+  padding: 12px;
+  color: var(--text-muted);
+}
+
+.node-panel__toggle:focus-visible,
+.node-panel__show-all:focus-visible,
+.node-panel__row:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: -3px;
+}
+
+/* On its side a phone is short: the list may use the height left above the toggle, but less of the width; the scene
+   notice then starts right of the panel so neither covers the other. */
+@media (orientation: landscape) {
+  .node-panel {
+    width: min(20rem, 45%);
+    max-height: calc(100% - 24px - var(--safe-top) - var(--safe-bottom));
+  }
+
+  .viewer__notice {
+    left: calc(max(12px, var(--safe-left)) + min(20rem, 45%) + 12px);
+  }
 }

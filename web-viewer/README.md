@@ -174,3 +174,71 @@ from the stream and the HTTP loader and drops the model when the session ends or
 while reconnecting); the HTTP loader forgets its loaded version at the same moments. Tests run in jsdom with the real
 `GLTFLoader` (no WebGL needed): `npm test -w web-viewer -- scene-model glb-validate model-lifecycle` (the
 memory-release checks enable `gc` at runtime via `v8.setFlagsFromString`).
+
+### Viewer and controls (WEB-08)
+
+`src/render/viewer.ts` renders the scene model with three.js and touch controls; `src/ui/screens.ts` decides which
+screen is visible (the viewer while a model is loaded on a live session, the code entry otherwise) and `main.ts`
+only wires the pieces together.
+
+```ts
+const result = createViewer(); // { ok: false, reason: "webgl2Unavailable" } without WebGL 2 or a GL context
+document.body.append(result.viewer.element); // .viewer: full-screen canvas (100dvh), notice, "Fit view" button
+result.viewer.setModel(model);    // adds model.root to a ×1000 (mm) stage and fits it from the front
+result.viewer.invalidate();       // request one frame after changing the scene (live updates, WEB-12)
+result.viewer.setNotice(describeState({ kind: "snapshotInvalid" })); // message over the scene; null hides it
+```
+
+- **Render on demand** (FR-39, NFR-08): frames only on control changes, model changes, resize and visibility; while
+  OrbitControls' damping settles it keeps rendering, then stops. Nothing renders while the page is hidden. Near/far
+  follow the camera distance.
+- **Touch** (FR-38, US-08): one finger rotates, two fingers zoom and pan, a double tap (or the Fit button, or a
+  double click) re-frames the visible nodes keeping the direction; a new model is framed from the front. Only the
+  canvas blocks browser gestures (`touch-action: none`, Safari `gesturestart`/`gesturechange`), so the code entry
+  stays zoomable; if the page was pinch-zoomed before joining, the viewer covers the visual viewport.
+- **Size**: `.viewer` is `position: fixed` with `100dvh`; the drawing buffer is `min(devicePixelRatio, 2) × page
+  zoom × CSS size` (NFR-32; a zoomed viewer keeps the unzoomed resolution), resized from a `ResizeObserver` and
+  `visualViewport` events and redrawn at once.
+- **Screens and messages**: Join is refused at once without WebGL 2; `screens.report()` shows a message over the
+  scene while it is visible (e.g. a refused update) and on the code entry otherwise; a closed session goes back to
+  a focused code entry with its message, and a rejoin of the same session shows the kept model with the user's
+  camera.
+- Tests: `npm test -w web-viewer -- viewer screens` (mocked renderer, frame scheduler and visual viewport in jsdom)
+  and `npm run e2e -w web-viewer -- controls` (Chromium: `e2e/fake-relay.ts` streams a fixture GLB from
+  `page.routeWebSocket`; touch gestures and a page pinch-zoom over CDP). The gesture spec is skipped on WebKit —
+  check iOS Safari on a device: `docs/testing/web.md` §iPhone Safari.
+
+### Node panel (WEB-09)
+
+`src/ui/node-panel.ts` lists the scene's structures in manifest order; `screens.ts` puts it into the viewer and
+feeds it the shown model.
+
+```ts
+const panel = createNodePanel({ onChange: () => viewer.invalidate() });
+viewer.element.append(panel.element); // bottom left; "Structures (n)" opens the list above it
+panel.setModel(model);                // one 44 px switch per node: colour, name (as text), eye
+panel.refresh();                      // after something else changed T.visible (presenter updates, WEB-12)
+```
+
+- A tap hides or shows the node on this device only (`T.visible`, FR-40, US-09) and redraws on the next frame;
+  "Show all" brings everything back. Names may contain PHI: they are set as text only and never logged.
+- Layout: at most half of a phone screen when open, upright and on its side; the panel box lets touches through
+  to the canvas; the list scrolls inside. `e2e/glb.ts` builds a 40-structure scene from the fixture for this.
+- Tests: `npm test -w web-viewer -- node-panel screens` and `npm run e2e -w web-viewer -- node-panel` (skipped
+  where the browser has no WebGL 2); manual: `docs/testing/web.md` §Node panel.
+
+### Component smoke (WEB-10)
+
+`e2e/join-and-view.spec.ts` joins a real publisher end to end: `e2e/fake-slicer.ts` starts the relay stub of
+`tools/fake-slicer` (until `relay-server` is on `main`) and the fake-slicer CLI, reads the session code from the
+CLI's fd 3 (never stdout) and bridges the page's `/ws` to the stub with `page.routeWebSocket`. The spec types the code,
+checks the drawn model and the node panel, and that the code is in no URL, no frame but `viewer.join` and no CLI
+output.
+
+```bash
+npm run e2e -w web-viewer -- join-and-view   # builds shared/ and tools/fake-slicer, then the viewer
+```
+
+A snapshot download that gives up (`loader` `failed`) shows a notice over the scene if one is shown (the previous
+scene stays), otherwise it leaves "Joining…" with the code still typed so **Join** tries again
+(`screens.failSnapshot`; ignored unless connected, so a late failure cannot cancel a new join).

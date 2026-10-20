@@ -218,9 +218,20 @@ export function createConnection(options: ConnectionOptions = {}): Connection {
 
   const nextId = (): string => `v-${++counter}`;
 
+  /** Runs each handler; one that throws neither stops the others nor the frame handling (only `event` is logged). */
+  function notify<T>(handlers: Iterable<(value: T) => void>, value: T, event: string): void {
+    for (const handler of [...handlers]) {
+      try {
+        handler(value);
+      } catch {
+        log("connection handler failed", { event });
+      }
+    }
+  }
+
   function setState(next: ConnectionState): void {
     state = next;
-    for (const handler of [...stateHandlers]) handler(next);
+    notify(stateHandlers, next, "state");
   }
 
   function stopHeartbeat(): void {
@@ -278,7 +289,7 @@ export function createConnection(options: ConnectionOptions = {}): Connection {
       immediate: false,
       dead: true,
     });
-    for (const handler of [...deadHandlers]) handler(undefined);
+    notify(deadHandlers, undefined, "dead");
   }
 
   /** Any frame after a `ping` proves the link is alive; a pong queued behind a 30 MiB stream must not kill it. */
@@ -340,14 +351,14 @@ export function createConnection(options: ConnectionOptions = {}): Connection {
       lastError = undefined; // only errors of the join phase may colour a later bare drop
       if (state.kind === "connecting") setState({ kind: "connected" });
     }
-    for (const handler of [...(messageHandlers.get(message.type) ?? [])]) handler(message);
+    notify(messageHandlers.get(message.type) ?? [], message, message.type);
   }
 
   function handleFrame(data: unknown): void {
     noteTraffic();
     if (typeof data === "string") return handleText(data);
     if (data instanceof ArrayBuffer) {
-      for (const handler of [...binaryHandlers]) handler(new Uint8Array(data));
+      notify(binaryHandlers, new Uint8Array(data), "binary");
       return;
     }
     log("ignored frame of unsupported kind", { kind: printableType(typeof data) ?? "?" });
