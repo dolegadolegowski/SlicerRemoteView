@@ -9,6 +9,8 @@ packages and the declared runtime dependencies. Anything else — ``slicer``, ``
 from __future__ import annotations
 
 import ast
+import json
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -83,6 +85,41 @@ def test_core_purity_requirements_contain_every_direct_pin():
     missing = [pin for pin in project["optional-dependencies"]["dev"] if pin not in lines]
     assert missing == []
     assert "--only-binary :all:" in (PLUGIN_ROOT / "requirements-dev.txt").read_text().splitlines()
+
+
+#: Every core module, imported on its own in a fresh interpreter by the test below.
+CORE_MODULES = [
+    "remoteview_core",
+    *sorted(f"remoteview_core.{p.stem}" for p in CORE_DIR.glob("*.py") if p.stem != "__init__"),
+]
+_IMPORT_PROBE = """
+import importlib, json, socket, sys, threading
+sys.path.append(sys.argv[1])
+created = []
+class _Socket(socket.socket):
+    def __init__(self, *args, **kwargs):
+        created.append(args)
+        super().__init__(*args, **kwargs)
+socket.socket = _Socket
+importlib.import_module(sys.argv[2])
+watched = {"websockets", "segno", "jsonschema", "slicer", "qt", "ctk"}
+print(json.dumps([sorted({m.split(".")[0] for m in sys.modules} & watched), threading.active_count(), len(created)]))
+"""
+
+
+@pytest.mark.parametrize("module", CORE_MODULES)
+def test_core_purity_import_starts_nothing(module):
+    """FR-02/FR-16: importing a core module loads no runtime dependency (``websockets``, ``segno``, ``jsonschema``) and
+    no Slicer/Qt, opens no socket and starts no thread — all of that waits for *Start session* (branch audit)."""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", _IMPORT_PROBE, str(CORE_DIR.parent), module],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert json.loads(result.stdout) == [[], 1, 0]
 
 
 def test_core_purity_no_slicer_qt_imports_in_remoteview_core():

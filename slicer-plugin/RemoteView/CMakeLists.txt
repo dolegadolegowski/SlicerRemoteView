@@ -14,6 +14,7 @@ set(MODULE_PYTHON_SCRIPTS
   remoteview_core/glb_writer.py
   remoteview_core/names.py
   remoteview_core/protocol_client.py
+  remoteview_core/transport.py
   remoteview_core/vendored.py
   _vendor/remoteview_protocol/__init__.py
   _vendor/remoteview_protocol/alphabet.py

@@ -109,6 +109,31 @@ Expected: `1 () [ 0.1  -0.02 -0.03]` (RAS (100, 30, −20) mm → glTF metres, +
 untouched), `b'glTF'`; no traceback (in particular no `DeprecationWarning`/`ImportError` from `vtkmodules`) and no
 network connection beyond the baseline.
 
+Re-run after SLC-08 (transport: Slicer's own Python `ssl`/OpenSSL 1.1.1; Windows, macOS **and** Linux). Until SLC-10
+installs it after consent, install the pinned client by hand in a **test** Slicer only: `slicer.util.pip_install(
+"websockets==17.2")`. With internet access, paste into the Python console:
+
+```python
+import os, queue, ssl
+from remoteview_core.transport import RelayTransport, Connected, Disconnected
+print(ssl.OPENSSL_VERSION, os.environ.get("SSL_CERT_FILE"), ssl.create_default_context().cert_store_stats())
+def attempt(url):
+    events = queue.Queue(); t = RelayTransport(url, events); t.start()
+    event = events.get(timeout=20); t.stop()
+    error = getattr(event, "error", None)
+    return type(event).__name__, error and error.kind.value, error and error.verify_code, getattr(event, "retry_in", None)
+for host in ("self-signed.badssl.com", "expired.badssl.com", "wrong.host.badssl.com", "untrusted-root.badssl.com"):
+    print(host, attempt(f"wss://{host}/"))
+print("relay", attempt("wss://<relay-host>/ws"))  # the deployed relay (docs/deploy.md); skip if none yet
+```
+
+Expected: `OpenSSL 1.1.1…`, the path of `Slicer.crt`, `x509_ca` ≈ 119 on macOS/Linux (more on Windows: the system
+store is added); then `('Disconnected', 'tls-certificate', 18, None)`, `(…, 10, None)`, `(…, 62, None)`,
+`(…, 19 or 20, None)` — certificate errors are never retried; the relay line shows `('Connected', None, None, None)`
+within 3 s (run that line 20 times: no 10-second stall, ADR 0009). No traceback, no code or token in the Python console
+or the application log. Behind a TLS-inspecting proxy note the code shown on each OS (report
+`docs/testing/reports/2026-10-20-slicer-1.md`).
+
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|
 | | | | | |
