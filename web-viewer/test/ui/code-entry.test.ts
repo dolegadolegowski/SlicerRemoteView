@@ -199,6 +199,22 @@ describe("code entry", () => {
     expect(join().disabled).toBe(false);
   });
 
+  it("has a polite status line under Join that is always in the accessibility tree (WEB-14)", () => {
+    const status = entry.element.querySelector<HTMLElement>(".code-entry__status")!;
+    expect(status.getAttribute("role")).toBe("status");
+    expect(status.hidden).toBe(false);
+    expect(status.textContent).toBe("");
+    expect(status.previousElementSibling).toBe(join());
+    entry.setStatus("Waiting for the presenter");
+    expect(status.textContent).toBe("Waiting for the presenter");
+    const text = status.firstChild;
+    entry.setStatus("Waiting for the presenter"); // unchanged: not announced again
+    expect(status.firstChild).toBe(text);
+    entry.setStatus(null);
+    expect(status.textContent).toBe("");
+    expect(status.hidden).toBe(false);
+  });
+
   it("shows an error from the catalogue, and clears it on the next edit", () => {
     type("7kq4x");
     entry.setError(describeCode("INVALID_CODE", "en"));

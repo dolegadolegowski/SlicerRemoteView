@@ -141,6 +141,14 @@ body {
   outline-offset: 2px;
 }
 
+/* "Waiting for the presenter", "Reconnecting…" under Join (WEB-14); one line kept so Join does not jump. */
+.code-entry__status {
+  margin: 0;
+  min-height: 1.5em;
+  color: var(--text-muted);
+  text-align: center;
+}
+
 /* 3D viewer (WEB-08): the canvas fills the dynamic viewport, also under a notch (viewport-fit=cover); only the
    canvas blocks browser gestures (touch-action: none), the page keeps native zoom elsewhere (WCAG). */
 .viewer {
@@ -179,13 +187,23 @@ body {
   touch-action: manipulation;
 }
 
+/* The notice and the status line stack at the top, so an open notice never covers "Reconnecting…" (WEB-14). */
+.viewer__top {
+  position: absolute;
+  z-index: 1; /* above the node panel */
+  top: max(12px, var(--safe-top));
+  left: max(12px, var(--safe-left));
+  right: max(12px, var(--safe-right));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+
 /* A short status line over the scene (role="status"), e.g. while a new snapshot is coming (WEB-12). */
 .viewer__status {
-  position: absolute;
-  top: max(12px, var(--safe-top));
-  left: 50%;
-  transform: translateX(-50%);
-  max-width: calc(100% - 24px - var(--safe-left) - var(--safe-right));
+  max-width: 100%;
   margin: 0;
   padding: 6px 12px;
   border: 1px solid var(--border);
@@ -196,6 +214,12 @@ body {
   pointer-events: none;
 }
 
+/* Empty: not drawn, but still a live region (viewer.ts). */
+.viewer__status:empty {
+  padding: 0;
+  border: 0;
+}
+
 .viewer__fit:focus-visible {
   outline: 3px solid var(--accent);
   outline-offset: 2px;
@@ -203,13 +227,10 @@ body {
 
 /* A message over the scene (refused snapshot while the previous one stays visible). */
 .viewer__notice {
-  position: absolute;
-  z-index: 1; /* above the node panel */
-  top: max(12px, var(--safe-top));
-  left: max(12px, var(--safe-left));
-  right: max(12px, var(--safe-right));
+  width: 100%;
   max-width: 28rem;
-  margin: 0 auto;
+  margin: 0;
+  pointer-events: auto;
   padding: 12px 16px;
   border: 1px solid var(--danger);
   border-radius: 10px;
@@ -434,14 +455,14 @@ body {
 }
 
 /* On its side a phone is short: the list may use the height left above the toggle, but less of the width; the scene
-   notice then starts right of the panel so neither covers the other. */
+   notice and the status line then start right of the panel so neither covers the other. */
 @media (orientation: landscape) {
   .node-panel {
     width: min(20rem, 45%);
     max-height: calc(100% - 24px - var(--safe-top) - var(--safe-bottom));
   }
 
-  .viewer__notice {
+  .viewer__top {
     left: calc(max(12px, var(--safe-left)) + min(20rem, 45%) + 12px);
   }
 }

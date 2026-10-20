@@ -129,8 +129,8 @@ toggle-visibility --loop --code-fd 3 3>code.txt` (other scripts: `colour-cycle`,
 3. `colour-cycle`: **Expect:** colours and transparency change on screen and in the swatches. `move-node`: the
    tumour moves in three 0.5 s steps and then stops at the scene origin (the script's last matrix), not at its
    starting place. `reload-scene`: "Updating the scene…" appears briefly, then the scene shows "Vessel".
-4. Switch on airplane mode for 5 s during `toggle-visibility --loop`, then off and **Join** again. **Expect:** the
-   scene shows the presenter's current state (no node stuck in an old state).
+4. Switch on airplane mode for 5 s during `toggle-visibility --loop`, then off (the viewer rejoins by itself since
+   WEB-14). **Expect:** the scene shows the presenter's current state (no node stuck in an old state).
 
 ### Opacity (WEB-13)
 
@@ -149,6 +149,24 @@ Joined with `asymmetric-2nodes.glb`, **Structures** open.
    slider jumps to the presenter's value and "The presenter changed Tumor" shows at the top for about 3 s.
 6. Hide the liver yourself while `colour-cycle` plays. **Expect:** its colour changes are applied (seen when you
    show it again) but it stays hidden.
+
+### Reconnect (WEB-14)
+
+Joined with `toggle-visibility --loop` playing.
+
+1. Switch on airplane mode for 10 s, then off. **Expect:** "Reconnecting…" over the scene while offline (the scene
+   and your camera stay); a few seconds after the network returns the status goes and the switches follow the
+   presenter again — no Join, no new download (Web Inspector → Network shows no second `/api/scene`).
+2. Lock the phone for 2 minutes, unlock. **Expect:** the same as step 1, within about 10 s of unlocking.
+3. Take the presenter's laptop off the network for 30 s, then back (Slicer resumes within the 120 s grace).
+   **Expect:** "Presenter is offline" over the frozen scene while it is away; it goes when the presenter is back.
+4. Restart or redeploy the relay while joined. **Expect:** "Reconnecting…", then "Waiting for the presenter" under
+   Join (cells disabled), then the scene again — about 5–10 s, nothing typed.
+5. The presenter stops the session. **Expect:** "Presentation ended" on the code entry, the code still in the
+   cells; nothing retries.
+6. Lock the phone, let the presenter stop the session, unlock after a minute. **Expect:** "Reconnecting…" for up to
+   a minute, then "Presentation ended" on the code entry (not "Code not recognised").
+7. With VoiceOver on, repeat step 1. **Expect:** "Reconnecting…" is spoken once, then "Connected again".
 
 ### Download in the background (WEB-06 review, WEB-10)
 

@@ -567,16 +567,20 @@ describe("scene graph, notices and page behaviour", () => {
     expect(notice.hidden).toBe(true);
   });
 
-  it("shows and hides a polite status line (e.g. a snapshot on its way)", () => {
+  it("shows and empties a polite status line that stays in the accessibility tree (WEB-12, WEB-14)", () => {
     const { viewer } = harness();
     const status = viewer.element.querySelector<HTMLElement>(".viewer__status")!;
-    expect(status.hidden).toBe(true);
     expect(status.getAttribute("role")).toBe("status");
+    expect(status.hidden).toBe(false); // a live region that appears with its text is often not announced
+    expect(status.textContent).toBe("");
     viewer.setStatus("Updating the scene…");
-    expect(status.hidden).toBe(false);
     expect(status.textContent).toBe("Updating the scene…");
+    const text = status.firstChild;
+    viewer.setStatus("Updating the scene…"); // the same text again: not announced twice
+    expect(status.firstChild).toBe(text);
     viewer.setStatus(null);
-    expect(status.hidden).toBe(true);
+    expect(status.textContent).toBe("");
+    expect(status.hidden).toBe(false);
   });
 
   it("focus() moves focus to the labelled canvas (not a tab stop)", () => {

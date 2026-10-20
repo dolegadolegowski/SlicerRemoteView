@@ -95,7 +95,7 @@ test("a presenter opacity change replaces the local value and says so for a mome
     (window as unknown as { __statuses: string[] }).__statuses = seen;
     new MutationObserver(() => {
       const status = document.querySelector<HTMLElement>(".viewer__status");
-      if (status && !status.hidden && seen.at(-1) !== status.textContent)
+      if (status?.textContent && seen.at(-1) !== status.textContent)
         seen.push(status.textContent ?? "");
     }).observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
   });

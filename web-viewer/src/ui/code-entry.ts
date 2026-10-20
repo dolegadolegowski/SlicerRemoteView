@@ -22,6 +22,8 @@ export interface CodeEntry {
   setError(error: Description | null): void;
   /** While busy the inputs and the button are disabled and the button reads "Joining…". */
   setBusy(busy: boolean): void;
+  /** A polite line under Join while the session is joined without a scene or reconnects (WEB-14); `null` clears it. */
+  setStatus(text: string | null): void;
   /** Clears all cells, keeps the language. */
   reset(): void;
   /** Puts `text` into the cells like a paste (deep link, WEB-11); the hint follows from what it contains. */
@@ -94,7 +96,13 @@ export function createCodeEntry(options: CodeEntryOptions): CodeEntry {
   join.type = "submit";
   join.className = "code-entry__join";
 
-  form.append(title, lead, group, message, join);
+  // Always in the accessibility tree, empty when there is nothing to say: a live region that appears together with
+  // its text is often not announced (VoiceOver).
+  const status = document.createElement("p");
+  status.className = "code-entry__status";
+  status.setAttribute("role", "status");
+
+  form.append(title, lead, group, message, join, status);
 
   const value = (): string => cells.map((c) => c.value).join("");
 
@@ -211,6 +219,9 @@ export function createCodeEntry(options: CodeEntryOptions): CodeEntry {
     setBusy(next) {
       busy = next;
       refresh();
+    },
+    setStatus(text) {
+      if (status.textContent !== (text ?? "")) status.textContent = text ?? "";
     },
     reset() {
       for (const cell of cells) cell.value = "";

@@ -10,7 +10,7 @@
 
 import type { MessageOfType } from "@slicerremoteview/shared";
 import { endsSession } from "./connection";
-import type { Connection, LogFn } from "./connection";
+import type { Connection, ConnectionState, LogFn } from "./connection";
 
 export type LiveMessage =
   | MessageOfType<"scene.update">
@@ -231,11 +231,13 @@ export function createSceneVersions(options: SceneVersionsOptions): SceneVersion
 
 /**
  * Feeds `versions` from the connection; a different session (new code, relay restart) starts from nothing, also
- * when none of the old session's scene was ever shown. Returns the unsubscribe function.
+ * when none of the old session's scene was ever shown. `ends` as in `bindModelLifecycle`. Returns the unsubscribe
+ * function.
  */
 export function bindSceneVersions(
   connection: Pick<Connection, "on" | "onMessage">,
   versions: SceneVersions,
+  ends: (state: ConnectionState) => boolean = endsSession,
 ): () => void {
   let sessionId: string | null = null;
   const offs = [
@@ -252,7 +254,7 @@ export function bindSceneVersions(
     connection.onMessage("scene.snapshot.ready", (m) => versions.expect(m.sceneVersion)),
     connection.onMessage("scene.snapshot.abort", (m) => versions.abandon(m.sceneVersion)),
     connection.on("state", (s) => {
-      if (!endsSession(s)) return;
+      if (!ends(s)) return;
       sessionId = null;
       versions.reset();
     }),

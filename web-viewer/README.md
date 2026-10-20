@@ -73,7 +73,7 @@ connection layer is wired through `onJoin` in `src/main.ts`. Unit tests:
 
 ### Connection client (WEB-04)
 
-`src/protocol/connection.ts` is one WebSocket's lifetime (no DOM, no three.js); reconnect with backoff is WEB-14.
+`src/protocol/connection.ts` is one WebSocket's lifetime (no DOM, no three.js); reconnecting is `reconnect.ts` (WEB-14).
 
 ```ts
 const connection = createConnection(); // wss://<location.host>/ws, or ws:// on localhost only (T5)
@@ -279,4 +279,33 @@ status line (`screens.presenterChanged`). A presenter `color` change keeps a loc
 
 ```bash
 npm test -w web-viewer -- node-panel apply-update screens && npm run e2e -w web-viewer -- opacity
+```
+
+### Reconnect and rejoin (WEB-14)
+
+`src/protocol/reconnect.ts` (`createReconnect(connection)`) owns the session's code and viewer token, in memory only,
+and decides after every closed socket whether to connect again (FR-43, NFR-19, NFR-20):
+
+- Only a joined session retries without the user; a first join that fails is reported on the code entry.
+- Rejoin with `sessionId` + `viewerToken` (§5.1); backoff 0.5 s → 30 s with jitter (`[d/2, d]`), reset only after a
+  rejoin held 10 s; `4008` after 0–3 s; the relay's `retryAfterS` honoured; `enterCode` / `sessionEnded` / `stopped`
+  / `idle` stop it.
+- `SESSION_NOT_FOUND` (relay restarted): join by the code on a new socket, first after a 4–6 s head start for the
+  presenter, then `INVALID_CODE` retried at ≈ 15, 35 and 60 s only (each failure counts against the room's IP, §12);
+  then "Presentation ended" on the code entry. A closed state it retries keeps the scene, the token and the versions
+  (`ends` passed to the model lifecycle, the loader and `bindSceneVersions`).
+- `visibilitychange → visible`: a `ping` at once while connected (`connection.checkAlive()`), or the backoff wait is
+  skipped; `pagehide` sends `viewer.leave` + `1000`; a page restored from the bfcache joins by the code again.
+- `connection.ts`: a pong timer that fires more than 2 s late (frozen page) pings again instead of declaring the link
+  dead; a socket that has not opened within 15 s counts as a drop; after `session.closed` / `session.expired` any
+  close ends the session.
+
+The screens keep the scene while reconnecting ("Reconnecting…" in the status line, then "Connected again" for 3 s),
+say "Presenter is offline" (`session.publisherState`, `viewer.joined.publisherOnline`) and, joined without a scene,
+"Waiting for the presenter" or — while a stream or download really runs (`downloading()`) — "Loading the scene…"
+under Join. Both status lines stay in the accessibility tree, empty when silent; the notice and the status line stack
+at the top of the viewer.
+
+```bash
+npm test -w web-viewer -- reconnect connection screens code-entry viewer && npm run e2e -w web-viewer -- reconnect
 ```

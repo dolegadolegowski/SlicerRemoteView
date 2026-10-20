@@ -1,7 +1,9 @@
 // Entry point: wires the modules. Joining by code (WEB-03/04) or `/j#CODE` (WEB-11), snapshots over the WebSocket
-// stream (WEB-05) or HTTP (WEB-06), the scene model (WEB-07), the viewer (WEB-08) and live updates (WEB-12);
-// `ui/screens.ts` decides which screen is visible.
-import { createConnection } from "./protocol/connection";
+// stream (WEB-05) or HTTP (WEB-06), the scene model (WEB-07), the viewer (WEB-08), live updates (WEB-12) and
+// reconnecting (WEB-14); `ui/screens.ts` decides which screen is visible.
+import { createConnection, endsSession } from "./protocol/connection";
+import type { ConnectionState } from "./protocol/connection";
+import { createReconnect } from "./protocol/reconnect";
 import { bindStreamToLoader, createSceneLoader } from "./protocol/scene-loader";
 import { bindSceneVersions, createSceneVersions } from "./protocol/scene-versions";
 import { bindSnapshotStream, createSnapshotStream } from "./protocol/snapshot-stream";
@@ -20,6 +22,10 @@ const link = takeDeepLink();
 const app = document.getElementById("app");
 if (app) {
   const connection = createConnection();
+  const session = createReconnect(connection); // memory only: the code and the token (CLAUDE.md rule 6)
+  // A closed state the reconnect logic retries (e.g. the code not re-created yet after a relay restart) keeps the
+  // scene, the token and the versions; the new session's `viewer.joined` replaces them (WEB-14).
+  const ends = (state: ConnectionState) => endsSession(state) && !session.willRetry(state);
   const stream = createSnapshotStream();
   // Live updates go to the scene shown, in version order (WEB-12); `live` follows the model.
   let live: LiveScene | null = null;
@@ -48,6 +54,7 @@ if (app) {
   });
   const loader = createSceneLoader(connection, {
     haveSceneVersion: () => versions.sceneVersion ?? loader.loadedVersion ?? 0,
+    ends,
   });
   const models = createSceneModelStore();
   bindSnapshotStream(connection, stream);
@@ -58,11 +65,17 @@ if (app) {
     screens.updating(false);
   };
   // The lifecycle subscribes before the screens, so a different session's model is cleared before they react.
-  bindModelLifecycle(connection, [stream, loader], models, (sceneVersion) => {
-    abandon(sceneVersion);
-    screens.report(describeState({ kind: "snapshotInvalid" }));
-  });
-  bindSceneVersions(connection, versions);
+  bindModelLifecycle(
+    connection,
+    [stream, loader],
+    models,
+    (sceneVersion) => {
+      abandon(sceneVersion);
+      screens.report(describeState({ kind: "snapshotInvalid" }));
+    },
+    ends,
+  );
+  bindSceneVersions(connection, versions, ends);
   // The "updating" hint of scene.nodeAdded waits for the snapshot it announces; a SUPERSEDED one has a newer
   // begin right behind it (§6.2).
   connection.onMessage("scene.snapshot.begin", () => screens.snapshotComing());
@@ -71,7 +84,14 @@ if (app) {
     if (m.reason !== "SUPERSEDED") screens.updating(false);
   });
   const entry = createCodeEntry({ onJoin: (code) => screens.join(code) });
-  const screens = bindScreens({ app, connection, models, entry });
+  const screens = bindScreens({
+    app,
+    connection,
+    session,
+    models,
+    entry,
+    downloading: () => loader.pendingVersion !== null || stream.activeVersion !== null,
+  });
   // After the screens: a new model is on screen (with its node panel) before queued updates are applied to it.
   models.onChange((model) => {
     live = model ? createLiveScene(model) : null;
@@ -80,7 +100,7 @@ if (app) {
 
   /** Leaves the session (the code entry comes back) and shows `description` there. */
   const stop = (description: Description) => {
-    connection.leave();
+    session.leave();
     entry.setError(description);
   };
   const tooLarge = ({ sceneVersion }: { readonly sceneVersion: number }) => {

@@ -79,7 +79,10 @@ export interface Viewer {
   resize(): void;
   /** A message over the scene (e.g. a refused snapshot while the old one stays visible); `null` hides it. */
   setNotice(notice: Description | null): void;
-  /** A short, polite status line (e.g. "Updating the scene…" before a new snapshot, WEB-12); `null` hides it. */
+  /**
+   * A short, polite status line (e.g. "Updating the scene…" before a new snapshot, WEB-12; "Reconnecting…", WEB-14);
+   * `null` empties it. The element stays in the accessibility tree (an empty one is not drawn), so a change is announced.
+   */
   setStatus(text: string | null): void;
   /** Moves keyboard / screen-reader focus to the canvas (its label describes the gestures). */
   focus(): void;
@@ -169,8 +172,10 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
   const status = doc.createElement("p");
   status.className = "viewer__status";
   status.setAttribute("role", "status"); // polite: announced without interrupting
-  status.hidden = true;
-  element.append(canvas, notice, status, fitButton);
+  const top = doc.createElement("div"); // the notice above the status line (style.css)
+  top.className = "viewer__top";
+  top.append(notice, status);
+  element.append(canvas, top, fitButton);
 
   let renderer: RendererLike;
   try {
@@ -446,8 +451,7 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
     resize,
     setNotice,
     setStatus(text) {
-      status.hidden = text === null;
-      status.textContent = text ?? "";
+      if (status.textContent !== (text ?? "")) status.textContent = text ?? "";
     },
     focus: () => canvas.focus({ preventScroll: true }),
     dispose() {

@@ -1,9 +1,12 @@
 // Which screen the user sees (WEB-08): the 3D viewer with its node panel (WEB-09) while a model is loaded and the
 // session is live, the code entry otherwise. Also routes messages to the screen that is visible, gates Join on
-// WebGL 2 and moves focus with the screen. Kept out of `main.ts` so every transition is unit-tested.
+// WebGL 2, moves focus with the screen and keeps one polite status line per screen (WEB-12–14): reconnecting,
+// presenter offline, waiting for or loading the scene, a presenter notice. Kept out of `main.ts` so every transition
+// is unit-tested.
 
 import { detectLang, t } from "../i18n/strings";
 import type { Connection } from "../protocol/connection";
+import type { Reconnect } from "../protocol/reconnect";
 import type { Applied } from "../render/apply-update";
 import type { SceneModel, SceneModelStore } from "../render/scene-model";
 import { createViewer, webGL2Available } from "../render/viewer";
@@ -16,11 +19,15 @@ import type { NodePanel } from "./node-panel";
 
 export interface ScreensOptions {
   readonly app: HTMLElement;
-  readonly connection: Pick<Connection, "state" | "connect" | "leave" | "on" | "onMessage">;
+  readonly connection: Pick<Connection, "state" | "leave" | "on" | "onMessage">;
+  /** Joins by code and decides about retries (WEB-14). */
+  readonly session: Pick<Reconnect, "join" | "willRetry" | "explain">;
   readonly models: SceneModelStore;
   readonly entry: CodeEntry;
   readonly createViewer?: () => CreateViewerResult;
   readonly webGL2Available?: () => boolean;
+  /** A snapshot is being received right now (stream or HTTP), so "Loading the scene…" is true; default never. */
+  readonly downloading?: () => boolean;
 }
 
 export interface Screens {
@@ -47,7 +54,7 @@ export interface Screens {
   presenterChanged(nodeIds: readonly string[]): void;
   readonly viewer: Viewer | null;
   readonly nodePanel: NodePanel | null;
-  /** Joining or joined: the code entry's cells hold the code of this session. */
+  /** Joining, joined or reconnecting: the code entry's cells hold the code of this session. */
   readonly live: boolean;
 }
 
@@ -57,26 +64,63 @@ export const UPDATING_HINT_MS = 10_000;
 export const PRESENTER_NOTICE_MS = 3_000;
 
 export function bindScreens(options: ScreensOptions): Screens {
-  const { app, connection, models, entry } = options;
+  const { app, connection, models, entry, session } = options;
   const create = options.createViewer ?? (() => createViewer());
   const canRender = options.webGL2Available ?? webGL2Available;
+  const downloading = options.downloading ?? (() => false);
   let viewer: Viewer | null = null;
   let panel: NodePanel | null = null;
   let shown: SceneModel | null = null;
-  // One status line: a short presenter notice wins over the "updating" hint, which comes back after it.
+  // One status line per screen, most important first: reconnecting, presenter offline, then over the scene a short
+  // presenter notice over the "updating" hint (which comes back after it), on the code entry "loading" or "waiting".
+  let joined = false; // `viewer.joined` of this session seen
+  let reconnecting = false;
+  let presenterOffline = false;
+  let loading = false; // joined without a scene shown: a snapshot is being received
   let hint = false;
   let hintTimer: ReturnType<typeof setTimeout> | undefined;
   let notice: string | null = null;
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
 
   function paintStatus(): void {
-    viewer?.setStatus(notice ?? (hint ? t(detectLang(), "viewer.updating") : null));
+    const lang = detectLang();
+    const urgent = reconnecting
+      ? t(lang, "state.reconnecting.title")
+      : presenterOffline
+        ? t(lang, "state.presenterOffline.title")
+        : null;
+    viewer?.setStatus(urgent ?? notice ?? (hint ? t(lang, "viewer.updating") : null));
+    const waiting = loading ? "state.downloading.title" : "state.waitingForScene.title";
+    entry.setStatus(urgent ?? (joined ? t(lang, waiting) : null));
+  }
+
+  /** The session is over for this viewer (or not yet joined): no status of it is left. */
+  function sessionGone(): void {
+    joined = reconnecting = presenterOffline = loading = false;
+    paintStatus();
   }
 
   function setHint(on: boolean): void {
     clearTimeout(hintTimer);
     hintTimer = undefined;
     hint = on;
+    paintStatus();
+  }
+
+  /** The hint goes after `UPDATING_HINT_MS` unless a snapshot is announced meanwhile. */
+  function armHint(): void {
+    clearTimeout(hintTimer);
+    hintTimer = setTimeout(() => setHint(false), UPDATING_HINT_MS);
+  }
+
+  /** A short notice in the status line (WEB-13, WEB-14), for `PRESENTER_NOTICE_MS`. */
+  function flash(text: string): void {
+    notice = text;
+    clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => {
+      notice = null;
+      paintStatus();
+    }, PRESENTER_NOTICE_MS);
     paintStatus();
   }
 
@@ -115,7 +159,8 @@ export function bindScreens(options: ScreensOptions): Screens {
     viewer.element.hidden = false;
     if (model !== shown) {
       viewer.setNotice(null);
-      clearStatus(); // both talk about the previous scene
+      loading = false;
+      clearStatus(); // the notice and the hint talk about the previous scene
       viewer.setModel(model); // a new model is fitted from the front
       panel?.setModel(model);
     } else {
@@ -143,8 +188,23 @@ export function bindScreens(options: ScreensOptions): Screens {
 
   // A rejoin of the same session keeps the model (no download): show it again. The model lifecycle registered its
   // handler first, so a different session has already cleared the old model here.
-  connection.onMessage("viewer.joined", () => {
+  // The scene loader registered first too: whether it started a download is known here.
+  connection.onMessage("viewer.joined", (m) => {
+    const back = reconnecting && models.current !== null;
+    joined = true;
+    reconnecting = false;
+    presenterOffline = !m.publisherOnline;
+    loading = downloading(); // else waiting for the presenter to share a scene (§13 step 9)
+    // A hint whose snapshot died with the old socket: it gets the usual time to be announced again.
+    if (hint && !loading) armHint();
+    paintStatus();
     if (models.current) showViewer(models.current);
+    if (back) flash(t(detectLang(), "viewer.reconnected")); // a cue that the link is back (the status empties)
+  });
+  // §4.6: the scene stays frozen while the presenter is away (grace) and updates when they are back.
+  connection.onMessage("session.publisherState", (m) => {
+    presenterOffline = !m.online;
+    paintStatus();
   });
 
   connection.on("state", (state) => {
@@ -156,14 +216,22 @@ export function bindScreens(options: ScreensOptions): Screens {
       case "connected":
         return;
       case "idle":
+        sessionGone();
         entry.setBusy(false);
         showEntry(true);
         return;
       default:
-        // Until WEB-14 reconnects automatically, every closed state goes back to the code entry with its message;
-        // after a retryable drop the model stays and is shown again when the same session is rejoined.
+        if (session.willRetry(state)) {
+          // A retry follows without the user (WEB-14): the scene, or the waiting code entry, stays and says so.
+          reconnecting = true;
+          entry.setBusy(true);
+          return paintStatus();
+        }
+        // Over: back to the code entry with the message. After a drop the model stays and is shown again when the
+        // same session is joined again (Join keeps the code).
+        sessionGone();
         entry.setBusy(false);
-        entry.setError(state.description);
+        entry.setError(session.explain(state) ?? state.description);
         showEntry(true);
     }
   });
@@ -172,7 +240,7 @@ export function bindScreens(options: ScreensOptions): Screens {
     join(code) {
       if (!canRender()) return entry.setError(describeState({ kind: "webgl2Unavailable" }));
       // The code travels only in the body of `viewer.join`, never in the URL (NFR-15).
-      connection.connect({ code });
+      session.join(code);
     },
     report(description) {
       if (viewerVisible()) viewer?.setNotice(description);
@@ -199,12 +267,18 @@ export function bindScreens(options: ScreensOptions): Screens {
       if (changed || removed) viewer?.contentChanged(); // nodes may have moved: clip planes follow
     },
     updating(on) {
+      if (!on) loading = downloading(); // abandoned: back to waiting for the presenter
       setHint(on);
-      if (on) hintTimer = setTimeout(() => setHint(false), UPDATING_HINT_MS);
+      if (on) armHint();
     },
     snapshotComing() {
       clearTimeout(hintTimer);
       hintTimer = undefined;
+      // The stream and the loader have seen the announcement first: one that is refused (too large) loads nothing.
+      if (!shown) {
+        loading = downloading();
+        paintStatus();
+      }
     },
     presenterChanged(changed) {
       const model = shown;
@@ -216,19 +290,15 @@ export function bindScreens(options: ScreensOptions): Screens {
       // Names are shown, never logged (PHI, §7.3).
       const name =
         node && (node.manifest.name.trim() || t(lang, "nodePanel.unnamed", { n: node.order + 1 }));
-      notice =
+      flash(
         nodeIds.length === 1 && name
           ? t(lang, "viewer.presenterChanged", { name })
-          : t(lang, "viewer.presenterChangedMany", { count: nodeIds.length });
-      clearTimeout(noticeTimer);
-      noticeTimer = setTimeout(() => {
-        notice = null;
-        paintStatus();
-      }, PRESENTER_NOTICE_MS);
-      paintStatus();
+          : t(lang, "viewer.presenterChangedMany", { count: nodeIds.length }),
+      );
     },
     get live() {
-      return connection.state.kind === "connecting" || connection.state.kind === "connected";
+      const state = connection.state;
+      return state.kind === "connecting" || state.kind === "connected" || session.willRetry(state);
     },
   };
 }

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Object3D } from "three";
 import { createConnection } from "../../src/protocol/connection";
 import type { Connection } from "../../src/protocol/connection";
+import { createReconnect } from "../../src/protocol/reconnect";
 import type { SceneModel, SceneModelStore, SceneNode } from "../../src/render/scene-model";
 import type { CreateViewerResult, Viewer } from "../../src/render/viewer";
 import { describe as describeCode, describeState } from "../../src/state/errors";
@@ -9,6 +10,7 @@ import { createCodeEntry } from "../../src/ui/code-entry";
 import type { CodeEntry } from "../../src/ui/code-entry";
 import { bindScreens, PRESENTER_NOTICE_MS, UPDATING_HINT_MS } from "../../src/ui/screens";
 import type { Screens } from "../../src/ui/screens";
+import { FakeDocument } from "../protocol/fake-document";
 import { MockSocket } from "../protocol/mock-socket";
 
 function fakeViewer() {
@@ -88,6 +90,8 @@ let models: ReturnType<typeof fakeStore>;
 let viewer: ReturnType<typeof fakeViewer>;
 let create: ReturnType<typeof vi.fn<() => CreateViewerResult>>;
 let screens: Screens;
+/** What `downloading()` answers: a stream or an HTTP download is running. */
+let receiving = false;
 
 function setup(options: { webgl?: boolean; viewerFails?: boolean } = {}): void {
   MockSocket.reset();
@@ -98,6 +102,7 @@ function setup(options: { webgl?: boolean; viewerFails?: boolean } = {}): void {
     createSocket: (url) => new MockSocket(url),
     log: vi.fn(),
     lang: "en",
+    heartbeatIntervalMs: 3_600_000, // these tests advance fake time a lot; the heartbeat has its own tests
   });
   models = fakeStore();
   viewer = fakeViewer();
@@ -108,29 +113,48 @@ function setup(options: { webgl?: boolean; viewerFails?: boolean } = {}): void {
   screens = bindScreens({
     app,
     connection: conn,
+    session: createReconnect(conn, {
+      random: () => 0,
+      document: new FakeDocument(),
+      window: new EventTarget(),
+      log: vi.fn(),
+      lang: "en",
+    }),
     models,
     entry,
     createViewer: create,
     webGL2Available: () => options.webgl ?? true,
+    downloading: () => receiving,
   });
   app.append(entry.element);
 }
 
-function join(sessionId?: string): MockSocket {
+function join(sessionId?: string, overrides: Record<string, unknown> = {}): MockSocket {
   screens.join("7KQ4X");
+  return rejoin(sessionId, overrides);
+}
+
+/** The relay accepts the newest socket's join (after `join`, or a retry of the reconnect logic). */
+function rejoin(sessionId?: string, overrides: Record<string, unknown> = {}): MockSocket {
   const socket = MockSocket.last;
   socket.open();
-  socket.receive(joined(sessionId));
+  socket.receive({ ...joined(sessionId), ...overrides });
   return socket;
 }
 
+const TOKEN = joined().viewerToken;
+
 const message = () => entry.element.querySelector(".code-entry__message")!.textContent ?? "";
+const entryStatus = () => entry.element.querySelector(".code-entry__status")!.textContent ?? "";
 const cellsEnabled = () =>
   [...entry.element.querySelectorAll("input")].every((input) => !input.disabled);
 const entryVisible = () => !entry.element.hidden;
 const viewerVisible = () => viewer.element.isConnected && !viewer.element.hidden;
 
-beforeEach(() => setup());
+beforeEach(() => {
+  receiving = false;
+  setup();
+});
 afterEach(() => {
   document.body.replaceChildren();
   for (const model of [modelA, modelB])
@@ -162,31 +186,60 @@ describe("screens", () => {
     expect(viewer.focus).toHaveBeenCalledTimes(1);
   });
 
-  it("a model finishing after a drop does not cover the 'connection lost' message; the rejoin shows it", () => {
-    const socket = join();
-    socket.serverClose(1006);
+  it("a first join that drops goes back to a usable code entry with 'connection lost' (Join tries again)", () => {
+    screens.join("7KQ4X");
+    MockSocket.last.serverClose(1006);
     expect(entryVisible()).toBe(true);
-    const lost = message();
-    expect(lost).toContain(describeCode(1001, "en").title);
-    models.emit(modelA); // the HTTP download kept running and finished now
-    expect(entryVisible()).toBe(true);
-    expect(message()).toBe(lost);
-    expect(viewer.setModel).not.toHaveBeenCalled();
-    join(); // same session, the model is kept: shown without a new download
-    expect(viewerVisible()).toBe(true);
-    expect(viewer.setModel).toHaveBeenCalledWith(modelA);
+    expect(cellsEnabled()).toBe(true);
+    expect(message()).toContain(describeCode(1001, "en").title);
+    expect(entryStatus()).toBe("");
+    expect(screens.live).toBe(false);
   });
 
-  it("rejoining the same session after a drop shows the same model again without refitting the camera", () => {
-    const socket = join();
-    models.emit(modelA);
-    socket.serverClose(1006);
-    expect(viewerVisible()).toBe(false);
-    join();
-    expect(viewerVisible()).toBe(true);
-    expect(viewer.setModel).toHaveBeenCalledTimes(1); // not again: the user's camera stays
-    expect(viewer.resize).toHaveBeenCalled();
-    expect(viewer.invalidate).toHaveBeenCalled();
+  it("a drop before the scene is shown keeps the code entry busy with 'Reconnecting…'; a model that finishes meanwhile is shown on the rejoin", () => {
+    vi.useFakeTimers();
+    try {
+      const socket = join();
+      socket.serverClose(1006);
+      expect(entryVisible()).toBe(true);
+      expect(cellsEnabled()).toBe(false);
+      expect(message()).toBe("");
+      expect(entryStatus()).toBe("Reconnecting…");
+      expect(screens.live).toBe(true);
+      models.emit(modelA); // the HTTP download kept running and finished now
+      expect(viewer.setModel).not.toHaveBeenCalled(); // not over a dropped session
+      vi.advanceTimersByTime(500);
+      rejoin(); // same session, the model is kept: shown without a new download
+      expect(viewerVisible()).toBe(true);
+      expect(viewer.setModel).toHaveBeenCalledWith(modelA);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a drop while the scene is shown keeps it with 'Reconnecting…'; the rejoin keeps the camera", () => {
+    vi.useFakeTimers();
+    try {
+      const socket = join();
+      models.emit(modelA);
+      socket.serverClose(1006);
+      expect(viewerVisible()).toBe(true);
+      expect(entryVisible()).toBe(false);
+      expect(viewer.setStatus).toHaveBeenLastCalledWith("Reconnecting…");
+      vi.advanceTimersByTime(500);
+      expect(viewer.setStatus).toHaveBeenLastCalledWith("Reconnecting…"); // still, while connecting
+      const again = rejoin();
+      expect(again.frames[0]).toMatchObject({ type: "viewer.join", viewerToken: TOKEN });
+      expect(viewer.setStatus).toHaveBeenLastCalledWith("Connected again"); // a cue that the link is back
+      vi.advanceTimersByTime(PRESENTER_NOTICE_MS);
+      expect(viewer.setStatus).toHaveBeenLastCalledWith(null);
+      expect(viewerVisible()).toBe(true);
+      expect(viewer.setModel).toHaveBeenCalledTimes(1); // not again: the user's camera stays
+      expect(viewer.resize).toHaveBeenCalled();
+      expect(viewer.invalidate).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("a new model replaces the shown one and clears an old notice", () => {
@@ -438,5 +491,152 @@ describe("messages go where the user is looking", () => {
     const invalid = describeState({ kind: "snapshotInvalid" }, "en");
     screens.report(invalid);
     expect(viewer.setNotice).toHaveBeenLastCalledWith(invalid);
+  });
+});
+
+describe("reconnecting and the presenter (WEB-14)", () => {
+  it("joined without a scene: 'Waiting for the presenter', then 'Loading the scene…' while one comes", () => {
+    join();
+    expect(entryStatus()).toBe("Waiting for the presenter");
+    receiving = true;
+    screens.snapshotComing(); // scene.snapshot.begin, the stream took it
+    expect(entryStatus()).toBe("Loading the scene…");
+    receiving = false;
+    screens.updating(false); // abandoned (aborted, damaged)
+    expect(entryStatus()).toBe("Waiting for the presenter");
+    models.emit(modelA);
+    expect(viewerVisible()).toBe(true);
+    expect(viewer.setStatus).toHaveBeenLastCalledWith(null);
+  });
+
+  it("an announced snapshot refused at once (too large) does not say 'Loading the scene…'", () => {
+    join();
+    screens.updating(false); // the stream refused it while handling scene.snapshot.begin …
+    screens.snapshotComing(); // … before the screens heard of the begin
+    expect(entryStatus()).toBe("Waiting for the presenter");
+  });
+
+  it("joined: 'Loading the scene…' only when a download really started", () => {
+    receiving = true; // the loader fetches the announced snapshot
+    join(undefined, { snapshotAvailable: true });
+    expect(entryStatus()).toBe("Loading the scene…");
+    conn.leave();
+    receiving = false; // announced, but the loader has it already (or asks for scene.snapshot.ready)
+    join(undefined, { snapshotAvailable: true });
+    expect(entryStatus()).toBe("Waiting for the presenter");
+  });
+
+  it("an 'updating' hint whose snapshot died with the old socket goes after the usual wait once rejoined", () => {
+    vi.useFakeTimers();
+    try {
+      const socket = join();
+      models.emit(modelA);
+      screens.updating(true); // scene.nodeAdded
+      screens.snapshotComing(); // its begin: the hint waits however long the stream takes
+      socket.serverClose(1006); // the stream is cut
+      vi.advanceTimersByTime(500);
+      rejoin(); // the relay has nothing newer: no download
+      vi.advanceTimersByTime(UPDATING_HINT_MS - 1);
+      expect(viewer.setStatus).toHaveBeenLastCalledWith("Updating the scene…");
+      vi.advanceTimersByTime(1);
+      expect(viewer.setStatus).toHaveBeenLastCalledWith(null);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a rejoin that downloads the announced snapshot keeps the hint", () => {
+    vi.useFakeTimers();
+    try {
+      const socket = join();
+      models.emit(modelA);
+      screens.updating(true);
+      screens.snapshotComing();
+      socket.serverClose(1006);
+      vi.advanceTimersByTime(500);
+      receiving = true;
+      rejoin();
+      vi.advanceTimersByTime(UPDATING_HINT_MS * 5);
+      expect(viewer.setStatus).toHaveBeenLastCalledWith("Updating the scene…");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("the presenter offline is said over the scene and on the waiting code entry (§4.6)", () => {
+    const socket = join(undefined, { publisherOnline: false });
+    expect(entryStatus()).toBe("Presenter is offline");
+    models.emit(modelA);
+    expect(viewer.setStatus).toHaveBeenLastCalledWith("Presenter is offline");
+    screens.presenterChanged(["vtkMRMLModelNode2"]);
+    expect(viewer.setStatus).toHaveBeenLastCalledWith("Presenter is offline"); // the more important line
+    socket.receive({ type: "session.publisherState", online: true });
+    expect(viewer.setStatus).toHaveBeenLastCalledWith("The presenter changed Tumor");
+    socket.receive({ type: "session.publisherState", online: false, graceEndsAt: 1 });
+    expect(viewer.setStatus).toHaveBeenLastCalledWith("Presenter is offline");
+  });
+
+  it("reconnecting wins over 'presenter offline' and goes with the rejoin", () => {
+    vi.useFakeTimers();
+    try {
+      const socket = join(undefined, { publisherOnline: false });
+      models.emit(modelA);
+      socket.serverClose(1006);
+      expect(viewer.setStatus).toHaveBeenLastCalledWith("Reconnecting…");
+      vi.advanceTimersByTime(500);
+      rejoin(undefined, { publisherOnline: true });
+      expect(viewer.setStatus).toHaveBeenLastCalledWith("Connected again");
+      vi.advanceTimersByTime(PRESENTER_NOTICE_MS);
+      expect(viewer.setStatus).toHaveBeenLastCalledWith(null);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("the end of the session clears every status and says why on the code entry", () => {
+    const socket = join(undefined, { publisherOnline: false });
+    socket.receive({
+      type: "session.closed",
+      sessionId: joined().sessionId,
+      reason: "PUBLISHER_CLOSED",
+    });
+    socket.serverClose(4001);
+    expect(entryStatus()).toBe("");
+    expect(message()).toContain(describeCode(4001, "en").title);
+    expect(cellsEnabled()).toBe(true);
+  });
+
+  it("a session lost in a relay restart and not re-created ends with 'Presentation ended' (US-12)", () => {
+    vi.useFakeTimers();
+    try {
+      join();
+      MockSocket.last.serverClose(4008);
+      vi.advanceTimersByTime(3_000);
+      const tokenJoin = MockSocket.last;
+      tokenJoin.open();
+      tokenJoin.receive({
+        type: "error",
+        code: "SESSION_NOT_FOUND",
+        message: "x",
+        retryable: false,
+      });
+      for (let attempt = 0; attempt < 4; attempt++) {
+        vi.advanceTimersToNextTimer();
+        const s = MockSocket.last;
+        s.open();
+        expect(s.frames[0]).toMatchObject({ type: "viewer.join", code: "7KQ4X" });
+        s.receive({ type: "error", code: "INVALID_CODE", message: "x", retryable: false });
+        s.serverClose(4004);
+        if (attempt < 3) {
+          expect(entryStatus()).toBe("Reconnecting…");
+          expect(message()).toBe("");
+        }
+      }
+      expect(message()).toContain(describeCode("SESSION_CLOSED", "en").title);
+      expect(entryStatus()).toBe("");
+      expect(cellsEnabled()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

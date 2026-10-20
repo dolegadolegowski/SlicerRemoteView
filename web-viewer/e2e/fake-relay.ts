@@ -7,11 +7,39 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect } from "@playwright/test";
-import type { Page } from "@playwright/test";
+import type { Page, WebSocketRoute } from "@playwright/test";
 
 const FIXTURES = resolve(dirname(fileURLToPath(import.meta.url)), "../../shared/fixtures/glb");
 export const fixture = (name: string): Buffer => readFileSync(`${FIXTURES}/${name}`);
 const CHUNK = 65_536;
+
+/** Sends `message` with the envelope's `protocolVersion`. */
+export const sendJson = (ws: WebSocketRoute, message: Record<string, unknown>): void =>
+  ws.send(JSON.stringify({ protocolVersion: "1.0", ...message }));
+
+/** Streams `glb` as snapshot `sceneVersion`: `begin`, SRVC-framed chunks, `end` (§6.2–6.4). */
+export function streamSnapshot(ws: WebSocketRoute, glb: Buffer, sceneVersion = 1): void {
+  const sha256 = createHash("sha256").update(glb).digest("hex");
+  const chunkCount = Math.ceil(glb.length / CHUNK);
+  sendJson(ws, {
+    type: "scene.snapshot.begin",
+    sceneVersion,
+    byteLength: glb.length,
+    sha256,
+    chunkCount,
+    chunkSize: CHUNK,
+    format: "glb",
+    extensionsUsed: [],
+  });
+  for (let index = 0; index < chunkCount; index++) {
+    const header = Buffer.alloc(12);
+    header.write("SRVC", 0, "ascii");
+    header.writeUInt32LE(sceneVersion, 4);
+    header.writeUInt32LE(index, 8);
+    ws.send(Buffer.concat([header, glb.subarray(index * CHUNK, (index + 1) * CHUNK)]));
+  }
+  sendJson(ws, { type: "scene.snapshot.end", sceneVersion, sha256 });
+}
 
 /** Plays the relay's side of the newest socket after the join (live updates in WEB-13 tests). */
 export interface FakeRelay {
@@ -24,8 +52,7 @@ export async function fakeRelay(
 ): Promise<FakeRelay> {
   let latest: ((message: Record<string, unknown>) => void) | null = null;
   await page.routeWebSocket(/\/ws$/, (ws) => {
-    const send = (message: Record<string, unknown>) =>
-      ws.send(JSON.stringify({ protocolVersion: "1.0", ...message }));
+    const send = (message: Record<string, unknown>) => sendJson(ws, message);
     latest = send;
     ws.onMessage((frame) => {
       const message = JSON.parse(String(frame)) as { type: string; id?: string };
@@ -46,26 +73,7 @@ export async function fakeRelay(
         profile: "mobile",
       });
       send({ type: "scene.state", sceneVersion: 0, snapshotVersion: null, nodes: [], removed: [] });
-      const sha256 = createHash("sha256").update(glb).digest("hex");
-      const chunkCount = Math.ceil(glb.length / CHUNK);
-      send({
-        type: "scene.snapshot.begin",
-        sceneVersion: 1,
-        byteLength: glb.length,
-        sha256,
-        chunkCount,
-        chunkSize: CHUNK,
-        format: "glb",
-        extensionsUsed: [],
-      });
-      for (let index = 0; index < chunkCount; index++) {
-        const header = Buffer.alloc(12);
-        header.write("SRVC", 0, "ascii");
-        header.writeUInt32LE(1, 4);
-        header.writeUInt32LE(index, 8);
-        ws.send(Buffer.concat([header, glb.subarray(index * CHUNK, (index + 1) * CHUNK)]));
-      }
-      send({ type: "scene.snapshot.end", sceneVersion: 1, sha256 });
+      streamSnapshot(ws, glb);
     });
   });
   return {

@@ -1,8 +1,8 @@
 import { setFlagsFromString } from "node:v8";
 import { runInNewContext } from "node:vm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createConnection } from "../../src/protocol/connection";
-import type { Connection } from "../../src/protocol/connection";
+import { createConnection, endsSession } from "../../src/protocol/connection";
+import type { Connection, ConnectionState } from "../../src/protocol/connection";
 import { bindModelLifecycle } from "../../src/render/model-lifecycle";
 import type { SnapshotSource } from "../../src/render/model-lifecycle";
 import type { SceneModelStore, StoreLoadResult } from "../../src/render/scene-model";
@@ -156,6 +156,22 @@ describe("model lifetime", () => {
     socket.receive(joined("sess_A"));
     expect(models.clear).not.toHaveBeenCalled();
     conn.leave();
+    expect(models.clear).toHaveBeenCalledTimes(1);
+  });
+
+  it("a terminal state that `ends` says is retried keeps the model (WEB-14: the code not re-created yet)", () => {
+    const models = store(() => Promise.resolve({ ok: false, reason: "superseded" }));
+    const ends = vi.fn(
+      (state: ConnectionState) => endsSession(state) && state.kind !== "enterCode",
+    );
+    bindModelLifecycle(conn, [], models, vi.fn(), ends);
+    open();
+    socket.receive(joined("sess_A"));
+    socket.serverClose(4004);
+    expect(ends).toHaveBeenCalledWith(expect.objectContaining({ kind: "enterCode" }));
+    expect(models.clear).not.toHaveBeenCalled();
+    open();
+    socket.receive(joined("sess_B")); // the new session: the old scene goes now
     expect(models.clear).toHaveBeenCalledTimes(1);
   });
 

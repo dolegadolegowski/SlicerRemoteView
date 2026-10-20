@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createConnection } from "../../src/protocol/connection";
+import { createReconnect } from "../../src/protocol/reconnect";
 import { describe as describeCode, describeState } from "../../src/state/errors";
 import { createCodeEntry } from "../../src/ui/code-entry";
 import type { CodeEntry } from "../../src/ui/code-entry";
 import { DEEP_LINK_PATH, startFromDeepLink, takeDeepLink } from "../../src/ui/deep-link";
 import type { HistoryLike } from "../../src/ui/deep-link";
 import { bindScreens } from "../../src/ui/screens";
+import { FakeDocument } from "../protocol/fake-document";
 import { MockSocket } from "../protocol/mock-socket";
 
 const at = (pathname: string, hash = "") => ({ pathname, hash });
@@ -120,9 +122,14 @@ function app() {
   });
   const models = { current: null, load: vi.fn(), clear: vi.fn(), onChange: () => () => {} };
   const entry = createCodeEntry({ lang: "en", onJoin: (code) => screens.join(code) });
+  const session = createReconnect(connection, {
+    document: new FakeDocument(),
+    window: new EventTarget(),
+  });
   const screens = bindScreens({
     app: root,
     connection,
+    session,
     models,
     entry,
     webGL2Available: () => true,
@@ -162,8 +169,9 @@ describe("a link opened during a session (hashchange)", () => {
     );
   });
 
-  it("also when joined: the cells keep the joined code and a drop still says 'connection lost'", () => {
-    const { connection, entry, screens, cells, message } = app();
+  it("also when joined or reconnecting: the cells keep the joined code", () => {
+    vi.useFakeTimers(); // the reconnect's retry timer must not outlive the test
+    const { connection, entry, screens, cells } = app();
     startFromDeepLink(takeDeepLink(at("/j", "#7KQ4X"), hist), entry, screens);
     MockSocket.last.open();
     MockSocket.last.receive({
@@ -183,9 +191,11 @@ describe("a link opened during a session (hashchange)", () => {
     expect(screens.live).toBe(true);
     startFromDeepLink(takeDeepLink(at("/j", "#7KQ0X"), hist), entry, screens);
     expect(cells()).toBe("7KQ4X");
-    MockSocket.last.serverClose(1006);
+    MockSocket.last.serverClose(1006); // WEB-14 rejoins by itself: still this session
+    expect(screens.live).toBe(true);
+    startFromDeepLink(takeDeepLink(at("/j", "#7KQ0X"), hist), entry, screens);
     expect(cells()).toBe("7KQ4X");
-    expect(message()).toContain(describeCode(1001, "en").title);
+    vi.useRealTimers();
   });
 
   it("a valid one joins that session instead", () => {

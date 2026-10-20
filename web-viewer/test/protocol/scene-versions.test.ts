@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createConnection } from "../../src/protocol/connection";
+import { createConnection, endsSession } from "../../src/protocol/connection";
 import {
   bindSceneVersions,
   createSceneVersions,
@@ -338,5 +338,33 @@ describe("bindSceneVersions", () => {
       "scene.nodeAdded 4",
       "reset",
     ]);
+  });
+
+  it("a terminal state that `ends` says is retried does not reset (WEB-14)", () => {
+    MockSocket.reset();
+    const connection = createConnection({
+      location: { protocol: "https:", host: "x.example", hostname: "x.example" },
+      createSocket: (url) => new MockSocket(url),
+      log: vi.fn(),
+      lang: "en",
+    });
+    const reset = vi.fn();
+    const spy = {
+      sceneVersion: null,
+      joined: vi.fn(),
+      expect: vi.fn(),
+      abandon: vi.fn(),
+      shown: vi.fn(),
+      state: vi.fn(),
+      live: vi.fn(),
+      reset,
+    } satisfies SceneVersions;
+    bindSceneVersions(connection, spy, (state) => endsSession(state) && state.kind !== "enterCode");
+    connection.connect({ code: "7KQ4X" });
+    MockSocket.last.serverClose(4004);
+    expect(reset).not.toHaveBeenCalled();
+    connection.connect({ code: "7KQ4X" });
+    MockSocket.last.serverClose(4001);
+    expect(reset).toHaveBeenCalledTimes(1);
   });
 });
