@@ -15,6 +15,7 @@ import type { Clock } from "./clock.js";
 import { loadConfig, publicLimits } from "./config.js";
 import type { Config } from "./config.js";
 import { createLogger } from "./logger.js";
+import { RateLimiter } from "./ratelimit.js";
 import { Registry } from "./registry.js";
 import { PROTOCOL_VERSIONS, RELAY_NAME, RELAY_VERSION } from "./version.js";
 import { createDispatcher } from "./ws/dispatch.js";
@@ -33,6 +34,8 @@ export interface AppOptions {
   clock?: Clock;
   /** Session registry; by default one is built from `config` and `clock`. */
   registry?: Registry;
+  /** Per-IP limits (SRV-08); by default one with a fresh per-boot key. */
+  limiter?: RateLimiter;
   /** Overrides for the WebSocket frame hooks (tests record frames); default: dispatch (SRV-23). */
   wsHandlers?: Partial<FrameHandlers>;
   /** Extra message-type handlers merged into the dispatch table (tests). */
@@ -122,14 +125,16 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
 
   // Compile every protocol schema now, not on the first client message (≈ 250 ms of blocked loop).
   const validators = defaultSchemas();
-  const publisher = publisherHandlers({ registry, config, logger });
-  const viewer = viewerHandlers({ registry, logger, clock });
+  const limiter = options.limiter ?? new RateLimiter({ clock, logger });
+  const publisher = publisherHandlers({ registry, config, limiter, logger });
+  const viewer = viewerHandlers({ registry, limiter, logger, clock });
 
   // First: the WebSocket plugin wraps every route registered after it (upgrade interception).
   await registerWsEndpoint(app, {
     allowedOrigins: config.allowedOrigins,
     clock,
     logger,
+    limiter,
     handlers: {
       text: createDispatcher({
         clock,
@@ -148,9 +153,13 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   });
 
   // The TTL sweep runs while the server is up (architecture §5).
-  app.addHook("onReady", async () => registry.start());
+  app.addHook("onReady", async () => {
+    registry.start();
+    limiter.start();
+  });
   app.addHook("onClose", async () => {
     registry.stop();
+    limiter.stop();
     publisher.dispose();
     viewer.dispose();
   });

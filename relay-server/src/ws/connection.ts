@@ -51,6 +51,8 @@ export class Connection implements Peer {
   constructor(
     readonly socket: WebSocket,
     private readonly clock: Clock,
+    /** HMAC of the client address (`RateLimiter.clientKey`); never the address itself (NFR-12). */
+    readonly clientKey: string,
   ) {}
 
   /** False once a close was started by either side. */

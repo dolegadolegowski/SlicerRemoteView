@@ -5,6 +5,8 @@
  *
  * - One `ws` server for both roles with `maxPayload` 1 MiB + 64 KiB and no `permessage-deflate`:
  *   `ws` closes an oversized message with `1009` before reading its payload.
+ * - More than 30 accepted upgrades per minute from one client address (an IPv6 /64) get HTTP 429
+ *   before the upgrade (§12); upgrades refused for their Origin or subprotocol do not count.
  * - A browser `Origin` outside `ALLOWED_ORIGINS` gets HTTP 403 before the upgrade; requests without
  *   `Origin` (Slicer, Unity) pass. An upgrade offering a subprotocol gets HTTP 400 (§3.1 keeps codes
  *   and tokens out of `Sec-WebSocket-Protocol`). A plain HTTP `GET /ws` is just an unknown path (404).
@@ -27,6 +29,7 @@ import { CLOSE_CODES, LIMITS } from "@slicerremoteview/shared";
 import type { Clock } from "../clock.js";
 import { Connection, HANDSHAKE_ROLES } from "./connection.js";
 import type { Role } from "./connection.js";
+import type { RateLimiter } from "../ratelimit.js";
 import { readFrame } from "./frame.js";
 import type { TextFrame } from "./frame.js";
 
@@ -54,6 +57,8 @@ export interface WsEndpointOptions {
   allowedOrigins: readonly string[];
   clock: Clock;
   logger: Logger;
+  /** Per-IP limits (SRV-08): the upgrade limit here, the client key for the message handlers. */
+  limiter: RateLimiter;
   handlers: FrameHandlers;
   /** Maps an error to a code that is safe to log (`systemErrorCode` of the app). */
   errorCode: (error: unknown) => string;
@@ -77,8 +82,10 @@ export async function registerWsEndpoint(
   app: FastifyInstance,
   options: WsEndpointOptions,
 ): Promise<void> {
-  const { clock, logger, handlers, errorCode } = options;
+  const { clock, logger, limiter, handlers, errorCode } = options;
   const allowed = new Set(options.allowedOrigins);
+  /** The limiter key of each upgrade request, computed once in `checkUpgrade`. */
+  const clientKeys = new WeakMap<object, string>();
 
   await app.register(websocket, {
     options: {
@@ -104,17 +111,33 @@ export async function registerWsEndpoint(
 
   // Runs before the upgrade (§3.1): the cross-site WebSocket hijacking guard (FR-33), and no
   // subprotocols — codes and tokens never travel in `Sec-WebSocket-Protocol`, and selecting one
-  // would reflect the client's value in the 101 response. Neither value is logged.
+  // would reflect the client's value in the 101 response. Neither value is logged. Only then the
+  // per-address upgrade limit (30/min, §12, T3): refused upgrades do not spend it, so a foreign page
+  // cannot lock a shared NAT out. The key is an HMAC of the address; only the error code is logged
+  // (debug: a flood must not flood the logs too).
   const checkUpgrade = async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
     const { origin } = request.headers;
     if (origin !== undefined && !allowed.has(origin)) {
-      logger.info({ errorCode: "FORBIDDEN_ORIGIN" }, "websocket upgrade refused");
+      logger.debug({ errorCode: "FORBIDDEN_ORIGIN" }, "websocket upgrade refused");
       await reply.code(403).send({ error: "FORBIDDEN" });
       return;
     }
-    if (request.ws && request.headers["sec-websocket-protocol"] !== undefined) {
-      logger.info({ errorCode: "SUBPROTOCOL_REFUSED" }, "websocket upgrade refused");
+    if (!request.ws) return;
+    if (request.headers["sec-websocket-protocol"] !== undefined) {
+      logger.debug({ errorCode: "SUBPROTOCOL_REFUSED" }, "websocket upgrade refused");
       await reply.code(400).send({ error: "BAD_REQUEST" });
+      return;
+    }
+    // `request.ip` is undefined once the client has gone; that request is counted as "unknown".
+    const clientKey = limiter.clientKey(request.ip as string | undefined);
+    clientKeys.set(request.raw, clientKey);
+    const verdict = limiter.upgrade(clientKey);
+    if (!verdict.ok) {
+      logger.debug({ errorCode: "RATE_LIMITED" }, "websocket upgrade refused");
+      await reply
+        .code(429)
+        .header("retry-after", String(verdict.retryAfterS))
+        .send({ error: "RATE_LIMITED" });
     }
   };
 
@@ -124,11 +147,12 @@ export async function registerWsEndpoint(
     preValidation: checkUpgrade,
     // A plain HTTP request to /ws is just another unknown path (§10).
     handler: async (_request, reply) => reply.code(404).send({ error: "NOT_FOUND" }),
-    wsHandler: (socket: WebSocket) => accept(socket),
+    wsHandler: (socket: WebSocket, request) =>
+      accept(socket, clientKeys.get(request.raw) ?? limiter.clientKey(request.ip)),
   });
 
-  function accept(socket: WebSocket): void {
-    const connection = new Connection(socket, clock);
+  function accept(socket: WebSocket, clientKey: string): void {
+    const connection = new Connection(socket, clock, clientKey);
     connection.armHandshakeTimer(HANDSHAKE_TIMEOUT_MS, () =>
       connection.close(CLOSE_CODES.HANDSHAKE_TIMEOUT),
     );

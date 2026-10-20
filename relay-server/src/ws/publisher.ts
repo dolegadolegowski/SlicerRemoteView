@@ -2,7 +2,10 @@
  * Publisher lifecycle (docs/protocol.md §4.1–§4.2, §4.5–§4.6, §9.1; architecture §2.1, §2.8–§2.9, §3).
  *
  * - `session.create` → registry session + `session.created` (code, `publisherToken` once, viewer
- *   limit, TTLs, effective limits); `CAPACITY` at `MAX_SESSIONS` → `error` + `4006`.
+ *   limit, TTLs, effective limits); `CAPACITY` at `MAX_SESSIONS` → `error` + `4006`; more than 5 per
+ *   minute from one client address → `RATE_LIMITED{retryAfterS}` + `4006` (§12). A well-formed
+ *   `preferredCode` counts as a failed join of that address, granted or not, and is ignored while
+ *   the address is banned (otherwise it would probe which codes are live, T1).
  * - `session.close` → every viewer gets `session.closed{PUBLISHER_CLOSED}` + `4001`, the session is
  *   released (code quarantined, snapshot dropped), the publisher socket closes `1000`.
  * - Publisher socket lost → phase `grace`, viewers get `session.publisherState{online:false,
@@ -13,8 +16,10 @@
  */
 import { CLOSE_CODES, LIMITS } from "@slicerremoteview/shared";
 import type { Logger } from "pino";
+import { isWellFormed } from "../codes.js";
 import { publicLimits } from "../config.js";
 import type { Config } from "../config.js";
+import type { RateLimiter } from "../ratelimit.js";
 import { RegistryError } from "../registry.js";
 import type { ExpiryReason, Peer, Registry, Session } from "../registry.js";
 import type { Connection } from "./connection.js";
@@ -23,10 +28,12 @@ import type { HandlerTable } from "./dispatch.js";
 export interface PublisherDeps {
   registry: Registry;
   config: Config;
+  /** `session.create` 5/min per client address; the `preferredCode` oracle (§12, SRV-08). */
+  limiter: RateLimiter;
   logger: Logger;
 }
 
-export function publisherHandlers({ registry, config, logger }: PublisherDeps) {
+export function publisherHandlers({ registry, config, limiter, logger }: PublisherDeps) {
   /** Sends `message` to every viewer with an open socket, then closes them with `closeCode`. */
   function endViewers(
     session: Session,
@@ -52,9 +59,32 @@ export function publisherHandlers({ registry, config, logger }: PublisherDeps) {
   };
   const handlers: HandlerTable = {
     "session.create": (connection, message) => {
+      const key = connection.clientKey;
+      const allowed = limiter.create(key);
+      if (!allowed.ok) {
+        connection.fail(
+          "RATE_LIMITED",
+          "too many sessions created from this address",
+          CLOSE_CODES.RATE_LIMITED,
+          { replyTo: message.id, retryable: true, details: { retryAfterS: allowed.retryAfterS } },
+        );
+        logger.debug({ errorCode: "RATE_LIMITED" }, "session refused");
+        return;
+      }
+      // A preferredCode probes a code like a join does (granted = free, not granted = live or
+      // quarantined), so it counts as a failed join either way and is ignored while the address is
+      // banned: with 5 creates/min it is no faster oracle than viewer.join (§12, T1). It does not
+      // need a slot of the per-minute join window, so failed joins of viewers behind the presenter's
+      // NAT after a redeploy cannot cost the presenter the code on the screen (§4.3, §13 step 9) —
+      // except during the global alarm, when probes too stay within its 3/min join window.
+      const probe =
+        isWellFormed(message.preferredCode) &&
+        limiter.checkBan(key).ok &&
+        (!limiter.alarmActive || limiter.join(key).ok);
+      const preferred = probe ? message.preferredCode : undefined;
       let created;
       try {
-        created = registry.createSession(message.profile, message.preferredCode);
+        created = registry.createSession(message.profile, preferred);
       } catch (error) {
         if (!(error instanceof RegistryError)) throw error;
         logger.warn({ errorCode: "CAPACITY" }, "session refused");
@@ -64,6 +94,8 @@ export function publisherHandlers({ registry, config, logger }: PublisherDeps) {
         });
         return;
       }
+      // Counted only once the probe was answered (a CAPACITY refusal tells nothing about the code).
+      if (probe) limiter.joinFailed(key);
       const { session, publisherToken } = created;
       session.publisher = connection;
       connection.session = session;

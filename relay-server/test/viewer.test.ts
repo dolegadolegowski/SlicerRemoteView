@@ -3,6 +3,7 @@ import { ALPHABET, validateMessage } from "@slicerremoteview/shared";
 import { tokenMatches } from "../src/codes.js";
 import { loadConfig } from "../src/config.js";
 import { createLogger } from "../src/logger.js";
+import { RateLimiter } from "../src/ratelimit.js";
 import { Registry } from "../src/registry.js";
 import type { Session } from "../src/registry.js";
 import type { Connection } from "../src/ws/connection.js";
@@ -455,9 +456,11 @@ describe("privacy (NFR-12, T6)", () => {
 
 function unitDeps(clock: ManualClock) {
   const config = loadConfig({});
+  const logger = createLogger({ level: "silent" });
   return {
     registry: new Registry({ ...config, clock }),
-    logger: createLogger({ level: "silent" }),
+    limiter: new RateLimiter({ clock, logger }),
+    logger,
     clock,
   };
 }
@@ -466,6 +469,7 @@ function unitDeps(clock: ManualClock) {
 function fakeConnection() {
   const sent: Record<string, unknown>[] = [];
   const connection = {
+    clientKey: "k",
     awaitClose: () => {},
     completeHandshake: () => {},
     send: (message: Record<string, unknown>) => sent.push(message),

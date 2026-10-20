@@ -6,6 +6,9 @@
  *   (quarantined) codes get the same `error INVALID_CODE` + `4004` after a random 50–150 ms, and the
  *   socket reads nothing more in between (§12: no retries on one socket). A live code joins: the
  *   viewer gets `viewer.joined` (its `viewerToken` once), then `scene.state` (§5.2, §8.3).
+ * - Per client address (`RateLimiter`, §12): 10 code attempts per minute, a join with a right code
+ *   gives its attempt back, 20 wrong codes within 10 min ban the address for 10 min →
+ *   `RATE_LIMITED{retryAfterS}` + `4006`, decided before the code is looked up.
  * - `SESSION_FULL{viewerLimit, retryAfterS}` + `4005` at `MAX_VIEWERS` connected viewers;
  *   `CAPACITY` + `4006` while a global budget refuses new viewers, decided before the code is looked
  *   up (the buffered-bytes budget arrives with SRV-10).
@@ -24,6 +27,7 @@ import type { Logger } from "pino";
 import type { Clock, TimerHandle } from "../clock.js";
 import { isWellFormed } from "../codes.js";
 import type { RandomInt } from "../codes.js";
+import type { RateLimiter } from "../ratelimit.js";
 import { RegistryError } from "../registry.js";
 import type { Registry, Session, ViewerPlatform } from "../registry.js";
 import type { Connection } from "./connection.js";
@@ -45,6 +49,8 @@ const PLATFORMS: ReadonlySet<string> = new Set(["web", "quest-browser", "quest2"
 
 export interface ViewerDeps {
   registry: Registry;
+  /** Per-IP join limit and lockout (§12, SRV-08). */
+  limiter: RateLimiter;
   logger: Logger;
   clock: Clock;
   /** Integer in `[min, max)` for the jitter; default `crypto.randomInt`. */
@@ -84,6 +90,7 @@ export function sceneState(session: Session): { type: string } & Record<string, 
 
 export function viewerHandlers({
   registry,
+  limiter,
   logger,
   clock,
   rng = randomInt,
@@ -168,12 +175,28 @@ export function viewerHandlers({
         logger.info({ errorCode: "CAPACITY" }, "viewer join refused");
         return;
       }
+      // Per-IP attempts and lockout, also before the lookup (§12, T1).
+      const key = connection.clientKey;
+      const allowed = limiter.join(key);
+      if (!allowed.ok) {
+        connection.fail(
+          "RATE_LIMITED",
+          "too many join attempts from this address",
+          CLOSE_CODES.RATE_LIMITED,
+          { replyTo, retryable: true, details: { retryAfterS: allowed.retryAfterS } },
+        );
+        logger.debug({ errorCode: "RATE_LIMITED" }, "viewer join refused");
+        return;
+      }
       const code = joinCodes.get(message);
       const session = code ? registry.getByCode(code) : undefined;
       if (session === undefined) {
+        limiter.joinFailed(key);
         refuseCode(connection, replyTo);
         return;
       }
+      // The code was right: the attempt does not count (classroom NAT, ADR 0008).
+      limiter.joinSucceeded(key);
       const platform = viewerPlatform(message.clientInfo.platform);
       let added;
       try {

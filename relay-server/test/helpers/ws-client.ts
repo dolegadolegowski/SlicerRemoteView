@@ -5,6 +5,8 @@ import type { RawData } from "ws";
 import { buildApp } from "../../src/app.js";
 import type { AppOptions } from "../../src/app.js";
 import { loadConfig } from "../../src/config.js";
+import { createLogger } from "../../src/logger.js";
+import { RateLimiter } from "../../src/ratelimit.js";
 import { Registry } from "../../src/registry.js";
 import { ManualClock } from "./manual-clock.js";
 
@@ -12,6 +14,7 @@ export interface TestRelay {
   app: FastifyInstance;
   clock: ManualClock;
   registry: Registry;
+  limiter: RateLimiter;
   /** `ws://127.0.0.1:<port>/ws` */
   url: string;
   close(): Promise<void>;
@@ -36,10 +39,20 @@ export async function startRelay(
           throw error;
         }),
     });
-  const app = await buildApp({ ...options, config, clock, registry });
+  const limiter =
+    options.limiter ??
+    new RateLimiter({ clock, logger: options.logger ?? createLogger({ level: "silent" }) });
+  const app = await buildApp({ ...options, config, clock, registry, limiter });
   await app.listen({ port: 0, host: "127.0.0.1" });
   const { port } = app.server.address() as AddressInfo;
-  return { app, clock, registry, url: `ws://127.0.0.1:${port}/ws`, close: () => app.close() };
+  return {
+    app,
+    clock,
+    registry,
+    limiter,
+    url: `ws://127.0.0.1:${port}/ws`,
+    close: () => app.close(),
+  };
 }
 
 export type Received = Record<string, unknown> & { type: string };
@@ -78,7 +91,12 @@ export function connectClient(
   const closed = new Promise<number>((resolve) => ws.once("close", (code) => resolve(code)));
   return new Promise((resolve, reject) => {
     ws.once("unexpected-response", (_request, response) =>
-      reject(Object.assign(new Error("upgrade refused"), { statusCode: response.statusCode })),
+      reject(
+        Object.assign(new Error("upgrade refused"), {
+          statusCode: response.statusCode,
+          headers: response.headers,
+        }),
+      ),
     );
     ws.once("error", (error) => {
       if (!opened) reject(error);
