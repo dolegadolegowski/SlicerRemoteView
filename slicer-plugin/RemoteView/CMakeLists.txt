@@ -11,6 +11,7 @@ set(MODULE_PYTHON_SCRIPTS
   remoteview_core/__init__.py
   remoteview_core/coords.py
   remoteview_core/glb_writer.py
+  remoteview_core/names.py
   remoteview_core/protocol_client.py
   remoteview_core/vendored.py
   _vendor/remoteview_protocol/__init__.py

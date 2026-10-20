@@ -55,7 +55,7 @@ extension built with CMake/CPack the path is inside the extension's `qt-scripted
 that `RESOURCES` keep the `_vendor/remoteview_protocol/schema/` sub-directory: the 30 `*.schema.json` files must exist
 there.
 
-Re-run after SLC-06 (pure core: coordinates, GLB writer, protocol client — Slicer's own Python and numpy): repeat
+Re-run after SLC-06 and SLC-23 (pure core: coordinates, GLB writer, protocol client, names — Slicer's own Python and numpy): repeat
 steps 2–3, then paste into the Python console:
 
 ```python
@@ -72,9 +72,11 @@ version = slicer.app.applicationVersion
 glb = write_glb([entity], RootExtras(scene_version=1, profile="mobile", slicer_version=version))
 client = ProtocolClient(make_client_info(version, sys.platform))
 print(glb[:4], len(glb) % 4, client.start("mobile")["type"], client.state.value)
+from remoteview_core.names import sanitize_name
+print(sanitize_name("Patient\a Name  "), sanitize_name("\U0001F600" * 40) == "\U0001F600" * 32)
 ```
 
-Expected: `b'glTF' 0 session.create connecting`; no traceback (if `make_client_info` raises "≤ 64 characters", note the
+Expected: `b'glTF' 0 session.create connecting`, then `Patient Name True` (SLC-23 with Slicer's own `unicodedata`); no traceback (if `make_client_info` raises "≤ 64 characters", note the
 `applicationVersion` string in the results table); no network connection beyond the baseline (the client only builds
 messages — sockets arrive with SLC-08) and no pip dialog.
 

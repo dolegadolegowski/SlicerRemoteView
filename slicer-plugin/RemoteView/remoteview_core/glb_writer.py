@@ -59,7 +59,7 @@ NODE_ID_PATTERN = re.compile(r"[A-Za-z0-9_./:-]{1,128}")
 #: §7.3: names are sanitised (trimmed, ≤ 64 characters) and contain no control, format (bidi/zero-width),
 #: surrogate, private-use, unassigned or line/paragraph-separator characters.
 MAX_NAME_LENGTH = 64
-#: Unicode categories a sanitised name never contains; SLC-07's sanitiser removes exactly these.
+#: Unicode categories a sanitised name never contains; ``names.sanitize_name`` (SLC-23) removes exactly these.
 FORBIDDEN_NAME_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})
 #: §7.3 substitutes for hidden names.
 _ANONYMOUS_NAME = re.compile(r"(Model|Segment) [1-9][0-9]*")
