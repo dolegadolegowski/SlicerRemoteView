@@ -334,3 +334,15 @@ The viewer stops drawing on `webglcontextlost` and says "3D view paused"; three.
 npm test -w web-viewer -- viewer wake-lock dev-overlay && npm run e2e -w web-viewer -- memory
 ```
 
+### Add to Home Screen (WEB-17)
+
+`public/manifest.webmanifest` and `public/icons/` (copied to `dist/`) make the viewer installable: `start_url` and
+`scope` `/`, `display: standalone`, 192/512 px icons (the 512 px one also maskable) and a 180 px
+`apple-touch-icon`; `index.html` has the Apple web-app tags. There is no service worker. `e2e/pwa.spec.ts` also runs
+axe-core's `color-contrast` rule (dev dependency `axe-core`, injected into the page) on the code entry, the status
+bar and the node panel.
+
+```bash
+npm test -w web-viewer -- pwa && npm run e2e -w web-viewer -- pwa
+```
+

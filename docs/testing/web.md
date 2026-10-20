@@ -195,6 +195,17 @@ Joined with `toggle-visibility --loop` playing.
 4. Open many other tabs with heavy pages until Safari reclaims memory, then come back. **Expect:** either the scene
    as before, or "3D view paused" and then the scene again by itself; never a black canvas without a message.
 
+### Add to Home Screen (WEB-17)
+
+1. Safari → Share → **Add to Home Screen**. **Expect:** the cube icon (not a screenshot of the page) and the name
+   "Remote View".
+2. Open it from the Home Screen. **Expect:** no Safari bars; the page is under the status bar without overlap
+   (the clock and battery stay readable over the dark background); join and view work as in Safari.
+3. Open a QR link while the app is installed. **Expect:** it opens in Safari or in the app (either is fine,
+   `[TODO verify]` research web.md §2.6), the code is joined and the address bar (if any) shows `/j`.
+4. Android Chrome: menu → **Install app** (or **Add to Home screen**). **Expect:** the cube icon, shaped by the
+   launcher (maskable), and the app opens without browser UI.
+
 ### Download in the background (WEB-06 review, WEB-10)
 
 1. Join with `large-synthetic.glb` on a slow network (Settings → Developer → Network Link Conditioner "3G"), and
