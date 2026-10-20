@@ -364,6 +364,15 @@ describe("presenter notice (WEB-13)", () => {
     viewer.setStatus.mockClear();
     screens.presenterChanged([]);
     expect(viewer.setStatus).not.toHaveBeenCalled();
+    screens.presenterChanged(["vtkMRMLModelNode9"]); // removed in the same scene.state
+    expect(viewer.setStatus).not.toHaveBeenCalled();
+  });
+
+  it("a node no longer in the scene is not counted", () => {
+    join();
+    models.emit(modelA);
+    screens.presenterChanged(["vtkMRMLModelNode9", "vtkMRMLModelNode2"]);
+    expect(viewer.setStatus).toHaveBeenLastCalledWith("The presenter changed Tumor");
   });
 });
 

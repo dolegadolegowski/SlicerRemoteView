@@ -344,6 +344,24 @@ describe("local opacity (WEB-13, FR-40, US-10)", () => {
       expect(onChange).toHaveBeenCalledTimes(calls);
     });
 
+    it("keeps what follows a presenter value set during the gesture, even after more input", () => {
+      setup();
+      const liver = model.nodes.get(LIVER)!;
+      pointer(slider(LIVER), "pointerdown");
+      slide(slider(LIVER), 0.25);
+      liver.material.opacity = 0.5; // the presenter's value …
+      panel.refresh();
+      slide(slider(LIVER), 0.3); // … then the finger moves on
+      pointer(slider(LIVER), "pointercancel");
+      expect(liver.material.opacity).toBe(0.3);
+      pointer(slider(LIVER), "pointerdown");
+      liver.material.opacity = 0.6; // the presenter's value before any input of this touch
+      panel.refresh();
+      slide(slider(LIVER), 0.2);
+      pointer(slider(LIVER), "pointercancel");
+      expect(liver.material.opacity).toBe(0.2);
+    });
+
     it("keeps an opacity the presenter set during the gesture", () => {
       setup();
       const liver = model.nodes.get(LIVER)!;

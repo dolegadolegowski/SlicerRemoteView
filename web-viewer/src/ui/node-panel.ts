@@ -81,6 +81,15 @@ export function createNodePanel(options: NodePanelOptions = {}): NodePanel {
   const listId = `node-panel-list-${++instances}`;
   let rows: Row[] = [];
   let open = false;
+  // Chromium moves the thumb to the touch point on `touchstart`, before a vertical swipe becomes a scroll of the list
+  // (`touch-action: pan-y` cannot stop that). When the browser takes the gesture (`pointercancel`) the slider goes
+  // back to where it was — unless the presenter has set that opacity meanwhile.
+  let touch: {
+    readonly pointerId: number;
+    readonly row: Row;
+    readonly before: number;
+    applied: number | null;
+  } | null = null;
 
   const element = doc.createElement("section");
   element.className = "node-panel";
@@ -119,6 +128,8 @@ export function createNodePanel(options: NodePanelOptions = {}): NodePanel {
   }
 
   function refresh(): void {
+    // The presenter set the opacity of the row being touched: a later `pointercancel` must not put back the old value.
+    if (touch && touch.row.node.material.opacity !== (touch.applied ?? touch.before)) touch = null;
     for (const row of rows) {
       const { node, button, swatch } = row;
       const visible = node.T.visible;
@@ -140,15 +151,6 @@ export function createNodePanel(options: NodePanelOptions = {}): NodePanel {
     refresh();
     options.onChange?.();
   };
-  // Chromium moves the thumb to the touch point on `touchstart`, before a vertical swipe becomes a scroll of the list
-  // (`touch-action: pan-y` cannot stop that). When the browser takes the gesture (`pointercancel`) the slider goes
-  // back to where it was — unless the presenter has set that opacity meanwhile.
-  let touch: {
-    readonly pointerId: number;
-    readonly row: Row;
-    readonly before: number;
-    applied: number | null;
-  } | null = null;
   // Local opacity (FR-40, US-10): this device only, until the presenter changes that node's opacity (WEB-12).
   const onListInput = (event: Event) => {
     const row = rows.find((r) => r.opacity === event.target);

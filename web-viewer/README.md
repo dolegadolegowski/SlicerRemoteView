@@ -274,7 +274,7 @@ npm run e2e -w web-viewer -- live-updates   # fake-slicer scripts through the re
 
 Every node-panel row has an opacity slider (0..1 in 1 % steps, local to this device, 44 px thumb; a vertical swipe
 that starts on it scrolls the list and leaves the value as it was). A presenter change of
-`visible` or `opacity` replaces the local choice; the viewer then says "The presenter changed <name>" for 3 s in its
+`visible` or `opacity` replaces the local choice; the viewer then says `The presenter changed <name>` for 3 s in its
 status line (`screens.presenterChanged`). A presenter `color` change keeps a local hide.
 
 ```bash

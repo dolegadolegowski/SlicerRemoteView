@@ -206,10 +206,13 @@ export function bindScreens(options: ScreensOptions): Screens {
       clearTimeout(hintTimer);
       hintTimer = undefined;
     },
-    presenterChanged(nodeIds) {
-      if (!shown || nodeIds.length === 0) return;
+    presenterChanged(changed) {
+      const model = shown;
+      // A node removed in the same `scene.state` is not named or counted.
+      const nodeIds = model ? changed.filter((id) => model.nodes.has(id)) : [];
+      if (!model || nodeIds.length === 0) return;
       const lang = detectLang();
-      const node = shown.nodes.get(nodeIds[0]!);
+      const node = model.nodes.get(nodeIds[0]!);
       // Names are shown, never logged (PHI, §7.3).
       const name =
         node && (node.manifest.name.trim() || t(lang, "nodePanel.unnamed", { n: node.order + 1 }));
