@@ -155,7 +155,8 @@ export type AppState =
   | { readonly kind: "snapshotInvalid" }
   | { readonly kind: "snapshotFailed" }
   | { readonly kind: "snapshotUpdateFailed" }
-  | { readonly kind: "linkInvalid" };
+  | { readonly kind: "linkInvalid" }
+  | { readonly kind: "contextLost" };
 
 const STATE_ENTRIES: Readonly<Record<AppState["kind"], Entry>> = {
   connecting: entry("connecting", "none"),
@@ -170,6 +171,7 @@ const STATE_ENTRIES: Readonly<Record<AppState["kind"], Entry>> = {
   snapshotFailed: entry("snapshotFailed", "retry"),
   snapshotUpdateFailed: entry("snapshotUpdateFailed", "askPresenter"),
   linkInvalid: entry("linkInvalid", "enterCode"),
+  contextLost: entry("contextLost", "none"),
 };
 
 export function describeState(state: AppState, lang: Lang = detectLang()): Description {

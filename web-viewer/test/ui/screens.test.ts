@@ -31,6 +31,7 @@ function fakeViewer() {
     contentChanged: vi.fn<Viewer["contentChanged"]>(),
     resize: vi.fn<Viewer["resize"]>(),
     setNotice: vi.fn<Viewer["setNotice"]>(),
+    rendererInfo: vi.fn<Viewer["rendererInfo"]>(() => null),
     setStatus: vi.fn<Viewer["setStatus"]>(),
     focus: vi.fn<Viewer["focus"]>(),
     dispose: vi.fn<Viewer["dispose"]>(),

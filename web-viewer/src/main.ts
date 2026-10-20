@@ -1,6 +1,7 @@
 // Entry point: wires the modules. Joining by code (WEB-03/04) or `/j#CODE` (WEB-11), snapshots over the WebSocket
-// stream (WEB-05) or HTTP (WEB-06), the scene model (WEB-07), the viewer (WEB-08), live updates (WEB-12) and
-// reconnecting (WEB-14); `ui/screens.ts` decides which screen is visible.
+// stream (WEB-05) or HTTP (WEB-06), the scene model (WEB-07), the viewer (WEB-08), live updates (WEB-12),
+// reconnecting (WEB-14), the status bar (WEB-15), the wake lock and the renderer test hook (WEB-16);
+// `ui/screens.ts` decides which screen is visible.
 import { createConnection, endsSession } from "./protocol/connection";
 import type { ConnectionState } from "./protocol/connection";
 import { createReconnect } from "./protocol/reconnect";
@@ -16,7 +17,9 @@ import { describeState } from "./state/errors";
 import type { Description } from "./state/errors";
 import { createCodeEntry } from "./ui/code-entry";
 import { startFromDeepLink, takeDeepLink } from "./ui/deep-link";
+import { startDevOverlay } from "./ui/dev-overlay";
 import { bindScreens } from "./ui/screens";
+import { bindWakeLock } from "./ui/wake-lock";
 
 // First of all: a `/j#CODE` link leaves the address bar before anything can reach the network (WEB-11, T6).
 const link = takeDeepLink();
@@ -126,6 +129,12 @@ if (app) {
   });
   loader.on("enterCode", ({ description }) => stop(description));
   loader.on("sessionEnded", ({ description }) => stop(description));
+
+  bindWakeLock(connection, { ends }); // the screen stays on during the session (WEB-16, FR-46)
+  // Test hook (WEB-16): GPU resource counts only — no scene content, names or credentials.
+  const rendererInfo = () => screens.viewer?.rendererInfo() ?? null;
+  (window as unknown as { __rv: { rendererInfo: typeof rendererInfo } }).__rv = { rendererInfo };
+  if (import.meta.env.DEV) startDevOverlay(rendererInfo);
 
   app.append(entry.element);
   if (!startFromDeepLink(link, entry, screens)) entry.focus();

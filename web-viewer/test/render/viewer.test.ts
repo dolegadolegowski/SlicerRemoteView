@@ -15,7 +15,7 @@ import type {
   ViewerOptions,
   VisualViewportLike,
 } from "../../src/render/viewer";
-import { describe as describeCode } from "../../src/state/errors";
+import { describe as describeCode, describeState } from "../../src/state/errors";
 import { glb } from "./glb-fixtures";
 
 /** Gives an element a layout size (jsdom has no layout). */
@@ -629,5 +629,69 @@ describe("scene graph, notices and page behaviour", () => {
     expect(r.setSize).toHaveBeenCalledTimes(1);
     viewer.dispose(); // idempotent
     expect(r.dispose).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("WebGL context loss (WEB-16, web.md §2.3)", () => {
+  it("a lost context shows the message and stops drawing; a restored one hides it and draws again", () => {
+    const { viewer, r, frames, flush } = harness();
+    flush();
+    r.render.mockClear();
+    const notice = viewer.element.querySelector<HTMLElement>(".viewer__notice")!;
+    viewer.canvas.dispatchEvent(new Event("webglcontextlost"));
+    expect(notice.hidden).toBe(false);
+    expect(notice.textContent).toContain(describeState({ kind: "contextLost" }, "en").title);
+    expect(viewer.element.dataset["context"]).toBe("lost");
+    viewer.invalidate();
+    viewer.fit();
+    expect(frames.size).toBe(0); // no frame is even requested
+    flush();
+    expect(r.render).not.toHaveBeenCalled();
+    viewer.canvas.dispatchEvent(new Event("webglcontextrestored"));
+    expect(notice.hidden).toBe(true);
+    expect(viewer.element.dataset["context"]).toBeUndefined();
+    expect(r.render).toHaveBeenCalledTimes(1); // drawn at once
+    viewer.invalidate();
+    expect(flush()).toBeGreaterThan(0);
+  });
+
+  it("a restore keeps a notice that is not its own (e.g. a refused snapshot shown meanwhile)", () => {
+    const { viewer } = harness();
+    viewer.canvas.dispatchEvent(new Event("webglcontextlost"));
+    const other = describeState({ kind: "snapshotTooLarge" }, "en");
+    viewer.setNotice(other);
+    viewer.canvas.dispatchEvent(new Event("webglcontextrestored"));
+    const notice = viewer.element.querySelector<HTMLElement>(".viewer__notice")!;
+    expect(notice.hidden).toBe(false);
+    expect(notice.textContent).toContain(other.title);
+  });
+
+  it("while lost, clearing the notice (a new scene) keeps saying why nothing is drawn", () => {
+    const { viewer } = harness();
+    viewer.canvas.dispatchEvent(new Event("webglcontextlost"));
+    viewer.setNotice(null);
+    const notice = viewer.element.querySelector<HTMLElement>(".viewer__notice")!;
+    expect(notice.hidden).toBe(false);
+    expect(notice.textContent).toContain(describeState({ kind: "contextLost" }, "en").title);
+    viewer.canvas.dispatchEvent(new Event("webglcontextrestored"));
+    expect(notice.hidden).toBe(true);
+  });
+
+  it("dispose removes the context listeners", () => {
+    const { viewer } = harness();
+    viewer.dispose();
+    viewer.canvas.dispatchEvent(new Event("webglcontextlost"));
+    expect(viewer.element.dataset["context"]).toBeUndefined();
+  });
+});
+
+describe("rendererInfo (WEB-16 test hook)", () => {
+  it("reads renderer.info.memory at the time of the call, null without it", () => {
+    const memory = { geometries: 2, textures: 0 };
+    const { viewer } = harness({ createRenderer: () => ({ ...renderer(), info: { memory } }) });
+    expect(viewer.rendererInfo()).toEqual({ geometries: 2, textures: 0 });
+    memory.geometries = 5;
+    expect(viewer.rendererInfo()).toEqual({ geometries: 5, textures: 0 });
+    expect(harness().viewer.rendererInfo()).toBeNull();
   });
 });

@@ -183,6 +183,18 @@ Joined with `toggle-visibility --loop` playing.
 4. Airplane mode for 10 s. **Expect:** the dot turns amber and "Reconnecting…", then green "Connected" again;
    VoiceOver speaks both.
 
+### Memory and wake lock (WEB-16)
+
+1. Join with `large-synthetic.glb`, then let the presenter share it again three times (`reload-scene`, or restart
+   the publisher's export). **Expect:** no "3D view paused", no reload of the tab by Safari; Web Inspector →
+   Timelines → Memory stays flat after each new scene (R-02).
+2. Join and leave the phone untouched on the desk for longer than its auto-lock time. **Expect:** the screen stays
+   on while the session runs; after "Presentation ended" it dims as usual (FR-46).
+3. Switch to another app for 10 s and back, then wait again. **Expect:** the screen still stays on (the lock is
+   requested again).
+4. Open many other tabs with heavy pages until Safari reclaims memory, then come back. **Expect:** either the scene
+   as before, or "3D view paused" and then the scene again by itself; never a black canvas without a message.
+
 ### Download in the background (WEB-06 review, WEB-10)
 
 1. Join with `large-synthetic.glb` on a slow network (Settings → Developer → Network Link Conditioner "3G"), and

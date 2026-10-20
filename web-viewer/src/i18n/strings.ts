@@ -82,6 +82,9 @@ const en = {
   "state.sessionEnded.title": "Presentation ended",
   "state.sessionEnded.body":
     "The presenter closed the session or it expired. Enter a new code to join another one.",
+  "state.contextLost.title": "3D view paused",
+  "state.contextLost.body":
+    "The device needed its graphics memory back. The scene returns by itself in a moment; if it does not, reload the page.",
   "state.webgl2Unavailable.title": "3D is not available",
   "state.webgl2Unavailable.body":
     "This browser or device cannot run WebGL 2, which the viewer needs. Try a current Safari or Chrome.",
@@ -205,6 +208,9 @@ const pl: Record<StringKey, string> = {
   "state.sessionEnded.title": "Prezentacja zakończona",
   "state.sessionEnded.body":
     "Prezenter zamknął sesję albo wygasła. Wpisz nowy kod, aby dołączyć do innej.",
+  "state.contextLost.title": "Widok 3D wstrzymany",
+  "state.contextLost.body":
+    "Urządzenie odebrało pamięć grafiki. Scena wróci sama za chwilę; jeśli nie wróci, odśwież stronę.",
   "state.webgl2Unavailable.title": "Grafika 3D jest niedostępna",
   "state.webgl2Unavailable.body":
     "Ta przeglądarka lub urządzenie nie obsługuje WebGL 2, którego wymaga podgląd. Spróbuj w aktualnym Safari lub Chrome.",

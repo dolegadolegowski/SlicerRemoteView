@@ -323,3 +323,14 @@ only those two values are sent. `snapshotLimit(profile)` sets `capabilities.maxS
 npm test -w web-viewer -- platform status-bar screens && npm run e2e -w web-viewer -- status
 ```
 
+### Memory, lost context and wake lock (WEB-16)
+
+The viewer stops drawing on `webglcontextlost` and says "3D view paused"; three.js re-uploads the scene on
+`webglcontextrestored` and the viewer draws again. `src/ui/wake-lock.ts` keeps the screen on during a session
+(`navigator.wakeLock`, re-requested when the page is visible again). `window.__rv.rendererInfo()` returns
+`renderer.info.memory` counts for tests; development builds also show them in a small overlay.
+
+```bash
+npm test -w web-viewer -- viewer wake-lock dev-overlay && npm run e2e -w web-viewer -- memory
+```
+

@@ -22,6 +22,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import WebGL from "three/addons/capabilities/WebGL.js";
 import { detectLang, t } from "../i18n/strings";
 import type { Lang } from "../i18n/strings";
+import { describeState } from "../state/errors";
 import type { Description } from "../state/errors";
 import type { SceneModel } from "./scene-model";
 
@@ -32,6 +33,8 @@ export interface RendererLike {
   setClearColor(color: Color | number, alpha?: number): void;
   render(scene: Object3D, camera: Camera): void;
   dispose(): void;
+  /** `WebGLRenderer.info` (replaced by three.js after a context restore, so read it each time). */
+  readonly info?: { readonly memory: { readonly geometries: number; readonly textures: number } };
 }
 
 /** The part of `window.visualViewport` the viewer uses. */
@@ -81,6 +84,8 @@ export interface Viewer {
   resize(): void;
   /** A message over the scene (e.g. a refused snapshot while the old one stays visible); `null` hides it. */
   setNotice(notice: Description | null): void;
+  /** GPU resources three.js holds now (`renderer.info.memory`), for tests and the dev overlay (WEB-16). */
+  rendererInfo(): { readonly geometries: number; readonly textures: number } | null;
   /**
    * A short, polite status line (e.g. "Updating the scene…" before a new snapshot, WEB-12; "Reconnecting…", WEB-14);
    * `null` empties it. The element stays in the accessibility tree (an empty one is not drawn), so a change is announced.
@@ -225,18 +230,21 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
   const bounds = new Sphere(new Vector3(), radius);
   let frame: number | null = null;
   let disposed = false;
+  /** The WebGL context is lost (GPU reset, memory pressure): nothing is drawn until it is restored (WEB-16). */
+  let lost = false;
+  let lostNotice: Description | null = null;
   let hidden = doc.visibilityState === "hidden";
   let size = { width: 0, height: 0, ratio: 0 };
 
   /** Render-on-demand (three.js manual): at most one pending frame; damping re-requests through `change`. */
   function invalidate(): void {
-    if (frame !== null || disposed || hidden) return;
+    if (frame !== null || disposed || hidden || lost) return;
     frame = requestFrame(renderFrame);
   }
   function renderFrame(): void {
     if (frame !== null) cancelFrame(frame);
     frame = null;
-    if (disposed || hidden) return;
+    if (disposed || hidden || lost) return;
     controls.update(); // dispatches `change` (→ next frame) while the damped motion continues
     updateClipping();
     renderer.render(scene, camera);
@@ -366,9 +374,11 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
   }
 
   function setNotice(next: Description | null): void {
-    notice.hidden = next === null;
-    noticeTitle.textContent = next?.title ?? "";
-    noticeBody.textContent = next?.body ?? "";
+    // While the context is lost, clearing a notice (e.g. for a new scene) brings back why nothing is drawn.
+    const shown = next ?? (lost ? lostNotice : null);
+    notice.hidden = shown === null;
+    noticeTitle.textContent = shown?.title ?? "";
+    noticeBody.textContent = shown?.body ?? "";
   }
 
   // Double tap (touch) and double click (mouse) frame the scene again; a drag, a long press or a pinch is not a tap.
@@ -425,6 +435,23 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
   };
   const onFit = () => fit();
   const onDismiss = () => setNotice(null);
+  // three.js prevents the default (so the context can come back) and re-uploads the scene on restore; the viewer
+  // stops its frames meanwhile and says why (web.md §2.3).
+  const onContextLost = () => {
+    lost = true;
+    if (frame !== null) cancelFrame(frame);
+    frame = null;
+    element.dataset["context"] = "lost";
+    lostNotice = describeState({ kind: "contextLost" }, lang);
+    setNotice(lostNotice);
+  };
+  const onContextRestored = () => {
+    lost = false;
+    delete element.dataset["context"];
+    if (lostNotice !== null && noticeTitle.textContent === lostNotice.title) setNotice(null);
+    lostNotice = null;
+    renderFrame();
+  };
 
   canvas.style.touchAction = "none"; // OrbitControls sets it too; the page itself keeps native zoom (WCAG)
   canvas.addEventListener("pointerdown", onPointerDown);
@@ -436,6 +463,8 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
   fitButton.addEventListener("click", onFit);
   noticeClose.addEventListener("click", onDismiss);
   doc.addEventListener("visibilitychange", onVisibility);
+  canvas.addEventListener("webglcontextlost", onContextLost);
+  canvas.addEventListener("webglcontextrestored", onContextRestored);
   visualViewport?.addEventListener("resize", resize);
   visualViewport?.addEventListener("scroll", resize);
   const stopObserving = (options.observeResize ?? defaultObserveResize)(element, resize);
@@ -453,6 +482,10 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
     contentChanged,
     resize,
     setNotice,
+    rendererInfo() {
+      const memory = renderer.info?.memory;
+      return memory ? { geometries: memory.geometries, textures: memory.textures } : null;
+    },
     setStatus(text) {
       if (status.textContent !== (text ?? "")) status.textContent = text ?? "";
     },
@@ -474,6 +507,8 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
       fitButton.removeEventListener("click", onFit);
       noticeClose.removeEventListener("click", onDismiss);
       doc.removeEventListener("visibilitychange", onVisibility);
+      canvas.removeEventListener("webglcontextlost", onContextLost);
+      canvas.removeEventListener("webglcontextrestored", onContextRestored);
       visualViewport?.removeEventListener("resize", resize);
       visualViewport?.removeEventListener("scroll", resize);
       if (model) stage.remove(model.root);
