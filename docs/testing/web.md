@@ -37,6 +37,23 @@ Publisher on the computer, phone on **4G** (Wi-Fi off). Use the largest fixture 
    entry is usable again with a message ("connection lost" or "Scene could not be downloaded") and the code still
    typed; **Join** tries again and shows the model.
 
+### Deep link (WEB-11, US-07)
+
+The publisher shows a QR of `https://<host>/j#<CODE>` (Slicer FR-04, or make one from the link fake-slicer writes to
+`code.txt`).
+
+1. Scan the QR with the **Camera** app and tap the banner. **Expect:** Safari opens, the cells show the code, the
+   viewer joins without a tap and shows the model.
+2. Look at the address bar, the tabs overview and the long-press Back list. **Expect:** `…/j` only, no code. Then
+   open Safari's **History** list and record what it shows: the browser records the opened `…/j#<CODE>` before any
+   script runs and no page can remove it (known residual, limited by the code's expiry and the session's end —
+   `docs/testing/reports/2026-10-20-web-1.md`).
+3. Edit the link to a wrong code (e.g. replace a letter with `0`) and open it in a **new tab** (no session is live
+   there). **Expect:** the code entry with the `0`/`O` hint, Join disabled, nothing joins.
+4. With the viewer open, paste the link of another session into the address bar. **Expect:** it joins that
+   session; the address bar shows `…/j`. A link with a wrong code pasted the same way shows a notice over the scene
+   and the session goes on.
+
 ### Code entry (WEB-03, WEB-04)
 
 1. Open the viewer URL. **Expect:** five empty cells, the keyboard shows capitals (`autocapitalize`), no
@@ -110,6 +127,8 @@ Joined with `asymmetric-2nodes.glb` (the opaque "Liver" encloses the translucent
 Devices: a current Chrome and the previous major (NFR-26). Run the **iPhone Safari** steps above with these
 differences:
 
+- Deep link step 1: scan with the stock camera or Google Lens (`[TODO verify]` per device, research web.md §4);
+  the link must open in Chrome, not in an in-app browser.
 - Code entry step 1: the keyboard may show lower case; typing still shows upper case in the cells.
 - Viewer step 3: Chrome honours `touch-action: none`, so the page must not zoom either.
 - Viewer step 8: Chrome's URL bar stays expanded on this page (it does not scroll); resize instead with

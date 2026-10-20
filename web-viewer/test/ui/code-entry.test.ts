@@ -49,6 +49,21 @@ afterEach(() => {
 });
 
 describe("code entry", () => {
+  it("setCode fills the cells like a paste (deep link): canonical, hinted, or too long", () => {
+    entry.setError(describeCode("INVALID_CODE", "en"));
+    entry.setCode("7kq-4x");
+    expect(values()).toBe("7KQ4X");
+    expect(message().hidden).toBe(true); // the old error is gone
+    expect(join().disabled).toBe(false);
+    entry.setCode("7KQ0X");
+    expect(message().textContent).toContain("0 or O");
+    expect(join().disabled).toBe(true);
+    entry.setCode("7KQ4X8");
+    expect(values()).toBe("7KQ4X");
+    expect(message().textContent).toContain("exactly 5");
+    expect(join().disabled).toBe(true);
+  });
+
   it("renders five labelled cells configured for code entry", () => {
     expect(cells()).toHaveLength(5);
     for (const [i, cell] of cells().entries()) {

@@ -1,5 +1,6 @@
-// Entry point: wires the modules. Joining (WEB-03/04), snapshots over the WebSocket stream (WEB-05) or HTTP (WEB-06),
-// the scene model (WEB-07) and the viewer (WEB-08); `ui/screens.ts` decides which screen is visible.
+// Entry point: wires the modules. Joining by code (WEB-03/04) or `/j#CODE` (WEB-11), snapshots over the WebSocket
+// stream (WEB-05) or HTTP (WEB-06), the scene model (WEB-07) and the viewer (WEB-08); `ui/screens.ts` decides which
+// screen is visible.
 import { createConnection } from "./protocol/connection";
 import { bindStreamToLoader, createSceneLoader } from "./protocol/scene-loader";
 import { bindSnapshotStream, createSnapshotStream } from "./protocol/snapshot-stream";
@@ -8,8 +9,11 @@ import { createSceneModelStore } from "./render/scene-model";
 import { describeState } from "./state/errors";
 import type { Description } from "./state/errors";
 import { createCodeEntry } from "./ui/code-entry";
+import { startFromDeepLink, takeDeepLink } from "./ui/deep-link";
 import { bindScreens } from "./ui/screens";
 
+// First of all: a `/j#CODE` link leaves the address bar before anything can reach the network (WEB-11, T6).
+const link = takeDeepLink();
 const app = document.getElementById("app");
 if (app) {
   const connection = createConnection();
@@ -39,6 +43,8 @@ if (app) {
   loader.on("sessionEnded", ({ description }) => stop(description));
 
   app.append(entry.element);
-  entry.focus();
+  if (!startFromDeepLink(link, entry, screens)) entry.focus();
+  // A link opened again in this tab only changes the fragment (no reload): take it the same way.
+  window.addEventListener("hashchange", () => startFromDeepLink(takeDeepLink(), entry, screens));
   app.dataset["ready"] = "true";
 }

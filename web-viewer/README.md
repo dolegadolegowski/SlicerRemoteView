@@ -242,3 +242,17 @@ npm run e2e -w web-viewer -- join-and-view   # builds shared/ and tools/fake-sli
 A snapshot download that gives up (`loader` `failed`) shows a notice over the scene if one is shown (the previous
 scene stays), otherwise it leaves "Joining…" with the code still typed so **Join** tries again
 (`screens.failSnapshot`; ignored unless connected, so a late failure cannot cancel a new join).
+
+### Deep link (WEB-11)
+
+`src/ui/deep-link.ts`: the QR opens `/j#<CODE>`; `main.ts` first calls `takeDeepLink()`, which replaces the URL with
+`/j` (`history.replaceState`, no reload, no history entry) before anything reaches the network, then joins with the
+code as if it had been typed (it is in the cells, so Join retries). An invalid fragment shows the code entry with its
+hint and joins nothing; a link opened again in the same tab (`hashchange`) is taken the same way, but an invalid one
+during a session leaves the joined code in the cells. Only `/j` takes a code (protocol §10). `replaceState` cleans the
+address bar and the tab's Back/Forward entries; the browser's own History list keeps the opened link (no web API can
+remove it), so the code's expiry is the limit there.
+
+```bash
+npm test -w web-viewer -- deep-link && npm run e2e -w web-viewer -- deep-link
+```

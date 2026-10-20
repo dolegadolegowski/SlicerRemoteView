@@ -97,6 +97,7 @@ describe("app state catalogue", () => {
     { kind: "snapshotInvalid" },
     { kind: "snapshotFailed" },
     { kind: "snapshotUpdateFailed" },
+    { kind: "linkInvalid" },
   ];
 
   it.each(LANGS.flatMap((lang) => states.map((s) => [lang, s] as const)))(

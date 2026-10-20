@@ -96,6 +96,9 @@ const en = {
   "state.snapshotUpdateFailed.title": "New scene could not be downloaded",
   "state.snapshotUpdateFailed.body":
     "You are still seeing the previous scene. Check the connection, or ask the presenter to share the scene again.",
+  "state.linkInvalid.title": "The link has no valid code",
+  "state.linkInvalid.body":
+    "The link you opened does not contain a valid session code. Check the code shown in 3D Slicer.",
   "viewer.fit": "Fit view",
   "viewer.dismiss": "Dismiss",
   "viewer.canvasLabel":
@@ -207,6 +210,9 @@ const pl: Record<StringKey, string> = {
   "state.snapshotUpdateFailed.title": "Nie udało się pobrać nowej sceny",
   "state.snapshotUpdateFailed.body":
     "Nadal widzisz poprzednią scenę. Sprawdź połączenie albo poproś prezentera o ponowne udostępnienie sceny.",
+  "state.linkInvalid.title": "Link nie zawiera prawidłowego kodu",
+  "state.linkInvalid.body":
+    "Otwarty link nie zawiera prawidłowego kodu sesji. Sprawdź kod widoczny w 3D Slicerze.",
   "viewer.fit": "Dopasuj widok",
   "viewer.dismiss": "Zamknij",
   "viewer.canvasLabel":

@@ -24,6 +24,8 @@ export interface CodeEntry {
   setBusy(busy: boolean): void;
   /** Clears all cells, keeps the language. */
   reset(): void;
+  /** Puts `text` into the cells like a paste (deep link, WEB-11); the hint follows from what it contains. */
+  setCode(text: string): void;
   /** Focuses the first empty cell (the last cell when all are filled). */
   focus(): void;
 }
@@ -214,6 +216,13 @@ export function createCodeEntry(options: CodeEntryOptions): CodeEntry {
       for (const cell of cells) cell.value = "";
       overflow = false;
       error = null;
+      refresh();
+    },
+    setCode(text) {
+      for (const cell of cells) cell.value = "";
+      overflow = false;
+      error = null;
+      fill(0, clean(text));
       refresh();
     },
     focus() {

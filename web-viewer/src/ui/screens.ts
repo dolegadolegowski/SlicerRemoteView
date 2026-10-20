@@ -34,6 +34,8 @@ export interface Screens {
   failSnapshot(): void;
   readonly viewer: Viewer | null;
   readonly nodePanel: NodePanel | null;
+  /** Joining or joined: the code entry's cells hold the code of this session. */
+  readonly live: boolean;
 }
 
 export function bindScreens(options: ScreensOptions): Screens {
@@ -147,6 +149,9 @@ export function bindScreens(options: ScreensOptions): Screens {
     },
     get nodePanel() {
       return panel;
+    },
+    get live() {
+      return connection.state.kind === "connecting" || connection.state.kind === "connected";
     },
   };
 }
