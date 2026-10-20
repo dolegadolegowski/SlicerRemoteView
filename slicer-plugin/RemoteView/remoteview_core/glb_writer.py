@@ -224,6 +224,25 @@ def _validate_identity(e: Entity, seen: set[str], anonymized: bool) -> None:
         )
 
 
+def _as_float32(m: NDArray[np.float64]) -> NDArray[np.float32]:
+    with np.errstate(over="ignore", under="ignore"):
+        return m.astype(np.float32)  # what float32 consumers (GPU, glTFast) will see
+
+
+def is_exportable_matrix(matrix: Any) -> bool:
+    """True when ``matrix`` (glTF space) can be a ``T.matrix``: a finite 4×4 array that is TRS-decomposable in
+    float64 and after rounding to float32 (what GPUs and glTFast see). The writer accepts exactly these; the
+    exporter bakes any other linear transform into the vertices instead (SLC-13)."""
+    try:
+        m = np.asarray(matrix, dtype=np.float64)
+    except (TypeError, ValueError):
+        return False
+    if m.shape != (4, 4) or not np.all(np.isfinite(m)):
+        return False
+    m32 = _as_float32(m)
+    return bool(np.all(np.isfinite(m32))) and is_trs_decomposable(m) and is_trs_decomposable(m32)
+
+
 def _validate_appearance(e: Entity) -> None:
     if (
         not isinstance(e.color, (tuple, list, np.ndarray))
@@ -243,11 +262,9 @@ def _validate_appearance(e: Entity) -> None:
             raise GlbWriteError(f"{e.node_id}: matrix must be a finite 4x4 array") from None
         if m.shape != (4, 4) or not np.all(np.isfinite(m)):
             raise GlbWriteError(f"{e.node_id}: matrix must be a finite 4x4 array")
-        with np.errstate(over="ignore", under="ignore"):
-            m32 = m.astype(np.float32)  # what float32 consumers (GPU, glTFast) will see
-        if not np.all(np.isfinite(m32)):
+        if not np.all(np.isfinite(_as_float32(m))):
             raise GlbWriteError(f"{e.node_id}: matrix must be a finite 4x4 array in float32")
-        if not (is_trs_decomposable(m) and is_trs_decomposable(m32)):
+        if not is_exportable_matrix(m):
             # glTF node.matrix must decompose into TRS; sheared transforms are baked instead (SLC-13, report slicer-4)
             raise GlbWriteError(f"{e.node_id}: matrix must be affine without shear (TRS)")
         if e.baked and not np.array_equal(m, np.eye(4)):

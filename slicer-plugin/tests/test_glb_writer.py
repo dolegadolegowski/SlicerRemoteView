@@ -23,7 +23,13 @@ from remoteview_core import (
 )  # vendored registers the protocol package (no __init__)
 from remoteview_core import glb_writer as writer
 from remoteview_core.coords import ras_matrix_to_gltf, ras_to_gltf_normals, ras_to_gltf_points
-from remoteview_core.glb_writer import Entity, GlbWriteError, RootExtras, write_glb
+from remoteview_core.glb_writer import (
+    Entity,
+    GlbWriteError,
+    RootExtras,
+    is_exportable_matrix,
+    write_glb,
+)
 from remoteview_protocol import generated
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -617,6 +623,38 @@ def test_glb_writer_accepts_anonymised_substitutes():
     )
     doc, _, _ = _parse(write_glb([_tumor(name="Model 2")], numpy_flag))
     assert doc["nodes"][0]["extras"]["anonymizedNames"] is True
+
+
+def test_glb_writer_accepts_exactly_the_exportable_matrices():
+    """`is_exportable_matrix` is the writer's own rule, so SLC-07/SLC-13 can decide "keep or bake" with it."""
+    rng = np.random.default_rng(11)
+    candidates = [
+        np.eye(4),
+        np.diag([-1.0, 1.0, 1.0, 1.0]),
+        np.diag([1e-50, 1e-50, 1e-50, 1.0]),
+        np.eye(4) + np.eye(4, k=3) * 1e39,
+        np.array([[1, 0.3, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1.0]]),
+        np.full((4, 4), np.nan),
+        np.eye(3),
+        "eye",
+    ]
+    for _ in range(100):
+        m = np.eye(4)
+        q, _ = np.linalg.qr(rng.normal(size=(3, 3)))
+        shear = np.eye(3) + np.triu(rng.normal(size=(3, 3)) * rng.choice([0.0, 1e-7, 1e-3]), 1)
+        m[:3, :3] = q @ shear @ np.diag(rng.uniform(0.1, 10, size=3))
+        m[:3, 3] = rng.normal(size=3)
+        candidates.append(m)
+    accepted = 0
+    for matrix in candidates:
+        try:
+            write_glb([_tumor(matrix=matrix)], ROOT)
+        except GlbWriteError:
+            assert not is_exportable_matrix(matrix)
+        else:
+            assert is_exportable_matrix(matrix)
+            accepted += 1
+    assert 0 < accepted < len(candidates)
 
 
 def test_glb_writer_baked_entity_with_identity_matrix_is_accepted():

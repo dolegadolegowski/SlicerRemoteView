@@ -80,6 +80,35 @@ Expected: `b'glTF' 0 session.create connecting`, then `Patient Name True` (SLC-2
 `applicationVersion` string in the results table); no network connection beyond the baseline (the client only builds
 messages — sockets arrive with SLC-08) and no pip dialog.
 
+Re-run after SLC-07 (model collection with Slicer's own VTK): with any scene loaded (the snippet adds and then removes
+one model), paste into the Python console:
+
+```python
+import numpy as np, vtk
+from remoteview_core.collect import collect_scene
+from remoteview_core.glb_writer import RootExtras, write_glb
+sphere = vtk.vtkSphereSource(); sphere.SetCenter(100, 30, -20); sphere.SetRadius(10); sphere.Update()
+model = slicer.modules.models.logic().AddModel(sphere.GetOutput())
+class Api:  # minimal stand-in for the SLC-22 adapter
+    def visible_model_nodes(self): return [model]
+    def node_id(self, n): return n.GetID()
+    def name(self, n): return n.GetName()
+    def polydata(self, n): return n.GetPolyData()
+    def display_props(self, n):
+        d = n.GetDisplayNode(); return d.GetColor(), d.GetOpacity(), bool(d.GetVisibility() and d.GetVisibility3D())
+    def world_matrix(self, n): return np.eye(4)
+before = (model.GetPolyData().GetMTime(), model.GetPolyData().GetNumberOfPoints())
+scene = collect_scene(Api())
+print(len(scene.entities), scene.skipped, np.round(scene.entities[0].positions.mean(axis=0), 4))
+print(before == (model.GetPolyData().GetMTime(), model.GetPolyData().GetNumberOfPoints()))
+glb = write_glb(scene.entities, RootExtras(scene_version=1, profile="mobile", slicer_version=slicer.app.applicationVersion))
+print(glb[:4]); slicer.mrmlScene.RemoveNode(model)
+```
+
+Expected: `1 () [ 0.1  -0.02 -0.03]` (RAS (100, 30, −20) mm → glTF metres, +Y up), `True` (the model's mesh is
+untouched), `b'glTF'`; no traceback (in particular no `DeprecationWarning`/`ImportError` from `vtkmodules`) and no
+network connection beyond the baseline.
+
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|
 | | | | | |
