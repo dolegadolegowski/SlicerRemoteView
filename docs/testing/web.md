@@ -116,6 +116,22 @@ Joined with `asymmetric-2nodes.glb` (the opaque "Liver" encloses the translucent
 6. Join with `large-synthetic.glb` (four spheres, one hidden in the snapshot). **Expect:** that row starts
    crossed out and its sphere is not drawn.
 
+### Live updates (WEB-12)
+
+Start the publisher with an update script: `node_modules/.bin/fake-slicer --relay wss://<host>/ws --script
+toggle-visibility --loop --code-fd 3 3>code.txt` (other scripts: `colour-cycle`, `move-node`, `reload-scene`).
+
+1. Join. **Expect:** about a second after the model appears, the liver disappears and comes back, then the tumour;
+   the switches in **Structures** follow.
+2. Hide the tumour in the panel while the liver is toggled by the presenter. **Expect:** the tumour stays hidden
+   (the presenter did not change it); when the presenter next hides and shows the tumour, its switch follows the
+   presenter again.
+3. `colour-cycle`: **Expect:** colours and transparency change on screen and in the swatches. `move-node`: the
+   tumour moves in three 0.5 s steps and then stops at the scene origin (the script's last matrix), not at its
+   starting place. `reload-scene`: "Updating the scene…" appears briefly, then the scene shows "Vessel".
+4. Switch on airplane mode for 5 s during `toggle-visibility --loop`, then off and **Join** again. **Expect:** the
+   scene shows the presenter's current state (no node stuck in an old state).
+
 ### Download in the background (WEB-06 review, WEB-10)
 
 1. Join with `large-synthetic.glb` on a slow network (Settings → Developer → Network Link Conditioner "3G"), and

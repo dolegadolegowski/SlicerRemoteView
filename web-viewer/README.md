@@ -256,3 +256,16 @@ remove it), so the code's expiry is the limit there.
 ```bash
 npm test -w web-viewer -- deep-link && npm run e2e -w web-viewer -- deep-link
 ```
+
+### Live updates (WEB-12)
+
+`src/protocol/scene-versions.ts` orders `scene.update`, `scene.nodeRemoved`, `scene.nodeAdded` and `scene.state` by
+version (§8.3): applied only when `baseVersion` matches what is shown, queued while their snapshot is still loading,
+one `scene.request{GAP}` after a gap. `src/render/apply-update.ts` applies them to the model (`visible`, `color`,
+`opacity`, `matrix` on `T`, removals); a property changes only when the presenter's value changes, so a replayed
+state keeps what the user hid locally, while a new presenter change of `visible` replaces it (FR-40).
+
+```bash
+npm test -w web-viewer -- scene-versions apply-update
+npm run e2e -w web-viewer -- live-updates   # fake-slicer scripts through the relay stub
+```

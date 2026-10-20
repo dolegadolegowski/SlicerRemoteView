@@ -465,6 +465,14 @@ describe("refused snapshots (§7.1, T10)", () => {
 });
 
 describe("scene model store and disposal (FR-45)", () => {
+  it("a model knows the snapshot version it was announced with (WEB-12)", async () => {
+    const store = createSceneModelStore({ log: vi.fn() });
+    await store.load(glb("asymmetric-2nodes.glb"), 7);
+    expect(store.current!.snapshotVersion).toBe(7);
+    await store.load(glb("quantized-1node.glb"));
+    expect(store.current!.snapshotVersion).toBeNull();
+  });
+
   it("loading a second GLB disposes every geometry and material of the first exactly once", async () => {
     const first = spyingParse();
     const store = createSceneModelStore({ parse: first.parse, log: vi.fn() });

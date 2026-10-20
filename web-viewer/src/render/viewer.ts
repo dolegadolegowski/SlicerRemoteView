@@ -71,12 +71,16 @@ export interface Viewer {
   setModel(model: SceneModel | null): void;
   /** Frames the visible nodes; `resetDirection` also returns to the front view (on load). */
   fit(resetDirection?: boolean): void;
-  /** Requests one frame (e.g. after a live update changed the scene, WEB-12). */
+  /** Requests one frame. */
   invalidate(): void;
+  /** Live updates changed the scene (WEB-12): re-measures the model for the clip planes, draws a frame. */
+  contentChanged(): void;
   /** Re-reads the size, pixel ratio and visual viewport and renders at once (also on resize events). */
   resize(): void;
   /** A message over the scene (e.g. a refused snapshot while the old one stays visible); `null` hides it. */
   setNotice(notice: Description | null): void;
+  /** A short, polite status line (e.g. "Updating the scene…" before a new snapshot, WEB-12); `null` hides it. */
+  setStatus(text: string | null): void;
   /** Moves keyboard / screen-reader focus to the canvas (its label describes the gestures). */
   focus(): void;
   dispose(): void;
@@ -162,7 +166,11 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
   fitButton.type = "button";
   fitButton.className = "viewer__fit";
   fitButton.textContent = t(lang, "viewer.fit");
-  element.append(canvas, notice, fitButton);
+  const status = doc.createElement("p");
+  status.className = "viewer__status";
+  status.setAttribute("role", "status"); // polite: announced without interrupting
+  status.hidden = true;
+  element.append(canvas, notice, status, fitButton);
 
   let renderer: RendererLike;
   try {
@@ -283,14 +291,26 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
     renderFrame(); // now, not on the next frame: a resized buffer is blank until drawn
   }
 
+  /** Camera distance at which a sphere of radius `r` fills the narrower field of view (with the margin). */
+  function fitDistance(r: number): number {
+    const vFov = (camera.fov * Math.PI) / 180;
+    const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
+    return (r / Math.sin(Math.min(vFov, hFov) / 2)) * FIT_MARGIN;
+  }
+
+  /** Bounding box of the whole model in stage units, hidden nodes included (empty without a model). */
+  function measureAll(): Box3 {
+    stage.updateMatrixWorld(true);
+    return model ? new Box3().setFromObject(model.root) : new Box3();
+  }
+
   function fit(resetDirection = false): void {
     // Apply whatever damped motion is still settling now, so it cannot drift the new framing afterwards.
     controls.enableDamping = false;
     controls.update();
     controls.enableDamping = true;
     const box = new Box3();
-    stage.updateMatrixWorld(true);
-    const all = model ? new Box3().setFromObject(model.root) : new Box3();
+    const all = measureAll();
     // Frame what the user sees; fall back to everything when all nodes are hidden.
     model?.root.traverseVisible((o) => {
       if ((o as { isMesh?: boolean }).isMesh) box.expandByObject(o);
@@ -302,9 +322,6 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
     radius = Math.max(sphere.radius, 1);
     if (all.isEmpty()) bounds.copy(sphere);
     else all.getBoundingSphere(bounds);
-    const vFov = (camera.fov * Math.PI) / 180;
-    const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
-    const fitDistance = (r: number) => (r / Math.sin(Math.min(vFov, hFov) / 2)) * FIT_MARGIN;
     const distance = fitDistance(radius);
     const direction = resetDirection
       ? FRONT.clone()
@@ -316,6 +333,18 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
     // Zooming out can always take in the whole model, also nodes that are hidden now and shown later (WEB-09).
     controls.maxDistance = Math.max(distance, fitDistance(bounds.radius)) * 10;
     controls.update();
+    updateClipping();
+    invalidate();
+  }
+
+  /**
+   * Live updates moved or removed nodes (WEB-12): the whole-model bounds behind the clip planes and the zoom-out
+   * limit follow, the camera stays where the user put it, and a frame is drawn.
+   */
+  function contentChanged(): void {
+    const all = measureAll();
+    if (!all.isEmpty()) all.getBoundingSphere(bounds);
+    controls.maxDistance = Math.max(controls.maxDistance, fitDistance(bounds.radius) * 10);
     updateClipping();
     invalidate();
   }
@@ -413,8 +442,13 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
     setModel,
     fit,
     invalidate,
+    contentChanged,
     resize,
     setNotice,
+    setStatus(text) {
+      status.hidden = text === null;
+      status.textContent = text ?? "";
+    },
     focus: () => canvas.focus({ preventScroll: true }),
     dispose() {
       if (disposed) return;

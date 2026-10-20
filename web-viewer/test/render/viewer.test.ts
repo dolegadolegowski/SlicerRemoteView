@@ -367,6 +367,26 @@ describe("camera and clipping", () => {
     expect(farthest).toBeLessThan(viewer.camera.far);
   });
 
+  it("a node moved far away by a live update stays inside the far plane after contentChanged (WEB-12)", () => {
+    const { viewer, flush, r } = harness();
+    const part = new Mesh(new BoxGeometry(0.05, 0.05, 0.05));
+    const root = new Group();
+    root.add(part);
+    viewer.setModel({ root } as unknown as SceneModel);
+    flush();
+    part.position.set(0, 0, -2); // 2 m behind, like a new T.matrix
+    r.render.mockClear();
+    viewer.contentChanged();
+    flush();
+    expect(r.render).toHaveBeenCalled();
+    viewer.camera.updateMatrixWorld(true);
+    root.updateWorldMatrix(true, true);
+    const box = new Box3().setFromObject(part);
+    const depth = -box.min.clone().applyMatrix4(viewer.camera.matrixWorldInverse).z;
+    expect(depth).toBeLessThan(viewer.camera.far);
+    expect(viewer.controls.target.length()).toBeLessThan(1e-6); // the camera was not refitted
+  });
+
   it("zooming out after a fit on a tiny visible part still takes in the whole model", () => {
     const { viewer, flush } = harness();
     // A 2 mm part and a 200 mm part (metres, like §7.1 data): the large one hidden, then shown again.
@@ -545,6 +565,18 @@ describe("scene graph, notices and page behaviour", () => {
     expect(notice.textContent).toContain(describeCode("PAYLOAD_TOO_LARGE", "en").title);
     notice.querySelector<HTMLButtonElement>(".viewer__notice-close")!.click();
     expect(notice.hidden).toBe(true);
+  });
+
+  it("shows and hides a polite status line (e.g. a snapshot on its way)", () => {
+    const { viewer } = harness();
+    const status = viewer.element.querySelector<HTMLElement>(".viewer__status")!;
+    expect(status.hidden).toBe(true);
+    expect(status.getAttribute("role")).toBe("status");
+    viewer.setStatus("Updating the scene…");
+    expect(status.hidden).toBe(false);
+    expect(status.textContent).toBe("Updating the scene…");
+    viewer.setStatus(null);
+    expect(status.hidden).toBe(true);
   });
 
   it("focus() moves focus to the labelled canvas (not a tab stop)", () => {

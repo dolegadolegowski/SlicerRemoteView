@@ -45,14 +45,21 @@ function readCode(child: ChildProcess): Promise<string> {
   });
 }
 
-export async function startPublisher(fixture = "asymmetric-2nodes.glb"): Promise<Publisher> {
+export interface PublisherOptions {
+  /** GLB from `shared/fixtures/glb` (default `asymmetric-2nodes.glb`). */
+  readonly fixture?: string;
+  /** An update script of fake-slicer (`toggle-visibility`, `move-node`, …), played after the snapshot ack. */
+  readonly script?: string;
+}
+
+export async function startPublisher(options: PublisherOptions = {}): Promise<Publisher> {
   // The stub keeps no snapshot cache (the relay will): hold the publisher's frames until a viewer has joined.
   const stub = await startRelayStub({ holdFramesUntilViewers: 1 });
-  const child = spawn(
-    process.execPath,
-    [BIN, "--relay", stub.url, "--fixture", fixture, "--code-fd", "3"],
-    { stdio: ["ignore", "pipe", "pipe", "pipe"] },
-  );
+  const args = [BIN, "--relay", stub.url, "--fixture", options.fixture ?? "asymmetric-2nodes.glb"];
+  if (options.script) args.push("--script", options.script);
+  const child = spawn(process.execPath, [...args, "--code-fd", "3"], {
+    stdio: ["ignore", "pipe", "pipe", "pipe"],
+  });
   let output = "";
   for (const pipe of [child.stdout, child.stderr]) pipe!.on("data", (d: Buffer) => (output += d));
   const close = async () => {

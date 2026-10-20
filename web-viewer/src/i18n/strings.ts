@@ -99,6 +99,7 @@ const en = {
   "state.linkInvalid.title": "The link has no valid code",
   "state.linkInvalid.body":
     "The link you opened does not contain a valid session code. Check the code shown in 3D Slicer.",
+  "viewer.updating": "Updating the scene…",
   "viewer.fit": "Fit view",
   "viewer.dismiss": "Dismiss",
   "viewer.canvasLabel":
@@ -213,6 +214,7 @@ const pl: Record<StringKey, string> = {
   "state.linkInvalid.title": "Link nie zawiera prawidłowego kodu",
   "state.linkInvalid.body":
     "Otwarty link nie zawiera prawidłowego kodu sesji. Sprawdź kod widoczny w 3D Slicerze.",
+  "viewer.updating": "Aktualizowanie sceny…",
   "viewer.fit": "Dopasuj widok",
   "viewer.dismiss": "Zamknij",
   "viewer.canvasLabel":

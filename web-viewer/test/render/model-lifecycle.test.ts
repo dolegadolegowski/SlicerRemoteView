@@ -9,13 +9,13 @@ import type { SceneModelStore, StoreLoadResult } from "../../src/render/scene-mo
 import { MockSocket } from "../protocol/mock-socket";
 
 function source() {
-  const handlers = new Set<(p: { bytes: Uint8Array }) => void>();
-  const s: SnapshotSource & { emit(bytes: Uint8Array): void } = {
+  const handlers = new Set<(p: { sceneVersion: number; bytes: Uint8Array }) => void>();
+  const s: SnapshotSource & { emit(bytes: Uint8Array, sceneVersion?: number): void } = {
     on: (_event, handler) => {
       handlers.add(handler);
       return () => void handlers.delete(handler);
     },
-    emit: (bytes) => handlers.forEach((h) => h({ bytes })),
+    emit: (bytes, sceneVersion = 1) => handlers.forEach((h) => h({ sceneVersion, bytes })),
   };
   return s;
 }
@@ -78,14 +78,19 @@ describe("snapshots → store", () => {
     });
     const onInvalid = vi.fn();
     bindModelLifecycle(conn, [stream, loader], models, onInvalid);
-    stream.emit(new Uint8Array(4));
-    loader.emit(new Uint8Array(8));
-    loader.emit(new Uint8Array(12));
+    stream.emit(new Uint8Array(4), 3);
+    loader.emit(new Uint8Array(8), 4);
+    loader.emit(new Uint8Array(12), 5);
     await vi.waitFor(() => expect(models.load).toHaveBeenCalledTimes(3));
     await vi.waitFor(() => expect(onInvalid).toHaveBeenCalledTimes(2)); // refused + rejected, not superseded
     await new Promise((resolve) => setTimeout(resolve, 0)); // let every pending load settle
     expect(onInvalid).toHaveBeenCalledTimes(2);
-    expect(models.load.mock.calls.map(([b]) => b.byteLength)).toEqual([4, 8, 12]);
+    expect(models.load.mock.calls.map(([b, v]) => [b.byteLength, v])).toEqual([
+      [4, 3],
+      [8, 4],
+      [12, 5],
+    ]); // each with the version it was announced with
+    expect(onInvalid.mock.calls.map(([v]) => v).sort()).toEqual([3, 5]); // the refused and the rejected one
   });
 
   it.each<[string, StoreLoadResult]>([

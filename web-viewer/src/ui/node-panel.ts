@@ -21,7 +21,7 @@ export interface NodePanel {
   readonly element: HTMLElement;
   /** Rebuilds the list for `model` in manifest order; `null` empties it. Keeps the open/closed state. */
   setModel(model: SceneModel | null): void;
-  /** Re-reads every node's `T.visible` into the switches (after presenter updates, WEB-12). */
+  /** Re-reads every node's `T.visible` and colour into the rows (after presenter updates, WEB-12). */
   refresh(): void;
   setOpen(open: boolean): void;
   readonly open: boolean;
@@ -31,6 +31,13 @@ export interface NodePanel {
 interface Row {
   readonly node: SceneNode;
   readonly button: HTMLButtonElement;
+  readonly swatch: HTMLElement;
+}
+
+/** The colour the node is drawn with now (live updates change the material, WEB-12), as a CSS colour. */
+function nodeColor(node: SceneNode): string {
+  const color = (node.material as { color?: Color }).color;
+  return color instanceof Color ? color.getStyle() : swatchColor(node.manifest.color);
 }
 
 const SVG = "http://www.w3.org/2000/svg";
@@ -98,10 +105,11 @@ export function createNodePanel(options: NodePanelOptions = {}): NodePanel {
   }
 
   function refresh(): void {
-    for (const { node, button } of rows) {
+    for (const { node, button, swatch } of rows) {
       const visible = node.T.visible;
       button.setAttribute("aria-checked", String(visible));
       button.dataset["visible"] = String(visible);
+      swatch.style.backgroundColor = nodeColor(node);
     }
     // `aria-disabled`, not `disabled`: a disabled button drops the keyboard focus it has right after "Show all".
     showAll.setAttribute("aria-disabled", String(rows.every((row) => row.node.T.visible)));
@@ -147,7 +155,6 @@ export function createNodePanel(options: NodePanelOptions = {}): NodePanel {
       const swatch = doc.createElement("span");
       swatch.className = "node-panel__swatch";
       swatch.setAttribute("aria-hidden", "true");
-      swatch.style.backgroundColor = swatchColor(node.manifest.color);
       const name = doc.createElement("span");
       name.className = "node-panel__name";
       name.dir = "auto"; // a right-to-left name keeps its beginning when the ellipsis cuts it
@@ -158,7 +165,7 @@ export function createNodePanel(options: NodePanelOptions = {}): NodePanel {
       const item = doc.createElement("li");
       item.append(button);
       items.push(item);
-      rows.push({ node, button });
+      rows.push({ node, button, swatch });
     }
     list.replaceChildren(...items);
     empty.hidden = rows.length > 0;

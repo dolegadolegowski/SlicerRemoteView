@@ -227,6 +227,18 @@ describe("local visibility (FR-40, US-09)", () => {
     expect(row(LIVER).getAttribute("aria-checked")).toBe("false");
     expect(onChange).not.toHaveBeenCalled();
   });
+
+  it("refresh() repaints the swatch from the colour the node is drawn with now", () => {
+    setup();
+    const material = model.nodes.get(TUMOR)!.material as unknown as { color: Color };
+    const before = material.color.clone();
+    material.color.setRGB(1, 1, 1, SRGBColorSpace);
+    panel.refresh();
+    expect(
+      row(TUMOR).querySelector<HTMLElement>(".node-panel__swatch")!.style.backgroundColor,
+    ).toBe("rgb(255, 255, 255)");
+    material.color.copy(before);
+  });
 });
 
 describe("collapsible", () => {

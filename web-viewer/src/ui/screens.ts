@@ -2,7 +2,9 @@
 // session is live, the code entry otherwise. Also routes messages to the screen that is visible, gates Join on
 // WebGL 2 and moves focus with the screen. Kept out of `main.ts` so every transition is unit-tested.
 
+import { detectLang, t } from "../i18n/strings";
 import type { Connection } from "../protocol/connection";
+import type { Applied } from "../render/apply-update";
 import type { SceneModel, SceneModelStore } from "../render/scene-model";
 import { createViewer, webGL2Available } from "../render/viewer";
 import type { CreateViewerResult, Viewer } from "../render/viewer";
@@ -32,11 +34,23 @@ export interface Screens {
    * late failure must not cancel a new join or replace a "connection lost" message.
    */
   failSnapshot(): void;
+  /** Live changes were applied to the shown scene (WEB-12): draw them, refresh or rebuild the node list. */
+  sceneChanged(applied: Pick<Applied, "changed" | "removed">): void;
+  /**
+   * `scene.nodeAdded`: a new snapshot is on its way (§8.2); the hint goes when it is shown or abandoned, or after
+   * `UPDATING_HINT_MS` if no snapshot is announced (the relay may refuse it before any viewer hears of it).
+   */
+  updating(on: boolean): void;
+  /** A newer snapshot was announced (`scene.snapshot.begin` / `.ready`): the hint waits for it, however long. */
+  snapshotComing(): void;
   readonly viewer: Viewer | null;
   readonly nodePanel: NodePanel | null;
   /** Joining or joined: the code entry's cells hold the code of this session. */
   readonly live: boolean;
 }
+
+/** How long the "updating" hint waits for the snapshot that `scene.nodeAdded` promises to be announced. */
+export const UPDATING_HINT_MS = 10_000;
 
 export function bindScreens(options: ScreensOptions): Screens {
   const { app, connection, models, entry } = options;
@@ -45,6 +59,13 @@ export function bindScreens(options: ScreensOptions): Screens {
   let viewer: Viewer | null = null;
   let panel: NodePanel | null = null;
   let shown: SceneModel | null = null;
+  let hintTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function setHint(on: boolean): void {
+    clearTimeout(hintTimer);
+    hintTimer = undefined;
+    viewer?.setStatus(on ? t(detectLang(), "viewer.updating") : null);
+  }
 
   const viewerVisible = () => viewer !== null && !viewer.element.hidden;
 
@@ -75,6 +96,7 @@ export function bindScreens(options: ScreensOptions): Screens {
     viewer.element.hidden = false;
     if (model !== shown) {
       viewer.setNotice(null);
+      setHint(false);
       viewer.setModel(model); // a new model is fitted from the front
       panel?.setModel(model);
     } else {
@@ -149,6 +171,21 @@ export function bindScreens(options: ScreensOptions): Screens {
     },
     get nodePanel() {
       return panel;
+    },
+    sceneChanged({ changed, removed }) {
+      if (!shown) return;
+      if (removed)
+        panel?.setModel(shown); // rows of removed nodes go; open state and focus are kept
+      else if (changed) panel?.refresh();
+      if (changed || removed) viewer?.contentChanged(); // nodes may have moved: clip planes follow
+    },
+    updating(on) {
+      setHint(on);
+      if (on) hintTimer = setTimeout(() => setHint(false), UPDATING_HINT_MS);
+    },
+    snapshotComing() {
+      clearTimeout(hintTimer);
+      hintTimer = undefined;
     },
     get live() {
       return connection.state.kind === "connecting" || connection.state.kind === "connected";

@@ -8,27 +8,36 @@ import type { SceneModelStore } from "./scene-model";
 
 /** Anything that emits hash-verified snapshots: `SnapshotStream` and `SceneLoader`. */
 export interface SnapshotSource {
-  on(event: "ready", handler: (payload: { readonly bytes: Uint8Array }) => void): () => void;
+  on(
+    event: "ready",
+    handler: (payload: { readonly sceneVersion: number; readonly bytes: Uint8Array }) => void,
+  ): () => void;
 }
 
 /**
- * `onInvalid` is called once per refused (or failing) load; `superseded` loads are ignored. The bytes are handed
- * to the store and not kept here (FR-45). Returns the unsubscribe function.
+ * `onInvalid` is called once per refused (or failing) load with its snapshot version; `superseded` loads are
+ * ignored. The bytes are handed to the store and not kept here (FR-45). Returns the unsubscribe function.
  */
 export function bindModelLifecycle(
   connection: Pick<Connection, "on" | "onMessage">,
   sources: readonly SnapshotSource[],
   models: SceneModelStore,
-  onInvalid: () => void,
+  onInvalid: (sceneVersion: number) => void,
 ): () => void {
   let sessionId: string | null = null;
-  const parse = ({ bytes }: { readonly bytes: Uint8Array }) =>
+  const parse = ({
+    sceneVersion,
+    bytes,
+  }: {
+    readonly sceneVersion: number;
+    readonly bytes: Uint8Array;
+  }) =>
     void models
-      .load(bytes)
+      .load(bytes, sceneVersion)
       .then((result) => {
-        if (!result.ok && result.reason !== "superseded") onInvalid();
+        if (!result.ok && result.reason !== "superseded") onInvalid(sceneVersion);
       })
-      .catch(onInvalid);
+      .catch(() => onInvalid(sceneVersion));
   const offs = [
     ...sources.map((source) => source.on("ready", parse)),
     connection.onMessage("viewer.joined", (m) => {

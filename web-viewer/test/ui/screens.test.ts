@@ -7,7 +7,7 @@ import type { CreateViewerResult, Viewer } from "../../src/render/viewer";
 import { describe as describeCode, describeState } from "../../src/state/errors";
 import { createCodeEntry } from "../../src/ui/code-entry";
 import type { CodeEntry } from "../../src/ui/code-entry";
-import { bindScreens } from "../../src/ui/screens";
+import { bindScreens, UPDATING_HINT_MS } from "../../src/ui/screens";
 import type { Screens } from "../../src/ui/screens";
 import { MockSocket } from "../protocol/mock-socket";
 
@@ -23,8 +23,10 @@ function fakeViewer() {
     setModel: vi.fn<Viewer["setModel"]>(),
     fit: vi.fn<Viewer["fit"]>(),
     invalidate: vi.fn<Viewer["invalidate"]>(),
+    contentChanged: vi.fn<Viewer["contentChanged"]>(),
     resize: vi.fn<Viewer["resize"]>(),
     setNotice: vi.fn<Viewer["setNotice"]>(),
+    setStatus: vi.fn<Viewer["setStatus"]>(),
     focus: vi.fn<Viewer["focus"]>(),
     dispose: vi.fn<Viewer["dispose"]>(),
   } satisfies Viewer;
@@ -70,6 +72,7 @@ function fakeModel(...names: string[]): SceneModel {
       nodeId,
       order,
       T: new Object3D(),
+      material: {},
       manifest: { nodeId, kind: "model", name, color: [1, 0, 0], opacity: 1, visible: true },
     } as unknown as SceneNode);
   });
@@ -263,6 +266,69 @@ describe("node panel (WEB-09)", () => {
     join();
     expect(rows()).toEqual(before); // same elements
     expect(rows()[0]!.getAttribute("aria-checked")).toBe("false");
+  });
+});
+
+describe("live updates (WEB-12)", () => {
+  const rows = () => [...viewer.element.querySelectorAll<HTMLButtonElement>(".node-panel__row")];
+
+  it("a change redraws and refreshes the node rows; nothing new changes nothing", () => {
+    join();
+    models.emit(modelA);
+    modelA.nodes.get("vtkMRMLModelNode1")!.T.visible = false; // what the live scene did
+    screens.sceneChanged({ changed: true, removed: false });
+    expect(viewer.contentChanged).toHaveBeenCalledTimes(1);
+    expect(rows()[0]!.getAttribute("aria-checked")).toBe("false");
+    viewer.contentChanged.mockClear();
+    screens.sceneChanged({ changed: false, removed: false });
+    expect(viewer.contentChanged).not.toHaveBeenCalled();
+  });
+
+  it("a removal rebuilds the rows from the model", () => {
+    join();
+    const model = fakeModel("Liver", "Tumor");
+    models.emit(model);
+    (model.nodes as Map<string, unknown>).delete("vtkMRMLModelNode2");
+    screens.sceneChanged({ changed: true, removed: true });
+    expect(rows().map((r) => r.textContent)).toEqual(["Liver"]);
+  });
+
+  it("before a scene is shown nothing happens", () => {
+    screens.sceneChanged({ changed: true, removed: true });
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("the hint goes after a while when no snapshot is announced, and waits as long as needed when one is", () => {
+    vi.useFakeTimers();
+    try {
+      join();
+      models.emit(modelA);
+      screens.updating(true);
+      vi.advanceTimersByTime(UPDATING_HINT_MS - 1);
+      expect(viewer.setStatus).toHaveBeenLastCalledWith("Updating the scene…");
+      vi.advanceTimersByTime(1);
+      expect(viewer.setStatus).toHaveBeenLastCalledWith(null); // the relay refused it: nothing comes
+      screens.updating(true);
+      screens.snapshotComing(); // scene.snapshot.begin
+      vi.advanceTimersByTime(UPDATING_HINT_MS * 10); // a large snapshot on a slow link
+      expect(viewer.setStatus).toHaveBeenLastCalledWith("Updating the scene…");
+      screens.updating(false); // shown or abandoned (the new model is covered below)
+      expect(viewer.setStatus).toHaveBeenLastCalledWith(null);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("the 'updating' hint shows on scene.nodeAdded and goes with the next model", () => {
+    join();
+    models.emit(modelA);
+    screens.updating(true);
+    expect(viewer.setStatus).toHaveBeenLastCalledWith("Updating the scene…");
+    models.emit(modelB);
+    expect(viewer.setStatus).toHaveBeenLastCalledWith(null);
+    screens.updating(true);
+    screens.updating(false); // the snapshot will not come
+    expect(viewer.setStatus).toHaveBeenLastCalledWith(null);
   });
 });
 
