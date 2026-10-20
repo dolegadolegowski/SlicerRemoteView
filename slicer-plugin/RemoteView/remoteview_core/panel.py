@@ -409,6 +409,9 @@ class PanelController:
         elif client.snapshot_in_flight != self._scene_version:  # the relay refused it (§6.2, §6.4)
             code = client.last_error.code if client.last_error is not None else None
             self._scene, self._scene_detail = "failed", scene_refused_text(code)
+            # the relay ignores the rest of a refused snapshot (§6.2): do not spend the uplink on it
+            if self._transport is not None and self._connection is not None:
+                self._transport.discard_queued(connection=self._connection)
 
     def _finish(self, detail: str, close: dict[str, Any] | None = None) -> None:
         """End the session: ``session.close`` while a socket can carry it, then stop the transport (non-blocking).

@@ -2,19 +2,24 @@
 
 from __future__ import annotations
 
-import json
 import queue
-import struct
-import subprocess
 import sys
 import time
-from pathlib import Path
 
-import numpy as np
 import pytest
-from test_glb_writer import _validate, needs_validator
-from test_panel import RELAY_STUB, _first_line, needs_relay_stub
-from vtkmodules.vtkFiltersSources import vtkSphereSource
+from support import (
+    FakeScene,
+    created,
+    needs_node,
+    needs_relay_stub,
+    needs_validator,
+    reassemble,
+    root_extras,
+    sphere,
+    start_relay_stub,
+    start_throttle_proxy,
+    validate_glb,
+)
 
 from remoteview_core.protocol_client import (
     ProtocolClient,
@@ -23,99 +28,17 @@ from remoteview_core.protocol_client import (
     make_client_info,
 )
 from remoteview_core.snapshot import SnapshotTooLargeError, build_snapshot
-from remoteview_core.transport import Connected, Received, RelayTransport
+from remoteview_core.transport import Connected, Disconnected, Received, RelayTransport
 from remoteview_core.vendored import chunk_header
 from remoteview_protocol import envelope, schemas
-
-LIMITS = {
-    "maxSnapshotBytes": 67_108_864,
-    "maxChunkBytes": 1_048_576,
-    "maxTextBytes": 262_144,
-    "maxChanges": 1000,
-}
-
-
-def sphere(resolution: int = 16):
-    source = vtkSphereSource()
-    source.SetRadius(20.0)
-    source.SetCenter(100.0, 0.0, 0.0)
-    source.SetThetaResolution(resolution)
-    source.SetPhiResolution(resolution)
-    source.Update()
-    return source.GetOutput()
-
-
-class FakeScene:
-    """A :class:`~remoteview_core.collect.SceneApi` over plain dicts (the MRML adapter is SLC-22's)."""
-
-    def __init__(self, *nodes: dict) -> None:
-        self.nodes = list(nodes)
-        self.asked = 0
-
-    def visible_model_nodes(self):
-        self.asked += 1
-        return self.nodes
-
-    def node_id(self, node):
-        return node["id"]
-
-    def name(self, node):
-        return node.get("name", "Liver")
-
-    def polydata(self, node):
-        return node.get("mesh")
-
-    def display_props(self, node):
-        return (0.8, 0.3, 0.2), 1.0, True
-
-    def world_matrix(self, node):
-        return np.eye(4)
 
 
 def live_client(profile: str = "mobile", **limits) -> ProtocolClient:
     client = ProtocolClient(make_client_info("5.12.4", "win32"), auto_renew=False)
     client.start(profile)
-    client.handle(
-        envelope.make(
-            "session.created",
-            reply_to="p-1",
-            sessionId="sess_01K7Q4XMB2TJ9RD6",
-            code="7KQ4X",
-            publisherToken="pt_Mn3Vq8YtK2cR9xLwZaBdE7fGhJ4uP6sTvW1yXoNQ5kA",  # the protocol.md §4.2 example
-            viewerLimit=20,
-            ttl={"graceS": 120, "idleS": 1800, "maxLifetimeS": 43200, "expiresAt": 1792281600120},
-            limits={**LIMITS, **limits},
-        )
-    )
+    client.handle(created(**limits))
     assert client.state is SessionState.CREATED
     return client
-
-
-def reassemble(frames: list) -> tuple[dict, bytes, dict]:
-    """``(begin, glb, end)`` from the frames in order, checking each chunk like a receiver does (§6.3)."""
-    begin, *chunks, end = frames
-    assert len(chunks) == begin["chunkCount"]
-    glb = bytearray()
-    for index, frame in enumerate(chunks):
-        decoded = chunk_header.decode_chunk_header(frame)
-        expected = chunk_header.ExpectedChunk(
-            begin["sceneVersion"],
-            begin["byteLength"],
-            begin["chunkSize"],
-            begin["chunkCount"],
-            index,
-        )
-        chunk_header.check_chunk(decoded, expected)
-        glb += decoded.payload
-    return begin, bytes(glb), end
-
-
-def root_extras(glb: bytes) -> dict:
-    json_length, json_type = struct.unpack_from("<II", glb, 12)
-    assert json_type == 0x4E4F534A
-    document = json.loads(glb[20 : 20 + json_length])
-    [root] = [n for n in document["nodes"] if n.get("name") == "SlicerRemoteView"]
-    return root["extras"]
 
 
 # --------------------------------------------------------------------------- the snapshot core
@@ -239,14 +162,16 @@ def test_snapshot_glb_passes_khronos_gltf_validator(tmp_path):
     client = live_client()
     scene = FakeScene({"id": "vtkMRMLModelNode4", "mesh": sphere()})
     _, glb, _ = reassemble(list(build_snapshot(scene, client, slicer_version="5.12.4").frames()))
-    report = _validate(tmp_path, {"snapshot.glb": glb})["snapshot.glb"]
+    report = validate_glb(tmp_path, {"snapshot.glb": glb})["snapshot.glb"]
     assert report["numErrors"] == 0 and report["numWarnings"] == 0 and report["violations"] == []
 
 
 # --------------------------------------------------------------------------- end to end through the relay stub
 
 
-def _next(events: queue.Queue, kind: type, deadline: float, client: ProtocolClient):
+def _next(
+    events: queue.Queue, kind: type | tuple[type, ...], deadline: float, client: ProtocolClient
+):
     """The next event of ``kind``; ``Received`` messages on the way are fed to ``client``."""
     while True:
         event = events.get(timeout=max(0.01, deadline - time.monotonic()))
@@ -256,47 +181,77 @@ def _next(events: queue.Queue, kind: type, deadline: float, client: ProtocolClie
             return event
 
 
-@needs_relay_stub
-def test_snapshot_end_to_end_with_the_relay_stub():
-    """Real client and transport (§4.1, §6): the stub receives intact chunks and acknowledges the snapshot."""
-    stub = subprocess.Popen(  # fixed argv: node and two repository files
-        ["node", str(Path(__file__).with_name("relay_stub.mjs")), RELAY_STUB.as_uri()],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        text=True,
-    )
+def upload(
+    url: str, scene: FakeScene, *, max_chunk: int | None = None, timeout: float = 10.0, **options
+):
+    """The real client and transport create a session at ``url`` and send ``scene`` as its first snapshot; returns
+    the ``begin`` message and the connections that ended on the way (the upload stops at the first). Waits up to
+    ``timeout`` s for the relay's ack, then ends the session with ``session.close``."""
     events: queue.Queue = queue.Queue()
-    transport = None
+    transport = RelayTransport(url, events, use_proxy=False, **options)
+    transport.start()
     try:
-        url = _first_line(stub, timeout=15)
-        assert url.startswith("ws://127.0.0.1:"), "the relay stub did not start"
-        transport = RelayTransport(url, events, use_proxy=False)
-        transport.start()
         client = ProtocolClient(make_client_info("5.12.4", sys.platform), auto_renew=False)
         deadline = time.monotonic() + 10
         connection = _next(events, Connected, deadline, client).connection
         transport.send(client.start("mobile"), connection=connection)
         while client.state is not SessionState.CREATED:
             _next(events, Received, deadline, client)
-        # 3 chunks of 64 KiB: the reassembly checks order and sizes, not just one frame
-        client.limits["maxChunkBytes"] = 65_536
-        scene = FakeScene({"id": "vtkMRMLModelNode4", "mesh": sphere(64)})
+        if max_chunk is not None:
+            client.limits["maxChunkBytes"] = max_chunk
         snapshot = build_snapshot(scene, client, slicer_version="5.12.4")
-        assert snapshot.byte_length > 2 * 65_536
-        begin = snapshot.messages.begin
         for frame in snapshot.frames():
             assert transport.send(frame, connection=connection)
-        while client.accepted_version != snapshot.scene_version:
-            _next(events, Received, deadline, client)
-        assert client.snapshot_in_flight is None and client.state is SessionState.ACTIVE
+        drops: list[Disconnected] = []
+        deadline = time.monotonic() + timeout
+        while client.accepted_version != snapshot.scene_version and not drops:
+            event = _next(events, (Received, Disconnected), deadline, client)
+            if isinstance(event, Disconnected):
+                drops.append(event)
+        if not drops:
+            assert client.snapshot_in_flight is None and client.state is SessionState.ACTIVE
         assert transport.stop(client.close(), timeout=3)
+        return snapshot, drops
     finally:
-        if transport is not None:
-            transport.stop(timeout=3)  # no transport thread outlives a failed test
-        try:
-            out, _ = stub.communicate(timeout=10)
-        except subprocess.TimeoutExpired:
-            stub.kill()
-            out, _ = stub.communicate()
+        transport.stop(timeout=3)  # no transport thread outlives a failed test
+
+
+@needs_relay_stub
+def test_snapshot_end_to_end_with_the_relay_stub():
+    """Real client and transport (§4.1, §6): the stub receives intact chunks and acknowledges the snapshot."""
+    stub = start_relay_stub()
+    try:
+        # 64 KiB chunks: the reassembly checks order and sizes, not just one frame
+        scene = FakeScene({"id": "vtkMRMLModelNode4", "mesh": sphere(64)})
+        snapshot, drops = upload(stub.address, scene, max_chunk=65_536)
+        assert drops == [] and snapshot.byte_length > 2 * 65_536
+    finally:
+        out = stub.finish()
     closes, _pings, *snapshots = out.split()
-    assert closes == "1" and snapshots == [f"v1:{begin['sha256']}"]
+    assert closes == "1" and snapshots == [f"v1:{snapshot.messages.begin['sha256']}"]
+
+
+@needs_relay_stub
+@needs_node
+def test_snapshot_heartbeat_survives_a_throttled_uplink():
+    """Real sockets (SLC-26): the proxy carries 400 KB/s to the relay, so the ping queued behind the chunks reaches it
+    seconds after it was sent — long after the (scaled) 0.5 s pong timeout — yet the upload is not a dead connection."""
+    stub = start_relay_stub()
+    try:
+        proxy = start_throttle_proxy(stub, rate=400_000)
+        try:
+            scene = FakeScene({"id": "vtkMRMLModelNode4", "mesh": sphere(200)})
+            snapshot, drops = upload(
+                f"ws://{proxy.address}/ws", scene, timeout=20, ping_interval=0.3, pong_timeout=0.5
+            )
+            # more than 3 s at 400 KB/s: several pings are due while the chunks are on their way
+            assert snapshot.byte_length > 1_000_000
+            assert drops == [], f"the upload was cut: {drops[0].error}"
+        finally:
+            forwarded = int(proxy.finish().split()[0])
+    finally:
+        out = stub.finish()
+    closes, _pings, *snapshots = out.split()
+    assert snapshots == [f"v1:{snapshot.messages.begin['sha256']}"] and closes == "1"
+    # everything went through the throttle
+    assert forwarded >= snapshot.byte_length

@@ -4,143 +4,21 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from support import (
+    LEGEND_DISPLAY,
+    SLICE_DISPLAY,
+    FakeDisplay,
+    FakeFolders,
+    FakeModel,
+    FakeView,
+)
+from support import (
+    FakeMrmlTransform as FakeTransform,
+)
 from vtkmodules.vtkFiltersSources import vtkSphereSource
 
 from remoteview_core.collect import collect_scene
 from remoteview_core.mrml_scene import MrmlSceneApi
-
-MODEL_DISPLAY = ("vtkMRMLModelDisplayNode", "vtkMRMLDisplayNode", "vtkMRMLNode")
-SLICE_DISPLAY = ("vtkMRMLSliceDisplayNode", *MODEL_DISPLAY)
-LEGEND_DISPLAY = ("vtkMRMLColorLegendDisplayNode", "vtkMRMLDisplayNode", "vtkMRMLNode")
-
-
-class FakeDisplay:
-    """A display node: ``IsA`` walks ``classes`` like VTK's class hierarchy."""
-
-    def __init__(  # noqa: PLR0913 — one keyword per MRML property
-        self,
-        classes=MODEL_DISPLAY,
-        *,
-        visible=1,
-        visible_3d=1,
-        color=(1.0, 0.5, 0.25),
-        opacity=0.8,
-        views=(),
-        folders_apply=True,
-    ):
-        self.classes, self.visible, self.visible_3d = classes, visible, visible_3d
-        self.color, self.opacity, self.views, self.folders_apply = (
-            color,
-            opacity,
-            views,
-            folders_apply,
-        )
-
-    def IsA(self, name):  # noqa: N802 — MRML's names
-        return int(name in self.classes)
-
-    def GetVisibility(self):  # noqa: N802
-        return self.visible
-
-    def GetVisibility3D(self):  # noqa: N802
-        return self.visible_3d
-
-    def GetColor(self):  # noqa: N802
-        return self.color
-
-    def GetOpacity(self):  # noqa: N802
-        return self.opacity
-
-    def GetNumberOfViewNodeIDs(self):  # noqa: N802
-        return len(self.views)
-
-    def IsDisplayableInView(self, view_id):  # noqa: N802
-        return not self.views or view_id in self.views
-
-    def GetFolderDisplayOverrideAllowed(self):  # noqa: N802
-        return self.folders_apply
-
-
-class FakeTransform:
-    def __init__(self, matrix=None):
-        self.matrix = matrix  # None = non-linear chain
-        self.asked = 0
-
-    def IsTransformToWorldLinear(self):  # noqa: N802
-        return int(self.matrix is not None)
-
-    def GetMatrixTransformToWorld(self, out):  # noqa: N802
-        self.asked += 1
-        out.DeepCopy([v for row in self.matrix for v in row])
-        return 1
-
-
-class FakeModel:
-    def __init__(  # noqa: PLR0913
-        self,
-        node_id,
-        *,
-        name="Liver",
-        displays=(),
-        cls="vtkMRMLModelNode",
-        hidden_from_editors=0,
-        transform=None,
-        polydata=None,
-    ):
-        self.node_id, self.node_name, self.displays, self.cls = node_id, name, list(displays), cls
-        self.hidden_from_editors, self.transform, self.mesh = (
-            hidden_from_editors,
-            transform,
-            polydata,
-        )
-
-    def GetClassName(self):  # noqa: N802
-        return self.cls
-
-    def GetHideFromEditors(self):  # noqa: N802
-        return self.hidden_from_editors
-
-    def GetNumberOfDisplayNodes(self):  # noqa: N802
-        return len(self.displays)
-
-    def GetNthDisplayNode(self, index):  # noqa: N802
-        return self.displays[index]
-
-    def GetID(self):  # noqa: N802
-        return self.node_id
-
-    def GetName(self):  # noqa: N802
-        return self.node_name
-
-    def GetPolyData(self):  # noqa: N802
-        return self.mesh
-
-    def GetParentTransformNode(self):  # noqa: N802
-        return self.transform
-
-
-class FakeView:
-    def __init__(self, view_id):
-        self.view_id = view_id
-
-    def GetID(self):  # noqa: N802
-        return self.view_id
-
-
-class FakeFolders:
-    """``slicer.vtkMRMLFolderDisplayNode``'s static methods, per model node."""
-
-    def __init__(self, hidden=(), opacity=None, overriding=None):
-        self.hidden, self.opacity, self.overriding = set(hidden), opacity or {}, overriding or {}
-
-    def GetHierarchyVisibility(self, node):  # noqa: N802
-        return node.node_id not in self.hidden
-
-    def GetHierarchyOpacity(self, node):  # noqa: N802
-        return self.opacity.get(node.node_id, 1.0)
-
-    def GetOverridingHierarchyDisplayNode(self, node):  # noqa: N802
-        return self.overriding.get(node.node_id)
 
 
 def scene(models, folders=None, views=("vtkMRMLViewNode1",)):

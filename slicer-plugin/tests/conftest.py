@@ -241,6 +241,15 @@ def slicer_stubs(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, types.Mo
 
 
 @pytest.fixture
+def fake():
+    """``support.FakeTransport`` with a clean ``made`` list (the panel's transport factory in tests)."""
+    from support import FakeTransport  # noqa: PLC0415 — imports remoteview_core, which needs the path set above
+
+    FakeTransport.made = []
+    return FakeTransport
+
+
+@pytest.fixture
 def import_remote_view(slicer_stubs: dict[str, types.ModuleType]):
     """Return a function that imports ``RemoteView.py`` against the stubs."""
 

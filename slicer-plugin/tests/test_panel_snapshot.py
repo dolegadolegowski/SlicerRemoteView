@@ -3,58 +3,37 @@
 from __future__ import annotations
 
 import logging
-import subprocess
 import sys
 import time
-from pathlib import Path
 
 import pytest
-from test_mrml_scene import FakeDisplay, FakeFolders, FakeModel, FakeView
-from test_panel import (
+from support import (
     CODE,
-    RELAY_STUB,
     URL,
+    FakeDisplay,
+    FakeFolders,
+    FakeModel,
+    FakeScene,
     FakeTransport,
-    _first_line,
-    _parent,
-    _pump_while,
+    FakeView,
+    ack,
+    created,
     deliver,
     needs_relay_stub,
+    parent_widget,
+    pump_while,
+    reassemble,
+    root_extras,
+    sphere,
+    start_relay_stub,
     viewer_count,
 )
-from test_snapshot import FakeScene, reassemble, root_extras, sphere
 
 from remoteview_core import panel
 from remoteview_core.panel import PanelController, Phase
 from remoteview_core.snapshot import SnapshotTooLargeError
 from remoteview_core.transport import Connected, Disconnected, Received, RelayTransport
 from remoteview_protocol import envelope
-
-LIMITS = {
-    "maxSnapshotBytes": 67_108_864,
-    "maxChunkBytes": 1_048_576,
-    "maxTextBytes": 262_144,
-    "maxChanges": 1000,
-}
-
-
-def created(**limits) -> dict:
-    return envelope.make(
-        "session.created",
-        reply_to="p-1",
-        sessionId="sess_01K7Q4XMB2TJ9RD6",
-        code=CODE,
-        publisherToken="pt_Mn3Vq8YtK2cR9xLwZaBdE7fGhJ4uP6sTvW1yXoNQ5kA",  # the protocol.md §4.2 example
-        viewerLimit=20,
-        ttl={"graceS": 120, "idleS": 1800, "maxLifetimeS": 43200, "expiresAt": 1792281600120},
-        limits={**LIMITS, **limits},
-    )
-
-
-def ack(version: int) -> dict:
-    return envelope.make(
-        "scene.snapshot.ack", sceneVersion=version, viewersStreamed=0, viewersDeferred=0
-    )
 
 
 def controller(scene) -> PanelController:
@@ -65,12 +44,6 @@ def controller(scene) -> PanelController:
 
 def kinds(transport) -> list[str]:
     return [m["type"] if isinstance(m, dict) else "chunk" for _, m in transport.sent]
-
-
-@pytest.fixture
-def fake():
-    FakeTransport.made = []
-    return FakeTransport
 
 
 def liver_scene():
@@ -191,6 +164,7 @@ def test_panel_snapshot_refused_by_the_relay(fake, code, answers, detail):
         detail,
     )
     assert "relay free text" not in view.detail and ctl.phase is Phase.LIVE
+    assert fake.made[0].discarded == [1]  # the rest of the refused snapshot stays on this PC
     assert deliver(ctl, Received(1, ack(1))).status.startswith(
         "Session running without"
     )  # too late
@@ -264,6 +238,17 @@ def test_panel_snapshot_keeps_the_extra_ca_note(fake):
             assert panel.EXTRA_CA_IN_USE in deliver(ctl, Received(1, ack(1))).detail
 
 
+def test_panel_snapshot_queued_frames_are_kept_unless_the_snapshot_is_refused(fake):
+    ctl = controller(liver_scene)
+    ctl.start(URL)
+    deliver(ctl, Connected(1), Received(1, created()))
+    unrelated = envelope.make(
+        "error", reply_to="hb-9", code="INVALID_MESSAGE", message="relay text"
+    )
+    deliver(ctl, Received(1, unrelated), Received(1, viewer_count(1)), Received(1, ack(1)))
+    assert fake.made[0].discarded == []
+
+
 def test_panel_snapshot_ignores_errors_about_other_messages(fake):
     ctl = controller(liver_scene)
     ctl.start(URL)
@@ -316,7 +301,7 @@ def test_panel_snapshot_adapter_sends_the_mrml_scene(
     monkeypatch.setattr(slicer_stubs["slicer"], "vtkMRMLFolderDisplayNode", FakeFolders())
     monkeypatch.setattr(slicer_stubs["slicer"].util, "getNodesByClass", nodes.__getitem__)
     monkeypatch.setattr(panel, "RelayTransport", FakeTransport)
-    instance = import_remote_view().RemoteViewWidget(parent=_parent())
+    instance = import_remote_view().RemoteViewWidget(parent=parent_widget())
     instance.setup()
     instance.ui.relayUrlLineEdit.text = URL
     instance.ui.extraCaPathLineEdit.currentPath = ""
@@ -336,12 +321,6 @@ def test_panel_snapshot_adapter_sends_the_mrml_scene(
 @needs_relay_stub
 def test_panel_snapshot_end_to_end_with_the_relay_stub():
     """The real controller and transport: a sphere scene goes "Live" on the stub's ack (§6.4)."""
-    stub = subprocess.Popen(  # fixed argv: node and two repository files
-        ["node", str(Path(__file__).with_name("relay_stub.mjs")), RELAY_STUB.as_uri()],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        text=True,
-    )
     ctl = PanelController(
         slicer_version="5.12.4",
         platform=sys.platform,
@@ -350,22 +329,17 @@ def test_panel_snapshot_end_to_end_with_the_relay_stub():
         ),
         scene=lambda: FakeScene({"id": "vtkMRMLModelNode4", "mesh": sphere(32)}),
     )
+    stub = start_relay_stub()
     try:
-        url = _first_line(stub, timeout=15)
-        assert url.startswith("ws://127.0.0.1:"), "the relay stub did not start"
-        ctl.start(url)
-        _pump_while(ctl, lambda: not ctl.view.status.startswith("Live"), 10)
+        ctl.start(stub.address)
+        pump_while(ctl, lambda: not ctl.view.status.startswith("Live"), 10)
         assert ctl.view.status == "Live · no viewers yet." and ctl.view.code
         started = time.monotonic()
         ctl.stop()
-        _pump_while(ctl, lambda: ctl.active, 5)
+        pump_while(ctl, lambda: ctl.active, 5)
         assert ctl.view == panel.PanelView(panel.NOT_CONNECTED) and time.monotonic() - started < 5
     finally:
         ctl.shutdown(timeout=3)
-        try:
-            out, _ = stub.communicate(timeout=10)
-        except subprocess.TimeoutExpired:
-            stub.kill()
-            out, _ = stub.communicate()
+        out = stub.finish()
     closes, _pings, *snapshots = out.split()
     assert closes == "1" and len(snapshots) == 1 and snapshots[0].startswith("v1:")

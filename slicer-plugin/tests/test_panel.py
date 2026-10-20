@@ -4,21 +4,28 @@ from __future__ import annotations
 
 import ast
 import logging
-import os
-import queue
 import re
-import shutil
-import subprocess
 import sys
-import threading
 import time
 import types
 import xml.etree.ElementTree as ET
-from pathlib import Path
-from typing import ClassVar
 
 import pytest
 from conftest import MODULE_DIR, ui_widget_names
+from support import (
+    CODE,
+    SESSION_ID,
+    TOKEN,
+    URL,
+    FakeTransport,
+    created,
+    deliver,
+    needs_relay_stub,
+    parent_widget,
+    pump_while,
+    start_relay_stub,
+    viewer_count,
+)
 
 from remoteview_core import panel
 from remoteview_core.panel import PanelController, PanelView, Phase
@@ -31,88 +38,19 @@ from remoteview_core.transport import (
     RelayTransport,
     TlsError,
     TransportError,
-    check_relay_url,
 )
 from remoteview_core.vendored import chunk_header  # noqa: F401 — registers the vendored protocol package
 from remoteview_protocol import envelope, schemas
 
 UI_FILE = MODULE_DIR / "Resources" / "UI" / "RemoteView.ui"
-REPO_ROOT = MODULE_DIR.parents[1]
-RELAY_STUB = REPO_ROOT / "tools" / "fake-slicer" / "dist" / "relay-stub.js"
-URL = "wss://relay.example.org/ws"
-CODE = "7KQ4X"
-TOKEN = "pt_Mn3Vq8YtK2cR9xLwZaBdE7fGhJ4uP6sTvW1yXoNQ5kA"  # noqa: S105 — the protocol.md §4.2 example token
-SESSION_ID = "sess_01K7Q4XMB2TJ9RD6"
 
-# --------------------------------------------------------------------------- fakes and messages
-
-
-class FakeTransport:
-    """``RelayTransport``'s interface: validates the URL like the real one, records sends and stops."""
-
-    made: ClassVar[list[FakeTransport]] = []
-
-    def __init__(self, url, events, *, extra_ca_file=None):
-        self.url = check_relay_url(url)
-        self.events = events
-        self.extra_ca_file = extra_ca_file
-        self.started = False
-        self.sent: list[tuple[int, dict]] = []
-        self.stops: list[tuple[object, float]] = []
-        FakeTransport.made.append(self)
-
-    def start(self) -> None:
-        self.started = True
-
-    def send(self, frame, *, connection):
-        self.sent.append((connection, frame))
-        return True
-
-    def stop(self, final=None, *, timeout=3.0):
-        self.stops.append((final, timeout))
-        return True
-
-
-@pytest.fixture
-def fake():
-    FakeTransport.made = []
-    return FakeTransport
+# --------------------------------------------------------------------------- the controller
 
 
 def controller(clock=time.monotonic) -> PanelController:
     return PanelController(
         slicer_version="5.12.4", platform="win32", transport_factory=FakeTransport, clock=clock
     )
-
-
-def created(reply_to: str = "p-1") -> dict:
-    return envelope.make(
-        "session.created",
-        reply_to=reply_to,
-        sessionId=SESSION_ID,
-        code=CODE,
-        publisherToken=TOKEN,
-        viewerLimit=20,
-        ttl={"graceS": 120, "idleS": 1800, "maxLifetimeS": 43200, "expiresAt": 1792281600120},
-        limits={
-            "maxSnapshotBytes": 67_108_864,
-            "maxChunkBytes": 1_048_576,
-            "maxTextBytes": 262_144,
-            "maxChanges": 1000,
-        },
-    )
-
-
-def viewer_count(count: int) -> dict:
-    platforms = {"ios": count} if count else {}
-    return envelope.make("viewer.count", viewerCount=count, viewerLimit=20, platforms=platforms)
-
-
-def deliver(ctl: PanelController, *events) -> PanelView:
-    transport = FakeTransport.made[-1]
-    for event in events:
-        transport.events.put(event)
-    return ctl.pump()
 
 
 def live(ctl: PanelController) -> PanelView:
@@ -656,15 +594,9 @@ def test_panel_ui_properties():
 def widget(import_remote_view, monkeypatch, fake):
     module = import_remote_view()
     monkeypatch.setattr(panel, "RelayTransport", FakeTransport)
-    instance = module.RemoteViewWidget(parent=_parent())
+    instance = module.RemoteViewWidget(parent=parent_widget())
     instance.setup()
     return module, instance
-
-
-def _parent():
-    from unittest import mock  # noqa: PLC0415
-
-    return mock.MagicMock(name="parentWidget")
 
 
 def test_panel_adapter_setup_loads_the_ui_and_settings(
@@ -674,13 +606,13 @@ def test_panel_adapter_setup_loads_the_ui_and_settings(
         raise AssertionError("opening the panel must not start a transport (FR-02)")
 
     monkeypatch.setattr(panel, "RelayTransport", no_transport)
-    empty = import_remote_view().RemoteViewWidget(parent=_parent())
+    empty = import_remote_view().RemoteViewWidget(parent=parent_widget())
     empty.setup()
     assert empty.ui.relayUrlLineEdit.text == ""  # no built-in relay address
     qt = slicer_stubs["qt"]
     qt.QSettings().setValue("RemoteView/RelayURL", URL)
     module = import_remote_view()
-    instance = module.RemoteViewWidget(parent=_parent())
+    instance = module.RemoteViewWidget(parent=parent_widget())
     instance.setup()
     assert instance.ui.relayUrlLineEdit.text == URL
     assert instance.ui.extraCaPathLineEdit.currentPath == ""
@@ -753,7 +685,7 @@ def test_panel_adapter_extra_ca_file_reaches_the_transport_and_is_remembered(
     assert instance.ui.statusLabel.text == "Connecting to relay.example.org…"
     assert instance.ui.detailLabel.text == panel.EXTRA_CA_IN_USE
     instance.cleanup()
-    again = module.RemoteViewWidget(parent=_parent())
+    again = module.RemoteViewWidget(parent=parent_widget())
     again.setup()
     assert again.ui.extraCaPathLineEdit.currentPath == "/etc/hospital-root.pem"
     # the extra trust anchor stays visible (T5)
@@ -828,7 +760,7 @@ def test_panel_adapter_assigns_the_code_font_back(import_remote_view, slicer_stu
         return ui
 
     monkeypatch.setattr(util, "childWidgetVariables", with_value_label)
-    instance = import_remote_view().RemoteViewWidget(parent=_parent())
+    instance = import_remote_view().RemoteViewWidget(parent=parent_widget())
     instance.setup()
     qfont = slicer_stubs["qt"].QFont
     assert instance.ui.codeLabel.shown.calls == [
@@ -872,41 +804,11 @@ def test_panel_adapter_cleanup_closes_a_running_session(widget, fake):
 
 # --------------------------------------------------------------------------- end to end with the fake-slicer relay stub
 
-needs_relay_stub = pytest.mark.skipif(
-    (shutil.which("node") is None or not RELAY_STUB.is_file())
-    and os.environ.get("REMOTEVIEW_REQUIRE_RELAY_STUB") != "1",
-    reason="needs Node 22 and `npm run build -w shared -w tools/fake-slicer` (the relay stub's dist/)",
-)
-
-
-def _first_line(process: subprocess.Popen, timeout: float) -> str:
-    """The first line ``process`` prints, or ``""`` after ``timeout`` s — a stub that never starts must not hang."""
-    lines: queue.Queue[str] = queue.Queue()
-    threading.Thread(target=lambda: lines.put(process.stdout.readline()), daemon=True).start()
-    try:
-        return lines.get(timeout=timeout).strip()
-    except queue.Empty:
-        return ""
-
-
-def _pump_while(ctl: PanelController, condition, seconds: float) -> None:
-    """The adapter's loop: pump, then sleep, while ``condition()`` holds (at most ``seconds``)."""
-    deadline = time.monotonic() + seconds
-    while condition() and time.monotonic() < deadline:
-        ctl.pump()
-        time.sleep(0.02)
-
 
 @needs_relay_stub
 def test_panel_end_to_end_with_the_relay_stub():
     """The real controller, transport and protocol client against tools/fake-slicer's relay stub (§4.1, §4.5,
     §9.1 heartbeat with a short interval)."""
-    stub = subprocess.Popen(  # fixed argv: node and two repository files
-        ["node", str(Path(__file__).with_name("relay_stub.mjs")), RELAY_STUB.as_uri()],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        text=True,
-    )
     ctl = PanelController(
         slicer_version="5.12.4",
         platform=sys.platform,
@@ -914,26 +816,21 @@ def test_panel_end_to_end_with_the_relay_stub():
             u, events, use_proxy=False, ping_interval=0.1
         ),
     )
+    stub = start_relay_stub()
     try:
-        url = _first_line(stub, timeout=15)
-        assert url.startswith("ws://127.0.0.1:"), "the relay stub did not start"
-        ctl.start(url)
-        _pump_while(ctl, lambda: ctl.phase is not Phase.LIVE, 5)
+        ctl.start(stub.address)
+        pump_while(ctl, lambda: ctl.phase is not Phase.LIVE, 5)
         assert ctl.phase is Phase.LIVE and re.fullmatch(
             r"[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{5}", ctl.view.code
         )
-        _pump_while(ctl, lambda: True, 1.0)  # live for 1 s: about ten heartbeats
+        pump_while(ctl, lambda: True, 1.0)  # live for 1 s: about ten heartbeats
         assert ctl.phase is Phase.LIVE
         ctl.stop()
-        _pump_while(ctl, lambda: ctl.active, 5)
+        pump_while(ctl, lambda: ctl.active, 5)
         assert ctl.view == PanelView(panel.NOT_CONNECTED)
     finally:
         ctl.shutdown(timeout=3)  # no transport thread outlives a failed test
-        try:
-            out, _ = stub.communicate(timeout=10)
-        except subprocess.TimeoutExpired:
-            stub.kill()
-            out, _ = stub.communicate()
+        out = stub.finish()
     closes, pings = out.split()[:2]
     assert closes == "1"  # the stub received exactly one session.close
     assert int(pings) >= 3  # and the heartbeat kept going while the panel pumped
