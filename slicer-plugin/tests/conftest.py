@@ -11,8 +11,10 @@ import importlib
 import sys
 import types
 import unittest
+import xml.etree.ElementTree as ET
 from collections.abc import Iterator
 from pathlib import Path
+from typing import ClassVar
 from unittest import mock
 
 import pytest
@@ -42,6 +44,8 @@ class _ScriptedLoadableModule:
 
 
 class _ScriptedLoadableModuleWidget:
+    """Mirror of ``ScriptedLoadableModuleWidget`` (5.12.4): ``resourcePath`` resolves against the module directory."""
+
     def __init__(self, parent=None):
         self.moduleName = type(self).__name__.removesuffix("Widget")
         self.parent = parent if parent is not None else mock.MagicMock(name="qMRMLWidget")
@@ -55,6 +59,9 @@ class _ScriptedLoadableModuleWidget:
     def cleanup(self):
         pass
 
+    def resourcePath(self, filename):
+        return str(MODULE_DIR / "Resources" / filename)
+
 
 class _ScriptedLoadableModuleLogic:
     def __init__(self, parent=None):
@@ -67,8 +74,10 @@ class _ScriptedLoadableModuleTest(unittest.TestCase):
 
 
 class _StubApp:
-    """``slicer.app`` with only ``connect``. Slots deferred to ``startupCompleted()`` run immediately, so
-    whatever they do happens inside the test (and its side-effect guard) instead of never."""
+    """``slicer.app`` with ``connect`` and ``applicationVersion``. Slots deferred to ``startupCompleted()`` run
+    immediately, so whatever they do happens inside the test (and its side-effect guard) instead of never."""
+
+    applicationVersion = "5.12.4"
 
     def connect(self, signal: str, slot) -> None:
         if signal == "startupCompleted()":
@@ -76,11 +85,79 @@ class _StubApp:
 
 
 class _StubQTimer:
-    """``qt.QTimer`` whose ``singleShot`` fires at once (deferred work must not escape the guard)."""
+    """``qt.QTimer`` whose ``singleShot`` fires at once (deferred work must not escape the guard). Instances only
+    record their interval, connections and state; tests call the connected slot themselves."""
+
+    def __init__(self) -> None:
+        self.interval: int | None = None
+        self.slots: dict[str, object] = {}
+        self.active = False
 
     @staticmethod
     def singleShot(_msec: int, callback) -> None:
         callback()
+
+    def setInterval(self, msec: int) -> None:
+        self.interval = msec
+
+    def connect(self, signal: str, slot) -> None:
+        self.slots[signal] = slot
+
+    def start(self) -> None:
+        self.active = True
+
+    def stop(self) -> None:
+        self.active = False
+
+    def isActive(self) -> bool:
+        return self.active
+
+
+class _StubQFont:
+    """The ``qt.QFont`` enum values the adapter uses."""
+
+    Monospace = 7  # QFont::Monospace
+    PercentageSpacing = 0  # QFont::PercentageSpacing
+
+
+def ui_widget_names(path) -> list[str]:
+    """``objectName`` of every widget, layout-free, in a Qt Designer ``.ui`` file."""
+    root = ET.parse(path).getroot()  # noqa: S314 — the module's own .ui file, not external input
+    return [w.get("name") for w in root.iter("widget") if w.get("name")]
+
+
+def _make_settings_class() -> type:
+    class _StubQSettings:
+        """``qt.QSettings`` over one in-memory dict per stub set (Slicer's settings file in the application): each
+        call of ``_make_settings_class`` runs this class body again, so every test gets a fresh ``store``."""
+
+        store: ClassVar[dict[str, object]] = {}
+
+        def value(self, key, default=None):
+            return self.store.get(key, default)
+
+        def setValue(self, key, value) -> None:
+            self.store[key] = value
+
+        def contains(self, key) -> bool:
+            return key in self.store
+
+    return _StubQSettings
+
+
+def _load_ui(path):
+    """``slicer.util.loadUI``: like Slicer, refuse a missing file; the stub widget remembers its ``.ui`` path."""
+    if not Path(path).is_file():
+        raise RuntimeError(f"Could not load UI file: file not found {path}")
+    return mock.MagicMock(name="uiWidget", uiPath=str(path))
+
+
+def _child_widget_variables(widget):
+    """``slicer.util.childWidgetVariables``: one attribute per named widget of the ``.ui`` file — and no other, so an
+    adapter that looks up a widget the file does not define fails the tests."""
+    return types.SimpleNamespace(
+        **{name: mock.MagicMock(name=name) for name in ui_widget_names(widget.uiPath)}
+    )
 
 
 def _strict_module(name: str, **attributes) -> types.ModuleType:
@@ -96,8 +173,17 @@ def _make_stub_modules() -> dict[str, types.ModuleType]:
     slicer = types.ModuleType("slicer")
     slicer.app = _StubApp()
 
+    settings_class = _make_settings_class()
     util = types.ModuleType("slicer.util")
     util.pip_install = mock.MagicMock(name="slicer.util.pip_install")
+    util.loadUI = _load_ui
+    util.childWidgetVariables = _child_widget_variables
+
+    def settings_value(key, default, converter=lambda v: v, settings=None):
+        settings = settings_class() if settings is None else settings
+        return converter(settings.value(key)) if settings.contains(key) else default
+
+    util.settingsValue = settings_value
     slicer.util = util
 
     packaging = types.ModuleType("slicer.packaging")
@@ -115,8 +201,8 @@ def _make_stub_modules() -> dict[str, types.ModuleType]:
     # Only the Qt classes the adapter uses; widgets are permissive mocks, network/process classes absent.
     qt = _strict_module(
         "qt",
-        QIcon=mock.MagicMock(name="qt.QIcon"),
-        QLabel=mock.MagicMock(name="qt.QLabel"),
+        QFont=_StubQFont,
+        QSettings=settings_class,
         QTimer=_StubQTimer,
     )
     ctk = _strict_module("ctk")

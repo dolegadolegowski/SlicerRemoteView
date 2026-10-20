@@ -30,9 +30,10 @@ Expected results:
 
 - Step 2: no error about the module path; after the restart there is no traceback mentioning `RemoteView` in the
   Python console or in *Help → Report a bug → log*.
-- Step 4: the category *Remote* contains *RemoteView* with the Wi-Fi-style blue icon; the panel opens and shows
-  "RemoteView is not connected. Session controls arrive in a later version." The *Help & Acknowledgement* section
-  says nothing is sent before *Start session* and lists what is sent afterwards; no error in the Python console.
+- Step 4: the category *Remote* contains *RemoteView* with the Wi-Fi-style blue icon; the panel opens with the
+  sections *Session* ("Not connected.", *Start session*, *Stop session* greyed out), *Shared nodes* and a collapsed
+  *Advanced* (since SLC-09; §2 tests them). The *Help & Acknowledgement* section says nothing is sent before *Start
+  session* and lists what is sent afterwards; no error in the Python console.
 - Step 5: the Python console shows "RemoteView load test passed" and no error dialog appears (*Reload and Test*
   shows a dialog only on failure); the scene is not cleared.
 - Step 6: no connection beyond the baseline (opt-in rule — FR-02, Extension Index tier 1); no pip/installation
@@ -133,6 +134,68 @@ store is added); then `('Disconnected', 'tls-certificate', 18, None)`, `(…, 10
 within 3 s (run that line 20 times: no 10-second stall, ADR 0009). No traceback, no code or token in the Python console
 or the application log. Behind a TLS-inspecting proxy note the code shown on each OS (report
 `docs/testing/reports/2026-10-20-slicer-1.md`).
+
+| Date | Slicer version | OS | Result | Tester |
+|---|---|---|---|---|
+| | | | | |
+
+## §2 Session panel: Start, code, Stop (SLC-09; US-01, FR-03, FR-13)
+
+Preconditions: a **test** Slicer 5.12.x with the module path of §1; until SLC-10 installs it after consent, install the
+pinned client once in that Slicer's Python console: `slicer.util.pip_install("websockets==17.2")`. Relays: (a) the
+relay stub of `tools/fake-slicer` on the same machine — once, from the repository root (Node 22): `npm ci` and
+`npm run build -w shared -w tools/fake-slicer`; then, in a terminal kept open next to Slicer,
+`node slicer-plugin/tests/relay_stub.mjs --port 8787`, which prints `ws://127.0.0.1:8787/ws` and, when you end its
+input (Ctrl-D; Ctrl-Z then Enter on Windows), two numbers — the `session.close` messages and the heartbeat `ping`s it
+received (e.g. `1 4`) — then exits; (b) a deployed relay (`wss://<relay-host>/ws`, `docs/deploy.md`), needed for step
+10 only (steps 3–8 work with either). For the CA steps keep any small non-certificate file and any PEM certificate at
+hand (e.g. Slicer's own `Slicer.crt`, whose path the SLC-08 snippet prints).
+
+Steps:
+
+1. Start the test Slicer with no RemoteView settings (a fresh profile, or remove the `RemoteView/*` keys from its
+   settings file) and open *RemoteView*. The panel shows *Session* (relay address, *Start session*, *Stop session*
+   greyed out, "Not connected."), *Shared nodes* (placeholder text) and a collapsed *Advanced* section (additional CA
+   certificate).
+2. Type `wss://user:secret@relay.example.org/ws` and click *Start session*. Then restart Slicer and open *RemoteView*.
+3. Type the relay address of the preconditions and click *Start session*.
+4. Leave Slicer idle (no mouse/keyboard) for at least 70 s with the session running.
+5. Click *Stop session*. For relay (a), end its input and note the two numbers it prints; start it again with the same
+   command (same port).
+6. Restart Slicer and open *RemoteView* again.
+7. Click *Start session* (the remembered address), wait for the code, then reload the module (*Developer mode →
+   Reload*). For relay (a), end its input and note the numbers.
+8. With relay (a) still stopped (with relay (b): type `wss://127.0.0.1:9/ws`, where nothing listens), click *Start
+   session*; after a few seconds click *Stop session*. Start relay (a) again (same command).
+9. In *Advanced*, pick the non-certificate file as *Additional trusted CA certificate* and click *Start session*. Then
+   reload the module and open *Advanced*.
+10. Pick the PEM certificate instead and start a session with relay (b) (`wss://`; with relay (a) the connection uses no
+    TLS, so the certificate plays no part); stop it. Restart Slicer and open *RemoteView*.
+
+Expected results:
+
+- Step 2: "Cannot start the session." and "relay URL must not carry user info, a query or a fragment (no secrets in
+  URLs, §3.1)" — the address is never echoed; nothing is sent; after the restart the address field is **empty** (the
+  refused address was not remembered).
+- Step 3: "Connecting to …", then within 3 s a 5-character code in large letters (monospace, visibly letter-spaced —
+  `[TODO verify]` the PythonQt `QFont` calls) and "Session running · no viewers yet."; *Start* and the address field are
+  disabled, *Stop* enabled (US-01, FR-03).
+- Step 4: the status stays "Session running" (the transport thread pings every 15 s and the relay answers, also with
+  the GUI idle — the 50 ms pump yields the GIL; architecture §6).
+- Step 5: "Stopping…", then "Not connected."; the code disappears; relay (a) prints `1 N` with N ≥ 4: one
+  `session.close` (FR-13) and a heartbeat every 15 s after the code appeared (N is about the session's seconds / 15;
+  fewer means the transport thread was starved — report it with the Slicer version and OS).
+- Step 6: the relay address of step 3 is filled in (remembered in Slicer's settings); *Advanced* is collapsed.
+- Step 7: after the reload the panel is idle and relay (a) prints `1 …` (first number 1): unloading the module closed
+  the session.
+- Step 8: "Relay unreachable — retrying in N s." with guidance; N is rounded up (at least 1) and grows (1, 1–2, 2–3, …
+  up to 30 s); *Stop* returns to "Not connected." at once.
+- Step 9: "Cannot start the session." and "the extra CA file holds no usable certificate (PEM or DER)"; nothing is
+  sent; after the reload the CA field is **empty** (the refused file was not remembered).
+- Step 10: while the session connects and runs, the line under the status reads "An additional CA certificate is
+  trusted for this connection." (T5); after the restart the PEM path is still selected and *Advanced* is expanded, so
+  the extra trust anchor stays visible.
+- Throughout: no traceback in the Python console, no session code or token in the console or the application log.
 
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|

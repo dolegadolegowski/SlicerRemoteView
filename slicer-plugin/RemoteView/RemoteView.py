@@ -9,13 +9,27 @@ and imports nothing heavier than ``slicer``/``qt``. Runtime dependencies are imp
 user clicks *Start session* (SLC-09, SLC-10).
 """
 
+import sys
+import time
+
 import qt
+import slicer
 from slicer.ScriptedLoadableModule import (
     ScriptedLoadableModule,
     ScriptedLoadableModuleLogic,
     ScriptedLoadableModuleTest,
     ScriptedLoadableModuleWidget,
 )
+
+#: QSettings keys (Slicer's own settings file): the relay address and the path of an additional CA certificate. Only
+#: values the transport accepted are stored — a refused address may hold credentials (§3.1).
+RELAY_URL_SETTING = "RemoteView/RelayURL"
+EXTRA_CA_SETTING = "RemoteView/ExtraCACertificate"
+#: No built-in relay until `deploy` names the production host (DEP-07) and `release` confirms it: a default address
+#: would send data to whoever controls that name.
+DEFAULT_RELAY_URL = ""
+#: The main-thread pump that drains the transport's events (architecture §6, SLC-08 ADR 0009).
+PUMP_INTERVAL_MS = 50
 
 #
 # RemoteView
@@ -55,28 +69,93 @@ SlicerRemoteView. Module layout follows the 3D Slicer scripted module template.
 
 
 class RemoteViewWidget(ScriptedLoadableModuleWidget):
-    """Module panel. Placeholder until the session UI lands (SLC-09)."""
+    """Module panel: Qt only. What Start/Stop do and what the panel shows is ``remoteview_core.panel`` (SLC-09)."""
 
     def __init__(self, parent=None) -> None:
         # Set before the base __init__, which calls setup() itself when parent is None.
         self.logic = None
+        self.ui = None
+        self.controller = None
+        self.pumpTimer = None
         ScriptedLoadableModuleWidget.__init__(self, parent)
 
     def setup(self) -> None:
         ScriptedLoadableModuleWidget.setup(self)
         self.logic = RemoteViewLogic()
 
-        statusLabel = qt.QLabel(
-            "RemoteView is not connected. Session controls arrive in a later version."
+        uiWidget = slicer.util.loadUI(self.resourcePath("UI/RemoteView.ui"))
+        self.layout.addWidget(uiWidget)
+        self.ui = slicer.util.childWidgetVariables(uiWidget)
+
+        codeFont = self.ui.codeLabel.font
+        # "Courier New" from the .ui is not installed everywhere
+        codeFont.setStyleHint(qt.QFont.Monospace)
+        # 5 characters read aloud and retyped
+        codeFont.setLetterSpacing(qt.QFont.PercentageSpacing, 130)
+        self.ui.codeLabel.font = codeFont
+
+        self.ui.relayUrlLineEdit.text = slicer.util.settingsValue(
+            RELAY_URL_SETTING, DEFAULT_RELAY_URL
         )
-        statusLabel.objectName = "statusLabel"
-        statusLabel.wordWrap = True
-        self.layout.addWidget(statusLabel)
-        self.layout.addStretch(1)
+        caFile = slicer.util.settingsValue(EXTRA_CA_SETTING, "")
+        self.ui.extraCaPathLineEdit.currentPath = caFile
+        # A remembered extra trust anchor is never applied out of sight (T5): show the section that holds it.
+        self.ui.advancedCollapsibleButton.collapsed = not caFile
+        self.ui.startButton.connect("clicked(bool)", self.onStartClicked)
+        self.ui.stopButton.connect("clicked(bool)", self.onStopClicked)
+
+        self.pumpTimer = qt.QTimer()
+        self.pumpTimer.setInterval(PUMP_INTERVAL_MS)
+        self.pumpTimer.connect("timeout()", self.onPump)
 
     def cleanup(self) -> None:
-        """Called when the module is unloaded (SLC-22 closes a running session here)."""
+        """Called when the module is unloaded: a running session is closed (waits up to 3 s)."""
+        if self.pumpTimer is not None:
+            self.pumpTimer.stop()
+        if self.controller is not None:
+            self.controller.shutdown()
+        self.controller = None
         self.logic = None
+
+    def onStartClicked(self, _checked: bool = False) -> None:
+        # Imported only now: nothing of the session machinery is loaded before the user starts (FR-02).
+        from remoteview_core.panel import PanelController  # noqa: PLC0415
+
+        if self.controller is None:
+            self.controller = PanelController(
+                slicer_version=slicer.app.applicationVersion, platform=sys.platform
+            )
+        url = self.ui.relayUrlLineEdit.text.strip()
+        caFile = self.ui.extraCaPathLineEdit.currentPath.strip()
+        view = self.controller.start(url, extra_ca_file=caFile or None)
+        if self.controller.active:  # the address and the CA file were accepted
+            settings = qt.QSettings()
+            settings.setValue(RELAY_URL_SETTING, url)
+            settings.setValue(EXTRA_CA_SETTING, caFile)
+            self.pumpTimer.start()
+        self.render(view)
+
+    def onStopClicked(self, _checked: bool = False) -> None:
+        if self.controller is not None:
+            self.render(self.controller.stop())
+
+    def onPump(self) -> None:
+        view = self.controller.pump()
+        self.render(view)
+        if not self.controller.active:
+            self.pumpTimer.stop()
+        # let the transport thread take the GIL (architecture §6, docs/research/slicer.md §3)
+        time.sleep(0.001)
+
+    def render(self, view) -> None:
+        """Show a ``remoteview_core.panel.PanelView`` (plain-text labels only)."""
+        self.ui.codeLabel.text = view.code
+        self.ui.statusLabel.text = view.status
+        self.ui.detailLabel.text = view.detail
+        self.ui.startButton.enabled = view.start_enabled
+        self.ui.stopButton.enabled = view.stop_enabled
+        self.ui.relayUrlLineEdit.enabled = view.settings_enabled
+        self.ui.extraCaPathLineEdit.enabled = view.settings_enabled
 
 
 #
@@ -85,7 +164,8 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
 
 
 class RemoteViewLogic(ScriptedLoadableModuleLogic):
-    """Session logic. Placeholder: no state, no network until SLC-09."""
+    """Scene-side logic. Placeholder: the session lives in the panel's controller (SLC-09); the Slicer scene
+    adapter arrives with SLC-22."""
 
     def __init__(self) -> None:
         ScriptedLoadableModuleLogic.__init__(self)
