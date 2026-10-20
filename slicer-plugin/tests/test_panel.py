@@ -589,6 +589,8 @@ def test_panel_texts_are_plain_and_complete():
     assert {"PUBLISHER_CLOSED", "PUBLISHER_GONE", "IDLE", "MAX_LIFETIME", "CAPACITY"} <= set(
         panel.END_REASONS
     )
+    texts = [*panel.SCENE_STATES.values(), *panel.SCENE_REFUSED.values(), panel.SCENE_FAILED]
+    assert all("<" not in text and ">" not in text for text in texts)
     for reason, text in panel.END_REASONS.items():
         assert re.fullmatch(r"[A-Z][A-Z0-9_]*", reason)
         assert "<" not in text and ">" not in text
@@ -709,8 +711,15 @@ def test_panel_adapter_start_pump_and_stop(widget, slicer_stubs, fake):
     transport.events.put(Received(1, created()))
     instance.onPump()
     assert instance.ui.codeLabel.text == CODE and instance.ui.stopButton.enabled is True
-    [(_, create)] = transport.sent  # §4.1 clientInfo: Slicer's version and the OS, nothing else
+    # §4.1 clientInfo: Slicer's version and the OS, nothing else
+    (_, create), *scene = transport.sent
     assert create["clientInfo"]["platform"] == f"Slicer 5.12.4 / {sys.platform}"
+    # SLC-25: the (empty) stub scene follows as a snapshot: begin, one chunk, end
+    assert [m["type"] if isinstance(m, dict) else "chunk" for _, m in scene] == [
+        "scene.snapshot.begin",
+        "chunk",
+        "scene.snapshot.end",
+    ]
     instance.onStopClicked()
     assert instance.ui.statusLabel.text == panel.STOPPING and instance.ui.codeLabel.text == ""
     transport.events.put(Disconnected(1, None, None, final_sent=True))

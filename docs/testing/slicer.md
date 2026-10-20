@@ -139,7 +139,7 @@ or the application log. Behind a TLS-inspecting proxy note the code shown on eac
 |---|---|---|---|---|
 | | | | | |
 
-## §2 Session panel: Start, code, Stop (SLC-09; US-01, FR-03, FR-13)
+## §2 Session panel: Start, code, scene, Stop (SLC-09, SLC-25; US-01, US-03, FR-03, FR-05, FR-08, FR-13)
 
 Preconditions: a **test** Slicer 5.12.x with the module path of §1; until SLC-10 installs it after consent, install the
 pinned client once in that Slicer's Python console: `slicer.util.pip_install("websockets==17.2")`. Relays: (a) the
@@ -147,9 +147,14 @@ relay stub of `tools/fake-slicer` on the same machine — once, from the reposit
 `npm run build -w shared -w tools/fake-slicer`; then, in a terminal kept open next to Slicer,
 `node slicer-plugin/tests/relay_stub.mjs --port 8787`, which prints `ws://127.0.0.1:8787/ws` and, when you end its
 input (Ctrl-D; Ctrl-Z then Enter on Windows), two numbers — the `session.close` messages and the heartbeat `ping`s it
-received (e.g. `1 4`; once sessions send scenes, SLC-25, one `v<sceneVersion>:<sha256>` per snapshot follows) — then
-exits; (b) a deployed relay (`wss://<relay-host>/ws`, `docs/deploy.md`), needed for step
-10 only (steps 3–8 work with either). For the CA steps keep any small non-certificate file and any PEM certificate at
+received (e.g. `1 4`), then one `v<sceneVersion>:<sha256>` per scene snapshot it received — then exits; (b) a deployed
+relay (`wss://<relay-host>/ws`, `docs/deploy.md`) with its viewer page (ADR 0006); (c) `relay-server` and `web-viewer`
+from `main` on this machine — in a checkout of `main`, `npm ci`, then `ALLOWED_ORIGINS=http://localhost:5173
+TRUST_PROXY=false npm run dev -w relay-server` and `npm run dev -w web-viewer` (relay address
+`ws://127.0.0.1:8787/ws`, viewer `http://localhost:5173`; in PowerShell set the two variables first:
+`$env:ALLOWED_ORIGINS='http://localhost:5173'; $env:TRUST_PROXY='false'`) — it listens unencrypted on every interface, so use sample
+data only or a host firewall. Step 10 needs (b); steps 11–14 need (b) or (c); the others
+work with any. For the CA steps keep any small non-certificate file and any PEM certificate at
 hand (e.g. Slicer's own `Slicer.crt`, whose path the SLC-08 snippet prints).
 
 Steps:
@@ -172,6 +177,28 @@ Steps:
    reload the module and open *Advanced*.
 10. Pick the PEM certificate instead and start a session with relay (b) (`wss://`; with relay (a) the connection uses no
     TLS, so the certificate plays no part); stop it. Restart Slicer and open *RemoteView*.
+11. With relay (b) or (c): load *MRHead* (*Sample Data*) and a model — e.g. the spheres of §12 — and click *Start
+    session*.
+12. Open the viewer (a phone with relay (b), or `http://localhost:5173` with relay (c)) and join with the code.
+13. Click *Stop session* while the viewer shows the scene.
+14. Start again, join with the viewer, then quit Slicer (*File → Exit*, confirm).
+15. Orientation phantom (SLC-05 follow-up): in a new scene, run in the Python console
+
+    ```python
+    import vtk
+    for name, center, color in (("R+100", (100, 0, 0), (1, 0, 0)), ("A+100", (0, 100, 0), (0, 1, 0)),
+                                ("S+100", (0, 0, 100), (0, 0, 1)), ("Origin", (0, 0, 0), (1, 1, 1))):
+        source = vtk.vtkSphereSource()
+        source.SetRadius(10 if name == "Origin" else 15)
+        source.SetCenter(center)
+        source.Update()
+        model = slicer.modules.models.logic().AddModel(source.GetOutput())
+        model.SetName(name)
+        model.GetDisplayNode().SetColor(color)
+    ```
+
+    start a session, join with the viewer, and turn Slicer's 3D view and the viewer to look from the front (Slicer:
+    *Anterior* view).
 
 Expected results:
 
@@ -179,11 +206,12 @@ Expected results:
   URLs, §3.1)" — the address is never echoed; nothing is sent; after the restart the address field is **empty** (the
   refused address was not remembered).
 - Step 3: "Connecting to …", then within 3 s a 5-character code in large letters (monospace, visibly letter-spaced —
-  `[TODO verify]` the PythonQt `QFont` calls) and "Session running · no viewers yet."; *Start* and the address field are
+  `[TODO verify]` the PythonQt `QFont` calls) and "Sending the scene · no viewers yet.", then "Live · no viewers yet."
+  (the scene loaded, possibly empty, was sent and the relay acknowledged it); *Start* and the address field are
   disabled, *Stop* enabled (US-01, FR-03).
-- Step 4: the status stays "Session running" (the transport thread pings every 15 s and the relay answers, also with
-  the GUI idle — the 50 ms pump yields the GIL; architecture §6).
-- Step 5: "Stopping…", then "Not connected."; the code disappears; relay (a) prints `1 N` with N ≥ 4: one
+- Step 4: the status stays "Live" (the transport thread pings every 15 s and the relay answers, also with the GUI
+  idle — the 50 ms pump yields the GIL; architecture §6).
+- Step 5: "Stopping…", then "Not connected."; the code disappears; relay (a) prints `1 N v1:…` with N ≥ 4: one
   `session.close` (FR-13) and a heartbeat every 15 s after the code appeared (N is about the session's seconds / 15;
   fewer means the transport thread was starved — report it with the Slicer version and OS).
 - Step 6: the relay address of step 3 is filled in (remembered in Slicer's settings); *Advanced* is collapsed.
@@ -196,6 +224,17 @@ Expected results:
 - Step 10: while the session connects and runs, the line under the status reads "An additional CA certificate is
   trusted for this connection." (T5); after the restart the PEM path is still selected and *Advanced* is expanded, so
   the extra trust anchor stays visible.
+- Step 11: "Sending the scene · no viewers yet.", then within 3 s of the code "Live · no viewers yet." (a large scene
+  takes longer: Slicer collects it on the main thread); a model that cannot be shared is counted under the status.
+- Step 12: the viewer shows the model within 10 s, in the colours and position of Slicer's 3D view, and nothing of
+  *MRHead* (a volume); Slicer shows "Live · 1 viewer." (US-01, FR-05, FR-08).
+- Step 13: the viewer shows "presentation ended" within 5 s (US-03, FR-13).
+- Step 14: Slicer exits without waiting more than 3 s; the viewer shows "presentation ended" within 5 s — the panel's
+  `cleanup()` runs while Slicer quits and sends `session.close` (`docs/research/slicer-scene.md` §2). This assumes the
+  scene had finished uploading ("Live"); during an upload on a slow link the stop message can be late (SLC-26).
+- Step 15: both show the same picture — red (R+100) on the patient's right, i.e. the left of the screen when looking
+  from the front, blue (S+100) at the top, green (A+100) nearest to the camera. A mirror image or a swapped pair is an
+  axis error (protocol §7.1, ADR 0005): report it with a screenshot of both.
 - Throughout: no traceback in the Python console, no session code or token in the console or the application log.
 
 | Date | Slicer version | OS | Result | Tester |

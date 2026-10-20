@@ -131,7 +131,9 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
 
         if self.controller is None:
             self.controller = PanelController(
-                slicer_version=slicer.app.applicationVersion, platform=sys.platform
+                slicer_version=slicer.app.applicationVersion,
+                platform=sys.platform,
+                scene=self.logic.sceneApi,
             )
         url = self.ui.relayUrlLineEdit.text.strip()
         caFile = self.ui.extraCaPathLineEdit.currentPath.strip()
@@ -172,8 +174,8 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
 
 
 class RemoteViewLogic(ScriptedLoadableModuleLogic):
-    """Scene-side logic: the session lives in the panel's controller (SLC-09); the first snapshot arrives with
-    SLC-24."""
+    """Scene-side logic: the session lives in the panel's controller (SLC-09), which sends the scene this logic
+    exposes as the session's first snapshot (SLC-25)."""
 
     def __init__(self) -> None:
         ScriptedLoadableModuleLogic.__init__(self)

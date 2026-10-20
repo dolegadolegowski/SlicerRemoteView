@@ -184,7 +184,17 @@ def _make_stub_modules() -> dict[str, types.ModuleType]:
         return converter(settings.value(key)) if settings.contains(key) else default
 
     util.settingsValue = settings_value
+    # an empty scene (MRML stays manual, docs/testing/slicer.md); tests replace these to add nodes
+    util.getNodesByClass = lambda _class_name: []
     slicer.util = util
+    slicer.vtkMRMLFolderDisplayNode = mock.NonCallableMagicMock(
+        name="slicer.vtkMRMLFolderDisplayNode",
+        spec_set=[
+            "GetHierarchyVisibility",
+            "GetHierarchyOpacity",
+            "GetOverridingHierarchyDisplayNode",
+        ],
+    )
 
     packaging = types.ModuleType("slicer.packaging")
     packaging.pip_install = mock.MagicMock(name="slicer.packaging.pip_install")
