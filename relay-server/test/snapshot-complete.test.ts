@@ -7,6 +7,8 @@ import { createLogger } from "../src/logger.js";
 import { Registry } from "../src/registry.js";
 import type { Session } from "../src/registry.js";
 import type { Connection } from "../src/ws/connection.js";
+import { readFrame } from "../src/ws/frame.js";
+import type { TextFrame } from "../src/ws/frame.js";
 import { CHUNK_TIMEOUT_MS, snapshotHandlers } from "../src/ws/snapshot.js";
 import type { AbortReason } from "../src/ws/snapshot.js";
 import { fixture } from "./helpers/fixtures.js";
@@ -88,6 +90,15 @@ async function flush(client: TestClient): Promise<Received[]> {
   }
 }
 
+/** Calls a handler the way the dispatcher does: with the message and the frame it came in. */
+function invoke(
+  handler: (connection: Connection, message: never, frame: TextFrame) => unknown,
+  connection: Connection,
+  message: Record<string, unknown>,
+): void {
+  void handler(connection, message as never, readFrame(JSON.stringify(message)));
+}
+
 describe("end, verify and cache (SRV-24 criterion 1, §6.4)", () => {
   it("the cached bytes match the manifest; the publisher gets the ack; state resets", async () => {
     const { client, session } = await publisher();
@@ -118,7 +129,7 @@ describe("end, verify and cache (SRV-24 criterion 1, §6.4)", () => {
     expect(session.nodeState.size).toBe(0);
   });
 
-  it("counts connected viewers as deferred until the fan-out exists (SRV-10)", async () => {
+  it("counts a viewer that was connected at begin as streamed (SRV-10)", async () => {
     const { client, session } = await publisher();
     const viewer = await connectClient(relay!.url);
     viewer.sendRaw(JSON.stringify({ ...fixture("viewer.join"), code: session.code }));
@@ -128,8 +139,8 @@ describe("end, verify and cache (SRV-24 criterion 1, §6.4)", () => {
     expect(await flush(client)).toEqual([
       expect.objectContaining({
         type: "scene.snapshot.ack",
-        viewersStreamed: 0,
-        viewersDeferred: 1,
+        viewersStreamed: 1,
+        viewersDeferred: 0,
       }),
     ]);
   });
@@ -363,10 +374,15 @@ describe("abort events for the fan-out (unit)", () => {
       sendError: (code: string) => sent.push({ code }),
       send: (message: Record<string, unknown>) => sent.push(message),
     } as unknown as Connection;
-    session.publisher = { send: (m) => sent.push(m), close: () => {} };
+    session.publisher = {
+      send: (m) => sent.push(m),
+      forward: () => {},
+      bufferedAmount: 0,
+      close: () => {},
+    };
     const bytes = glb("asymmetric-2nodes.glb");
     const start = (version: number) =>
-      void snapshot.handlers["scene.snapshot.begin"]!(connection, begin(bytes, version) as never);
+      invoke(snapshot.handlers["scene.snapshot.begin"]!, connection, begin(bytes, version));
     return { clock, session, snapshot, connection, aborted, sent, bytes, start };
   }
 
@@ -376,11 +392,11 @@ describe("abort events for the fan-out (unit)", () => {
     [
       "the publisher's abort",
       (s) =>
-        void s.snapshot.handlers["scene.snapshot.abort"]!(s.connection, {
+        invoke(s.snapshot.handlers["scene.snapshot.abort"]!, s.connection, {
           type: "scene.snapshot.abort",
           sceneVersion: 1,
           reason: "TIMEOUT",
-        } as never),
+        }),
       "TIMEOUT",
     ],
     ["the publisher gone", (s) => s.snapshot.publisherGone(s.session), "PUBLISHER_GONE"],
@@ -389,9 +405,10 @@ describe("abort events for the fan-out (unit)", () => {
       "a checksum mismatch",
       (s) => {
         s.snapshot.chunk(s.connection, frames(s.bytes, 1)[0]!);
-        void s.snapshot.handlers["scene.snapshot.end"]!(
+        invoke(
+          s.snapshot.handlers["scene.snapshot.end"]!,
           s.connection,
-          end(s.bytes, 1, "f".repeat(64)) as never,
+          end(s.bytes, 1, "f".repeat(64)),
         );
       },
       "CHECKSUM_MISMATCH",
@@ -422,10 +439,10 @@ describe("abort events for the fan-out (unit)", () => {
   ])("a newer begin refused as %s still supersedes the snapshot in flight", (_name, extra) => {
     const s = setup();
     s.start(1);
-    void s.snapshot.handlers["scene.snapshot.begin"]!(s.connection, {
+    invoke(s.snapshot.handlers["scene.snapshot.begin"]!, s.connection, {
       ...begin(s.bytes, 2),
       ...extra,
-    } as never);
+    });
     expect(s.aborted).toEqual([[1, "SUPERSEDED"]]);
     expect(s.session.assembling).toBeUndefined();
   });
@@ -455,14 +472,19 @@ describe("abort events for the fan-out (unit)", () => {
       session,
       send: (message: Record<string, unknown>) => sent.push(message),
     } as unknown as Connection;
-    session.publisher = { send: (m) => sent.push(m), close: () => {} };
+    session.publisher = {
+      send: (m) => sent.push(m),
+      forward: () => {},
+      bufferedAmount: 0,
+      close: () => {},
+    };
     const bytes = glb("asymmetric-2nodes.glb");
-    void snapshot.handlers["scene.snapshot.begin"]!(connection, begin(bytes, 1) as never);
+    invoke(snapshot.handlers["scene.snapshot.begin"]!, connection, begin(bytes, 1));
     expect(() => clock.advance(CHUNK_TIMEOUT_MS)).not.toThrow();
     expect(session.assembling).toBeUndefined();
-    void snapshot.handlers["scene.snapshot.begin"]!(connection, begin(bytes, 2) as never);
+    invoke(snapshot.handlers["scene.snapshot.begin"]!, connection, begin(bytes, 2));
     for (const frame of frames(bytes, 2)) snapshot.chunk(connection, frame);
-    void snapshot.handlers["scene.snapshot.end"]!(connection, end(bytes, 2) as never);
+    invoke(snapshot.handlers["scene.snapshot.end"]!, connection, end(bytes, 2));
     expect(sent.at(-1)).toMatchObject({ type: "scene.snapshot.ack", sceneVersion: 2 });
     const failures = lines.filter((l) => l.includes("hook failed"));
     expect(failures).toHaveLength(2);

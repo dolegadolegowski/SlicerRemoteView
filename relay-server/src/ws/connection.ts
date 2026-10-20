@@ -49,6 +49,7 @@ export class Connection implements Peer {
   #bound = false;
   #closing = false;
   #reading = true;
+  #paused = false;
   #handshakeTimer: TimerHandle | undefined;
 
   constructor(
@@ -69,6 +70,28 @@ export class Connection implements Peer {
     this.socket.send(
       JSON.stringify({ protocolVersion: PROTOCOL_VERSION, ...message, ts: this.clock.now() }),
     );
+  }
+
+  /** Sends a publisher frame as received (text or binary), unchanged (§11). */
+  forward(frame: string | Buffer): void {
+    if (!this.isOpen) return;
+    this.socket.send(frame, { binary: typeof frame !== "string" });
+  }
+
+  get bufferedAmount(): number {
+    return this.socket.bufferedAmount;
+  }
+
+  /** `ws` `pause()`/`resume()`: the socket stops / restarts emitting messages. */
+  pauseReading(): void {
+    if (this.#closing) return;
+    this.#paused = true;
+    this.socket.pause();
+  }
+
+  resumeReading(): void {
+    this.#paused = false;
+    this.socket.resume();
   }
 
   /** Sends `error` (§9.2); `message` is developer-facing English without client data. */
@@ -109,11 +132,20 @@ export class Connection implements Peer {
     if (this.#closing) return;
     this.#closing = true;
     this.#clearHandshakeTimer();
+    // A paused socket would not read the peer's close frame: `ws` would wait 30 s to destroy it.
+    if (this.#paused) this.resumeReading();
     if (
       this.socket.readyState === WebSocket.OPEN ||
       this.socket.readyState === WebSocket.CONNECTING
     )
       this.socket.close(closeCode);
+  }
+
+  /** Destroys the socket without a closing handshake (a peer that reads nothing cannot complete one). */
+  terminate(): void {
+    this.#closing = true;
+    this.#clearHandshakeTimer();
+    this.socket.terminate();
   }
 
   /** Marks a close the peer started, so handlers stop sending. */

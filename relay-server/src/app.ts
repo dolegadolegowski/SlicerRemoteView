@@ -21,6 +21,7 @@ import { PROTOCOL_VERSIONS, RELAY_NAME, RELAY_VERSION } from "./version.js";
 import { createDispatcher } from "./ws/dispatch.js";
 import type { HandlerTable } from "./ws/dispatch.js";
 import { registerWsEndpoint } from "./ws/endpoint.js";
+import { fanout } from "./ws/fanout.js";
 import { publisherHandlers } from "./ws/publisher.js";
 import { snapshotHandlers } from "./ws/snapshot.js";
 import { viewerHandlers } from "./ws/viewer.js";
@@ -128,8 +129,15 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   const validators = defaultSchemas();
   const limiter = options.limiter ?? new RateLimiter({ clock, logger });
   const publisher = publisherHandlers({ registry, config, limiter, logger });
-  const viewer = viewerHandlers({ registry, limiter, logger, clock });
-  const snapshot = snapshotHandlers({ registry, config, logger, clock });
+  const fan = fanout({ registry, config, logger, clock });
+  const viewer = viewerHandlers({
+    registry,
+    limiter,
+    logger,
+    clock,
+    overCapacity: fan.overCapacity,
+  });
+  const snapshot = snapshotHandlers({ registry, config, logger, clock, events: fan.events });
 
   // First: the WebSocket plugin wraps every route registered after it (upgrade interception).
   await registerWsEndpoint(app, {
@@ -169,6 +177,11 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   app.addHook("onReady", async () => {
     registry.start();
     limiter.start();
+    fan.start();
+  });
+  // Before the server waits for its sockets: a publisher paused by the fan-out must read its close.
+  app.addHook("preClose", async () => {
+    fan.dispose();
   });
   app.addHook("onClose", async () => {
     registry.stop();

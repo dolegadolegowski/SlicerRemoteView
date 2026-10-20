@@ -40,7 +40,7 @@ interface Scenario {
   reason: ExpiryReason;
 }
 
-const stubPeer = { send: () => {}, close: () => {} };
+const stubPeer = { send: () => {}, forward: () => {}, bufferedAmount: 0, close: () => {} };
 const withViewer: Step = (r, s) => void r.addViewer(s, stubPeer, "web");
 const viewersLeave: Step = (r, s) => {
   for (const viewer of s.viewers.values()) r.viewerDisconnected(s, viewer);

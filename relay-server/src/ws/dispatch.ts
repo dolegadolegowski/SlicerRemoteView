@@ -41,10 +41,14 @@ export const UNAUTHORIZED_STRIKES = 2;
 /** Cap on the echoed `details.instancePath` (JSON Pointers of client messages are short). */
 export const MAX_INSTANCE_PATH_LENGTH = 128;
 
-/** May be async; the endpoint guards both throws and rejections (`INTERNAL` + `1011`). */
+/**
+ * May be async; the endpoint guards both throws and rejections (`INTERNAL` + `1011`). `frame` is the
+ * message as received, for handlers that forward it byte for byte (§11).
+ */
 export type Handler<T extends MessageType> = (
   connection: Connection,
   message: MessageOfType<T>,
+  frame: TextFrame,
 ) => void | Promise<void>;
 export type HandlerTable = { [T in MessageType]?: Handler<T> };
 
@@ -189,6 +193,6 @@ export function createDispatcher(
       );
       return;
     }
-    return handler(connection, message as never);
+    return handler(connection, message as never, frame);
   };
 }

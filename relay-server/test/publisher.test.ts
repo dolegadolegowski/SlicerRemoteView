@@ -26,6 +26,8 @@ function fakeViewer(session: Session) {
   const events: ViewerEvent[] = [];
   const at: number[] = [];
   const peer: Peer = {
+    bufferedAmount: 0,
+    forward: () => {},
     send: (message) => {
       expect(validateMessage({ protocolVersion: "1.0", ts: 0, ...message })).toMatchObject({
         ok: true,
@@ -240,7 +242,8 @@ describe("app lifecycle", () => {
   it("closing the app detaches the expiry listener from an injected registry", async () => {
     relay = await startRelay();
     expect(relay.registry.listenerCount("expired")).toBe(1);
-    expect(relay.registry.listenerCount("released")).toBe(1);
+    // The snapshot pipeline and the fan-out.
+    expect(relay.registry.listenerCount("released")).toBe(2);
     await relay.close();
     expect(relay.registry.listenerCount("expired")).toBe(0);
     expect(relay.registry.listenerCount("released")).toBe(0);

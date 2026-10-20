@@ -1,8 +1,8 @@
 /**
  * Snapshot ingest and completion (docs/protocol.md §3.3, §6.1–§6.4; architecture §3, §5): the checks
  * of `scene.snapshot.begin`, the binary chunk stream into one buffer allocated at `begin`, and its
- * end — verified and swapped into the cache, or aborted. Forwarding to viewers is SRV-10, which
- * plugs into `SnapshotEvents`.
+ * end — verified and swapped into the cache, or aborted. Forwarding to viewers is `fanout.ts`
+ * (SRV-10), which plugs into `SnapshotEvents`.
  *
  * - `begin`: `sceneVersion` a uint32 (`INVALID_MESSAGE{instancePath:"/sceneVersion"}`, the chunk
  *   header carries no more) above every version used so far — the last accepted one and every one
@@ -57,14 +57,25 @@ import type { HandlerTable, NormalizerTable } from "./dispatch.js";
 
 export type AbortReason = MessageOfType<"scene.snapshot.abort">["reason"];
 
-/** What the viewer fan-out (SRV-10) plugs in. */
+/**
+ * What the viewer fan-out (`fanout.ts`) plugs in. `text` and `frame` are the publisher's frames as
+ * received, forwarded byte for byte (§11).
+ */
 export interface SnapshotEvents {
-  /** A snapshot in flight was dropped; viewers that got its `begin` get `scene.snapshot.abort`. */
-  aborted?(session: Session, sceneVersion: number, reason: AbortReason): void;
+  /** A `scene.snapshot.begin` was accepted. */
+  begun?(session: Session, sceneVersion: number, text: string): void;
+  /** A binary chunk of the snapshot in flight was accepted. */
+  chunk?(session: Session, frame: Buffer): void;
+  /**
+   * A snapshot in flight was dropped; viewers that got its `begin` get `scene.snapshot.abort`.
+   * `text` is the publisher's own abort; the relay's own aborts have none.
+   */
+  aborted?(session: Session, sceneVersion: number, reason: AbortReason, text?: string): void;
   /** A snapshot was verified and cached; returns the counts of `scene.snapshot.ack`. */
   completed?(
     session: Session,
     snapshot: CachedSnapshot,
+    text: string,
   ): { viewersStreamed: number; viewersDeferred: number };
 }
 
@@ -123,13 +134,17 @@ export function snapshotHandlers({ registry, config, logger, clock, events = {} 
   }
 
   /** Drops the snapshot in flight, if any: its buffer is freed and its later chunks are ignored. */
-  function discard(session: Session, reason: AbortReason): void {
+  function discard(session: Session, reason: AbortReason, text?: string): void {
     const assembling = session.assembling;
     if (assembling === undefined) return;
     cancelChunkTimeout(session);
     session.assembling = undefined;
     session.ignoredSnapshotVersion = assembling.sceneVersion;
-    hook(session, () => events.aborted?.(session, assembling.sceneVersion, reason), undefined);
+    hook(
+      session,
+      () => events.aborted?.(session, assembling.sceneVersion, reason, text),
+      undefined,
+    );
     logger.debug(
       { sessionId: session.id, sceneVersion: assembling.sceneVersion, reason },
       "snapshot aborted",
@@ -170,7 +185,7 @@ export function snapshotHandlers({ registry, config, logger, clock, events = {} 
   }
 
   const handlers: HandlerTable = {
-    "scene.snapshot.begin": (connection, message) => {
+    "scene.snapshot.begin": (connection, message, frame) => {
       const session = connection.session;
       if (session === undefined) return;
       const replyTo = message.id;
@@ -246,13 +261,14 @@ export function snapshotHandlers({ registry, config, logger, clock, events = {} 
       };
       session.assembling = assembling;
       armTimeout(session, sceneVersion, CHUNK_TIMEOUT_MS);
+      hook(session, () => events.begun?.(session, sceneVersion, frame.text), undefined);
       logger.debug(
         { sessionId: session.id, sceneVersion, byteLength, chunkCount },
         "snapshot begin",
       );
     },
 
-    "scene.snapshot.end": (connection, message) => {
+    "scene.snapshot.end": (connection, message, frame) => {
       const session = connection.session;
       if (session === undefined) return;
       const replyTo = message.id;
@@ -304,7 +320,7 @@ export function snapshotHandlers({ registry, config, logger, clock, events = {} 
       const fallback = { viewersStreamed: 0, viewersDeferred: session.connectedViewers };
       const counts = hook(
         session,
-        () => events.completed?.(session, snapshot) ?? fallback,
+        () => events.completed?.(session, snapshot, frame.text) ?? fallback,
         fallback,
       );
       connection.send({
@@ -319,11 +335,11 @@ export function snapshotHandlers({ registry, config, logger, clock, events = {} 
       );
     },
 
-    "scene.snapshot.abort": (connection, message) => {
+    "scene.snapshot.abort": (connection, message, frame) => {
       const session = connection.session;
       // Only the snapshot in flight can be aborted; anything else is already over.
       if (session?.assembling?.sceneVersion === message.sceneVersion)
-        discard(session, message.reason);
+        discard(session, message.reason, frame.text);
     },
   };
 
@@ -367,6 +383,7 @@ export function snapshotHandlers({ registry, config, logger, clock, events = {} 
     assembling.hash.update(decoded.value.payload);
     assembling.nextIndex += 1;
     assembling.lastChunkAt = clock.now();
+    hook(session, () => events.chunk?.(session, frame), undefined);
   }
 
   /** The publisher's socket is gone: the snapshot in flight cannot complete (§6.4). */

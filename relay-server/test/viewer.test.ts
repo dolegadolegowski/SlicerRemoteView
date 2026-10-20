@@ -7,6 +7,8 @@ import { RateLimiter } from "../src/ratelimit.js";
 import { Registry } from "../src/registry.js";
 import type { Session } from "../src/registry.js";
 import type { Connection } from "../src/ws/connection.js";
+import { readFrame } from "../src/ws/frame.js";
+import type { TextFrame } from "../src/ws/frame.js";
 import {
   INVALID_CODE_JITTER_MS,
   normalizeCode,
@@ -93,6 +95,15 @@ const refusals = (): number =>
   lines.filter((l) => (JSON.parse(l) as { errorCode?: string }).errorCode === "INVALID_CODE")
     .length;
 const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 30));
+
+/** Calls a handler the way the dispatcher does: with the message and the frame it came in. */
+function invoke(
+  handler: (connection: Connection, message: never, frame: TextFrame) => unknown,
+  connection: Connection,
+  message: Record<string, unknown>,
+): void {
+  void handler(connection, message as never, readFrame(JSON.stringify(message)));
+}
 
 describe("viewer limit (SRV-07 criterion 1, FR-22, US-16)", () => {
   it("20 viewers join; the 21st gets SESSION_FULL{viewerLimit:20} + 4005, the others stay", async () => {
@@ -237,7 +248,7 @@ describe("uniform INVALID_CODE (SRV-07 criterion 2, §5.2, §12, T1)", () => {
     const { connection, sent } = fakeConnection();
     const message = joinMessage("AAAAO");
     normalizers["viewer.join"]!(message);
-    void handlers["viewer.join"]!(connection, message as never);
+    invoke(handlers["viewer.join"]!, connection, message);
     expect(calls).toEqual([[INVALID_CODE_JITTER_MS.min, INVALID_CODE_JITTER_MS.max + 1]]);
     clock.advance(96);
     expect(sent).toEqual([]);
@@ -491,7 +502,7 @@ describe("unit", () => {
       const { connection, sent } = fakeConnection();
       const message = joinMessage(code);
       normalizers["viewer.join"]!(message);
-      void handlers["viewer.join"]!(connection, message as never);
+      invoke(handlers["viewer.join"]!, connection, message);
       expect(sent).toEqual([{ code: "CAPACITY", close: 4006 }]);
     }
     expect(clock.pending).toBe(0); // answered at once: no jitter timer either way
@@ -504,7 +515,7 @@ describe("unit", () => {
     const { session } = deps.registry.createSession("mobile");
     const { handlers } = viewerHandlers(deps);
     const { connection, sent } = fakeConnection();
-    void handlers["viewer.join"]!(connection, joinMessage(session.code) as never);
+    invoke(handlers["viewer.join"]!, connection, joinMessage(session.code));
     clock.advance(INVALID_CODE_JITTER_MS.max);
     expect(sent).toEqual([{ code: "INVALID_CODE", close: 4004 }]);
     expect(session.viewers.size).toBe(0);

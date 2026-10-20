@@ -85,7 +85,16 @@ export interface AssemblingSnapshot {
 export interface Peer {
   /** Sends one JSON message; the transport adds `protocolVersion` and `ts`. */
   send(message: { type: string } & Record<string, unknown>): void;
+  /** Sends a publisher frame as received, byte for byte: text as is, a `Buffer` as binary (§11). */
+  forward(frame: string | Buffer): void;
+  /** Bytes queued for this socket and not yet handed to the network (`ws` `bufferedAmount`). */
+  readonly bufferedAmount: number;
+  /** Stops / restarts reading from this socket (TCP backpressure on its sender). */
+  pauseReading?(): void;
+  resumeReading?(): void;
   close(closeCode: number): void;
+  /** Drops the socket at once, without waiting for the peer's close (`ws` `terminate()`). */
+  terminate?(): void;
 }
 
 /** `clientInfo.platform` of a viewer, mapped onto the documented set (§5.1; unknown → `other`, §14). */

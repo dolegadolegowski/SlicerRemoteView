@@ -11,7 +11,8 @@
  *   `RATE_LIMITED{retryAfterS}` + `4006`, decided before the code is looked up.
  * - `SESSION_FULL{viewerLimit, retryAfterS}` + `4005` at `MAX_VIEWERS` connected viewers;
  *   `CAPACITY` + `4006` while a global budget refuses new viewers, decided before the code is looked
- *   up (the buffered-bytes budget arrives with SRV-10).
+ *   up (the app passes the fan-out's: the viewers' send buffers hold `MAX_TOTAL_BUFFERED_BYTES`,
+ *   `ws/fanout.ts`).
  * - Rejoin by `sessionId` + `viewerToken` is SRV-15; until then it answers `SESSION_NOT_FOUND`
  *   (socket kept open, so the client falls back to a code join, §9.2).
  * - `viewer.count` goes to the publisher and every connected viewer after each join and leave (§5.3);
@@ -55,7 +56,7 @@ export interface ViewerDeps {
   clock: Clock;
   /** Integer in `[min, max)` for the jitter; default `crypto.randomInt`. */
   rng?: RandomInt;
-  /** True while a global budget refuses new viewers (`CAPACITY`); SRV-10 supplies the real one. */
+  /** True while a global budget refuses new viewers (`CAPACITY`); the app passes the fan-out's. */
   overCapacity?: () => boolean;
 }
 
