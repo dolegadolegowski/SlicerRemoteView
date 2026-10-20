@@ -27,11 +27,12 @@ if (app) {
     apply(message) {
       if (message.type === "scene.nodeAdded") return screens.updating(true); // a snapshot follows (§8.2)
       if (!live) return;
-      screens.sceneChanged(
+      const applied =
         message.type === "scene.update"
           ? live.apply(message.changes)
-          : live.remove(message.nodeIds),
-      );
+          : live.remove(message.nodeIds);
+      screens.sceneChanged(applied);
+      screens.presenterChanged(applied.overridden); // WEB-13: a local choice was replaced
     },
     applyState(state) {
       if (!live) return;
@@ -41,6 +42,7 @@ if (app) {
         changed: changed.changed || removed.changed,
         removed: removed.removed,
       });
+      screens.presenterChanged(changed.overridden);
     },
     requestResync: (reason) => void loader.requestResync(reason),
   });

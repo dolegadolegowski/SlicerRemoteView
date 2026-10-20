@@ -100,6 +100,8 @@ const en = {
   "state.linkInvalid.body":
     "The link you opened does not contain a valid session code. Check the code shown in 3D Slicer.",
   "viewer.updating": "Updating the scene…",
+  "viewer.presenterChanged": "The presenter changed {name}",
+  "viewer.presenterChangedMany": "The presenter changed {count} structures",
   "viewer.fit": "Fit view",
   "viewer.dismiss": "Dismiss",
   "viewer.canvasLabel":
@@ -109,6 +111,7 @@ const en = {
   "nodePanel.showAll": "Show all",
   "nodePanel.unnamed": "Unnamed {n}",
   "nodePanel.empty": "This scene has no structures.",
+  "nodePanel.opacity": "Opacity of {name}",
   "codeEntry.title": "Join a session",
   "codeEntry.lead": "Enter the 5-character code shown in 3D Slicer.",
   "codeEntry.cellLabel": "Code character {n} of {total}",
@@ -215,6 +218,8 @@ const pl: Record<StringKey, string> = {
   "state.linkInvalid.body":
     "Otwarty link nie zawiera prawidłowego kodu sesji. Sprawdź kod widoczny w 3D Slicerze.",
   "viewer.updating": "Aktualizowanie sceny…",
+  "viewer.presenterChanged": "Prezenter zmienił: {name}",
+  "viewer.presenterChangedMany": "Prezenter zmienił struktury: {count}",
   "viewer.fit": "Dopasuj widok",
   "viewer.dismiss": "Zamknij",
   "viewer.canvasLabel":
@@ -224,6 +229,7 @@ const pl: Record<StringKey, string> = {
   "nodePanel.showAll": "Pokaż wszystkie",
   "nodePanel.unnamed": "Bez nazwy {n}",
   "nodePanel.empty": "Ta scena nie zawiera struktur.",
+  "nodePanel.opacity": "Krycie: {name}",
   "codeEntry.title": "Dołącz do sesji",
   "codeEntry.lead": "Wpisz 5-znakowy kod widoczny w 3D Slicerze.",
   "codeEntry.cellLabel": "Znak kodu {n} z {total}",

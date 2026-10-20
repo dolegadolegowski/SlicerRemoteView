@@ -241,6 +241,122 @@ describe("local visibility (FR-40, US-09)", () => {
   });
 });
 
+describe("local opacity (WEB-13, FR-40, US-10)", () => {
+  const slider = (nodeId: string) =>
+    row(nodeId).parentElement!.querySelector<HTMLInputElement>(".node-panel__opacity")!;
+  const slide = (input: HTMLInputElement, value: number) => {
+    input.value = String(value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  afterEach(() => {
+    for (const node of model.nodes.values()) {
+      node.material.opacity = node.manifest.opacity;
+      node.material.transparent = node.manifest.opacity < 1;
+      node.material.depthWrite = node.manifest.opacity >= 1;
+    }
+  });
+
+  it("each structure has a labelled 0..1 slider showing its opacity", () => {
+    setup();
+    expect(slider(LIVER).getAttribute("aria-label")).toBe("Opacity of Liver");
+    expect([slider(LIVER).min, slider(LIVER).max]).toEqual(["0", "1"]);
+    expect(slider(LIVER).value).toBe("1");
+    expect(slider(TUMOR).value).toBe("0.35"); // the fixture's translucent tumour
+    expect(slider(TUMOR).getAttribute("aria-valuetext")).toBe("35 %");
+  });
+
+  it("sliding to 0.4 makes the material translucent at once and asks for one frame", () => {
+    setup();
+    const liver = model.nodes.get(LIVER)!;
+    slide(slider(LIVER), 0.4);
+    expect(liver.material.opacity).toBe(0.4);
+    expect(liver.material.transparent).toBe(true);
+    expect(liver.material.depthWrite).toBe(false); // the opaque tumour inside still sorts right
+    expect(liver.M.renderOrder).toBeGreaterThan(0);
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(slider(LIVER).getAttribute("aria-valuetext")).toBe("40 %");
+    slide(slider(LIVER), 1);
+    expect(liver.material.transparent).toBe(false);
+    expect(liver.material.depthWrite).toBe(true);
+  });
+
+  it("refresh() shows an opacity the presenter set, also one off a coarse step", () => {
+    setup();
+    model.nodes.get(TUMOR)!.material.opacity = 0.8;
+    panel.refresh();
+    expect(slider(TUMOR).value).toBe("0.8");
+    model.nodes.get(TUMOR)!.material.opacity = 0.98; // Slicer's value: not at the end stop of the slider
+    panel.refresh();
+    expect(slider(TUMOR).value).toBe("0.98");
+    expect(slider(TUMOR).getAttribute("aria-valuetext")).toBe("98 %");
+    // jsdom does not round to the step; a browser would show 0.98 as 1 with a 5 % step (e2e/opacity.spec.ts).
+    expect(slider(TUMOR).step).toBe("0.01");
+  });
+
+  it("a rebuild keeps keyboard focus on the same slider", () => {
+    setup();
+    slider(TUMOR).focus();
+    panel.setModel(model);
+    expect(document.activeElement).toBe(slider(TUMOR));
+  });
+
+  describe("a vertical swipe that starts on the track (Chromium jumps the thumb on touchstart)", () => {
+    const pointer = (target: Element, type: string, pointerType = "touch", pointerId = 7) => {
+      const event = new Event(type, { bubbles: true });
+      Object.assign(event, { pointerType, pointerId });
+      target.dispatchEvent(event);
+    };
+
+    it("puts the slider back when the browser takes the gesture for scrolling (pointercancel)", () => {
+      setup();
+      const liver = model.nodes.get(LIVER)!;
+      pointer(slider(LIVER), "pointerdown");
+      slide(slider(LIVER), 0.25); // the thumb jumped to the touch point
+      expect(liver.material.opacity).toBe(0.25);
+      pointer(slider(LIVER), "pointercancel");
+      expect(liver.material.opacity).toBe(1);
+      expect(liver.material.transparent).toBe(false);
+      expect(liver.material.depthWrite).toBe(true);
+      expect(slider(LIVER).value).toBe("1");
+      expect(onChange).toHaveBeenCalledTimes(2); // the jump and the way back are both drawn
+    });
+
+    it("keeps a tap or a horizontal drag (pointerup), a mouse, another pointer and a cancel without input", () => {
+      setup();
+      const liver = model.nodes.get(LIVER)!;
+      pointer(slider(LIVER), "pointerdown");
+      slide(slider(LIVER), 0.4);
+      pointer(slider(LIVER), "pointerup");
+      pointer(slider(LIVER), "pointercancel");
+      expect(liver.material.opacity).toBe(0.4);
+      pointer(slider(LIVER), "pointerdown", "mouse");
+      slide(slider(LIVER), 0.6);
+      pointer(slider(LIVER), "pointercancel", "mouse");
+      expect(liver.material.opacity).toBe(0.6);
+      pointer(slider(LIVER), "pointerdown");
+      slide(slider(LIVER), 0.7);
+      pointer(slider(LIVER), "pointercancel", "touch", 8);
+      expect(liver.material.opacity).toBe(0.7);
+      const calls = onChange.mock.calls.length;
+      pointer(slider(TUMOR), "pointerdown");
+      pointer(slider(TUMOR), "pointercancel");
+      expect(model.nodes.get(TUMOR)!.material.opacity).toBe(0.35);
+      expect(onChange).toHaveBeenCalledTimes(calls);
+    });
+
+    it("keeps an opacity the presenter set during the gesture", () => {
+      setup();
+      const liver = model.nodes.get(LIVER)!;
+      pointer(slider(LIVER), "pointerdown");
+      slide(slider(LIVER), 0.25);
+      liver.material.opacity = 0.5; // a live update (WEB-12) …
+      panel.refresh(); // … and its refresh
+      pointer(slider(LIVER), "pointercancel");
+      expect(liver.material.opacity).toBe(0.5);
+    });
+  });
+});
+
 describe("collapsible", () => {
   it("starts closed; the toggle opens and closes the list and reports it", () => {
     onChange = vi.fn<() => void>();

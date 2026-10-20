@@ -326,6 +326,62 @@ body {
   touch-action: manipulation;
 }
 
+.node-panel__item {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Opacity (WEB-13): a 44 px tall control whose thumb is a 44 px touch target (28 px drawn, 8 px clear border):
+   iOS Safari only drags a range input by its thumb. */
+.node-panel__opacity {
+  -webkit-appearance: none;
+  appearance: none;
+  height: var(--target);
+  margin: 0 12px;
+  background: transparent;
+  touch-action: pan-y; /* a vertical swipe scrolls the list (node-panel.ts undoes Blink's thumb jump); a horizontal one moves the thumb */
+}
+
+.node-panel__opacity::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+}
+
+.node-panel__opacity::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  box-sizing: border-box;
+  width: var(--target);
+  height: var(--target);
+  margin-top: -20px; /* centred on the 4 px track */
+  border: 8px solid transparent;
+  border-radius: 50%;
+  background: var(--accent);
+  background-clip: padding-box;
+}
+
+.node-panel__opacity::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+}
+
+.node-panel__opacity::-moz-range-thumb {
+  box-sizing: border-box;
+  width: var(--target);
+  height: var(--target);
+  border: 8px solid transparent;
+  border-radius: 50%;
+  background: var(--accent);
+  background-clip: padding-box;
+}
+
+.node-panel__opacity:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: -3px;
+}
+
 .node-panel__swatch {
   flex: none;
   width: 16px;

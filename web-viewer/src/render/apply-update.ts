@@ -5,8 +5,8 @@
 // The presenter's last value of every property is kept per node (from the manifest, then each change). A property
 // is applied only when the presenter's value changes: a `scene.state` replayed after a gap or a rejoin repeats
 // values already applied and so does not undo what the user chose locally in the node panel. When the presenter
-// does change `visible`, that replaces the local choice (FR-40, US-09); the nodes where this happened are returned
-// for the notice (WEB-13).
+// does change `visible` or `opacity`, that replaces the local choice (FR-40, US-09, US-10); the nodes where this
+// happened are returned for the notice (WEB-13). A `color` change never touches a local hide.
 
 import { LinearSRGBColorSpace } from "three";
 import type { Color } from "three";
@@ -19,7 +19,7 @@ export interface Applied {
   readonly changed: boolean;
   /** Nodes were removed: the node panel rebuilds its list. */
   readonly removed: boolean;
-  /** Nodes whose local visibility choice a presenter change replaced (FR-40). */
+  /** Nodes whose local visibility or opacity choice a presenter change replaced (FR-40), each once. */
   readonly overridden: readonly string[];
 }
 
@@ -55,7 +55,7 @@ export function createLiveScene(model: SceneModel): LiveScene {
   return {
     apply(changes) {
       let changed = false;
-      const overridden: string[] = [];
+      const overridden = new Set<string>();
       for (const item of changes) {
         const change = parseChange(item);
         const node = change && model.nodes.get(change.nodeId);
@@ -63,7 +63,7 @@ export function createLiveScene(model: SceneModel): LiveScene {
         if (!change || !node || !p) continue;
         if (change.visible !== undefined && change.visible !== p.visible) {
           // The user's local choice (different from the presenter's) ends here: from now on the presenter's counts.
-          if (node.T.visible !== p.visible) overridden.push(node.nodeId);
+          if (node.T.visible !== p.visible) overridden.add(node.nodeId);
           node.T.visible = change.visible;
           p.visible = change.visible;
           changed = true;
@@ -76,6 +76,8 @@ export function createLiveScene(model: SceneModel): LiveScene {
           changed = true;
         }
         if (change.opacity !== undefined && change.opacity !== p.opacity) {
+          // A local slider value (WEB-13) differs from the presenter's: it ends here, like a local hide.
+          if (node.material.opacity !== p.opacity) overridden.add(node.nodeId);
           applyOpacity(node, change.opacity);
           p.opacity = change.opacity;
           changed = true;
@@ -89,7 +91,7 @@ export function createLiveScene(model: SceneModel): LiveScene {
           changed = true;
         }
       }
-      return { changed, removed: false, overridden };
+      return { changed, removed: false, overridden: [...overridden] };
     },
     remove(nodeIds) {
       let removed = false;

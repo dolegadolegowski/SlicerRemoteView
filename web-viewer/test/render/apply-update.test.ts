@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { Color, Matrix4, Mesh, SRGBColorSpace } from "three";
 import type { BufferGeometry, Material } from "three";
 import { createLiveScene } from "../../src/render/apply-update";
-import { parseSceneModel } from "../../src/render/scene-model";
+import { applyOpacity, parseSceneModel } from "../../src/render/scene-model";
 import type { SceneModel } from "../../src/render/scene-model";
 import { glb } from "./glb-fixtures";
 
@@ -130,10 +130,46 @@ describe("presenter vs local choice (FR-40, US-09)", () => {
     expect(liver.T.visible).toBe(true);
   });
 
+  it("a presenter opacity change replaces a local slider value and names the node (WEB-13)", async () => {
+    const model = await load();
+    const live = createLiveScene(model);
+    const liver = model.nodes.get(LIVER)!;
+    applyOpacity(liver, 0.4); // the user's slider
+    expect(live.apply([{ nodeId: LIVER, opacity: 1 }]).changed).toBe(false); // the presenter's value: unchanged
+    expect(liver.material.opacity).toBe(0.4);
+    const result = live.apply([{ nodeId: LIVER, opacity: 0.6 }]);
+    expect(result.overridden).toEqual([LIVER]);
+    expect(liver.material.opacity).toBe(0.6);
+  });
+
+  it("a presenter colour change keeps a local hide and stores the colour (US-02)", async () => {
+    const model = await load();
+    const live = createLiveScene(model);
+    const liver = model.nodes.get(LIVER)!;
+    liver.T.visible = false;
+    const result = live.apply([{ nodeId: LIVER, color: [0.1, 0.2, 0.3] }]);
+    expect(result.overridden).toEqual([]);
+    expect(liver.T.visible).toBe(false);
+    expect((liver.material as unknown as { color: Color }).color.r).toBeCloseTo(0.1, 6);
+  });
+
+  it("a node changed in two ways at once is named once", async () => {
+    const model = await load();
+    const live = createLiveScene(model);
+    const liver = model.nodes.get(LIVER)!;
+    liver.T.visible = false;
+    applyOpacity(liver, 0.4);
+    expect(live.apply([{ nodeId: LIVER, visible: false, opacity: 0.5 }]).overridden).toEqual([
+      LIVER,
+    ]);
+  });
+
   it("without a local choice a presenter change reports no override", async () => {
     const model = await load();
     const live = createLiveScene(model);
     expect(live.apply([{ nodeId: LIVER, visible: false }]).overridden).toEqual([]);
+    expect(live.apply([{ nodeId: TUMOR, opacity: 0.5 }]).overridden).toEqual([]);
+    expect(live.apply([{ nodeId: TUMOR, opacity: 0.8, visible: false }]).overridden).toEqual([]);
   });
 });
 

@@ -132,6 +132,24 @@ toggle-visibility --loop --code-fd 3 3>code.txt` (other scripts: `colour-cycle`,
 4. Switch on airplane mode for 5 s during `toggle-visibility --loop`, then off and **Join** again. **Expect:** the
    scene shows the presenter's current state (no node stuck in an old state).
 
+### Opacity (WEB-13)
+
+Joined with `asymmetric-2nodes.glb`, **Structures** open.
+
+1. Drag the tumour's slider to 100 % (the fixture's tumour is translucent), then the liver's thumb to about 40 %, and
+   rotate. **Expect:** the liver turns translucent while you drag; the tumour inside is solid and fully visible, with
+   no flicker or cut-outs while rotating (the opaque node is still depth-sorted, US-10).
+2. Tap the track away from the thumb. **Expect:** on iPhone nothing (Safari moves a range input only by its thumb,
+   which is easy to hit: 44 px); on Android the thumb jumps there.
+3. Swipe up and down over the sliders, starting on the thumb and on the track away from it. **Expect:** the list
+   scrolls; the opacities do not change (on Android the thumb may flick to the finger and straight back).
+4. With VoiceOver / TalkBack, move to a slider. **Expect:** "Opacity of Liver, 100 %" (Polish: "Krycie: …"); swipe
+   up/down changes it in 1 % steps.
+5. With `colour-cycle` playing, set the tumour's slider yourself. **Expect:** at the presenter's next change the
+   slider jumps to the presenter's value and "The presenter changed Tumor" shows at the top for about 3 s.
+6. Hide the liver yourself while `colour-cycle` plays. **Expect:** its colour changes are applied (seen when you
+   show it again) but it stays hidden.
+
 ### Download in the background (WEB-06 review, WEB-10)
 
 1. Join with `large-synthetic.glb` on a slow network (Settings → Developer → Network Link Conditioner "3G"), and

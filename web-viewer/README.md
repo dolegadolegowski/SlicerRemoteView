@@ -269,3 +269,14 @@ state keeps what the user hid locally, while a new presenter change of `visible`
 npm test -w web-viewer -- scene-versions apply-update
 npm run e2e -w web-viewer -- live-updates   # fake-slicer scripts through the relay stub
 ```
+
+### Opacity and presenter overrides (WEB-13)
+
+Every node-panel row has an opacity slider (0..1 in 1 % steps, local to this device, 44 px thumb; a vertical swipe
+that starts on it scrolls the list and leaves the value as it was). A presenter change of
+`visible` or `opacity` replaces the local choice; the viewer then says "The presenter changed <name>" for 3 s in its
+status line (`screens.presenterChanged`). A presenter `color` change keeps a local hide.
+
+```bash
+npm test -w web-viewer -- node-panel apply-update screens && npm run e2e -w web-viewer -- opacity
+```

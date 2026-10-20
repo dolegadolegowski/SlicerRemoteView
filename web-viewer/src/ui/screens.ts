@@ -43,6 +43,8 @@ export interface Screens {
   updating(on: boolean): void;
   /** A newer snapshot was announced (`scene.snapshot.begin` / `.ready`): the hint waits for it, however long. */
   snapshotComing(): void;
+  /** A presenter change replaced the local choice for these nodes (FR-40, US-09): a short notice names them. */
+  presenterChanged(nodeIds: readonly string[]): void;
   readonly viewer: Viewer | null;
   readonly nodePanel: NodePanel | null;
   /** Joining or joined: the code entry's cells hold the code of this session. */
@@ -51,6 +53,8 @@ export interface Screens {
 
 /** How long the "updating" hint waits for the snapshot that `scene.nodeAdded` promises to be announced. */
 export const UPDATING_HINT_MS = 10_000;
+/** How long "The presenter changed …" stays (WEB-13: 3 s). */
+export const PRESENTER_NOTICE_MS = 3_000;
 
 export function bindScreens(options: ScreensOptions): Screens {
   const { app, connection, models, entry } = options;
@@ -59,12 +63,27 @@ export function bindScreens(options: ScreensOptions): Screens {
   let viewer: Viewer | null = null;
   let panel: NodePanel | null = null;
   let shown: SceneModel | null = null;
+  // One status line: a short presenter notice wins over the "updating" hint, which comes back after it.
+  let hint = false;
   let hintTimer: ReturnType<typeof setTimeout> | undefined;
+  let notice: string | null = null;
+  let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function paintStatus(): void {
+    viewer?.setStatus(notice ?? (hint ? t(detectLang(), "viewer.updating") : null));
+  }
 
   function setHint(on: boolean): void {
     clearTimeout(hintTimer);
     hintTimer = undefined;
-    viewer?.setStatus(on ? t(detectLang(), "viewer.updating") : null);
+    hint = on;
+    paintStatus();
+  }
+
+  function clearStatus(): void {
+    clearTimeout(noticeTimer);
+    notice = null;
+    setHint(false);
   }
 
   const viewerVisible = () => viewer !== null && !viewer.element.hidden;
@@ -96,7 +115,7 @@ export function bindScreens(options: ScreensOptions): Screens {
     viewer.element.hidden = false;
     if (model !== shown) {
       viewer.setNotice(null);
-      setHint(false);
+      clearStatus(); // both talk about the previous scene
       viewer.setModel(model); // a new model is fitted from the front
       panel?.setModel(model);
     } else {
@@ -186,6 +205,24 @@ export function bindScreens(options: ScreensOptions): Screens {
     snapshotComing() {
       clearTimeout(hintTimer);
       hintTimer = undefined;
+    },
+    presenterChanged(nodeIds) {
+      if (!shown || nodeIds.length === 0) return;
+      const lang = detectLang();
+      const node = shown.nodes.get(nodeIds[0]!);
+      // Names are shown, never logged (PHI, §7.3).
+      const name =
+        node && (node.manifest.name.trim() || t(lang, "nodePanel.unnamed", { n: node.order + 1 }));
+      notice =
+        nodeIds.length === 1 && name
+          ? t(lang, "viewer.presenterChanged", { name })
+          : t(lang, "viewer.presenterChangedMany", { count: nodeIds.length });
+      clearTimeout(noticeTimer);
+      noticeTimer = setTimeout(() => {
+        notice = null;
+        paintStatus();
+      }, PRESENTER_NOTICE_MS);
+      paintStatus();
     },
     get live() {
       return connection.state.kind === "connecting" || connection.state.kind === "connected";

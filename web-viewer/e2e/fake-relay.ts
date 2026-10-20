@@ -13,13 +13,20 @@ const FIXTURES = resolve(dirname(fileURLToPath(import.meta.url)), "../../shared/
 export const fixture = (name: string): Buffer => readFileSync(`${FIXTURES}/${name}`);
 const CHUNK = 65_536;
 
+/** Plays the relay's side of the newest socket after the join (live updates in WEB-13 tests). */
+export interface FakeRelay {
+  send(message: Record<string, unknown>): void;
+}
+
 export async function fakeRelay(
   page: Page,
   glb: Buffer = fixture("asymmetric-2nodes.glb"),
-): Promise<void> {
+): Promise<FakeRelay> {
+  let latest: ((message: Record<string, unknown>) => void) | null = null;
   await page.routeWebSocket(/\/ws$/, (ws) => {
     const send = (message: Record<string, unknown>) =>
       ws.send(JSON.stringify({ protocolVersion: "1.0", ...message }));
+    latest = send;
     ws.onMessage((frame) => {
       const message = JSON.parse(String(frame)) as { type: string; id?: string };
       if (message.type === "ping") send({ type: "pong", replyTo: message.id });
@@ -61,6 +68,12 @@ export async function fakeRelay(
       send({ type: "scene.snapshot.end", sceneVersion: 1, sha256 });
     });
   });
+  return {
+    send(message) {
+      if (!latest) throw new Error("no socket yet");
+      latest(message);
+    },
+  };
 }
 
 /** Types a code on the open page, joins and waits for the viewer to show the model. */
@@ -73,8 +86,9 @@ export async function join(page: Page): Promise<void> {
 }
 
 /** Installs the fake relay, opens the app and joins. */
-export async function joinAndView(page: Page, glb?: Buffer): Promise<void> {
-  await fakeRelay(page, glb);
+export async function joinAndView(page: Page, glb?: Buffer): Promise<FakeRelay> {
+  const relay = await fakeRelay(page, glb);
   await page.goto("/");
   await join(page);
+  return relay;
 }

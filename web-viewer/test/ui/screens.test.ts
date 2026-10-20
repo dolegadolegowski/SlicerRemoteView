@@ -7,7 +7,7 @@ import type { CreateViewerResult, Viewer } from "../../src/render/viewer";
 import { describe as describeCode, describeState } from "../../src/state/errors";
 import { createCodeEntry } from "../../src/ui/code-entry";
 import type { CodeEntry } from "../../src/ui/code-entry";
-import { bindScreens, UPDATING_HINT_MS } from "../../src/ui/screens";
+import { bindScreens, PRESENTER_NOTICE_MS, UPDATING_HINT_MS } from "../../src/ui/screens";
 import type { Screens } from "../../src/ui/screens";
 import { MockSocket } from "../protocol/mock-socket";
 
@@ -329,6 +329,41 @@ describe("live updates (WEB-12)", () => {
     screens.updating(true);
     screens.updating(false); // the snapshot will not come
     expect(viewer.setStatus).toHaveBeenLastCalledWith(null);
+  });
+});
+
+describe("presenter notice (WEB-13)", () => {
+  it("names the node for 3 s, over the 'updating' hint, which comes back after it", () => {
+    vi.useFakeTimers();
+    try {
+      join();
+      models.emit(modelA);
+      screens.updating(true);
+      screens.snapshotComing();
+      screens.presenterChanged(["vtkMRMLModelNode2"]);
+      expect(viewer.setStatus).toHaveBeenLastCalledWith("The presenter changed Tumor");
+      vi.advanceTimersByTime(PRESENTER_NOTICE_MS - 1);
+      expect(viewer.setStatus).toHaveBeenLastCalledWith("The presenter changed Tumor");
+      vi.advanceTimersByTime(1);
+      expect(viewer.setStatus).toHaveBeenLastCalledWith("Updating the scene…");
+      screens.presenterChanged(["vtkMRMLModelNode1", "vtkMRMLModelNode2"]);
+      expect(viewer.setStatus).toHaveBeenLastCalledWith("The presenter changed 2 structures");
+      models.emit(modelB); // a new scene: both messages were about the old one
+      expect(viewer.setStatus).toHaveBeenLastCalledWith(null);
+      vi.advanceTimersByTime(PRESENTER_NOTICE_MS);
+      expect(viewer.setStatus).toHaveBeenLastCalledWith(null);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("nothing to name or no scene: no notice", () => {
+    screens.presenterChanged(["vtkMRMLModelNode1"]);
+    join();
+    models.emit(modelA);
+    viewer.setStatus.mockClear();
+    screens.presenterChanged([]);
+    expect(viewer.setStatus).not.toHaveBeenCalled();
   });
 });
 
