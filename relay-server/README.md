@@ -126,7 +126,7 @@ HMAC'd `clientKey` — never an address. Memory figures are not on `/healthz` (S
 
 ```bash
 npm test -w relay-server             # vitest (all relay tests)
-npm test -w relay-server -- app      # one file by name filter, e.g. `app`, `config`, `codes`, `viewer`, `snapshot`, `fanout`, `http-scene`, `heartbeat`, `static`
+npm test -w relay-server -- app      # one file by name filter, e.g. `app`, `config`, `codes`, `viewer`, `snapshot`, `fanout`, `http-scene`, `heartbeat`, `static`, `logs`, `docker-smoke`
 npm run lint -w relay-server         # eslint + prettier --check
 npm run typecheck -w relay-server
 npm run build -w relay-server        # tsc → relay-server/dist (needs `npm run build -w shared` first)
@@ -136,5 +136,32 @@ The root `npm test`, `npm run lint`, `npm run typecheck`, `npm run build` run ev
 
 The per-address limits (`src/ratelimit.ts`) also apply to E2E and load tests: from one address, more than 30
 upgrades, 10 wrong codes or 5 sessions per minute are refused, and 20 wrong codes within 10 minutes ban it. Harnesses run the relay with `TRUST_PROXY=true`
-and give each simulated client its own `X-Forwarded-For` address, as `test/ratelimit.test.ts` does. The Docker image
-(`docker build -f relay-server/Dockerfile .` from the repo root) arrives with SRV-20.
+and give each simulated client its own `X-Forwarded-For` address, as `test/ratelimit.test.ts` does.
+
+## Docker
+
+`relay-server/Dockerfile` (ADR 0007 §5), built from the repository root with the root `.dockerignore`:
+
+```bash
+docker build -f relay-server/Dockerfile -t slicerremoteview-relay:local .
+RELAY_IMAGE=slicerremoteview-relay:local npm test -w relay-server -- docker-smoke   # skipped without RELAY_IMAGE
+# Outside Railway there is no edge proxy in front: TRUST_PROXY=false, or clients choose their own address.
+docker run --rm -e PORT=8787 -e TRUST_PROXY=false -e ALLOWED_ORIGINS=http://127.0.0.1:8787 \
+  -p 127.0.0.1:8787:8787 slicerremoteview-relay:local   # http://127.0.0.1:8787/j
+```
+
+- Stage 1 (`node:22-alpine`): `npm ci` of all workspaces, `npm run build -w shared -w web-viewer -w relay-server`; the
+  build fails if `web-viewer/dist` contains a symbolic link (the file server would follow it, SRV-16).
+- Stage 2 (`node:22-alpine` + `dumb-init` as PID 1): `npm ci --omit=dev --ignore-scripts -w relay-server` (the
+  relay's dependencies and the workspace links of `shared` and the relay only, 25 MB), `shared/dist`, `relay-server/dist`, and `web-viewer/dist`
+  as `relay-server/public/`, all owned by root. It runs as `node` (uid 1000) from `/app/relay-server`,
+  `CMD ["dumb-init", "node", "dist/index.js"]`, with `NODE_ENV=production` and
+  `NODE_OPTIONS=--max-old-space-size-percentage=75` (the heap follows the container's memory limit: about 195 MiB at
+  `--memory 256m`). No `EXPOSE`: Railway sets `PORT`.
+- Docker Hub rate limits: pull the base from a mirror and tag it, e.g.
+  `docker pull mirror.gcr.io/library/node:22-alpine && docker tag mirror.gcr.io/library/node:22-alpine node:22-alpine`.
+- Build from a clean checkout: the root `.dockerignore` excludes `.env*` at the root only, so a `relay-server/.env`
+  would reach the build stage (not the image; report `docs/testing/reports/2026-10-20-server-9.md`).
+- Memory: the snapshot and send-buffer budgets (`MAX_TOTAL_SNAPSHOT_BYTES` 512 MiB, `MAX_TOTAL_BUFFERED_BYTES` 160 MiB
+  by default) are `Buffer`s outside the V8 heap, which may grow to 75 % of the container's memory: size the container
+  for both, or lower the budgets (same report).
