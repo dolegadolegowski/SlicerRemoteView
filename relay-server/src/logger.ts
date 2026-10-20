@@ -6,7 +6,7 @@
  * passes codes, tokens or payloads to the logger in the first place; pino `redact` works on object
  * keys only and does not scrub interpolated strings, ADR 0002). Because `*.code` is censored, protocol and
  * system error codes are logged under the key `errorCode`. `rawPacket` is Node's copy of the raw
- * request bytes on HTTP parser errors (headers included). SRV-18 adds the log-grep test.
+ * request bytes on HTTP parser errors (headers included). `test/logs.test.ts` (SRV-18) is the log-grep test.
  */
 import { pino } from "pino";
 import type { DestinationStream, Level, Logger } from "pino";

@@ -2,7 +2,7 @@ import type { AddressInfo } from "node:net";
 import type { FastifyInstance } from "fastify";
 import { WebSocket } from "ws";
 import type { RawData } from "ws";
-import { buildApp } from "../../src/app.js";
+import { buildApp, listenTextResolver } from "../../src/app.js";
 import type { AppOptions } from "../../src/app.js";
 import { loadConfig } from "../../src/config.js";
 import { createLogger } from "../../src/logger.js";
@@ -52,7 +52,8 @@ export async function startRelay(
     limiter,
     heartbeat: options.heartbeat ?? false,
   });
-  await app.listen({ port: 0, host: "127.0.0.1" });
+  // As `src/index.ts`: Fastify's own line would carry the bound address.
+  await app.listen({ port: 0, host: "127.0.0.1", listenTextResolver });
   const { port } = app.server.address() as AddressInfo;
   return {
     app,

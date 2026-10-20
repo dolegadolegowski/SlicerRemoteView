@@ -6,6 +6,7 @@
  * headers; T6) and every unknown path answers `404 {"error":"NOT_FOUND"}` without echoing it.
  */
 import type { Duplex } from "node:stream";
+import { getHeapStatistics } from "node:v8";
 import helmet from "@fastify/helmet";
 import Fastify, { LogController } from "fastify";
 import type { FastifyBaseLogger, FastifyInstance, FastifyReply } from "fastify";
@@ -57,6 +58,13 @@ export interface AppOptions {
 }
 
 const NOT_FOUND = { error: "NOT_FOUND" } as const;
+
+/**
+ * The text of Fastify's line per bound address in `listen()`; its default names the address (for
+ * `0.0.0.0`, every IPv4 interface's). Shared by `src/index.ts` (which logs the port itself) and the
+ * tests' `startRelay`.
+ */
+export const listenTextResolver = (): string => "http server listening";
 
 /**
  * The `code` of a Fastify (`FST_ERR_*`), Node (`ERR_*`), HTTP parser (`HPE_*`), `ws` (`WS_ERR_*`) or system error
@@ -263,8 +271,19 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     errorCode: systemErrorCode,
   });
 
-  // The TTL sweep runs while the server is up (architecture §5).
+  // The TTL sweep runs while the server is up (architecture §5). One startup line for the DEP-06
+  // checklist, before the port is bound: the heap limit Node derived from the container
+  // (`--max-old-space-size-percentage`) next to the budgets that have to fit in it — figures only.
   app.addHook("onReady", async () => {
+    logger.info(
+      {
+        heapSizeLimit: getHeapStatistics().heap_size_limit,
+        maxTotalBufferedBytes: config.maxTotalBufferedBytes,
+        maxTotalSnapshotBytes: config.maxTotalSnapshotBytes,
+        trustProxy: config.trustProxy,
+      },
+      "relay starting",
+    );
     registry.start();
     limiter.start();
     fan.start();

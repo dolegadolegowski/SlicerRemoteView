@@ -89,7 +89,15 @@ style-src 'self' 'unsafe-inline';connect-src 'self' wss:;worker-src 'self' blob:
 Docker build puts `web-viewer/dist` there (SRV-20); during viewer development the Vite dev server serves it and
 proxies to the relay (`web-viewer/vite.config.ts`).
 
-Logs are JSON lines (`level`, `time`, `message`) on stdout; per-request logging is disabled.
+Logs are JSON lines (`level`, `time`, `message`) on stdout; per-request logging is disabled. Lines carry session and
+viewer ids, connection numbers, roles, sizes, durations, close and error codes and similar fixed values — never a
+code, a token, a client address, a node name or scene bytes (`test/logs.test.ts` greps a whole session logged at
+`trace`); `src/logger.ts` redacts code and token keys as a second line of defence. Two lines are there for the deploy
+checklist (DEP-06): `relay starting` before the port is bound (`heapSizeLimit` from `v8.getHeapStatistics()`,
+`maxTotalBufferedBytes`, `maxTotalSnapshotBytes`, `trustProxy`) and `first websocket upgrade` once with
+`xff: "present" | "absent"`, `xffEntries` (the entries of `X-Forwarded-For`, the client's own included: read it from
+a client that sends none, e.g. fake-slicer on a direct connection, as the first upgrade after a deploy) and the
+HMAC'd `clientKey` — never an address. Memory figures are not on `/healthz` (SRV-19's `/metrics` will have them).
 
 ## Design notes
 

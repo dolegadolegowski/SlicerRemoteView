@@ -2,7 +2,7 @@
  * Process entry point: read the configuration, build the app and listen on `PORT` (Railway) on
  * all interfaces. An invalid environment stops the process before anything listens.
  */
-import { buildApp, systemErrorCode } from "./app.js";
+import { buildApp, listenTextResolver, systemErrorCode } from "./app.js";
 import { ConfigError, loadConfig } from "./config.js";
 import type { Config } from "./config.js";
 import { createLogger } from "./logger.js";
@@ -21,7 +21,7 @@ const port = config.port;
 const app = await buildApp({ config, logger });
 try {
   // Fastify logs one line per bound address; keep the addresses out of it (our line has the port).
-  await app.listen({ port, host: "0.0.0.0", listenTextResolver: () => "http server listening" });
+  await app.listen({ port, host: "0.0.0.0", listenTextResolver });
 } catch (error) {
   logger.fatal({ errorCode: systemErrorCode(error) }, "listen failed");
   process.exit(1);

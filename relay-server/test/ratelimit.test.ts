@@ -538,8 +538,7 @@ describe("privacy of the limiter (SRV-08 criterion 3, NFR-12, NFR-13, FR-26)", (
     expect(keys.length).toBeGreaterThanOrEqual(3);
     for (const key of keys) expect(key).toMatch(/^[0-9a-f]{64}$/);
     const state = JSON.stringify(keys);
-    // The listen line names the loopback bind address of this test server, not a client.
-    const log = lines.filter((l) => !l.includes("Server listening")).join("");
+    const log = lines.join("");
     for (const ip of ["192.0.2.33", "203.0.113.44", "198.51.100.55", "127.0.0.1"]) {
       expect(state).not.toContain(ip);
       expect(log).not.toContain(ip);

@@ -90,6 +90,7 @@ export async function registerWsEndpoint(
   const allowed = new Set(options.allowedOrigins);
   /** The limiter key of each upgrade request, computed once in `checkUpgrade`. */
   const clientKeys = new WeakMap<object, string>();
+  let firstUpgrade = true;
 
   await app.register(websocket, {
     options: {
@@ -134,6 +135,22 @@ export async function registerWsEndpoint(
     }
     // `request.ip` is undefined once the client has gone; that request is counted as "unknown".
     const clientKey = limiter.clientKey(request.ip as string | undefined);
+    // For the deploy checklist (DEP-06): whether the edge sends `X-Forwarded-For` and how many hops it
+    // lists (with `TRUST_PROXY=true` but no header, or more than one internal hop, clients share one
+    // limiter key), with the HMAC'd key of this client — once, never an address.
+    if (firstUpgrade) {
+      firstUpgrade = false;
+      const header = request.headers["x-forwarded-for"];
+      const forwarded = Array.isArray(header) ? header.join(",") : header;
+      logger.info(
+        {
+          xff: forwarded === undefined ? "absent" : "present",
+          ...(forwarded !== undefined && { xffEntries: forwarded.split(",").length }),
+          clientKey,
+        },
+        "first websocket upgrade",
+      );
+    }
     clientKeys.set(request.raw, clientKey);
     const verdict = limiter.upgrade(clientKey);
     if (!verdict.ok) {
