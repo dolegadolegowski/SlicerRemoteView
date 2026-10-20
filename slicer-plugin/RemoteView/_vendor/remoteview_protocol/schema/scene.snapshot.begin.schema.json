@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/scene.snapshot.begin.schema.json",
+  "title": "scene.snapshot.begin (publisher → relay → viewers)",
+  "description": "Announces a full GLB snapshot that follows as chunkCount binary chunks of chunkSize bytes (docs/protocol.md §6.1–6.3). The relay, not the schema, checks chunkCount == ceil(byteLength / chunkSize) and the global budget (§6.2, §3.3).",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.schema.json" }],
+  "properties": {
+    "type": { "type": "string", "const": "scene.snapshot.begin" },
+    "sceneVersion": {
+      "description": "MUST be greater than every version used so far in the session (§6.2, §8.4).",
+      "$ref": "defs.schema.json#/definitions/snapshotVersion"
+    },
+    "byteLength": { "$ref": "defs.schema.json#/definitions/byteLength" },
+    "sha256": {
+      "description": "SHA-256 of the complete GLB, repeated in scene.snapshot.end (§6.2, §6.4).",
+      "$ref": "defs.schema.json#/definitions/sha256"
+    },
+    "chunkCount": {
+      "description": "Number of binary chunks, at most 1024 (§3.3).",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1024
+    },
+    "chunkSize": {
+      "description": "Payload bytes per chunk except the last: 64 KiB … 1 MiB, SHOULD be 1 MiB (§6.2).",
+      "type": "integer",
+      "minimum": 65536,
+      "maximum": 1048576
+    },
+    "format": { "$ref": "defs.schema.json#/definitions/snapshotFormat" },
+    "extensionsUsed": { "$ref": "defs.schema.json#/definitions/gltfExtensions" },
+    "extensionsRequired": {
+      "description": "Absent = []. The relay never parses the GLB, so it copies this value into scene.snapshot.ready (§6.4).",
+      "$ref": "defs.schema.json#/definitions/gltfExtensions"
+    },
+    "profile": {
+      "description": "Budget profile the GLB was decimated for (§7.5).",
+      "$ref": "defs.schema.json#/definitions/profile"
+    },
+    "nodeCount": {
+      "description": "Informational: Slicer nodes in the snapshot (§6.2).",
+      "type": "integer",
+      "minimum": 0
+    },
+    "triangleCount": {
+      "description": "Informational: triangles in the snapshot (§6.2).",
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "type",
+    "sceneVersion",
+    "byteLength",
+    "sha256",
+    "chunkCount",
+    "chunkSize",
+    "format",
+    "extensionsUsed"
+  ]
+}

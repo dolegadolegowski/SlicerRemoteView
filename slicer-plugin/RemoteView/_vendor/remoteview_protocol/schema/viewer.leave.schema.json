@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/viewer.leave.schema.json",
+  "title": "viewer.leave (viewer → relay, optional)",
+  "description": "Polite leave before the client closes with 1000 (docs/protocol.md §5.4). No payload fields.",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.schema.json" }],
+  "properties": {
+    "type": { "type": "string", "const": "viewer.leave" }
+  },
+  "required": ["type"]
+}

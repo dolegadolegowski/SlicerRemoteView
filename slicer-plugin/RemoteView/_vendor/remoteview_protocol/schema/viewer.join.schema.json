@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/viewer.join.schema.json",
+  "title": "viewer.join (viewer → relay, first message)",
+  "description": "Join by a typed or deep-linked code, or rejoin by sessionId + viewerToken after a disconnect. Exactly one of `code` or (`sessionId` + `viewerToken`) is present (docs/protocol.md §5.1). Every property is declared here; the oneOf only states the required/forbidden sets (generator spike, shared/README.md).",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.schema.json" }],
+  "properties": {
+    "type": { "type": "string", "const": "viewer.join" },
+    "code": { "$ref": "defs.schema.json#/definitions/code" },
+    "sessionId": { "$ref": "defs.schema.json#/definitions/sessionId" },
+    "viewerToken": { "$ref": "defs.schema.json#/definitions/token" },
+    "clientInfo": {
+      "description": "clientInfo.platform SHOULD be one of web | quest-browser | quest2 | quest3 | other and clientInfo.profile is informational (§5.1); receivers treat unknown platform values as other (§14).",
+      "$ref": "defs.schema.json#/definitions/clientInfo"
+    }
+  },
+  "required": ["type", "clientInfo"],
+  "oneOf": [
+    {
+      "$comment": "Join by code: no sessionId, no viewerToken (§5.1).",
+      "properties": { "code": { "$ref": "defs.schema.json#/definitions/code" } },
+      "required": ["code"],
+      "not": {
+        "anyOf": [
+          { "properties": { "sessionId": {} }, "required": ["sessionId"] },
+          { "properties": { "viewerToken": {} }, "required": ["viewerToken"] }
+        ]
+      }
+    },
+    {
+      "$comment": "Rejoin by token: no code (§5.1).",
+      "properties": {
+        "sessionId": { "$ref": "defs.schema.json#/definitions/sessionId" },
+        "viewerToken": { "$ref": "defs.schema.json#/definitions/token" }
+      },
+      "required": ["sessionId", "viewerToken"],
+      "not": { "properties": { "code": {} }, "required": ["code"] }
+    }
+  ]
+}

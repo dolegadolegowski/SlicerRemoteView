@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/session.create.schema.json",
+  "title": "session.create (publisher → relay)",
+  "description": "First message of a new publisher: open a session and receive a code (docs/protocol.md §4.1). Carries no token — the publisherToken is issued in session.created (ADR 0008 errata).",
+  "type": "object",
+  "allOf": [
+    {
+      "$ref": "envelope.schema.json"
+    }
+  ],
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "session.create"
+    },
+    "clientInfo": {
+      "$ref": "defs.schema.json#/definitions/clientInfo"
+    },
+    "preferredCode": {
+      "description": "Code the publisher previously held, or null. Granted only if free and well-formed; a malformed value is ignored, not rejected (§4.1).",
+      "type": ["string", "null"],
+      "maxLength": 32
+    },
+    "profile": {
+      "$ref": "defs.schema.json#/definitions/profile"
+    }
+  },
+  "required": ["type", "clientInfo", "profile"],
+  "not": {
+    "$comment": "§4.1 / ADR 0008 errata: session.create has no token field.",
+    "anyOf": [
+      {
+        "properties": {
+          "publisherToken": {}
+        },
+        "required": ["publisherToken"]
+      },
+      {
+        "properties": {
+          "token": {}
+        },
+        "required": ["token"]
+      },
+      {
+        "properties": {
+          "viewerToken": {}
+        },
+        "required": ["viewerToken"]
+      }
+    ]
+  }
+}

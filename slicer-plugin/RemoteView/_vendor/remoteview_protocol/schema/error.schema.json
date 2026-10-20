@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/error.schema.json",
+  "title": "error (relay → publisher or viewer)",
+  "description": "Error report with one of the 15 codes of docs/protocol.md §9.2; `message` is developer-facing English, `details` MUST NOT contain session codes, tokens or scene content.",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.schema.json" }],
+  "properties": {
+    "type": { "type": "string", "const": "error" },
+    "code": { "$ref": "defs.schema.json#/definitions/errorCode" },
+    "message": {
+      "description": "Human-readable English for developers, never shown raw to end users (§9.2).",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "retryable": {
+      "description": "Whether the sender may retry; omitted where §9.2 lists none.",
+      "type": "boolean"
+    },
+    "details": {
+      "description": "Machine-readable context (e.g. viewerLimit, retryAfterS, the offending field for BAD_SEQUENCE). The top-level keys code, token, publisherToken and viewerToken are forbidden here (§9.2); the relay never nests credentials deeper, which the schema cannot check.",
+      "type": "object",
+      "not": {
+        "anyOf": [
+          { "properties": { "code": {} }, "required": ["code"] },
+          { "properties": { "token": {} }, "required": ["token"] },
+          { "properties": { "publisherToken": {} }, "required": ["publisherToken"] },
+          { "properties": { "viewerToken": {} }, "required": ["viewerToken"] }
+        ]
+      }
+    }
+  },
+  "required": ["type", "code", "message"]
+}
