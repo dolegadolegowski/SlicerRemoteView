@@ -102,7 +102,11 @@ const en = {
   "viewer.updating": "Updating the scene…",
   "viewer.presenterChanged": "The presenter changed {name}",
   "viewer.presenterChangedMany": "The presenter changed {count} structures",
-  "viewer.reconnected": "Connected again",
+
+  "statusBar.label": "Session status",
+  "statusBar.connected": "Connected",
+  "statusBar.viewers": "Viewers: {count}",
+  "statusBar.scene": "Scene v{version}",
   "viewer.fit": "Fit view",
   "viewer.dismiss": "Dismiss",
   "viewer.canvasLabel":
@@ -221,7 +225,11 @@ const pl: Record<StringKey, string> = {
   "viewer.updating": "Aktualizowanie sceny…",
   "viewer.presenterChanged": "Prezenter zmienił: {name}",
   "viewer.presenterChangedMany": "Prezenter zmienił struktury: {count}",
-  "viewer.reconnected": "Połączono ponownie",
+
+  "statusBar.label": "Stan sesji",
+  "statusBar.connected": "Połączono",
+  "statusBar.viewers": "Widzowie: {count}",
+  "statusBar.scene": "Scena v{version}",
   "viewer.fit": "Dopasuj widok",
   "viewer.dismiss": "Zamknij",
   "viewer.canvasLabel":

@@ -22,7 +22,7 @@ export type JoinCredentials =
   { readonly code: string } | { readonly sessionId: string; readonly viewerToken: string };
 
 export interface ClientInfoOptions {
-  /** `web | quest-browser | quest2 | quest3 | other` (§5.1); WEB-15 detects it. */
+  /** `web | quest-browser | quest2 | quest3 | other` (§5.1); `platform.ts` detects it (WEB-15). */
   readonly platform?: string;
   /** `mobile | quest2 | quest3` — informational (§5.1). */
   readonly profile?: string;

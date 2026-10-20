@@ -9,6 +9,8 @@
   --text-muted: #b4bfcc;
   --accent: #5cb8ff;
   --danger: #ff8a8a;
+  --ok: #6fdc8c;
+  --warn: #ffc857;
   --target: 44px;
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-right: env(safe-area-inset-right, 0px);
@@ -199,6 +201,43 @@ body {
   align-items: center;
   gap: 8px;
   pointer-events: none;
+}
+
+/* Status bar (WEB-15): connection, viewers, scene version — one muted line, first in the top stack. The dot is
+   decoration; the word says the state. */
+.status-bar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 2px 12px;
+  max-width: 100%;
+  margin: 0;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  pointer-events: none;
+}
+
+.status-bar__connection::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+  vertical-align: 1px;
+}
+
+.status-bar:not([data-connection="connected"]) .status-bar__connection {
+  color: var(--text);
+}
+
+.status-bar:not([data-connection="connected"]) .status-bar__connection::before {
+  background: var(--warn);
 }
 
 /* A short status line over the scene (role="status"), e.g. while a new snapshot is coming (WEB-12). */

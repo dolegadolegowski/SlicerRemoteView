@@ -58,8 +58,7 @@ test("colour-cycle: colours reach the swatches; the last one stays", async ({ pa
 test("move-node: a new T.matrix moves the model on screen", async ({ page }) => {
   await joinPlaying(page, "move-node", publishers);
   const canvas = page.locator(".viewer__canvas");
-  const style =
-    ".viewer__fit, .viewer__notice, .viewer__status, .node-panel { visibility: hidden !important; }";
+  const style = ".viewer__fit, .viewer__top, .node-panel { visibility: hidden !important; }";
   const loaded = await canvas.screenshot({ style });
   await expect
     .poll(async () => (await canvas.screenshot({ style })).equals(loaded), { timeout: 5_000 })

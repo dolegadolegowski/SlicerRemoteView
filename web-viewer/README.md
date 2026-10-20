@@ -300,7 +300,7 @@ and decides after every closed socket whether to connect again (FR-43, NFR-19, N
   dead; a socket that has not opened within 15 s counts as a drop; after `session.closed` / `session.expired` any
   close ends the session.
 
-The screens keep the scene while reconnecting ("Reconnecting…" in the status line, then "Connected again" for 3 s),
+The screens keep the scene while reconnecting ("Reconnecting…", then "Connected" — in the status bar since WEB-15),
 say "Presenter is offline" (`session.publisherState`, `viewer.joined.publisherOnline`) and, joined without a scene,
 "Waiting for the presenter" or — while a stream or download really runs (`downloading()`) — "Loading the scene…"
 under Join. Both status lines stay in the accessibility tree, empty when silent; the notice and the status line stack
@@ -309,3 +309,17 @@ at the top of the viewer.
 ```bash
 npm test -w web-viewer -- reconnect connection screens code-entry viewer && npm run e2e -w web-viewer -- reconnect
 ```
+
+### Status bar and device profile (WEB-15)
+
+`src/platform.ts` turns `navigator.userAgent` into `clientInfo.platform` (`web` or `quest-browser`) and the
+informational `profile` (`mobile`, `quest2`, `quest3`) — rule and sources in `docs/research/web-quest-user-agent.md`;
+only those two values are sent. `snapshotLimit(profile)` sets `capabilities.maxSnapshotBytes` (64 MiB for `quest3`,
+32 MiB otherwise) for the stream and the download too. `src/ui/status-bar.ts` is the first line over the scene: the connection
+(`Connected`, `Reconnecting…`, `Presenter is offline` — its only live region), `Viewers: n` (`viewer.count`) and
+`Scene v<n>`.
+
+```bash
+npm test -w web-viewer -- platform status-bar screens && npm run e2e -w web-viewer -- status
+```
+

@@ -63,6 +63,8 @@ export interface ViewerOptions {
 export interface Viewer {
   /** `.viewer` element: canvas, notice and "Fit" button; CSS gives it the dynamic viewport. */
   readonly element: HTMLElement;
+  /** The stack at the top (notice, status line); the status bar is put first in it (WEB-15). */
+  readonly overlay: HTMLElement;
   readonly canvas: HTMLCanvasElement;
   readonly scene: Scene;
   readonly camera: PerspectiveCamera;
@@ -440,6 +442,7 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
 
   const viewer: Viewer = {
     element,
+    overlay: top,
     canvas,
     scene,
     camera,

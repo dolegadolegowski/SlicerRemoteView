@@ -96,7 +96,8 @@ async function joinAndShow(
   return { next: r.next, first, opened: () => r.count };
 }
 
-const status = (page: Page) => page.locator(".viewer__status");
+/** The connection state in the status bar over the scene (WEB-15). */
+const status = (page: Page) => page.locator(".status-bar__connection");
 
 test("a dropped connection is rejoined with the token: the scene stays, no new download (US-12)", async ({
   page,
@@ -121,8 +122,7 @@ test("a dropped connection is rejoined with the token: the scene stays, no new d
     snapshot: { sceneVersion: 1, byteLength: GLB.length, sha256, format: "glb" },
   });
   state(second, 1, 1);
-  await expect(status(page)).toHaveText("Connected again"); // the cue that the link is back …
-  await expect(status(page)).toBeHidden({ timeout: 3_000 + 5_000 }); // … for PRESENTER_NOTICE_MS (3 s)
+  await expect(status(page)).toHaveText("Connected"); // the bar's cue that the link is back (WEB-15)
   await expect(page.locator(".viewer[data-model='loaded']")).toBeVisible();
   expect(downloads).toEqual([]); // the version it shows is the one the relay caches
 });
@@ -169,7 +169,9 @@ test("after a relay restart the viewer joins by its code again, waits for the pr
   await expect(page.locator(".code-entry")).toBeHidden();
 });
 
-test("an open notice over the scene does not cover 'Reconnecting…'", async ({ page }) => {
+test("an open notice over the scene does not cover the status bar's 'Reconnecting…'", async ({
+  page,
+}) => {
   const { first } = await joinAndShow(page);
   // A snapshot above this device's 32 MiB: refused, the old scene stays with a notice over it.
   sendJson(first.ws, {
@@ -187,8 +189,8 @@ test("an open notice over the scene does not cover 'Reconnecting…'", async ({ 
   await first.ws.close();
   await expect(status(page)).toHaveText("Reconnecting…");
   const a = (await notice.boundingBox())!;
-  const b = (await status(page).boundingBox())!;
-  expect(b.y).toBeGreaterThanOrEqual(a.y + a.height); // below the notice, not under it
+  const b = (await page.locator(".status-bar").boundingBox())!;
+  expect(a.y).toBeGreaterThanOrEqual(b.y + b.height); // the notice sits below the bar, not over it
 });
 
 test("the presenter going offline and back is shown over the scene (§4.6)", async ({ page }) => {
@@ -201,7 +203,7 @@ test("the presenter going offline and back is shown over the scene (§4.6)", asy
   await expect(status(page)).toHaveText("Presenter is offline");
   await expect(page.locator(".viewer[data-model='loaded']")).toBeVisible();
   sendJson(first.ws, { type: "session.publisherState", online: true });
-  await expect(status(page)).toBeHidden();
+  await expect(status(page)).toHaveText("Connected");
 });
 
 test("the end of the presentation goes to the code entry and is not retried (4001)", async ({

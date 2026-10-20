@@ -16,8 +16,11 @@ import { MockSocket } from "../protocol/mock-socket";
 function fakeViewer() {
   const element = document.createElement("div");
   element.className = "viewer";
+  const overlay = document.createElement("div");
+  element.append(overlay);
   return {
     element,
+    overlay,
     canvas: document.createElement("canvas"),
     scene: undefined as never,
     camera: undefined as never,
@@ -146,6 +149,12 @@ const TOKEN = joined().viewerToken;
 
 const message = () => entry.element.querySelector(".code-entry__message")!.textContent ?? "";
 const entryStatus = () => entry.element.querySelector(".code-entry__status")!.textContent ?? "";
+const barConnection = () =>
+  viewer.element.querySelector(".status-bar__connection")?.textContent ?? "(no bar)";
+const barText = (name: string) => {
+  const part = viewer.element.querySelector<HTMLElement>(`.status-bar__${name}`)!;
+  return part.hidden ? null : part.textContent;
+};
 const cellsEnabled = () =>
   [...entry.element.querySelectorAll("input")].every((input) => !input.disabled);
 const entryVisible = () => !entry.element.hidden;
@@ -225,14 +234,12 @@ describe("screens", () => {
       socket.serverClose(1006);
       expect(viewerVisible()).toBe(true);
       expect(entryVisible()).toBe(false);
-      expect(viewer.setStatus).toHaveBeenLastCalledWith("Reconnecting…");
+      expect(barConnection()).toBe("Reconnecting…");
       vi.advanceTimersByTime(500);
-      expect(viewer.setStatus).toHaveBeenLastCalledWith("Reconnecting…"); // still, while connecting
+      expect(barConnection()).toBe("Reconnecting…"); // still, while connecting
       const again = rejoin();
       expect(again.frames[0]).toMatchObject({ type: "viewer.join", viewerToken: TOKEN });
-      expect(viewer.setStatus).toHaveBeenLastCalledWith("Connected again"); // a cue that the link is back
-      vi.advanceTimersByTime(PRESENTER_NOTICE_MS);
-      expect(viewer.setStatus).toHaveBeenLastCalledWith(null);
+      expect(barConnection()).toBe("Connected"); // announced: the cue that the link is back
       expect(viewerVisible()).toBe(true);
       expect(viewer.setModel).toHaveBeenCalledTimes(1); // not again: the user's camera stays
       expect(viewer.resize).toHaveBeenCalled();
@@ -567,13 +574,13 @@ describe("reconnecting and the presenter (WEB-14)", () => {
     const socket = join(undefined, { publisherOnline: false });
     expect(entryStatus()).toBe("Presenter is offline");
     models.emit(modelA);
-    expect(viewer.setStatus).toHaveBeenLastCalledWith("Presenter is offline");
-    screens.presenterChanged(["vtkMRMLModelNode2"]);
-    expect(viewer.setStatus).toHaveBeenLastCalledWith("Presenter is offline"); // the more important line
-    socket.receive({ type: "session.publisherState", online: true });
+    expect(barConnection()).toBe("Presenter is offline");
+    screens.presenterChanged(["vtkMRMLModelNode2"]); // the notice line is free for it
     expect(viewer.setStatus).toHaveBeenLastCalledWith("The presenter changed Tumor");
+    socket.receive({ type: "session.publisherState", online: true });
+    expect(barConnection()).toBe("Connected");
     socket.receive({ type: "session.publisherState", online: false, graceEndsAt: 1 });
-    expect(viewer.setStatus).toHaveBeenLastCalledWith("Presenter is offline");
+    expect(barConnection()).toBe("Presenter is offline");
   });
 
   it("reconnecting wins over 'presenter offline' and goes with the rejoin", () => {
@@ -582,11 +589,10 @@ describe("reconnecting and the presenter (WEB-14)", () => {
       const socket = join(undefined, { publisherOnline: false });
       models.emit(modelA);
       socket.serverClose(1006);
-      expect(viewer.setStatus).toHaveBeenLastCalledWith("Reconnecting…");
+      expect(barConnection()).toBe("Reconnecting…");
       vi.advanceTimersByTime(500);
       rejoin(undefined, { publisherOnline: true });
-      expect(viewer.setStatus).toHaveBeenLastCalledWith("Connected again");
-      vi.advanceTimersByTime(PRESENTER_NOTICE_MS);
+      expect(barConnection()).toBe("Connected");
       expect(viewer.setStatus).toHaveBeenLastCalledWith(null);
     } finally {
       vi.useRealTimers();
@@ -638,5 +644,33 @@ describe("reconnecting and the presenter (WEB-14)", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("status bar (WEB-15)", () => {
+  it("sits first in the viewer's top stack and shows the viewers and the scene version", () => {
+    const socket = join(undefined, { viewerCount: 3 });
+    screens.sceneVersion(1); // what main.ts reports for a new model
+    models.emit(modelA);
+    expect(viewer.overlay.firstElementChild?.className).toBe("status-bar");
+    expect(barConnection()).toBe("Connected");
+    expect(barText("viewers")).toBe("Viewers: 3");
+    expect(barText("version")).toBe("Scene v1");
+    socket.receive({
+      type: "viewer.count",
+      viewerCount: 4,
+      viewerLimit: 20,
+      platforms: { web: 4 },
+    });
+    expect(barText("viewers")).toBe("Viewers: 4"); // at once: no frame waits for it
+    screens.sceneVersion(5);
+    expect(barText("version")).toBe("Scene v5");
+  });
+
+  it("the end of the session clears the count", () => {
+    const socket = join(undefined, { viewerCount: 3 });
+    models.emit(modelA);
+    socket.serverClose(4001);
+    expect(barText("viewers")).toBeNull();
   });
 });

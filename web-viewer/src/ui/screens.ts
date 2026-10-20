@@ -1,8 +1,9 @@
 // Which screen the user sees (WEB-08): the 3D viewer with its node panel (WEB-09) while a model is loaded and the
 // session is live, the code entry otherwise. Also routes messages to the screen that is visible, gates Join on
-// WebGL 2, moves focus with the screen and keeps one polite status line per screen (WEB-12–14): reconnecting,
-// presenter offline, waiting for or loading the scene, a presenter notice. Kept out of `main.ts` so every transition
-// is unit-tested.
+// WebGL 2, moves focus with the screen and keeps the status lines: over the scene the status bar (WEB-15: connection,
+// viewers, scene version) and a short notice line (presenter changes, "updating"); on the code entry one line
+// (reconnecting, presenter offline, waiting for or loading the scene, WEB-14). Kept out of `main.ts` so every
+// transition is unit-tested.
 
 import { detectLang, t } from "../i18n/strings";
 import type { Connection } from "../protocol/connection";
@@ -16,6 +17,8 @@ import type { Description } from "../state/errors";
 import type { CodeEntry } from "./code-entry";
 import { createNodePanel } from "./node-panel";
 import type { NodePanel } from "./node-panel";
+import { createStatusBar } from "./status-bar";
+import type { StatusBar } from "./status-bar";
 
 export interface ScreensOptions {
   readonly app: HTMLElement;
@@ -52,6 +55,8 @@ export interface Screens {
   snapshotComing(): void;
   /** A presenter change replaced the local choice for these nodes (FR-40, US-09): a short notice names them. */
   presenterChanged(nodeIds: readonly string[]): void;
+  /** The scene version shown (§8.4), for the status bar; `null` when there is none. */
+  sceneVersion(version: number | null): void;
   readonly viewer: Viewer | null;
   readonly nodePanel: NodePanel | null;
   /** Joining, joined or reconnecting: the code entry's cells hold the code of this session. */
@@ -70,9 +75,12 @@ export function bindScreens(options: ScreensOptions): Screens {
   const downloading = options.downloading ?? (() => false);
   let viewer: Viewer | null = null;
   let panel: NodePanel | null = null;
+  let bar: StatusBar | null = null;
   let shown: SceneModel | null = null;
-  // One status line per screen, most important first: reconnecting, presenter offline, then over the scene a short
-  // presenter notice over the "updating" hint (which comes back after it), on the code entry "loading" or "waiting".
+  let viewerCount: number | null = null;
+  let version: number | null = null;
+  // Over the scene the status bar says reconnecting / presenter offline, the notice line a presenter notice over the
+  // "updating" hint (which comes back after it); the code entry says the most important of all of them.
   let joined = false; // `viewer.joined` of this session seen
   let reconnecting = false;
   let presenterOffline = false;
@@ -89,7 +97,10 @@ export function bindScreens(options: ScreensOptions): Screens {
       : presenterOffline
         ? t(lang, "state.presenterOffline.title")
         : null;
-    viewer?.setStatus(urgent ?? notice ?? (hint ? t(lang, "viewer.updating") : null));
+    bar?.setConnection(
+      reconnecting ? "reconnecting" : presenterOffline ? "presenterOffline" : "connected",
+    );
+    viewer?.setStatus(notice ?? (hint ? t(lang, "viewer.updating") : null));
     const waiting = loading ? "state.downloading.title" : "state.waitingForScene.title";
     entry.setStatus(urgent ?? (joined ? t(lang, waiting) : null));
   }
@@ -97,6 +108,8 @@ export function bindScreens(options: ScreensOptions): Screens {
   /** The session is over for this viewer (or not yet joined): no status of it is left. */
   function sessionGone(): void {
     joined = reconnecting = presenterOffline = loading = false;
+    viewerCount = null;
+    bar?.setViewers(null);
     paintStatus();
   }
 
@@ -113,7 +126,7 @@ export function bindScreens(options: ScreensOptions): Screens {
     hintTimer = setTimeout(() => setHint(false), UPDATING_HINT_MS);
   }
 
-  /** A short notice in the status line (WEB-13, WEB-14), for `PRESENTER_NOTICE_MS`. */
+  /** A short notice in the notice line (WEB-13), for `PRESENTER_NOTICE_MS`. */
   function flash(text: string): void {
     notice = text;
     clearTimeout(noticeTimer);
@@ -151,6 +164,10 @@ export function bindScreens(options: ScreensOptions): Screens {
       viewer = shownViewer;
       panel = createNodePanel({ onChange: () => shownViewer.invalidate() });
       viewer.element.append(panel.element);
+      bar = createStatusBar();
+      viewer.overlay.prepend(bar.element); // above the notice and the notice line
+      bar.setViewers(viewerCount);
+      bar.setSceneVersion(version);
       viewer.element.hidden = true;
       app.append(viewer.element);
     }
@@ -190,16 +207,21 @@ export function bindScreens(options: ScreensOptions): Screens {
   // handler first, so a different session has already cleared the old model here.
   // The scene loader registered first too: whether it started a download is known here.
   connection.onMessage("viewer.joined", (m) => {
-    const back = reconnecting && models.current !== null;
     joined = true;
+    viewerCount = m.viewerCount;
+    bar?.setViewers(viewerCount);
     reconnecting = false;
     presenterOffline = !m.publisherOnline;
     loading = downloading(); // else waiting for the presenter to share a scene (§13 step 9)
     // A hint whose snapshot died with the old socket: it gets the usual time to be announced again.
     if (hint && !loading) armHint();
-    paintStatus();
+    paintStatus(); // the bar's "Connected" after "Reconnecting…" is the cue that the link is back
     if (models.current) showViewer(models.current);
-    if (back) flash(t(detectLang(), "viewer.reconnected")); // a cue that the link is back (the status empties)
+  });
+  // §5.3: sent on every join and leave; shown at once (WEB-15).
+  connection.onMessage("viewer.count", (m) => {
+    viewerCount = m.viewerCount;
+    bar?.setViewers(viewerCount);
   });
   // §4.6: the scene stays frozen while the presenter is away (grace) and updates when they are back.
   connection.onMessage("session.publisherState", (m) => {
@@ -295,6 +317,10 @@ export function bindScreens(options: ScreensOptions): Screens {
           ? t(lang, "viewer.presenterChanged", { name })
           : t(lang, "viewer.presenterChangedMany", { count: nodeIds.length }),
       );
+    },
+    sceneVersion(next) {
+      version = next;
+      bar?.setSceneVersion(next);
     },
     get live() {
       const state = connection.state;

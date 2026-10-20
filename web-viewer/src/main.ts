@@ -4,6 +4,7 @@
 import { createConnection, endsSession } from "./protocol/connection";
 import type { ConnectionState } from "./protocol/connection";
 import { createReconnect } from "./protocol/reconnect";
+import { currentDevice, snapshotLimit } from "./platform";
 import { bindStreamToLoader, createSceneLoader } from "./protocol/scene-loader";
 import { bindSceneVersions, createSceneVersions } from "./protocol/scene-versions";
 import { bindSnapshotStream, createSnapshotStream } from "./protocol/snapshot-stream";
@@ -21,16 +22,21 @@ import { bindScreens } from "./ui/screens";
 const link = takeDeepLink();
 const app = document.getElementById("app");
 if (app) {
-  const connection = createConnection();
+  // `clientInfo.platform`/`profile` from the user agent (WEB-15); nothing else about the device is sent (§5.1). The
+  // snapshot limit follows the profile and is the same for the announcement, the stream and the download.
+  const device = currentDevice();
+  const maxSnapshotBytes = snapshotLimit(device.profile);
+  const connection = createConnection({ clientInfo: device, maxSnapshotBytes });
   const session = createReconnect(connection); // memory only: the code and the token (CLAUDE.md rule 6)
   // A closed state the reconnect logic retries (e.g. the code not re-created yet after a relay restart) keeps the
   // scene, the token and the versions; the new session's `viewer.joined` replaces them (WEB-14).
   const ends = (state: ConnectionState) => endsSession(state) && !session.willRetry(state);
-  const stream = createSnapshotStream();
+  const stream = createSnapshotStream({ maxSnapshotBytes });
   // Live updates go to the scene shown, in version order (WEB-12); `live` follows the model.
   let live: LiveScene | null = null;
   const versions = createSceneVersions({
     apply(message) {
+      screens.sceneVersion(message.sceneVersion); // the status bar (WEB-15)
       if (message.type === "scene.nodeAdded") return screens.updating(true); // a snapshot follows (§8.2)
       if (!live) return;
       const applied =
@@ -42,6 +48,7 @@ if (app) {
     },
     applyState(state) {
       if (!live) return;
+      screens.sceneVersion(state.sceneVersion);
       const changed = live.apply(state.nodes);
       const removed = live.remove(state.removed);
       screens.sceneChanged({
@@ -55,6 +62,7 @@ if (app) {
   const loader = createSceneLoader(connection, {
     haveSceneVersion: () => versions.sceneVersion ?? loader.loadedVersion ?? 0,
     ends,
+    maxSnapshotBytes,
   });
   const models = createSceneModelStore();
   bindSnapshotStream(connection, stream);
@@ -95,6 +103,8 @@ if (app) {
   // After the screens: a new model is on screen (with its node panel) before queued updates are applied to it.
   models.onChange((model) => {
     live = model ? createLiveScene(model) : null;
+    // First the snapshot's version: `shown` applies a waiting `scene.state` and queued updates, which raise it.
+    screens.sceneVersion(model?.snapshotVersion ?? null);
     versions.shown(model?.snapshotVersion ?? null);
   });
 

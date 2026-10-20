@@ -98,7 +98,8 @@ Join with a valid code (`asymmetric-2nodes.glb`).
     no rendering frames).
 12. Switch to another app for 10 s and come back. **Expect:** if the connection survived, the model is drawn
     again at once with the same camera; if Safari closed it meanwhile, "Reconnecting…" over the same model and
-    then "Connected again", with the same camera and nothing typed (WEB-14). Note which one happened.
+    then "Connected" in the status bar, with the same camera and nothing typed (WEB-14, WEB-15). Note which one
+    happened.
 
 ### Node panel (WEB-09)
 
@@ -155,12 +156,14 @@ Joined with `asymmetric-2nodes.glb`, **Structures** open.
 
 Joined with `toggle-visibility --loop` playing.
 
-1. Switch on airplane mode for 10 s, then off. **Expect:** "Reconnecting…" over the scene while offline (the scene
-   and your camera stay); a few seconds after the network returns the status goes and the switches follow the
-   presenter again — no Join, no new download (Web Inspector → Network shows no second `/api/scene`).
+1. Switch on airplane mode for 10 s, then off. **Expect:** "Reconnecting…" in the status bar while offline (the
+   scene and your camera stay); a few seconds after the network returns the bar shows the green "Connected" again
+   and the switches follow the presenter — no Join, no new download (Web Inspector → Network shows no second
+   `/api/scene`).
 2. Lock the phone for 2 minutes, unlock. **Expect:** the same as step 1, within about 10 s of unlocking.
 3. Take the presenter's laptop off the network for 30 s, then back (Slicer resumes within the 120 s grace).
-   **Expect:** "Presenter is offline" over the frozen scene while it is away; it goes when the presenter is back.
+   **Expect:** "Presenter is offline" in the status bar over the frozen scene while it is away, "Connected" when
+   the presenter is back.
 4. Restart or redeploy the relay while joined. **Expect:** "Reconnecting…", then "Waiting for the presenter" (or
    "Loading the scene…" if the presenter has shared it again already) under Join (cells disabled), then the scene
    again — about 5–10 s, nothing typed.
@@ -168,7 +171,17 @@ Joined with `toggle-visibility --loop` playing.
    cells; nothing retries.
 6. Lock the phone, let the presenter stop the session, unlock after a minute. **Expect:** "Reconnecting…" for up to
    a minute, then "Presentation ended" on the code entry (not "Code not recognised").
-7. With VoiceOver on, repeat step 1. **Expect:** "Reconnecting…" is spoken once, then "Connected again".
+7. With VoiceOver on, repeat step 1. **Expect:** "Reconnecting…" is spoken once, then "Connected" (status bar).
+
+### Status bar (WEB-15)
+
+1. Join. **Expect:** at the top, below the notch / Dynamic Island and inside the rounded corners (portrait and
+   landscape; attach both screenshots to **Results**): a green dot, "Connected", "Viewers: n" and "Scene v<n>" with
+   the presenter's current scene version (also when changes were made after the snapshot).
+2. Join from a second phone. **Expect:** the count goes up on both at once; it goes down when one leaves.
+3. Play `toggle-visibility`. **Expect:** the scene version goes up with every change.
+4. Airplane mode for 10 s. **Expect:** the dot turns amber and "Reconnecting…", then green "Connected" again;
+   VoiceOver speaks both.
 
 ### Download in the background (WEB-06 review, WEB-10)
 
@@ -192,6 +205,26 @@ differences:
 ## Quest Browser
 
 Filled in by WEB-19 / WEB-20 (WebXR entry, hands and controllers, 72 Hz; NFR-27).
+
+### Device profile (WEB-15)
+
+On Quest 2, Quest 3, Quest 3S (and Quest Pro if available), current Meta Quest Browser:
+
+Quest Browser has no developer tools on the headset: connect it over USB (developer mode) and inspect the tab from
+`chrome://inspect` on a computer.
+
+1. Open `https://<host>/` and record, in desktop mode and in mobile mode, `navigator.userAgent`,
+   `navigator.userAgentData?.brands`, `.platform`, `.mobile` and
+   `await navigator.userAgentData?.getHighEntropyValues(["model", "platformVersion"])`. **Expect:** `OculusBrowser/`
+   and a `Quest …` token in both modes (research `docs/research/web-quest-user-agent.md` §1.3, §2, §3 — note
+   anything else there). Add each recorded user agent to the matrix in `web-viewer/test/platform.test.ts`.
+2. Join a session and, in DevTools → Network → WS → Messages, open the first frame (`viewer.join`). **Expect:**
+   `clientInfo.platform` `quest-browser`, `profile` `quest3` on Quest 3 / 3S and `quest2` on the others,
+   `capabilities.maxSnapshotBytes` 67108864 on Quest 3 / 3S (33554432 otherwise), and no user agent anywhere in the
+   frame. (`viewer.count.platforms` and the publisher's viewer list show only `quest-browser`, once SRV-07 and
+   SLC-18 exist.)
+3. On a Quest 3, load a scene close to 64 MiB (`[TODO verify]`: Quest Browser tab memory, NFR-03). **Expect:** it
+   loads and stays responsive; if the tab is killed, record it — the limit for `quest3` goes back to 32 MiB.
 
 ## Results
 
