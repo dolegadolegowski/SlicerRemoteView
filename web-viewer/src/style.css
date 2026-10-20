@@ -30,6 +30,11 @@
   box-sizing: border-box;
 }
 
+/* `hidden` must win over component display rules (the viewer and the code entry swap screens). */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
@@ -133,5 +138,90 @@ body {
 
 .code-entry__join:focus-visible {
   outline: 3px solid var(--text);
+  outline-offset: 2px;
+}
+
+/* 3D viewer (WEB-08): the canvas fills the dynamic viewport, also under a notch (viewport-fit=cover); only the
+   canvas blocks browser gestures (touch-action: none), the page keeps native zoom elsewhere (WCAG). */
+.viewer {
+  position: fixed;
+  inset: 0 auto auto 0;
+  width: 100%;
+  height: 100vh; /* fallback for browsers without dynamic viewport units */
+  height: 100dvh;
+  background: var(--bg);
+}
+
+.viewer__canvas {
+  outline: none; /* focused from script only (tabindex=-1), for its screen-reader label */
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.viewer__fit {
+  position: absolute;
+  right: max(12px, var(--safe-right));
+  bottom: max(12px, var(--safe-bottom));
+  min-width: var(--target);
+  min-height: var(--target);
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 1rem;
+  touch-action: manipulation;
+}
+
+.viewer__fit:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* A message over the scene (refused snapshot while the previous one stays visible). */
+.viewer__notice {
+  position: absolute;
+  top: max(12px, var(--safe-top));
+  left: max(12px, var(--safe-left));
+  right: max(12px, var(--safe-right));
+  max-width: 28rem;
+  margin: 0 auto;
+  padding: 12px 16px;
+  border: 1px solid var(--danger);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.viewer__notice-title {
+  margin: 0 0 4px;
+  font-weight: 600;
+}
+
+.viewer__notice-body {
+  margin: 0 0 8px;
+  color: var(--text-muted);
+}
+
+.viewer__notice-close {
+  min-width: var(--target);
+  min-height: var(--target);
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  touch-action: manipulation;
+}
+
+.viewer__notice-close:focus-visible {
+  outline: 3px solid var(--accent);
   outline-offset: 2px;
 }

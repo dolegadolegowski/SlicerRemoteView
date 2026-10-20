@@ -275,6 +275,8 @@ export interface SceneModelStore {
   readonly current: SceneModel | null;
   /** Disposes the current model and cancels loads in flight (session ended, WEB-16). */
   clear(): void;
+  /** Called with the new current model after a successful load, and with `null` after `clear()`. */
+  onChange(handler: (model: SceneModel | null) => void): () => void;
 }
 
 export interface SceneModelStoreOptions extends ParseSceneOptions {
@@ -287,6 +289,16 @@ export function createSceneModelStore(options: SceneModelStoreOptions = {}): Sce
   const log = options.log ?? defaultLog;
   let current: SceneModel | null = null;
   let generation = 0;
+  const handlers = new Set<(model: SceneModel | null) => void>();
+  const changed = () => {
+    for (const handler of [...handlers]) {
+      try {
+        handler(current);
+      } catch {
+        log("scene model handler failed");
+      }
+    }
+  };
   return {
     async load(bytes) {
       const mine = ++generation;
@@ -301,6 +313,7 @@ export function createSceneModelStore(options: SceneModelStoreOptions = {}): Sce
       }
       current?.dispose();
       current = result.model;
+      changed();
       return result;
     },
     get current() {
@@ -308,8 +321,14 @@ export function createSceneModelStore(options: SceneModelStoreOptions = {}): Sce
     },
     clear() {
       generation++;
+      const had = current !== null;
       current?.dispose();
       current = null;
+      if (had) changed();
+    },
+    onChange(handler) {
+      handlers.add(handler);
+      return () => void handlers.delete(handler);
     },
   };
 }

@@ -174,3 +174,36 @@ from the stream and the HTTP loader and drops the model when the session ends or
 while reconnecting); the HTTP loader forgets its loaded version at the same moments. Tests run in jsdom with the real
 `GLTFLoader` (no WebGL needed): `npm test -w web-viewer -- scene-model glb-validate model-lifecycle` (the
 memory-release checks enable `gc` at runtime via `v8.setFlagsFromString`).
+
+### Viewer and controls (WEB-08)
+
+`src/render/viewer.ts` renders the scene model with three.js and touch controls; `src/ui/screens.ts` decides which
+screen is visible (the viewer while a model is loaded on a live session, the code entry otherwise) and `main.ts`
+only wires the pieces together.
+
+```ts
+const result = createViewer(); // { ok: false, reason: "webgl2Unavailable" } without WebGL 2 or a GL context
+document.body.append(result.viewer.element); // .viewer: full-screen canvas (100dvh), notice, "Fit view" button
+result.viewer.setModel(model);    // adds model.root to a ×1000 (mm) stage and fits it from the front
+result.viewer.invalidate();       // request one frame after changing the scene (live updates, WEB-12)
+result.viewer.setNotice(describeState({ kind: "snapshotInvalid" })); // message over the scene; null hides it
+```
+
+- **Render on demand** (FR-39, NFR-08): frames only on control changes, model changes, resize and visibility; while
+  OrbitControls' damping settles it keeps rendering, then stops. Nothing renders while the page is hidden. Near/far
+  follow the camera distance.
+- **Touch** (FR-38, US-08): one finger rotates, two fingers zoom and pan, a double tap (or the Fit button, or a
+  double click) re-frames the visible nodes keeping the direction; a new model is framed from the front. Only the
+  canvas blocks browser gestures (`touch-action: none`, Safari `gesturestart`/`gesturechange`), so the code entry
+  stays zoomable; if the page was pinch-zoomed before joining, the viewer covers the visual viewport.
+- **Size**: `.viewer` is `position: fixed` with `100dvh`; the drawing buffer is `min(devicePixelRatio, 2) × page
+  zoom × CSS size` (NFR-32; a zoomed viewer keeps the unzoomed resolution), resized from a `ResizeObserver` and
+  `visualViewport` events and redrawn at once.
+- **Screens and messages**: Join is refused at once without WebGL 2; `screens.report()` shows a message over the
+  scene while it is visible (e.g. a refused update) and on the code entry otherwise; a closed session goes back to
+  a focused code entry with its message, and a rejoin of the same session shows the kept model with the user's
+  camera.
+- Tests: `npm test -w web-viewer -- viewer screens` (mocked renderer, frame scheduler and visual viewport in jsdom)
+  and `npm run e2e -w web-viewer -- controls` (Chromium: `e2e/fake-relay.ts` streams a fixture GLB from
+  `page.routeWebSocket`; touch gestures and a page pinch-zoom over CDP). The gesture spec is skipped on WebKit —
+  check iOS Safari on a device: `docs/testing/web.md` §iPhone Safari.

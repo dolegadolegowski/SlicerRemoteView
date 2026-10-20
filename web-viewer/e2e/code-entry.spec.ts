@@ -50,8 +50,13 @@ test.describe("code entry", () => {
     await expect(page.locator(".code-entry__message")).toBeVisible();
     await expect(join).toBeEnabled();
 
-    expect(sockets).toHaveLength(1);
-    expect(sockets[0]!.url).toMatch(/^ws:\/\/127\.0\.0\.1:\d+\/ws$/);
+    // Join is refused up front where WebGL 2 is missing (e.g. headless WebKit on Linux): no socket at all then.
+    const webgl2 = await page.evaluate(
+      () => !!document.createElement("canvas").getContext("webgl2"),
+    );
+    expect(sockets).toHaveLength(webgl2 ? 1 : 0);
+    if (!webgl2) await expect(page.locator(".code-entry__message")).toContainText("3D");
+    if (webgl2) expect(sockets[0]!.url).toMatch(/^ws:\/\/127\.0\.0\.1:\d+\/ws$/);
     expect(page.url()).not.toMatch(/7KQ4X/i);
     expect(new URL(page.url()).search).toBe("");
     expect(new URL(page.url()).hash).toBe("");
