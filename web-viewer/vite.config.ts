@@ -19,6 +19,9 @@ export default defineConfig({
     // Vite upgrade cannot move the floor silently.
     target: "baseline-widely-available",
     sourcemap: false,
+    // three.js is one ≈ 740 kB (≈ 190 kB gzip) chunk; the real gate is the 1 MiB gzip budget of
+    // scripts/check-bundle.mjs (WEB-18, NFR-09), so Vite's 500 kB minified warning is raised to that.
+    chunkSizeWarningLimit: 1024,
   },
   server: {
     proxy: {
