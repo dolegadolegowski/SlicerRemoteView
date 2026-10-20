@@ -132,6 +132,7 @@ describe("session.close (SRV-06 criterion 2, §4.5)", () => {
       sha256: "x",
       byteLength: 1024,
       sceneVersion: 1,
+      extensionsRequired: [],
     };
     const started = performance.now();
     client.send({ type: "session.close", id: "p-77", reason: "USER_STOPPED" });
@@ -239,8 +240,10 @@ describe("app lifecycle", () => {
   it("closing the app detaches the expiry listener from an injected registry", async () => {
     relay = await startRelay();
     expect(relay.registry.listenerCount("expired")).toBe(1);
+    expect(relay.registry.listenerCount("released")).toBe(1);
     await relay.close();
     expect(relay.registry.listenerCount("expired")).toBe(0);
+    expect(relay.registry.listenerCount("released")).toBe(0);
     relay = undefined;
   });
 });

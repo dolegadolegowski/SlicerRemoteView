@@ -103,7 +103,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
       ...config,
       clock,
       onListenerError: (error) =>
-        logger.error({ errorCode: systemErrorCode(error) }, "session expiry handler failed"),
+        logger.error({ errorCode: systemErrorCode(error) }, "registry event handler failed"),
     });
 
   const app = Fastify({
@@ -151,8 +151,14 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
       }),
       binary: (connection, frame) => snapshot.chunk(connection, frame),
       closed: (connection, closeCode) => {
-        if (connection.role === "publisher") publisher.publisherClosed(connection, closeCode);
-        else if (connection.role === "viewer") viewer.viewerClosed(connection);
+        if (connection.role === "publisher") {
+          const session = connection.session;
+          try {
+            if (session?.publisher === connection) snapshot.publisherGone(session);
+          } finally {
+            publisher.publisherClosed(connection, closeCode);
+          }
+        } else if (connection.role === "viewer") viewer.viewerClosed(connection);
       },
       ...options.wsHandlers,
     },
@@ -169,6 +175,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     limiter.stop();
     publisher.dispose();
     viewer.dispose();
+    snapshot.dispose();
   });
 
   // No endpoint takes a request body (§10); without parsers a POST to an unknown path is a plain 404.

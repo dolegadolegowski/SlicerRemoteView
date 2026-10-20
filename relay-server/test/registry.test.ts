@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -182,7 +183,13 @@ describe("expiry follows the state diagram of architecture §3 (SRV-04 criterion
     expect(registry.publisherLost(session)).toBe(session.graceEndsAt);
     expect(session.phase).toBe("grace");
     expect(registry.publisherLost(session)).toBeUndefined();
-    session.snapshot = { buffer: Buffer.alloc(1), sha256: "x", byteLength: 1, sceneVersion: 1 };
+    session.snapshot = {
+      buffer: Buffer.alloc(1),
+      sha256: "x",
+      byteLength: 1,
+      sceneVersion: 1,
+      extensionsRequired: [],
+    };
     registry.publisherResumed(session);
     expect([session.phase, session.graceEndsAt]).toEqual(["active", undefined]);
     registry.closeSession(session);
@@ -244,6 +251,7 @@ function attachBuffers(session: Session): WeakRef<Buffer>[] {
     sha256: "x",
     byteLength: snapshot.length,
     sceneVersion: 3,
+    extensionsRequired: [],
   };
   session.assembling = {
     buffer: assembling,
@@ -253,6 +261,7 @@ function attachBuffers(session: Session): WeakRef<Buffer>[] {
     chunkCount: 8,
     nextIndex: 0,
     sha256: "0".repeat(64),
+    hash: createHash("sha256"),
     extensionsRequired: [],
     lastChunkAt: 0,
   };
@@ -290,14 +299,21 @@ describe("releasing a session (SRV-04 criterion 2, NFR-10)", () => {
     expect(refs.map((ref) => ref.deref() === undefined)).toEqual([true, true]);
   });
 
-  it("is idempotent", () => {
+  it("is idempotent; `released` follows `expired` once per session, also for a close", () => {
     const { registry, expired } = setup();
+    const events: string[] = [];
+    registry.on("expired", () => events.push("expired"));
+    registry.on("released", (s) => events.push(`released ${s.phase}`));
     const { session } = registry.createSession("mobile");
     registry.expireSession(session, "IDLE");
     registry.expireSession(session, "IDLE");
     registry.closeSession(session);
     expect(session.phase).toBe("expired");
     expect(expired).toHaveLength(1);
+    const other = registry.createSession("mobile").session;
+    registry.closeSession(other);
+    registry.closeSession(other);
+    expect(events).toEqual(["expired", "released expired", "released closed"]);
   });
 
   it("the relay sources never touch the file system", () => {

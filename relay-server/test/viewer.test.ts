@@ -356,6 +356,7 @@ describe("viewer.joined (§5.2)", () => {
       byteLength: 8,
       sceneVersion: 3,
       sha256: "a".repeat(64),
+      extensionsRequired: [],
     };
     pub.session.sceneVersion = 4;
     pub.client.ws.terminate();

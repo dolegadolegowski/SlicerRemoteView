@@ -19,8 +19,8 @@
  * the snapshot buffers and the merged node state, so V8 frees them once the sockets are gone;
  * nothing is pooled and nothing is ever written to disk (NFR-10).
  */
+import { randomInt, type Hash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { randomInt } from "node:crypto";
 import type { MessageOfType } from "@slicerremoteview/shared";
 import type { Clock, TimerHandle } from "./clock.js";
 import { systemClock } from "./clock.js";
@@ -48,12 +48,14 @@ export interface NodeState {
   matrix?: number[];
 }
 
-/** The latest complete snapshot (SRV-24 fills it). */
+/** The latest complete, verified snapshot (`ws/snapshot.ts` swaps it in at `end`). */
 export interface CachedSnapshot {
   buffer: Buffer;
   sha256: string;
   byteLength: number;
   sceneVersion: number;
+  /** From `begin`, for `scene.snapshot.ready` (§6.4). */
+  extensionsRequired: string[];
 }
 
 /** A snapshot being received (`ws/snapshot.ts`; SRV-24 verifies and swaps it in at `end`). */
@@ -68,6 +70,8 @@ export interface AssemblingSnapshot {
   nextIndex: number;
   /** SHA-256 announced in `begin`, checked against the bytes at `end` (§6.4). */
   sha256: string;
+  /** SHA-256 of the payloads so far, fed chunk by chunk (no 64 MiB hash at `end`). */
+  hash: Hash;
   /** Copied into `scene.snapshot.ready` (§6.4); the relay never parses the GLB. */
   extensionsRequired: string[];
   /** Arrival of the last chunk (or `begin`), for the 120 s chunk timeout (§3.3). */
@@ -154,7 +158,8 @@ export interface RegistryOptions extends RegistryLimits {
   /** RNG for codes and session ids (tests); default `crypto.randomInt`. */
   rng?: RandomInt;
   /**
-   * Called when an `expired`/`expiring` listener throws; the other listeners and the sweep go on.
+   * Called when an `expiring`/`expired`/`released` listener throws; the other listeners and the
+   * sweep go on.
    * Default: ignore (the app logs an error code).
    */
   onListenerError?: (error: unknown) => void;
@@ -165,6 +170,8 @@ export type RegistryEvents = {
   expiring: [session: Session, closesAt: number];
   /** After the session was released by the relay (sweep or `expireSession`). */
   expired: [session: Session, reason: ExpiryReason];
+  /** After any release (close or expiry), once per session: drop what is keyed by it. */
+  released: [session: Session];
 };
 
 export class RegistryError extends Error {
@@ -422,10 +429,11 @@ export class Registry extends EventEmitter<RegistryEvents> {
       : undefined;
   }
 
-  /** `session.close` from the publisher: phase `closed`, released at once (§4.5). No event. */
+  /** `session.close` from the publisher: phase `closed`, released at once (§4.5); `released` only. */
   closeSession(session: Session): void {
     if (!this.#release(session)) return;
     session.phase = "closed";
+    this.#notify("released", session);
   }
 
   /** Relay-initiated end: phase `expired`, released, then the `expired` event. */
@@ -433,6 +441,7 @@ export class Registry extends EventEmitter<RegistryEvents> {
     if (!this.#release(session)) return;
     session.phase = "expired";
     this.#notify("expired", session, reason);
+    this.#notify("released", session);
   }
 
   /** One expiry pass over all sessions; also drops expired quarantine entries. */
