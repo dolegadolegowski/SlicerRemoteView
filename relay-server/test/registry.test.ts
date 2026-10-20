@@ -505,3 +505,53 @@ describe("viewers (SRV-07, architecture §3)", () => {
     expect(registry.idleDeadline(session)).toBe(clock.now() + 1_800 * S);
   });
 });
+
+describe("tokens of ended sessions (SRV-11, §10: 410 vs 401)", () => {
+  it("are remembered for CODE_QUARANTINE_S after close or expiry, then forgotten", () => {
+    const { clock, registry } = setup();
+    const closed = registry.createSession("mobile").session;
+    const { viewerToken: closedToken } = registry.addViewer(closed, stubPeer, "web");
+    const expiring = registry.createSession("mobile").session;
+    const { viewerToken: expiredToken } = registry.addViewer(expiring, stubPeer, "web");
+    expect(registry.tokenEnded(closedToken)).toBe(false);
+    registry.closeSession(closed);
+    registry.expireSession(expiring, "MAX_LIFETIME");
+    expect(registry.viewerByToken(closedToken)).toBeUndefined();
+    expect(registry.tokenEnded(closedToken)).toBe(true);
+    expect(registry.tokenEnded(expiredToken)).toBe(true);
+    expect(registry.tokenEnded(`vt_${"A".repeat(43)}`)).toBe(false);
+    clock.advance(DEFAULTS.codeQuarantineS * 1000 - 1);
+    registry.sweep();
+    expect(registry.tokenEnded(closedToken)).toBe(true);
+    clock.advance(1);
+    expect(registry.tokenEnded(closedToken)).toBe(false);
+    registry.sweep();
+    expect(registry.tokenEnded(expiredToken)).toBe(false);
+    expect(registry.endedTokenCount).toBe(0);
+  });
+
+  it("never include entries pruned while the session was live", () => {
+    const { registry } = setup({ maxSessions: 10, maxViewers: 1 });
+    const session = registry.createSession("mobile").session;
+    const tokens: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      const { viewer, viewerToken } = registry.addViewer(session, stubPeer, "web");
+      tokens.push(viewerToken);
+      registry.viewerDisconnected(session, viewer);
+    }
+    // 3 × maxViewers entries are kept: the first was pruned before the end.
+    registry.closeSession(session);
+    expect(tokens.map((token) => registry.tokenEnded(token))).toEqual([false, true, true, true]);
+  });
+
+  it("are bounded at maxSessions × 3 × maxViewers, oldest out", () => {
+    const { registry } = setup({ maxSessions: 1, maxViewers: 1 });
+    const tokens: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      const session = registry.createSession("mobile").session;
+      tokens.push(registry.addViewer(session, stubPeer, "web").viewerToken);
+      registry.closeSession(session);
+    }
+    expect(tokens.map((token) => registry.tokenEnded(token))).toEqual([false, true, true, true]);
+  });
+});

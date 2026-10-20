@@ -250,7 +250,7 @@ export function fanout({ registry, config, logger, clock }: FanoutDeps) {
     updatePause();
   }
 
-  const events: SnapshotEvents = {
+  const events: Required<SnapshotEvents> = {
     begun(session, sceneVersion, text) {
       if (disposed) return;
       const stream: Stream = {

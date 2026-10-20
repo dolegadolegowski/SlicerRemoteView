@@ -14,6 +14,7 @@ import { systemClock } from "./clock.js";
 import type { Clock } from "./clock.js";
 import { loadConfig, publicLimits } from "./config.js";
 import type { Config } from "./config.js";
+import { registerSceneRoute, sceneDownloads } from "./http/scene.js";
 import { createLogger } from "./logger.js";
 import { RateLimiter } from "./ratelimit.js";
 import { Registry } from "./registry.js";
@@ -137,7 +138,21 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     clock,
     overCapacity: fan.overCapacity,
   });
-  const snapshot = snapshotHandlers({ registry, config, logger, clock, events: fan.events });
+  const downloads = sceneDownloads({ registry });
+  const snapshot = snapshotHandlers({
+    registry,
+    config,
+    logger,
+    clock,
+    events: {
+      ...fan.events,
+      // The cache swap also ends the HTTP downloads of the replaced buffer (§6.4).
+      completed: (session, cached, text) => {
+        downloads.replaced(session);
+        return fan.events.completed(session, cached, text);
+      },
+    },
+  });
 
   // First: the WebSocket plugin wraps every route registered after it (upgrade interception).
   await registerWsEndpoint(app, {
@@ -189,6 +204,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     publisher.dispose();
     viewer.dispose();
     snapshot.dispose();
+    downloads.dispose();
   });
 
   // No endpoint takes a request body (§10); without parsers a POST to an unknown path is a plain 404.
@@ -208,6 +224,8 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     protocolVersions: PROTOCOL_VERSIONS,
     limits,
   }));
+
+  registerSceneRoute(app, { registry, clock, logger, downloads });
 
   // No SPA fallback and no echo of the requested path: a leaked `/7KQ4X` style URL never works (§10).
   app.setNotFoundHandler(async (_request, reply) => reply.code(404).send(NOT_FOUND));

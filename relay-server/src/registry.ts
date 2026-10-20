@@ -213,6 +213,12 @@ export class Registry extends EventEmitter<RegistryEvents> {
   readonly #byCode = new Map<string, Session>();
   /** Hex SHA-256 of a viewer token → its session and viewer (rejoin SRV-15, scene download SRV-11). */
   readonly #viewerTokens = new Map<string, { session: Session; viewer: Viewer }>();
+  /**
+   * Hex SHA-256 of the viewer tokens of ended sessions → when to forget them, so `GET /api/scene`
+   * can answer `410` rather than `401` (§10). Kept `codeQuarantineS`, oldest first out above
+   * `maxSessions × VIEWER_ENTRIES_PER_SLOT × maxViewers` entries.
+   */
+  readonly #endedTokens = new Map<string, number>();
   readonly #quarantine: CodeQuarantine;
   readonly #clock: Clock;
   readonly #rng: RandomInt;
@@ -398,6 +404,20 @@ export class Registry extends EventEmitter<RegistryEvents> {
     return this.#viewerTokens.get(hashToken(token).toString("hex"));
   }
 
+  /** Remembered token hashes of ended sessions (tests, metrics). */
+  get endedTokenCount(): number {
+    return this.#endedTokens.size;
+  }
+
+  /**
+   * True for the token of a viewer entry whose session ended less than `codeQuarantineS` ago
+   * (`410`, §10); false for any other, including entries pruned before the end.
+   */
+  tokenEnded(token: string): boolean {
+    const until = this.#endedTokens.get(hashToken(token).toString("hex"));
+    return until !== undefined && until > this.#clock.now();
+  }
+
   /**
    * Number of viewers with an open socket, kept in step by `addViewer`/`viewerDisconnected`.
    * Dropping to 0 starts a new idle period; while it is above 0 the idle timer does not run (§4.4).
@@ -453,7 +473,7 @@ export class Registry extends EventEmitter<RegistryEvents> {
     this.#notify("released", session);
   }
 
-  /** One expiry pass over all sessions; also drops expired quarantine entries. */
+  /** One expiry pass over all sessions; also drops expired quarantine entries and ended tokens. */
   sweep(): void {
     const now = this.#clock.now();
     for (const session of [...this.#byId.values()]) {
@@ -466,6 +486,11 @@ export class Registry extends EventEmitter<RegistryEvents> {
       }
     }
     this.#quarantine.sweep();
+    // Insertion order is expiry order: every entry is kept for the same time.
+    for (const [key, until] of this.#endedTokens) {
+      if (until > now) break;
+      this.#endedTokens.delete(key);
+    }
   }
 
   /**
@@ -527,8 +552,15 @@ export class Registry extends EventEmitter<RegistryEvents> {
     if (this.#byId.get(session.id) !== session) return false;
     this.#byId.delete(session.id);
     this.#byCode.delete(session.code);
-    for (const viewer of session.viewers.values())
-      this.#viewerTokens.delete(viewer.tokenHash.toString("hex"));
+    const forgetAt = this.#clock.now() + this.#limits.codeQuarantineS * 1000;
+    const maxEnded = this.#limits.maxSessions * VIEWER_ENTRIES_PER_SLOT * this.#limits.maxViewers;
+    for (const viewer of session.viewers.values()) {
+      const key = viewer.tokenHash.toString("hex");
+      this.#viewerTokens.delete(key);
+      this.#endedTokens.set(key, forgetAt);
+      if (this.#endedTokens.size > maxEnded)
+        this.#endedTokens.delete(this.#endedTokens.keys().next().value as string);
+    }
     this.#quarantine.add(session.code);
     session.snapshot = undefined;
     session.assembling = undefined;

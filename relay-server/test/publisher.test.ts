@@ -242,8 +242,8 @@ describe("app lifecycle", () => {
   it("closing the app detaches the expiry listener from an injected registry", async () => {
     relay = await startRelay();
     expect(relay.registry.listenerCount("expired")).toBe(1);
-    // The snapshot pipeline and the fan-out.
-    expect(relay.registry.listenerCount("released")).toBe(2);
+    // The snapshot pipeline, the fan-out and the scene downloads.
+    expect(relay.registry.listenerCount("released")).toBe(3);
     await relay.close();
     expect(relay.registry.listenerCount("expired")).toBe(0);
     expect(relay.registry.listenerCount("released")).toBe(0);
