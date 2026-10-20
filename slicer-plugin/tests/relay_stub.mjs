@@ -1,9 +1,13 @@
-// Runs the in-process relay stub of tools/fake-slicer (its own tests' relay) for test_panel.py and manual §2: prints
-// the stub's ws:// URL on one line; when stdin closes, prints "<session.close messages> <heartbeat pings>" it received
-// from publishers (e.g. "1 4") on a second line and exits.
+// Runs the in-process relay stub of tools/fake-slicer (its own tests' relay) for the tests and manual §2: prints the
+// stub's ws:// URL on one line; when stdin closes, prints "<session.close messages> <heartbeat pings>" it received from
+// publishers (e.g. "1 4"), followed by " v<sceneVersion>:<sha256>" for each snapshot whose binary chunks it received
+// (the SHA-256 of the chunk payloads joined in order — one publisher session assumed: a version reused by a later
+// session would be merged), on a second line, and exits.
 // Usage: node relay_stub.mjs [--port <n>] [<file URL of relay-stub.js>]
 // Without a URL it loads tools/fake-slicer/dist/relay-stub.js of this checkout (any shell, any OS); --port keeps the
 // address the same across runs (default: a random free port).
+import { createHash } from "node:crypto";
+
 const args = process.argv.slice(2);
 let port = 0;
 let stubUrl = new URL("../../tools/fake-slicer/dist/relay-stub.js", import.meta.url).href;
@@ -23,7 +27,14 @@ process.stdin.on("end", async () => {
   const closes = stub.publisherFrames.filter(
     (frame) => !frame.binary && JSON.parse(frame.data.toString()).type === "session.close",
   ).length;
-  process.stdout.write(`${closes} ${stub.pings}\n`);
+  const snapshots = new Map();
+  for (const frame of stub.publisherFrames.filter((f) => f.binary && f.data.length >= 12)) {
+    const version = frame.data.readUInt32LE(4); // §6.3 header: SRVC, sceneVersion, chunkIndex
+    if (!snapshots.has(version)) snapshots.set(version, createHash("sha256"));
+    snapshots.get(version).update(frame.data.subarray(12));
+  }
+  const digests = [...snapshots].map(([version, hash]) => ` v${version}:${hash.digest("hex")}`).join("");
+  process.stdout.write(`${closes} ${stub.pings}${digests}\n`);
   await stub.close();
   process.exit(0);
 });

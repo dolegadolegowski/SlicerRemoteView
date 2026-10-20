@@ -147,7 +147,8 @@ relay stub of `tools/fake-slicer` on the same machine — once, from the reposit
 `npm run build -w shared -w tools/fake-slicer`; then, in a terminal kept open next to Slicer,
 `node slicer-plugin/tests/relay_stub.mjs --port 8787`, which prints `ws://127.0.0.1:8787/ws` and, when you end its
 input (Ctrl-D; Ctrl-Z then Enter on Windows), two numbers — the `session.close` messages and the heartbeat `ping`s it
-received (e.g. `1 4`) — then exits; (b) a deployed relay (`wss://<relay-host>/ws`, `docs/deploy.md`), needed for step
+received (e.g. `1 4`; once sessions send scenes, SLC-25, one `v<sceneVersion>:<sha256>` per snapshot follows) — then
+exits; (b) a deployed relay (`wss://<relay-host>/ws`, `docs/deploy.md`), needed for step
 10 only (steps 3–8 work with either). For the CA steps keep any small non-certificate file and any PEM certificate at
 hand (e.g. Slicer's own `Slicer.crt`, whose path the SLC-08 snippet prints).
 

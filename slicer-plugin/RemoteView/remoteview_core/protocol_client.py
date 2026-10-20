@@ -430,6 +430,12 @@ class ProtocolClient:
         return f"ProtocolClient(state={self.state.value}, sceneVersion={self.versions.last})"
 
     @property
+    def next_scene_version(self) -> int:
+        """The ``sceneVersion`` the next snapshot or update gets (§8.4), so a GLB's root extras can name it before
+        :meth:`begin_snapshot` allocates it; reading it allocates nothing."""
+        return self.versions.last + 1
+
+    @property
     def has_publisher_token(self) -> bool:
         return self._publisher_token is not None
 

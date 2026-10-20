@@ -925,6 +925,6 @@ def test_panel_end_to_end_with_the_relay_stub():
         except subprocess.TimeoutExpired:
             stub.kill()
             out, _ = stub.communicate()
-    closes, pings = out.split()
+    closes, pings = out.split()[:2]
     assert closes == "1"  # the stub received exactly one session.close
     assert int(pings) >= 3  # and the heartbeat kept going while the panel pumped
