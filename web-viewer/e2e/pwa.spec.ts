@@ -44,7 +44,11 @@ test("no service worker is registered, also after joining a session", async ({ p
   ).toBe(0);
 });
 
-/** Contrast violations of the elements matched by `include` (WCAG 2 AA, NFR-32). */
+/**
+ * Contrast problems of the elements matched by `include` (WCAG 2 AA, NFR-32): violations, and also the nodes axe
+ * could not decide (text over the canvas or an image would land there and pass silently). At least one node must
+ * have been checked, so an empty or hidden selection fails too.
+ */
 async function contrast(page: Page, include: string): Promise<string[]> {
   await page.addScriptTag({ path: AXE });
   return page.evaluate(async (selector) => {
@@ -53,9 +57,11 @@ async function contrast(page: Page, include: string): Promise<string[]> {
     ).axe;
     const options: RunOptions = { runOnly: { type: "rule", values: ["color-contrast"] } };
     const result = await axe.run(selector, options);
-    return result.violations.flatMap((v) =>
+    const problems = [...result.violations, ...result.incomplete].flatMap((v) =>
       v.nodes.map((n) => `${n.target.join(" ")}: ${n.failureSummary ?? ""}`),
     );
+    const checked = result.passes.reduce((sum, rule) => sum + rule.nodes.length, 0);
+    return checked > 0 || problems.length > 0 ? problems : [`${selector}: no text checked`];
   }, include);
 }
 

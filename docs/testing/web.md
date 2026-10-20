@@ -216,6 +216,12 @@ Joined with `toggle-visibility --loop` playing.
    `[TODO verify]` research web.md §2.6), the code is joined and the address bar (if any) shows `/j`.
 4. Android Chrome: menu → **Install app** (or **Add to Home screen**). **Expect:** the cube icon, shaped by the
    launcher (maskable), and the app opens without browser UI.
+5. In the installed app, during a session: there is no Leave control yet (WEB-22), no address bar and no reload; iOS
+   has no back button either. To join another code, close the app from the app switcher and open it again.
+   **Expect:** the code entry (the installed app always starts at `/`), and the presenter's viewer count drops by one
+   within 60 s (at once with `pagehide` → `viewer.leave`, §5.4; else the relay's WS-ping timeout, §9.1). Android:
+   also press the system Back during a session and record what happens (expected: the app closes, same result;
+   `[TODO verify]`).
 
 ### Download in the background (WEB-06 review, WEB-10)
 
