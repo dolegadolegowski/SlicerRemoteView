@@ -94,9 +94,12 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
         codeFont.setLetterSpacing(qt.QFont.PercentageSpacing, 130)
         self.ui.codeLabel.font = codeFont
 
+        # the consent statement names the relay being typed, before anything is sent (R-06)
+        self.ui.relayUrlLineEdit.connect("textChanged(QString)", self.onRelayUrlChanged)
         self.ui.relayUrlLineEdit.text = slicer.util.settingsValue(
             RELAY_URL_SETTING, DEFAULT_RELAY_URL
         )
+        self.onRelayUrlChanged(self.ui.relayUrlLineEdit.text)
         caFile = slicer.util.settingsValue(EXTRA_CA_SETTING, "")
         self.ui.extraCaPathLineEdit.currentPath = caFile
         # A remembered extra trust anchor is never applied out of sight (T5): show the section that holds it.
@@ -116,6 +119,11 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
             self.controller.shutdown()
         self.controller = None
         self.logic = None
+
+    def onRelayUrlChanged(self, url: str) -> None:
+        from remoteview_core.consent import consent_text  # noqa: PLC0415 — standard library only
+
+        self.ui.consentLabel.text = consent_text(url)
 
     def onStartClicked(self, _checked: bool = False) -> None:
         # Imported only now: nothing of the session machinery is loaded before the user starts (FR-02).
@@ -164,11 +172,18 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
 
 
 class RemoteViewLogic(ScriptedLoadableModuleLogic):
-    """Scene-side logic. Placeholder: the session lives in the panel's controller (SLC-09); the Slicer scene
-    adapter arrives with SLC-22."""
+    """Scene-side logic: the session lives in the panel's controller (SLC-09); the first snapshot arrives with
+    SLC-24."""
 
     def __init__(self) -> None:
         ScriptedLoadableModuleLogic.__init__(self)
+
+    @staticmethod
+    def sceneApi():
+        """The current scene as ``remoteview_core.collect`` reads it: the model nodes the 3D view shows (SLC-22)."""
+        from remoteview_core.mrml_scene import MrmlSceneApi  # noqa: PLC0415 — imports VTK
+
+        return MrmlSceneApi(slicer.util.getNodesByClass, slicer.vtkMRMLFolderDisplayNode)
 
 
 #

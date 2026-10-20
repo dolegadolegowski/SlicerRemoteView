@@ -200,3 +200,57 @@ Expected results:
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|
 | | | | | |
+
+## §12 Consent text and the scene adapter (SLC-22; R-06, NFR-16, FR-05)
+
+Preconditions: the test Slicer of §2; the *MRHead* sample (*Sample Data*) and two models made in the Python console:
+
+```python
+import vtk
+for name, center in (("Sphere A", (100, 0, 0)), ("Sphere B", (0, 100, 0))):
+    source = vtk.vtkSphereSource()
+    source.SetRadius(20)
+    source.SetCenter(center)
+    source.Update()
+    slicer.modules.models.logic().AddModel(source.GetOutput()).SetName(name)
+```
+
+Steps:
+
+1. Open *RemoteView*. Read the text above *Start session* with the address field empty, then type
+   `wss://relay.example.org/ws`, then `wss://user:secret@relay.example.org/ws`, then `ws://127.0.0.1:8787/ws`.
+2. In *Data*, move *Sphere B* into a new folder and hide the folder (eye icon). In *Models*, set *Sphere A*'s opacity to
+   0.5. In *Transforms*, create a linear transform *T1* with a translation of 50 mm along R and apply it to *Sphere A*;
+   create *T2* with 30 mm along R and apply it to *T1* (a two-level chain).
+3. In the Python console run:
+
+   ```python
+   import RemoteView
+   from remoteview_core.collect import collect_scene
+   api = RemoteView.RemoteViewLogic.sceneApi()
+   print([node.GetName() for node in api.visible_model_nodes()])
+   scene = collect_scene(api)
+   print([(e.name, round(e.opacity, 3), None if e.matrix is None else round(e.matrix[0][3], 3))
+          for e in scene.entities], scene.skipped)
+   ```
+
+4. Show the folder again, close *Sphere A*'s eye in *Data* and run the snippet again.
+
+Expected results:
+
+- Step 1: the text lists what *Start session* sends (the complete surface meshes of the models shown in the 3D view —
+  clipping is not applied — no images or volumes, names and MRML node IDs, colours, opacity, visibility, position, the
+  Slicer/RemoteView/OS versions) and who can see it. It names "the relay whose address you enter above" for the empty
+  field and "the relay at relay.example.org" for both `wss://` addresses (never `user` or `secret`); for
+  `ws://127.0.0.1:8787/ws` it names "the relay at 127.0.0.1" and ends with "A ws:// address is not encrypted; Start
+  session accepts it only for a relay on this computer (development)." The status stays "Not connected."; nothing is
+  sent.
+- Step 3: the first line is `['Sphere A']` — no slice planes (*Red/Green/Yellow Volume Slice*), no *Sphere B* (hidden
+  folder), nothing from *MRHead* (a volume). The second line is `[('Sphere A', 0.5, 0.08)] ()`: opacity as shown, the
+  80 mm of the two transforms as 0.08 m along glTF +X.
+- Step 4: the first line is `['Sphere B']`.
+- Throughout: no traceback and no error logged by Slicer (in particular none from `GetMatrixTransformToWorld`).
+
+| Date | Slicer version | OS | Result | Tester |
+|---|---|---|---|---|
+| | | | | |

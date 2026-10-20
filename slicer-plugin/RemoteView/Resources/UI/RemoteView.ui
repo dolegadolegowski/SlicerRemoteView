@@ -34,6 +34,22 @@
        </layout>
       </item>
       <item>
+       <widget class="QLabel" name="consentLabel">
+        <property name="accessibleName">
+         <string>What Start session sends</string>
+        </property>
+        <property name="text">
+         <string/>
+        </property>
+        <property name="textFormat">
+         <enum>Qt::PlainText</enum>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
        <layout class="QHBoxLayout" name="buttonsLayout">
         <item>
          <widget class="QPushButton" name="startButton">
