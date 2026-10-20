@@ -93,7 +93,6 @@ describe("client IP behind the Railway edge (TRUST_PROXY, T1, T3)", () => {
 
 describe("unknown paths (SRV-01, §10)", () => {
   it.each([
-    "/", // the SPA arrives with SRV-16 (static hosting); until then `/` is unknown too
     "/nope",
     "/7KQ4X",
     "/j/7KQ4X",

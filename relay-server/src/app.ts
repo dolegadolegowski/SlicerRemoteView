@@ -6,6 +6,7 @@
  * headers; T6) and every unknown path answers `404 {"error":"NOT_FOUND"}` without echoing it.
  */
 import type { Duplex } from "node:stream";
+import helmet from "@fastify/helmet";
 import Fastify, { LogController } from "fastify";
 import type { FastifyBaseLogger, FastifyInstance, FastifyReply } from "fastify";
 import type { Logger } from "pino";
@@ -15,6 +16,7 @@ import type { Clock } from "./clock.js";
 import { loadConfig, publicLimits } from "./config.js";
 import type { Config } from "./config.js";
 import { registerSceneRoute, sceneDownloads } from "./http/scene.js";
+import { DEFAULT_STATIC_ROOT, registerStatic } from "./http/static.js";
 import { createLogger } from "./logger.js";
 import { RateLimiter } from "./ratelimit.js";
 import { Registry } from "./registry.js";
@@ -50,6 +52,8 @@ export interface AppOptions {
    * time turn it off: every tick would pass before a real pong could arrive.
    */
   heartbeat?: boolean;
+  /** The viewer build (`index.html`, `assets/`); default `relay-server/public/` (SRV-16). */
+  staticRoot?: string;
 }
 
 const NOT_FOUND = { error: "NOT_FOUND" } as const;
@@ -133,6 +137,21 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     },
   });
 
+  // Both handlers first: a plugin scope (the viewer routes, SRV-16) chains to the handlers set when
+  // it loads, and every `await app.register()` below loads the routes registered so far.
+  // No SPA fallback beyond `/` and `/j` and no echo of the requested path: a leaked `/7KQ4X` style
+  // URL never works (§10).
+  app.setNotFoundHandler(async (_request, reply) => reply.code(404).send(NOT_FOUND));
+  // Fastify's default error body repeats parser and validation messages (and file paths); answer
+  // with a code only, and log the 5xx (per-request logging, Fastify's own error log included, is off).
+  app.setErrorHandler(async (error, request, reply) => {
+    const raw = (error as { statusCode?: unknown }).statusCode;
+    const status = typeof raw === "number" && raw >= 400 && raw < 600 ? raw : 500;
+    if (status >= 500)
+      request.log.error({ errorCode: systemErrorCode(error) }, "http handler failed");
+    return reply.code(status).send({ error: status >= 500 ? "INTERNAL" : "BAD_REQUEST" });
+  });
+
   // Compile every protocol schema now, not on the first client message (≈ 250 ms of blocked loop).
   const validators = defaultSchemas();
   const limiter = options.limiter ?? new RateLimiter({ clock, logger });
@@ -183,7 +202,30 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     },
   });
 
-  // First: the WebSocket plugin wraps every route registered after it (upgrade interception).
+  // Security headers on every response (ADR 0006 §4, architecture §8 T6). The CSP fits the viewer:
+  // its own scripts, styles (Vite may inline some), workers and blobs for the three.js decoders,
+  // `wss:` for the relay itself; no `unsafe-eval`, no third-party origin. No
+  // `upgrade-insecure-requests`: every URL is relative, production is HTTPS behind the edge (HSTS),
+  // and it would break a plain-HTTP local run of the image (SRV-20).
+  await app.register(helmet, {
+    contentSecurityPolicy: {
+      useDefaults: true,
+      directives: {
+        defaultSrc: ["'self'"],
+        connectSrc: ["'self'", "wss:"],
+        workerSrc: ["'self'", "blob:"],
+        imgSrc: ["'self'", "data:", "blob:"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        fontSrc: ["'self'", "data:"],
+        frameAncestors: ["'none'"],
+        upgradeInsecureRequests: null,
+      },
+    },
+    referrerPolicy: { policy: "no-referrer" },
+    frameguard: { action: "deny" },
+  });
+
+  // Then the WebSocket plugin, which wraps every route registered after it (upgrade interception).
   await registerWsEndpoint(app, {
     allowedOrigins: config.allowedOrigins,
     clock,
@@ -261,18 +303,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   }));
 
   registerSceneRoute(app, { registry, clock, logger, downloads });
-
-  // No SPA fallback and no echo of the requested path: a leaked `/7KQ4X` style URL never works (§10).
-  app.setNotFoundHandler(async (_request, reply) => reply.code(404).send(NOT_FOUND));
-
-  // Fastify's default error body repeats parser and validation messages; answer with a code only.
-  app.setErrorHandler(async (error, request, reply) => {
-    const raw = (error as { statusCode?: unknown }).statusCode;
-    const status = typeof raw === "number" && raw >= 400 && raw < 600 ? raw : 500;
-    if (status >= 500)
-      request.log.error({ errorCode: systemErrorCode(error) }, "http handler failed");
-    return reply.code(status).send({ error: status >= 500 ? "INTERNAL" : "BAD_REQUEST" });
-  });
+  await registerStatic(app, { root: options.staticRoot ?? DEFAULT_STATIC_ROOT });
 
   return app;
 }
