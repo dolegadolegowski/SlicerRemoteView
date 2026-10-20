@@ -5,61 +5,8 @@
 
 import { expect, test } from "@playwright/test";
 import type { CDPSession, Page } from "@playwright/test";
-import { fakeRelay, join, joinAndView } from "./fake-relay";
-
-/** The scene only: controls over the canvas would count as model pixels (not `mask`: its colour counts too). */
-const SCENE_ONLY = ".viewer__fit, .viewer__notice { visibility: hidden !important; }";
-
-/** Waits until the canvas stops changing (damping settled; render on demand stops). */
-async function settled(page: Page): Promise<Buffer> {
-  const canvas = page.locator(".viewer__canvas");
-  const shot = () => canvas.screenshot({ style: SCENE_ONLY });
-  let previous = await shot();
-  for (let attempt = 0; attempt < 20; attempt++) {
-    await page.waitForTimeout(250);
-    const current = await shot();
-    if (current.equals(previous)) return current;
-    previous = current;
-  }
-  throw new Error("the canvas never settled");
-}
-
-interface Footprint {
-  /** Share of the canvas covered by the model (pixels that differ from the background). */
-  readonly area: number;
-  /** Centroid of those pixels, 0..1 across the canvas. */
-  readonly x: number;
-  readonly y: number;
-}
-
-/** Where the model is in a screenshot: decoded in the page (no image library in the test runner). */
-async function footprint(page: Page, png: Buffer): Promise<Footprint> {
-  return page.evaluate(async (base64) => {
-    const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
-    const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/png" }));
-    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
-    const context = canvas.getContext("2d")!;
-    context.drawImage(bitmap, 0, 0);
-    const { data, width, height } = context.getImageData(0, 0, bitmap.width, bitmap.height);
-    let count = 0;
-    let sx = 0;
-    let sy = 0;
-    for (let i = 0; i < data.length; i += 4) {
-      // background #0b0f14
-      if (Math.abs(data[i]! - 11) + Math.abs(data[i + 1]! - 15) + Math.abs(data[i + 2]! - 20) < 24)
-        continue;
-      const p = i / 4;
-      count++;
-      sx += p % width;
-      sy += Math.floor(p / width);
-    }
-    return {
-      area: count / (width * height),
-      x: count ? sx / count / width : 0,
-      y: count ? sy / count / height : 0,
-    };
-  }, png.toString("base64"));
-}
+import { footprint, settled } from "./canvas";
+import { fakeRelay, joinAndView } from "./fake-relay";
 
 type Point = readonly [number, number];
 /** A touch gesture: every finger moves in a straight line from `from[i]` to `to[i]`. */
@@ -225,7 +172,24 @@ test.describe("viewer controls (WEB-08)", () => {
       20,
     );
     await expect.poll(() => page.evaluate(() => window.visualViewport!.scale)).toBeGreaterThan(1.2);
-    await join(page);
+    // The zoom settles with inertia: wait until it stops, then join by keyboard (a click on a page still zooming
+    // can land beside its target).
+    const zoom = () =>
+      page.evaluate(() => {
+        const vv = window.visualViewport!;
+        return [vv.scale, vv.offsetLeft, vv.offsetTop].join();
+      });
+    await expect
+      .poll(async () => {
+        const before = await zoom();
+        await page.waitForTimeout(200);
+        return before === (await zoom());
+      })
+      .toBe(true);
+    await page.locator(".code-entry__cell").first().focus();
+    await page.keyboard.type("7kq4x");
+    await page.keyboard.press("Enter");
+    await expect(page.locator(".viewer[data-model='loaded']")).toBeVisible();
     const placement = await page.evaluate(() => {
       const vv = window.visualViewport!;
       const fit = document.querySelector(".viewer__fit")!.getBoundingClientRect();

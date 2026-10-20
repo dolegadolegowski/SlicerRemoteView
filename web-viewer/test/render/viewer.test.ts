@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Box3, TOUCH, Vector3 } from "three";
+import { Box3, BoxGeometry, Group, Mesh, TOUCH, Vector3 } from "three";
+import type { Object3D } from "three";
 import { parseSceneModel } from "../../src/render/scene-model";
 import type { SceneModel } from "../../src/render/scene-model";
 import {
@@ -334,6 +335,55 @@ describe("camera and clipping", () => {
     expect(viewer.camera.near).toBeGreaterThan(near * 2);
     expect(viewer.camera.near).toBeCloseTo(distance(viewer) / 200, 6);
     expect(viewer.camera.far).toBeGreaterThan(distance(viewer));
+  });
+
+  it("a node shown again after a fit on a smaller visible part stays inside the far plane", async () => {
+    const { viewer, flush } = harness();
+    const m = await model("large-synthetic.glb"); // spheres of 160, 100, 80, 60 mm in a row, 100 mm apart
+    viewer.setModel(m);
+    const [smallest, ...others] = [...m.nodes.values()].reverse();
+    const centre = (o: Object3D) => new Box3().setFromObject(o).getCenter(new Vector3());
+    // Look through the smallest sphere towards the others, so they lie behind it in depth.
+    const others3 = others.reduce((sum, n) => sum.add(centre(n.T)), new Vector3());
+    const look = centre(smallest!.T).sub(others3.divideScalar(others.length)).normalize();
+    viewer.camera.position.copy(viewer.controls.target).add(look);
+    for (const node of others) node.T.visible = false;
+    viewer.fit(); // frames the smallest sphere only, keeping that direction
+    for (const node of others) node.T.visible = true; // shown again from the node panel
+    viewer.invalidate();
+    flush();
+    viewer.camera.updateMatrixWorld(true);
+    const all = visibleBox(m);
+    const farthest = Math.max(
+      ...[0, 1, 2, 3, 4, 5, 6, 7].map((i) => {
+        const corner = new Vector3(
+          i & 1 ? all.max.x : all.min.x,
+          i & 2 ? all.max.y : all.min.y,
+          i & 4 ? all.max.z : all.min.z,
+        );
+        return -corner.applyMatrix4(viewer.camera.matrixWorldInverse).z; // depth in front of the camera
+      }),
+    );
+    expect(farthest).toBeLessThan(viewer.camera.far);
+  });
+
+  it("zooming out after a fit on a tiny visible part still takes in the whole model", () => {
+    const { viewer, flush } = harness();
+    // A 2 mm part and a 200 mm part (metres, like §7.1 data): the large one hidden, then shown again.
+    const tiny = new Mesh(new BoxGeometry(0.002, 0.002, 0.002));
+    const large = new Mesh(new BoxGeometry(0.2, 0.2, 0.2));
+    large.position.set(0.3, 0, 0);
+    const root = new Group();
+    root.add(tiny, large);
+    viewer.setModel({ root } as unknown as SceneModel);
+    large.visible = false;
+    viewer.fit();
+    large.visible = true;
+    viewer.controls.dollyIn(1e6); // as far out as the controls allow
+    viewer.invalidate();
+    flush();
+    root.updateWorldMatrix(true, true);
+    expect(inView(viewer, new Box3().setFromObject(root))).toBe(true);
   });
 
   it("the headlight's target rides with the camera (lit from the view direction anywhere in RAS space)", () => {

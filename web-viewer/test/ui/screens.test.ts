@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Object3D } from "three";
 import { createConnection } from "../../src/protocol/connection";
 import type { Connection } from "../../src/protocol/connection";
-import type { SceneModel, SceneModelStore } from "../../src/render/scene-model";
+import type { SceneModel, SceneModelStore, SceneNode } from "../../src/render/scene-model";
 import type { CreateViewerResult, Viewer } from "../../src/render/viewer";
 import { describe as describeCode, describeState } from "../../src/state/errors";
 import { createCodeEntry } from "../../src/ui/code-entry";
@@ -60,8 +61,22 @@ const joined = (sessionId = "sess_01K7Q4XMB2TJ9RD6") => ({
   viewerLimit: 20,
   profile: "mobile",
 });
-const modelA = { root: {} } as unknown as SceneModel;
-const modelB = { root: {} } as unknown as SceneModel;
+/** A model with one node per name (only what the screens and the node panel read). */
+function fakeModel(...names: string[]): SceneModel {
+  const nodes = new Map<string, SceneNode>();
+  names.forEach((name, order) => {
+    const nodeId = `vtkMRMLModelNode${order + 1}`;
+    nodes.set(nodeId, {
+      nodeId,
+      order,
+      T: new Object3D(),
+      manifest: { nodeId, kind: "model", name, color: [1, 0, 0], opacity: 1, visible: true },
+    } as unknown as SceneNode);
+  });
+  return { root: {}, nodes } as unknown as SceneModel;
+}
+const modelA = fakeModel("Liver", "Tumor");
+const modelB = fakeModel("Kidney");
 
 let app: HTMLElement;
 let conn: Connection;
@@ -113,7 +128,11 @@ const entryVisible = () => !entry.element.hidden;
 const viewerVisible = () => viewer.element.isConnected && !viewer.element.hidden;
 
 beforeEach(() => setup());
-afterEach(() => document.body.replaceChildren());
+afterEach(() => {
+  document.body.replaceChildren();
+  for (const model of [modelA, modelB])
+    for (const node of model.nodes.values()) node.T.visible = true;
+});
 
 describe("Join", () => {
   it("is refused at once without WebGL 2: message, no socket, no join spent", () => {
@@ -208,6 +227,42 @@ describe("screens", () => {
     expect(conn.state.kind).toBe("idle");
     expect(entryVisible()).toBe(true);
     expect(message()).toContain(describeState({ kind: "webgl2Unavailable" }, "en").title);
+  });
+});
+
+describe("node panel (WEB-09)", () => {
+  const rows = () => [...viewer.element.querySelectorAll<HTMLButtonElement>(".node-panel__row")];
+
+  it("sits in the viewer and lists the shown model; a tap there asks the viewer for a frame", () => {
+    join();
+    models.emit(modelA);
+    expect(screens.nodePanel!.element.parentElement).toBe(viewer.element);
+    expect(rows().map((r) => r.textContent)).toEqual(["Liver", "Tumor"]);
+    viewer.invalidate.mockClear();
+    rows()[1]!.click();
+    expect(modelA.nodes.get("vtkMRMLModelNode2")!.T.visible).toBe(false);
+    expect(viewer.invalidate).toHaveBeenCalledTimes(1);
+  });
+
+  it("follows a new model and empties when the model is dropped", () => {
+    const socket = join();
+    models.emit(modelA);
+    models.emit(modelB);
+    expect(rows().map((r) => r.textContent)).toEqual(["Kidney"]);
+    socket.serverClose(4001);
+    models.emit(null);
+    expect(rows()).toHaveLength(0);
+  });
+
+  it("a rejoin with the kept model re-reads the visibility instead of rebuilding the list", () => {
+    const socket = join();
+    models.emit(modelA);
+    const before = rows();
+    socket.serverClose(1006);
+    modelA.nodes.get("vtkMRMLModelNode1")!.T.visible = false;
+    join();
+    expect(rows()).toEqual(before); // same elements
+    expect(rows()[0]!.getAttribute("aria-checked")).toBe("false");
   });
 });
 

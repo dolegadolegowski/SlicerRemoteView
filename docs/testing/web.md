@@ -66,6 +66,23 @@ Join with a valid code (`asymmetric-2nodes.glb`).
     and the code has to be typed again (automatic reconnect is WEB-14). Both pass for WEB-08 — note which one
     happened.
 
+### Node panel (WEB-09)
+
+Joined with `asymmetric-2nodes.glb` (the opaque "Liver" encloses the translucent "Tumor").
+
+1. Tap **Structures (2)** (bottom left). **Expect:** the list opens above the button with the rows "Liver" and
+   "Tumor", each with its colour dot and an eye; it covers at most half of the screen and **Fit view** stays
+   visible and tappable.
+2. Tap the "Liver" row. **Expect:** the liver disappears at once and the tumour inside shows; the row turns grey
+   with a crossed-out eye. VoiceOver (if on) reads the row as a switch, now off.
+3. Tap **Show all**. **Expect:** the liver is back, the model has not moved, **Show all** is greyed out.
+4. Drag on the canvas just above the open list and beside it. **Expect:** the model rotates (only the list and
+   the buttons take touches).
+5. Rotate to landscape with the list open. **Expect:** every row is reachable, the list does not cover the
+   **Fit view** button, and a message over the scene (if one is shown) sits to the right of the list.
+6. Join with `large-synthetic.glb` (four spheres, one hidden in the snapshot). **Expect:** that row starts
+   crossed out and its sphere is not drawn.
+
 ### Download in the background (WEB-06 review, WEB-10)
 
 1. Join with `large-synthetic.glb` on a slow network (Settings → Developer → Network Link Conditioner "3G"), and

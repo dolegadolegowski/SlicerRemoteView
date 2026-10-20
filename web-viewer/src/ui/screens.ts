@@ -1,6 +1,6 @@
-// Which screen the user sees (WEB-08): the 3D viewer while a model is loaded and the session is live, the code
-// entry otherwise. Also routes messages to the screen that is visible, gates Join on WebGL 2 and moves focus with
-// the screen. Kept out of `main.ts` so every transition is unit-tested.
+// Which screen the user sees (WEB-08): the 3D viewer with its node panel (WEB-09) while a model is loaded and the
+// session is live, the code entry otherwise. Also routes messages to the screen that is visible, gates Join on
+// WebGL 2 and moves focus with the screen. Kept out of `main.ts` so every transition is unit-tested.
 
 import type { Connection } from "../protocol/connection";
 import type { SceneModel, SceneModelStore } from "../render/scene-model";
@@ -9,6 +9,8 @@ import type { CreateViewerResult, Viewer } from "../render/viewer";
 import { describeState } from "../state/errors";
 import type { Description } from "../state/errors";
 import type { CodeEntry } from "./code-entry";
+import { createNodePanel } from "./node-panel";
+import type { NodePanel } from "./node-panel";
 
 export interface ScreensOptions {
   readonly app: HTMLElement;
@@ -25,6 +27,7 @@ export interface Screens {
   /** Shows a message where the user is looking: over the scene while it is shown, else on the code entry. */
   report(description: Description): void;
   readonly viewer: Viewer | null;
+  readonly nodePanel: NodePanel | null;
 }
 
 export function bindScreens(options: ScreensOptions): Screens {
@@ -32,6 +35,7 @@ export function bindScreens(options: ScreensOptions): Screens {
   const create = options.createViewer ?? (() => createViewer());
   const canRender = options.webGL2Available ?? webGL2Available;
   let viewer: Viewer | null = null;
+  let panel: NodePanel | null = null;
   let shown: SceneModel | null = null;
 
   const viewerVisible = () => viewer !== null && !viewer.element.hidden;
@@ -51,7 +55,10 @@ export function bindScreens(options: ScreensOptions): Screens {
         entry.setError(describeState({ kind: "webgl2Unavailable" }));
         return;
       }
-      viewer = created.viewer;
+      const shownViewer = created.viewer;
+      viewer = shownViewer;
+      panel = createNodePanel({ onChange: () => shownViewer.invalidate() });
+      viewer.element.append(panel.element);
       viewer.element.hidden = true;
       app.append(viewer.element);
     }
@@ -61,9 +68,11 @@ export function bindScreens(options: ScreensOptions): Screens {
     if (model !== shown) {
       viewer.setNotice(null);
       viewer.setModel(model); // a new model is fitted from the front
+      panel?.setModel(model);
     } else {
       viewer.resize(); // the same model again (rejoin after a drop) keeps the user's camera
       viewer.invalidate();
+      panel?.refresh();
     }
     shown = model;
     if (appearing) viewer.focus(); // focus was on the now hidden code entry
@@ -79,6 +88,7 @@ export function bindScreens(options: ScreensOptions): Screens {
     shown = null;
     viewer?.setModel(null);
     viewer?.setNotice(null);
+    panel?.setModel(null);
     if (viewerVisible()) showEntry(false); // the state handler focuses once the entry is usable again
   });
 
@@ -121,6 +131,9 @@ export function bindScreens(options: ScreensOptions): Screens {
     },
     get viewer() {
       return viewer;
+    },
+    get nodePanel() {
+      return panel;
     },
   };
 }

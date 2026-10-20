@@ -206,6 +206,8 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
 
   let model: SceneModel | null = null;
   let radius = 100; // of the framed content, in stage units (mm)
+  /** The whole model, hidden nodes included: what a node panel (WEB-09) can show again without a new fit. */
+  const bounds = new Sphere(new Vector3(), radius);
   let frame: number | null = null;
   let disposed = false;
   let hidden = doc.visibilityState === "hidden";
@@ -224,11 +226,17 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
     updateClipping();
     renderer.render(scene, camera);
   }
-  /** Clip planes follow the camera distance, so zooming out does not cost depth precision between nested surfaces. */
+  /**
+   * Clip planes follow the camera distance, so zooming out does not cost depth precision between nested surfaces.
+   * Far also reaches past the whole model: a node shown again after a fit on a smaller visible part is not cut off.
+   */
   function updateClipping(): void {
     const distance = camera.position.distanceTo(controls.target);
     const near = Math.max(distance / 200, radius / 1000);
-    const far = distance + radius * 4;
+    const far = Math.max(
+      distance + radius * 4,
+      camera.position.distanceTo(bounds.center) + bounds.radius * 2,
+    );
     if (near === camera.near && far === camera.far) return;
     camera.near = near;
     camera.far = far;
@@ -282,18 +290,22 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
     controls.enableDamping = true;
     const box = new Box3();
     stage.updateMatrixWorld(true);
+    const all = model ? new Box3().setFromObject(model.root) : new Box3();
     // Frame what the user sees; fall back to everything when all nodes are hidden.
     model?.root.traverseVisible((o) => {
       if ((o as { isMesh?: boolean }).isMesh) box.expandByObject(o);
     });
-    if (box.isEmpty() && model) box.setFromObject(model.root);
+    if (box.isEmpty()) box.copy(all);
     const sphere = box.isEmpty()
       ? new Sphere(new Vector3(), 100)
       : box.getBoundingSphere(new Sphere());
     radius = Math.max(sphere.radius, 1);
+    if (all.isEmpty()) bounds.copy(sphere);
+    else all.getBoundingSphere(bounds);
     const vFov = (camera.fov * Math.PI) / 180;
     const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
-    const distance = (radius / Math.sin(Math.min(vFov, hFov) / 2)) * FIT_MARGIN;
+    const fitDistance = (r: number) => (r / Math.sin(Math.min(vFov, hFov) / 2)) * FIT_MARGIN;
+    const distance = fitDistance(radius);
     const direction = resetDirection
       ? FRONT.clone()
       : camera.position.clone().sub(controls.target).normalize();
@@ -301,7 +313,8 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
     controls.target.copy(sphere.center);
     camera.position.copy(sphere.center).addScaledVector(direction, distance);
     controls.minDistance = radius * 0.05;
-    controls.maxDistance = distance * 10;
+    // Zooming out can always take in the whole model, also nodes that are hidden now and shown later (WEB-09).
+    controls.maxDistance = Math.max(distance, fitDistance(bounds.radius)) * 10;
     controls.update();
     updateClipping();
     invalidate();

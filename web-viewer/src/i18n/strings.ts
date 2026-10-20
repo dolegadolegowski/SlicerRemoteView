@@ -95,6 +95,11 @@ const en = {
   "viewer.dismiss": "Dismiss",
   "viewer.canvasLabel":
     "3D scene. Drag with one finger to rotate, pinch with two fingers to zoom and move, double-tap to fit.",
+  "nodePanel.title": "Structures",
+  "nodePanel.toggle": "Structures ({count})",
+  "nodePanel.showAll": "Show all",
+  "nodePanel.unnamed": "Unnamed {n}",
+  "nodePanel.empty": "This scene has no structures.",
   "codeEntry.title": "Join a session",
   "codeEntry.lead": "Enter the 5-character code shown in 3D Slicer.",
   "codeEntry.cellLabel": "Code character {n} of {total}",
@@ -196,6 +201,11 @@ const pl: Record<StringKey, string> = {
   "viewer.dismiss": "Zamknij",
   "viewer.canvasLabel":
     "Scena 3D. Przeciągnij jednym palcem, aby obrócić, rozsuń dwa palce, aby przybliżyć i przesunąć, stuknij dwukrotnie, aby dopasować.",
+  "nodePanel.title": "Struktury",
+  "nodePanel.toggle": "Struktury ({count})",
+  "nodePanel.showAll": "Pokaż wszystkie",
+  "nodePanel.unnamed": "Bez nazwy {n}",
+  "nodePanel.empty": "Ta scena nie zawiera struktur.",
   "codeEntry.title": "Dołącz do sesji",
   "codeEntry.lead": "Wpisz 5-znakowy kod widoczny w 3D Slicerze.",
   "codeEntry.cellLabel": "Znak kodu {n} z {total}",

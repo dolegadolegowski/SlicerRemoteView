@@ -207,3 +207,22 @@ result.viewer.setNotice(describeState({ kind: "snapshotInvalid" })); // message 
   and `npm run e2e -w web-viewer -- controls` (Chromium: `e2e/fake-relay.ts` streams a fixture GLB from
   `page.routeWebSocket`; touch gestures and a page pinch-zoom over CDP). The gesture spec is skipped on WebKit —
   check iOS Safari on a device: `docs/testing/web.md` §iPhone Safari.
+
+### Node panel (WEB-09)
+
+`src/ui/node-panel.ts` lists the scene's structures in manifest order; `screens.ts` puts it into the viewer and
+feeds it the shown model.
+
+```ts
+const panel = createNodePanel({ onChange: () => viewer.invalidate() });
+viewer.element.append(panel.element); // bottom left; "Structures (n)" opens the list above it
+panel.setModel(model);                // one 44 px switch per node: colour, name (as text), eye
+panel.refresh();                      // after something else changed T.visible (presenter updates, WEB-12)
+```
+
+- A tap hides or shows the node on this device only (`T.visible`, FR-40, US-09) and redraws on the next frame;
+  "Show all" brings everything back. Names may contain PHI: they are set as text only and never logged.
+- Layout: at most half of a phone screen when open, upright and on its side; the panel box lets touches through
+  to the canvas; the list scrolls inside. `e2e/glb.ts` builds a 40-structure scene from the fixture for this.
+- Tests: `npm test -w web-viewer -- node-panel screens` and `npm run e2e -w web-viewer -- node-panel` (skipped
+  where the browser has no WebGL 2); manual: `docs/testing/web.md` §Node panel.
