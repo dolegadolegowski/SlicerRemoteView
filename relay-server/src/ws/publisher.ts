@@ -12,6 +12,10 @@
  *   graceEndsAt}`; resume is SRV-15.
  * - Registry `expired` (grace over, idle, lifetime) → `session.expired{reason}` + `4002` to the
  *   viewers and, if still connected, the publisher.
+ * - Registry `expiring` (60 s before the idle expiry, only while no viewer is connected) →
+ *   `session.expiring{reason:"IDLE", closesAt}` to the publisher; `session.renew` restarts the idle
+ *   period and answers `session.renewed{ttl}` (§4.4). `ttl.expiresAt` is the lifetime deadline, which
+ *   no renew moves (§4.2).
  * Log lines carry the session id and reasons only — never the code or the token (NFR-12).
  */
 import { CLOSE_CODES, LIMITS } from "@slicerremoteview/shared";
@@ -127,6 +131,19 @@ export function publisherHandlers({ registry, config, limiter, logger }: Publish
       connection.close(CLOSE_CODES.NORMAL);
       logger.info({ sessionId: session.id, reason: message.reason }, "session closed by publisher");
     },
+
+    "session.renew": (connection, message) => {
+      const session = connection.session;
+      // Only the session's own publisher socket, not one it has replaced (SRV-15).
+      if (session === undefined || session.publisher !== connection) return;
+      registry.renew(session);
+      connection.send({
+        type: "session.renewed",
+        ...(message.id !== undefined && { replyTo: message.id }),
+        ttl: registry.ttl(session),
+      });
+      logger.debug({ sessionId: session.id }, "session renewed");
+    },
   };
 
   /** The publisher's socket closed without `session.close` (or after it — then nothing is left to do). */
@@ -151,8 +168,16 @@ export function publisherHandlers({ registry, config, limiter, logger }: Publish
     logger.info({ sessionId: session.id, reason }, "session expired");
   }
 
+  function sessionExpiring(session: Session, closesAt: number): void {
+    session.publisher?.send({ type: "session.expiring", reason: "IDLE", closesAt });
+  }
+
   registry.on("expired", sessionExpired);
+  registry.on("expiring", sessionExpiring);
   /** Detaches from the registry (the app calls it on close). */
-  const dispose = (): void => void registry.off("expired", sessionExpired);
+  const dispose = (): void => {
+    registry.off("expired", sessionExpired);
+    registry.off("expiring", sessionExpiring);
+  };
   return { handlers, publisherClosed, dispose };
 }

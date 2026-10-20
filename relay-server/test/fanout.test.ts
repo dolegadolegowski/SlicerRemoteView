@@ -12,6 +12,7 @@ import type { Connection } from "../src/ws/connection.js";
 import {
   fanout,
   MAX_PAUSE_MS,
+  PUBLISHER_BUFFER_LIMIT_BYTES,
   SLOW_CONSUMER_TERMINATE_MS,
   STUCK_MS,
   WATCH_INTERVAL_MS,
@@ -405,6 +406,37 @@ describe("slow consumers (SRV-10 criterion 2, §3.3, §9.3)", () => {
     }
     expect(smaller!.peer.isOpen).toBe(true);
     expect(types(smaller!)).toContain("scene.snapshot.ready");
+  });
+});
+
+describe("a publisher's own send buffer (T3)", () => {
+  it("above 1 MiB → SLOW_CONSUMER + 4010, logged once; its session enters grace", async () => {
+    const lines: string[] = [];
+    const logger = createLogger({ level: "trace", destination: { write: (s) => lines.push(s) } });
+    const { client, session, peer } = await publisher({}, logger);
+    await flush(client);
+    mockBuffered(peer, PUBLISHER_BUFFER_LIMIT_BYTES + 1);
+    // Closed at the first watch; the next ones see it closing (its close event is still on its way).
+    relay!.clock.advance(3 * WATCH_INTERVAL_MS);
+    expect([4010, 1006]).toContain(await client.closed);
+    expect(client.received.at(-1)).toMatchObject({ type: "error", code: "SLOW_CONSUMER" });
+    await expect.poll(() => session.phase).toBe("grace");
+    const closes = lines.filter((l) => l.includes("slow consumer closed"));
+    expect(closes).toHaveLength(1);
+    expect(JSON.parse(closes[0]!)).toMatchObject({
+      sessionId: session.id,
+      role: "publisher",
+      bufferedBytes: PUBLISHER_BUFFER_LIMIT_BYTES + 1,
+      reason: "PUBLISHER_LIMIT",
+    });
+  });
+
+  it("at exactly 1 MiB it stays, however long (no stuck rule: the heartbeat watches it)", async () => {
+    const { client, peer } = await publisher();
+    await flush(client);
+    mockBuffered(peer, PUBLISHER_BUFFER_LIMIT_BYTES);
+    relay!.clock.advance(STUCK_MS + 2 * WATCH_INTERVAL_MS);
+    expect(peer.isOpen).toBe(true);
   });
 });
 

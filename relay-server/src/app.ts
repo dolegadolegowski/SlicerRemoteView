@@ -19,10 +19,12 @@ import { createLogger } from "./logger.js";
 import { RateLimiter } from "./ratelimit.js";
 import { Registry } from "./registry.js";
 import { PROTOCOL_VERSIONS, RELAY_NAME, RELAY_VERSION } from "./version.js";
+import type { Connection } from "./ws/connection.js";
 import { createDispatcher } from "./ws/dispatch.js";
 import type { HandlerTable } from "./ws/dispatch.js";
 import { registerWsEndpoint } from "./ws/endpoint.js";
 import { fanout } from "./ws/fanout.js";
+import { heartbeat } from "./ws/heartbeat.js";
 import { publisherHandlers } from "./ws/publisher.js";
 import { snapshotHandlers } from "./ws/snapshot.js";
 import { viewerHandlers } from "./ws/viewer.js";
@@ -43,6 +45,11 @@ export interface AppOptions {
   wsHandlers?: Partial<FrameHandlers>;
   /** Extra message-type handlers merged into the dispatch table (tests). */
   messageHandlers?: HandlerTable;
+  /**
+   * Runs the WebSocket heartbeat (default `true`). Tests that move a manual clock by minutes at a
+   * time turn it off: every tick would pass before a real pong could arrive.
+   */
+  heartbeat?: boolean;
 }
 
 const NOT_FOUND = { error: "NOT_FOUND" } as const;
@@ -154,6 +161,28 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     },
   });
 
+  const beat = heartbeat({ clock, logger });
+  /**
+   * Any frame or pong of a bound publisher counts as activity (§9.1); the idle timer is separate
+   * (`registry.renew`).
+   */
+  const seen = (connection: Connection): void => {
+    const session = connection.session;
+    if (connection.role === "publisher" && session?.publisher === connection)
+      registry.touchPublisher(session);
+  };
+  const dispatch = createDispatcher({
+    clock,
+    validators,
+    normalizers: { ...viewer.normalizers, ...snapshot.normalizers },
+    handlers: {
+      ...publisher.handlers,
+      ...viewer.handlers,
+      ...snapshot.handlers,
+      ...options.messageHandlers,
+    },
+  });
+
   // First: the WebSocket plugin wraps every route registered after it (upgrade interception).
   await registerWsEndpoint(app, {
     allowedOrigins: config.allowedOrigins,
@@ -161,19 +190,23 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     logger,
     limiter,
     handlers: {
-      text: createDispatcher({
-        clock,
-        validators,
-        normalizers: { ...viewer.normalizers, ...snapshot.normalizers },
-        handlers: {
-          ...publisher.handlers,
-          ...viewer.handlers,
-          ...snapshot.handlers,
-          ...options.messageHandlers,
-        },
-      }),
-      binary: (connection, frame) => snapshot.chunk(connection, frame),
+      opened: (connection) => beat.add(connection),
+      pong: (connection, data) => {
+        beat.pong(connection, data);
+        seen(connection);
+      },
+      text: (connection, frame) => {
+        beat.heard(connection);
+        seen(connection);
+        return dispatch(connection, frame);
+      },
+      binary: (connection, frame) => {
+        beat.heard(connection);
+        seen(connection);
+        return snapshot.chunk(connection, frame);
+      },
       closed: (connection, closeCode) => {
+        beat.remove(connection);
         if (connection.role === "publisher") {
           const session = connection.session;
           try {
@@ -193,6 +226,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     registry.start();
     limiter.start();
     fan.start();
+    if (options.heartbeat !== false) beat.start();
   });
   // Before the server waits for its sockets: a publisher paused by the fan-out must read its close.
   app.addHook("preClose", async () => {
@@ -205,6 +239,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     viewer.dispose();
     snapshot.dispose();
     downloads.dispose();
+    beat.dispose();
   });
 
   // No endpoint takes a request body (§10); without parsers a POST to an unknown path is a plain 404.

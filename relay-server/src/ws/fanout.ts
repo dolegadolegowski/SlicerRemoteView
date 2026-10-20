@@ -1,6 +1,7 @@
 /**
- * Snapshot fan-out to viewers and their send buffers (docs/protocol.md §3.3 watermarks, §6.1–§6.5,
- * §9.3, §11; architecture §2.3, §4, §5). Implements `SnapshotEvents` of `snapshot.ts`.
+ * Snapshot fan-out to viewers, and the send buffers of viewers and publishers (docs/protocol.md §3.3
+ * watermarks, §6.1–§6.5, §9.3, §11; architecture §2.3, §4, §5). Implements `SnapshotEvents` of
+ * `snapshot.ts`.
  *
  * - At an accepted `begin`, every connected viewer whose `bufferedAmount` is below the 4 MiB soft
  *   watermark is streamed: it gets the publisher's `begin`, each chunk and `end` as received, byte for
@@ -12,7 +13,9 @@
  * - An abort reaches every viewer that got the `begin`: the publisher's own abort as received, the
  *   relay's as `scene.snapshot.abort{sceneVersion, reason}`.
  * - Slow consumers get `error SLOW_CONSUMER` and close `4010` (§9.3): above the 8 MiB hard watermark,
- *   or at or above the soft one for more than 60 s (`LIMITS.SLOW_CONSUMER_STUCK_S`). The sum of all
+ *   or at or above the soft one for more than 60 s (`LIMITS.SLOW_CONSUMER_STUCK_S`). A publisher's
+ *   socket is closed the same way above `PUBLISHER_BUFFER_LIMIT_BYTES` (1 MiB): it only gets replies,
+ *   a few KiB at a time, and is not part of the sum below. The sum of all
  *   viewers' `bufferedAmount` (plus what a chunk is about to add) must stay within
  *   `MAX_TOTAL_BUFFERED_BYTES`; above it the largest send buffers are closed `4010` until it fits
  *   (architecture §4). A socket that holds less than the chunk is not worth closing: a streamed one
@@ -46,12 +49,27 @@ export const STUCK_MS = LIMITS.SLOW_CONSUMER_STUCK_S * 1000;
 export const WATCH_INTERVAL_MS = 1_000;
 /** A slow consumer that has not completed its close by then is terminated. */
 export const SLOW_CONSUMER_TERMINATE_MS = 5_000;
+/**
+ * A publisher's socket gets replies only (pongs, acks, `viewer.count`, renewals, errors): one holding
+ * more than this has stopped reading. It caps what all publishers hold outside the viewers' budget
+ * at `MAX_SESSIONS` × 1 MiB (T3).
+ */
+export const PUBLISHER_BUFFER_LIMIT_BYTES = 1024 * 1024;
 /** The longest continuous pause of a publisher; it is then read for at least a watch interval. */
 export const MAX_PAUSE_MS = 5_000;
 /** At most one warning per minute about paused publishers. */
 const PAUSE_WARN_INTERVAL_MS = 60_000;
 
-type SlowReason = "HARD_WATERMARK" | "STUCK" | "BUDGET";
+type SlowReason = "HARD_WATERMARK" | "STUCK" | "BUDGET" | "PUBLISHER_LIMIT";
+
+/** The `slow consumer closed` log line: ids, byte counts and the rule, nothing else (NFR-12). */
+interface SlowLog {
+  sessionId: string;
+  viewerId?: string;
+  role?: "publisher";
+  bufferedBytes: number;
+  reason: SlowReason;
+}
 
 /** The snapshot in flight of one session, as the viewers see it. */
 interface Stream {
@@ -120,14 +138,13 @@ export function fanout({ registry, config, logger, clock }: FanoutDeps) {
     return total;
   }
 
-  function slowConsumer(consumer: Consumer, reason: SlowReason): void {
-    const { session, viewer, peer } = consumer;
+  /** `error SLOW_CONSUMER` + `4010`, then terminated unless its close completes within 5 s. */
+  function closeSlow(peer: Peer, log: SlowLog): void {
     closing.add(peer);
-    streams.get(session)?.streaming.delete(peer);
     peer.send({
       type: "error",
       code: "SLOW_CONSUMER",
-      message: "the viewer does not read fast enough; reconnect (§3.3)",
+      message: "the socket does not read fast enough; reconnect (§3.3)",
       retryable: true,
     });
     peer.close(CLOSE_CODES.SLOW_CONSUMER);
@@ -138,16 +155,18 @@ export function fanout({ registry, config, logger, clock }: FanoutDeps) {
     }, SLOW_CONSUMER_TERMINATE_MS);
     (timer as { unref?: () => void }).unref?.();
     terminations.set(timer, peer);
-    logger.info(
-      {
-        sessionId: session.id,
-        viewerId: viewer.id,
-        bufferedBytes: consumer.amount,
-        reason,
-        errorCode: "SLOW_CONSUMER",
-      },
-      "slow consumer closed",
-    );
+    logger.info({ ...log, errorCode: "SLOW_CONSUMER" }, "slow consumer closed");
+  }
+
+  function slowConsumer(consumer: Consumer, reason: SlowReason): void {
+    const { session, viewer, peer } = consumer;
+    streams.get(session)?.streaming.delete(peer);
+    closeSlow(peer, {
+      sessionId: session.id,
+      viewerId: viewer.id,
+      bufferedBytes: consumer.amount,
+      reason,
+    });
   }
 
   /**
@@ -229,7 +248,7 @@ export function fanout({ registry, config, logger, clock }: FanoutDeps) {
     pausedPublishers.clear();
   }
 
-  /** Hard watermark and stuck viewers, the global budget, then the publishers' pause. */
+  /** Hard watermark and stuck viewers, publishers over their limit, the global budget, then the pause. */
   function watch(): void {
     const now = clock.now();
     for (const consumer of consumers()) {
@@ -245,6 +264,19 @@ export function fanout({ registry, config, logger, clock }: FanoutDeps) {
       const since = aboveSoftSince.get(peer);
       if (since === undefined) aboveSoftSince.set(peer, now);
       else if (now - since > STUCK_MS) slowConsumer(consumer, "STUCK");
+    }
+    // A publisher that stops reading must not grow its socket's buffer either (T3).
+    for (const session of registry.sessions()) {
+      const publisher = session.publisher;
+      if (publisher === undefined || closing.has(publisher)) continue;
+      const amount = publisher.bufferedAmount;
+      if (amount > PUBLISHER_BUFFER_LIMIT_BYTES)
+        closeSlow(publisher, {
+          sessionId: session.id,
+          role: "publisher",
+          bufferedBytes: amount,
+          reason: "PUBLISHER_LIMIT",
+        });
     }
     enforceBudget();
     updatePause();

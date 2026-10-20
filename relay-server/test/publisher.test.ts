@@ -198,7 +198,8 @@ describe("relay-initiated expiry reaches the publisher too (§4.5, §11)", () =>
   it("idle expiry: the connected publisher gets session.expired{IDLE} + 4002", async () => {
     const { client, session } = await createSession();
     relay!.clock.advance(1_800 * S + 10 * S);
-    // session.expiring (60 s before) is SRV-14; until then session.expired is the only message.
+    // The warning 60 s before (SRV-14, §4.4), then the expiry.
+    expect(await client.next()).toMatchObject({ type: "session.expiring", reason: "IDLE" });
     const expired = await client.next();
     expect(expired).toMatchObject({
       type: "session.expired",

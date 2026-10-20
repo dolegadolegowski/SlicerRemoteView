@@ -51,6 +51,10 @@ export interface FrameHandlers {
   binary(connection: Connection, frame: Buffer): void | Promise<void>;
   /** The socket closed, by either side. */
   closed(connection: Connection, closeCode: number): void | Promise<void>;
+  /** The upgrade is done (the heartbeat starts watching, SRV-14). */
+  opened?(connection: Connection): void;
+  /** The peer sent a WebSocket-level pong (§9.1), with its payload. */
+  pong?(connection: Connection, data: Buffer): void;
 }
 
 export interface WsEndpointOptions {
@@ -157,9 +161,15 @@ export async function registerWsEndpoint(
       connection.close(CLOSE_CODES.HANDSHAKE_TIMEOUT),
     );
 
+    guarded(connection, "open", () => handlers.opened?.(connection));
+
     socket.on("message", (data: RawData, isBinary: boolean) => {
       guarded(connection, "frame", () => onFrame(connection, asBuffer(data), isBinary));
     });
+
+    socket.on("pong", (data: Buffer) =>
+      guarded(connection, "pong", () => handlers.pong?.(connection, data)),
+    );
 
     socket.on("close", (closeCode: number) => {
       connection.markClosed();
@@ -177,7 +187,7 @@ export async function registerWsEndpoint(
    */
   function guarded(
     connection: Connection,
-    stage: "frame" | "close",
+    stage: "open" | "frame" | "pong" | "close",
     run: () => void | Promise<void>,
     replyTo?: string,
   ): void {

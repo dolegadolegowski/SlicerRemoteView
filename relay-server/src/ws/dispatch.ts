@@ -74,7 +74,7 @@ export function createDispatcher(
   const { clock } = options;
   const validators = options.validators ?? defaultSchemas();
   const table: HandlerTable = {
-    // §9.1: both roles; the heartbeat bookkeeping (TTL refresh, WS pings) is SRV-14.
+    // §9.1: both roles; WS-level pings and publisher activity are `heartbeat.ts` and `app.ts`.
     ping: (connection, message) =>
       connection.send({
         type: "pong",
