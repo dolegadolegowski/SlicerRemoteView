@@ -79,6 +79,26 @@ function make(options: Parameters<typeof createSnapshotStream>[0] = {}): void {
 beforeEach(() => make());
 
 describe("happy path (§6.3, §6.4)", () => {
+  it("a progress handler that throws does not stop the handlers after it or the snapshot", async () => {
+    const log = vi.fn();
+    stream = createSnapshotStream({ log });
+    stream.on("progress", () => {
+      throw new Error("handler bug");
+    });
+    const after = vi.fn();
+    stream.on("progress", after); // registered after the throwing one
+    const ready = vi.fn();
+    stream.on("ready", ready);
+    const bytes = glb("asymmetric-2nodes.glb");
+    const begin = await withHash(bytes, 7);
+    stream.begin(begin);
+    for (const f of frames(bytes, 7)) stream.chunk(f);
+    await stream.end(endFor(begin));
+    expect(after).toHaveBeenCalled();
+    expect(ready).toHaveBeenCalledOnce();
+    expect(log).toHaveBeenCalledWith("snapshot stream handler failed", { event: "progress" });
+  });
+
   it("reassembles asymmetric-2nodes.glb and matches manifest.json", async () => {
     const bytes = glb("asymmetric-2nodes.glb");
     const begin = await withHash(bytes, 7);

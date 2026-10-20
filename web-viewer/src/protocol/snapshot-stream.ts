@@ -20,7 +20,7 @@ import {
 } from "@slicerremoteview/shared";
 import type { ChunkHeaderField, MessageOfType } from "@slicerremoteview/shared";
 import { DEFAULT_MAX_SNAPSHOT_BYTES } from "./connection";
-import type { Connection } from "./connection";
+import type { Connection, LogFn } from "./connection";
 
 type Begin = MessageOfType<"scene.snapshot.begin">;
 type End = MessageOfType<"scene.snapshot.end">;
@@ -34,7 +34,11 @@ export interface SnapshotStreamOptions {
   readonly maxSnapshotBytes?: number;
   /** SHA-256 as lowercase hex; default WebCrypto (`crypto.subtle.digest`). */
   readonly sha256?: (bytes: Uint8Array) => Promise<string>;
+  /** Default `console.warn`; receives event names only, never message content. */
+  readonly log?: LogFn;
 }
+
+const defaultLog: LogFn = (message, fields) => console.warn(`[viewer] ${message}`, fields ?? "");
 
 export interface SnapshotStreamEvents {
   /** `received / byteLength`, `0 < fraction ≤ 1`, strictly increasing within one snapshot. */
@@ -94,6 +98,7 @@ export function createSnapshotStream(options: SnapshotStreamOptions = {}): Snaps
     MAX_SNAPSHOT_BYTES,
   );
   const digest = options.sha256 ?? sha256Hex;
+  const log = options.log ?? defaultLog;
   const handlers = new Map<keyof SnapshotStreamEvents, Set<(payload: never) => void>>();
   const ignored: number[] = [];
   let active: Active | null = null;
@@ -102,8 +107,14 @@ export function createSnapshotStream(options: SnapshotStreamOptions = {}): Snaps
     event: K,
     payload: SnapshotStreamEvents[K],
   ): void {
-    for (const handler of [...(handlers.get(event) ?? [])])
-      (handler as (p: typeof payload) => void)(payload);
+    // One failing handler must not stop the others or the frame handling that emitted the event.
+    for (const handler of [...(handlers.get(event) ?? [])]) {
+      try {
+        (handler as (p: typeof payload) => void)(payload);
+      } catch {
+        log("snapshot stream handler failed", { event });
+      }
+    }
   }
 
   function ignore(sceneVersion: number): void {

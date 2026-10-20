@@ -26,6 +26,12 @@ export interface Screens {
   join(code: string): void;
   /** Shows a message where the user is looking: over the scene while it is shown, else on the code entry. */
   report(description: Description): void;
+  /**
+   * A snapshot download gave up. While a scene is shown it stays, with a notice over it; before that, the session
+   * is left and the code entry says so with the code still typed — Join tries again. Ignored unless connected: a
+   * late failure must not cancel a new join or replace a "connection lost" message.
+   */
+  failSnapshot(): void;
   readonly viewer: Viewer | null;
   readonly nodePanel: NodePanel | null;
 }
@@ -128,6 +134,13 @@ export function bindScreens(options: ScreensOptions): Screens {
     report(description) {
       if (viewerVisible()) viewer?.setNotice(description);
       else entry.setError(description);
+    },
+    failSnapshot() {
+      if (connection.state.kind !== "connected") return;
+      if (viewerVisible())
+        return viewer?.setNotice(describeState({ kind: "snapshotUpdateFailed" }));
+      connection.leave(); // out of "Joining…": the code entry is usable again
+      entry.setError(describeState({ kind: "snapshotFailed" }));
     },
     get viewer() {
       return viewer;

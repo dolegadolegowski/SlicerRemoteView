@@ -33,6 +33,8 @@ if (app) {
   const tooLarge = () => screens.report(describeState({ kind: "snapshotTooLarge" }));
   stream.on("tooLarge", tooLarge);
   loader.on("tooLarge", tooLarge);
+  // Downloads that gave up (attempts exhausted, repeated 404 or mismatch) must not leave the user on "Joining…".
+  loader.on("failed", () => screens.failSnapshot());
   loader.on("enterCode", ({ description }) => stop(description));
   loader.on("sessionEnded", ({ description }) => stop(description));
 

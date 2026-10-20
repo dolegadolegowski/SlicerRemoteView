@@ -266,6 +266,58 @@ describe("node panel (WEB-09)", () => {
   });
 });
 
+describe("a snapshot that could not be loaded (WEB-10)", () => {
+  const failed = describeState({ kind: "snapshotFailed" }, "en");
+  const updateFailed = describeState({ kind: "snapshotUpdateFailed" }, "en");
+
+  it("before anything is shown: leaves the session, keeps the code typed, and Join tries again", () => {
+    const joinButton = entry.element.querySelector<HTMLButtonElement>(".code-entry__join")!;
+    entry.element.querySelector("input")!.focus();
+    for (const ch of "7KQ4X") {
+      const cell = document.activeElement as HTMLInputElement;
+      cell.value = ch;
+      cell.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    joinButton.click();
+    MockSocket.last.open();
+    MockSocket.last.receive(joined());
+    expect(cellsEnabled()).toBe(false); // "Joining…" while the scene downloads
+    screens.failSnapshot();
+    expect(conn.state.kind).toBe("idle");
+    expect(cellsEnabled()).toBe(true);
+    expect(message()).toContain(failed.title);
+    expect(entry.element.contains(document.activeElement)).toBe(true);
+    const typed = [...entry.element.querySelectorAll("input")].map((input) => input.value).join("");
+    expect(typed).toBe("7KQ4X");
+    joinButton.click();
+    expect(MockSocket.instances).toHaveLength(2);
+    MockSocket.last.open();
+    expect(MockSocket.last.frames[0]).toMatchObject({ type: "viewer.join", code: "7KQ4X" });
+  });
+
+  it("while a scene is shown: a notice over it (no Join there), the session and the scene stay", () => {
+    join();
+    models.emit(modelA);
+    screens.failSnapshot();
+    expect(viewer.setNotice).toHaveBeenLastCalledWith(updateFailed);
+    expect(updateFailed.body).not.toMatch(/Join/);
+    expect(conn.state.kind).toBe("connected");
+    expect(viewerVisible()).toBe(true);
+  });
+
+  it("a late failure while not connected changes nothing: no new join is cancelled, no message replaced", () => {
+    const socket = join();
+    socket.serverClose(1006);
+    const lost = message();
+    screens.failSnapshot(); // the old download gave up after the drop
+    expect(message()).toBe(lost);
+    screens.join("7KQ4X"); // the user joins again
+    screens.failSnapshot();
+    expect(conn.state.kind).toBe("connecting");
+    expect(MockSocket.last.closedWith).toBeUndefined();
+  });
+});
+
 describe("messages go where the user is looking", () => {
   it("over the scene while it is shown, on the code entry otherwise", () => {
     const tooLarge = describeState({ kind: "snapshotTooLarge" }, "en");

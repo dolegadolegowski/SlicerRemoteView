@@ -304,6 +304,41 @@ describe("heartbeat (§9.1, NFR-21)", () => {
 });
 
 describe("inbound frames", () => {
+  it("a handler that throws neither stops the others nor the connection; only the event name is logged", () => {
+    make();
+    const after = vi.fn();
+    conn.on("state", () => {
+      throw new Error(`state ${CODE}`);
+    });
+    conn.on("state", after);
+    conn.onMessage("viewer.joined", () => {
+      throw new Error(joined.viewerToken);
+    });
+    const joinedAfter = vi.fn();
+    conn.onMessage("viewer.joined", joinedAfter);
+    conn.on("binary", () => {
+      throw new Error("binary");
+    });
+    const binaryAfter = vi.fn();
+    conn.on("binary", binaryAfter);
+    conn.connect({ code: CODE });
+    const s = MockSocket.last;
+    s.open();
+    s.receive(joined);
+    s.receiveRaw(new Uint8Array([1, 2, 3]).buffer);
+    expect(after).toHaveBeenCalledWith({ kind: "connected" });
+    expect(joinedAfter).toHaveBeenCalledOnce();
+    expect(binaryAfter).toHaveBeenCalledOnce();
+    expect(conn.state.kind).toBe("connected");
+    expect(log.mock.calls).toEqual([
+      ["connection handler failed", { event: "state" }],
+      ["connection handler failed", { event: "state" }],
+      ["connection handler failed", { event: "viewer.joined" }],
+      ["connection handler failed", { event: "binary" }],
+    ]);
+    expect(JSON.stringify(log.mock.calls)).not.toMatch(new RegExp(`${CODE}|${joined.viewerToken}`));
+  });
+
   it("ignores and logs unknown message types, tolerates unknown fields (§14)", () => {
     make();
     const count = vi.fn();

@@ -226,3 +226,19 @@ panel.refresh();                      // after something else changed T.visible 
   to the canvas; the list scrolls inside. `e2e/glb.ts` builds a 40-structure scene from the fixture for this.
 - Tests: `npm test -w web-viewer -- node-panel screens` and `npm run e2e -w web-viewer -- node-panel` (skipped
   where the browser has no WebGL 2); manual: `docs/testing/web.md` §Node panel.
+
+### Component smoke (WEB-10)
+
+`e2e/join-and-view.spec.ts` joins a real publisher end to end: `e2e/fake-slicer.ts` starts the relay stub of
+`tools/fake-slicer` (until `relay-server` is on `main`) and the fake-slicer CLI, reads the session code from the
+CLI's fd 3 (never stdout) and bridges the page's `/ws` to the stub with `page.routeWebSocket`. The spec types the code,
+checks the drawn model and the node panel, and that the code is in no URL, no frame but `viewer.join` and no CLI
+output.
+
+```bash
+npm run e2e -w web-viewer -- join-and-view   # builds shared/ and tools/fake-slicer, then the viewer
+```
+
+A snapshot download that gives up (`loader` `failed`) shows a notice over the scene if one is shown (the previous
+scene stays), otherwise it leaves "Joining…" with the code still typed so **Join** tries again
+(`screens.failSnapshot`; ignored unless connected, so a late failure cannot cancel a new join).

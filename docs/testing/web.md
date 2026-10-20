@@ -9,17 +9,33 @@ plan row.
 ## Setup
 
 - A relay reachable from the device over **HTTPS** (the page needs a secure context: `crypto.subtle` verifies the
-  snapshot SHA-256, §6.3; plain `http://<LAN IP>` is not one). Until the relay is deployed (`SRV-22`, `DEP-`),
-  serve a build through a TLS tunnel or a local HTTPS proxy in front of `relay-server` — `[TODO]` exact commands
-  with WEB-10.
-- A publisher: 3D Slicer with the plugin, or `npx fake-slicer --relay wss://<host>/ws --fixture
-  asymmetric-2nodes.glb --code-fd 3 3>code.txt` (the code is read from the file, never from the console — NFR-12).
-- Fixtures from `shared/fixtures/glb/`: `asymmetric-2nodes.glb` (default), `large-synthetic.glb` (4.9 MiB).
+  snapshot SHA-256, §6.3; plain `http://<LAN IP>` is not one), serving this build on the same origin (ADR 0006).
+  None exists yet: `relay-server` is not on `main`, and the relay stub of tools/fake-slicer (used by the WEB-10
+  smoke) runs only inside tests and keeps no snapshot. The device runs below wait for `SRV-22` or the deployment
+  (`DEP-`) — `[TODO]` the exact commands come with them.
+- A publisher: 3D Slicer with the plugin, or the fake-slicer CLI started **directly** from the repository root —
+  `node_modules/.bin/fake-slicer --relay wss://<host>/ws --fixture large-synthetic.glb --code-fd 3 3>code.txt`
+  (not through `npx` or `npm run`, which do not pass fd 3 on; the code is read from the file, never from the
+  console — NFR-12).
+- Fixtures from `shared/fixtures/glb/`: `asymmetric-2nodes.glb` (default), `large-synthetic.glb` (4.9 MB).
 - Record every run in **Results** at the end (one row per device and build).
 
 ## iPhone Safari
 
 Devices: one iPhone with iOS ≥ 16.4 and one with iOS 15.x if available (R-02, NFR-25). Safari, not an in-app browser.
+
+### Join and view (WEB-10, NFR-01)
+
+Publisher on the computer, phone on **4G** (Wi-Fi off). Use the largest fixture available (`large-synthetic.glb`,
+4.9 MB; a 10 MB fixture for the NFR-01 figure is `[TODO]` with PRO), start a stopwatch on **Join**.
+
+1. Type the code from the publisher and tap **Join**. **Expect:** "Joining…", then the model; it is drawn within
+   10 s of tapping Join for a 10 MB scene (NFR-01) — record the time and the file size.
+2. Open **Structures**. **Expect:** one row per structure of the fixture, in the publisher's order.
+3. Check the address bar. **Expect:** no code in it at any time.
+4. On a second run, switch on airplane mode during "Joining…", wait 30 s, switch it off. **Expect:** the code
+   entry is usable again with a message ("connection lost" or "Scene could not be downloaded") and the code still
+   typed; **Join** tries again and shows the model.
 
 ### Code entry (WEB-03, WEB-04)
 
@@ -62,9 +78,9 @@ Join with a valid code (`asymmetric-2nodes.glb`).
     idle page (render on demand — nothing is drawn while still; optional: Safari Web Inspector → Timelines shows
     no rendering frames).
 12. Switch to another app for 10 s and come back. **Expect:** if the connection survived, the model is drawn
-    again at once with the same camera; if Safari closed it meanwhile, the code entry says the connection was lost
-    and the code has to be typed again (automatic reconnect is WEB-14). Both pass for WEB-08 — note which one
-    happened.
+    again at once with the same camera; if Safari closed it meanwhile, the code entry says the connection was lost,
+    with the code still typed, and **Join** shows the same model with the same camera (automatic reconnect is
+    WEB-14). Both pass for WEB-08 — note which one happened.
 
 ### Node panel (WEB-09)
 

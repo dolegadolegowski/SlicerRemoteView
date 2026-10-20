@@ -91,6 +91,11 @@ const en = {
   "state.snapshotInvalid.title": "Scene could not be opened",
   "state.snapshotInvalid.body":
     "The scene that was shared is damaged or uses features this viewer does not support. Ask the presenter to share it again.",
+  "state.snapshotFailed.title": "Scene could not be downloaded",
+  "state.snapshotFailed.body": "Check the connection and tap Join to try again.",
+  "state.snapshotUpdateFailed.title": "New scene could not be downloaded",
+  "state.snapshotUpdateFailed.body":
+    "You are still seeing the previous scene. Check the connection, or ask the presenter to share the scene again.",
   "viewer.fit": "Fit view",
   "viewer.dismiss": "Dismiss",
   "viewer.canvasLabel":
@@ -197,6 +202,11 @@ const pl: Record<StringKey, string> = {
   "state.snapshotInvalid.title": "Nie udało się otworzyć sceny",
   "state.snapshotInvalid.body":
     "Udostępniona scena jest uszkodzona albo używa funkcji, których podgląd nie obsługuje. Poproś prezentera o ponowne udostępnienie.",
+  "state.snapshotFailed.title": "Nie udało się pobrać sceny",
+  "state.snapshotFailed.body": "Sprawdź połączenie i stuknij „Dołącz”, aby spróbować ponownie.",
+  "state.snapshotUpdateFailed.title": "Nie udało się pobrać nowej sceny",
+  "state.snapshotUpdateFailed.body":
+    "Nadal widzisz poprzednią scenę. Sprawdź połączenie albo poproś prezentera o ponowne udostępnienie sceny.",
   "viewer.fit": "Dopasuj widok",
   "viewer.dismiss": "Zamknij",
   "viewer.canvasLabel":
