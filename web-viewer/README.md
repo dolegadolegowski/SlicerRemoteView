@@ -327,7 +327,8 @@ npm test -w web-viewer -- platform status-bar screens && npm run e2e -w web-view
 
 The viewer stops drawing on `webglcontextlost` and says "3D view paused"; three.js re-uploads the scene on
 `webglcontextrestored` and the viewer draws again. `src/ui/wake-lock.ts` keeps the screen on during a session
-(`navigator.wakeLock`, re-requested when the page is visible again). `window.__rv.rendererInfo()` returns
+(`navigator.wakeLock`, re-requested when the page is visible again, and on the next tap after a refusal — Safari
+wants a user gesture; let go after 2 min offline). `window.__rv.rendererInfo()` returns
 `renderer.info.memory` counts for tests; development builds also show them in a small overlay.
 
 ```bash

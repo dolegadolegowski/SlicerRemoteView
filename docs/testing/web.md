@@ -185,15 +185,26 @@ Joined with `toggle-visibility --loop` playing.
 
 ### Memory and wake lock (WEB-16)
 
-1. Join with `large-synthetic.glb`, then let the presenter share it again three times (`reload-scene`, or restart
-   the publisher's export). **Expect:** no "3D view paused", no reload of the tab by Safari; Web Inspector →
-   Timelines → Memory stays flat after each new scene (R-02).
-2. Join and leave the phone untouched on the desk for longer than its auto-lock time. **Expect:** the screen stays
-   on while the session runs; after "Presentation ended" it dims as usual (FR-46).
+1. Save `[{"afterMs":5000,"type":"scene.snapshot"}]` as `resend.json` (a `scene.snapshot` entry without `fixture`
+   resends the `--fixture` GLB) and start `node_modules/.bin/fake-slicer --relay wss://<host>/ws --fixture
+   large-synthetic.glb --script ./resend.json --loop --code-fd 3 3>code.txt`. Join and let it resend three times.
+   After each new scene type `__rv.rendererInfo()` in the remote console (Safari Web Inspector; on Android
+   `chrome://inspect`). **Expect:** `geometries` equals the fixture's node count every time; no "3D view paused",
+   no reload of the tab; Web Inspector → Timelines → Memory stays flat (R-02).
+2. Join by typing the code and leave the phone untouched on the desk for longer than its auto-lock time.
+   **Expect:** the screen stays on while the session runs; after "Presentation ended" it dims as usual (FR-46).
+   Then join from a QR link and touch the scene once: Safari grants the lock only after a tap (WebKit
+   `WakeLock.cpp`). **Expect:** from then on the screen stays on, also after switching apps and back.
 3. Switch to another app for 10 s and back, then wait again. **Expect:** the screen still stays on (the lock is
    requested again).
-4. Open many other tabs with heavy pages until Safari reclaims memory, then come back. **Expect:** either the scene
-   as before, or "3D view paused" and then the scene again by itself; never a black canvas without a message.
+4. Open many other tabs with heavy pages until Safari reclaims memory, then come back. **Expect** one of: the scene
+   as before; "3D view paused" and then the scene again by itself; or the tab reloaded to an empty code entry
+   (Safari discarded the page, R-02 — record it). Never a black canvas without a message.
+5. In the remote console run `x = document.querySelector(".viewer__canvas").getContext("webgl2")
+   .getExtension("WEBGL_lose_context"); x.loseContext()`. **Expect:** "3D view paused" without a Dismiss button
+   (VoiceOver reads it). Then `x.restoreContext()`. **Expect:** the same scene and camera again, the message gone.
+6. Turn on airplane mode for more than 2 minutes with the scene open. **Expect:** "Reconnecting…", and the screen
+   may dim after its usual timeout (the lock is let go offline); back online, the scene and the lock return.
 
 ### Add to Home Screen (WEB-17)
 

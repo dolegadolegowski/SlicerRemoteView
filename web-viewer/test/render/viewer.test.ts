@@ -677,6 +677,20 @@ describe("WebGL context loss (WEB-16, web.md §2.3)", () => {
     expect(notice.hidden).toBe(true);
   });
 
+  it("the lost-context notice has no Dismiss button (it could not go away); other notices keep theirs", () => {
+    const { viewer } = harness();
+    const close = viewer.element.querySelector<HTMLButtonElement>(".viewer__notice-close")!;
+    viewer.canvas.dispatchEvent(new Event("webglcontextlost"));
+    expect(close.hidden).toBe(true);
+    const title = viewer.element.querySelector(".viewer__notice-title")!.firstChild;
+    viewer.setNotice(null); // a new scene meanwhile: the same alert, not announced again
+    expect(viewer.element.querySelector(".viewer__notice-title")!.firstChild).toBe(title);
+    viewer.setNotice(describeState({ kind: "snapshotTooLarge" }, "en"));
+    expect(close.hidden).toBe(false);
+    viewer.canvas.dispatchEvent(new Event("webglcontextrestored"));
+    expect(close.hidden).toBe(false);
+  });
+
   it("dispose removes the context listeners", () => {
     const { viewer } = harness();
     viewer.dispose();

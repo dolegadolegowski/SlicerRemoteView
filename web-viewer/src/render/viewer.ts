@@ -377,8 +377,12 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
     // While the context is lost, clearing a notice (e.g. for a new scene) brings back why nothing is drawn.
     const shown = next ?? (lost ? lostNotice : null);
     notice.hidden = shown === null;
-    noticeTitle.textContent = shown?.title ?? "";
-    noticeBody.textContent = shown?.body ?? "";
+    // The lost-context notice cannot be dismissed (it would come straight back), so it has no button.
+    noticeClose.hidden = shown !== null && shown === lostNotice;
+    // Unchanged text is left alone: the alert is not announced again.
+    if (noticeTitle.textContent !== (shown?.title ?? ""))
+      noticeTitle.textContent = shown?.title ?? "";
+    if (noticeBody.textContent !== (shown?.body ?? "")) noticeBody.textContent = shown?.body ?? "";
   }
 
   // Double tap (touch) and double click (mouse) frame the scene again; a drag, a long press or a pinch is not a tap.

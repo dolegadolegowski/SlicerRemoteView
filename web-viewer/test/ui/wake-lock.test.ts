@@ -1,7 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createConnection } from "../../src/protocol/connection";
 import type { Connection, LogFn } from "../../src/protocol/connection";
-import { bindWakeLock } from "../../src/ui/wake-lock";
+import { OFFLINE_RELEASE_MS, bindWakeLock } from "../../src/ui/wake-lock";
 import type { SentinelLike } from "../../src/ui/wake-lock";
 import { FakeDocument } from "../protocol/fake-document";
 import { MockSocket } from "../protocol/mock-socket";
@@ -144,5 +144,71 @@ describe("screen wake lock (WEB-16, FR-46)", () => {
     await settle();
     off2();
     expect(sentinels[0]!.release).toHaveBeenCalledTimes(1);
+  });
+
+  describe("review follow-ups", () => {
+    afterEach(() => vi.useRealTimers());
+
+    it("after a refusal (no user activation, iOS), the next tap asks again; once granted, taps do not", async () => {
+      let refuse = true;
+      const picky = vi.fn(async () => {
+        if (refuse) throw new DOMException("denied", "NotAllowedError");
+        const s = new FakeSentinel();
+        sentinels.push(s);
+        return s;
+      });
+      bindWakeLock(connection, { wakeLock: { request: picky }, document: doc, log });
+      join(); // from a QR link: no user activation
+      await settle();
+      expect(picky).toHaveBeenCalledTimes(1);
+      refuse = false;
+      doc.dispatchEvent(new Event("pointerup")); // the user touches the scene
+      expect(picky).toHaveBeenCalledTimes(2);
+      await settle();
+      expect(sentinels).toHaveLength(1);
+      doc.dispatchEvent(new Event("keydown"));
+      expect(picky).toHaveBeenCalledTimes(2);
+    });
+
+    it("the lock goes after OFFLINE_RELEASE_MS without a connection and comes back with the rejoin", async () => {
+      vi.useFakeTimers();
+      const off = bindWakeLock(connection, {
+        wakeLock: { request },
+        document: doc,
+        log,
+        ends: () => false, // every drop is retried (WEB-14)
+      });
+      const s = join();
+      await vi.advanceTimersByTimeAsync(0);
+      s.serverClose(1006);
+      await vi.advanceTimersByTimeAsync(OFFLINE_RELEASE_MS - 1);
+      expect(sentinels[0]!.release).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(sentinels[0]!.release).toHaveBeenCalledTimes(1);
+      doc.show("visible"); // offline: not asked for again
+      expect(request).toHaveBeenCalledTimes(1);
+      connection.connect({ code: "7KQ4X" });
+      MockSocket.last.open();
+      MockSocket.last.receive(joined); // back
+      expect(request).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sentinels).toHaveLength(2);
+      off();
+    });
+
+    it("a request in flight is not doubled by a visibility change or another join, and its lock is released at the end", async () => {
+      let grant: (s: SentinelLike) => void = () => undefined;
+      const slow = vi.fn(() => new Promise<SentinelLike>((resolve) => (grant = resolve)));
+      bindWakeLock(connection, { wakeLock: { request: slow }, document: doc, log });
+      join();
+      doc.show("visible");
+      MockSocket.last.receive(joined); // a token rejoin's viewer.joined meanwhile
+      expect(slow).toHaveBeenCalledTimes(1);
+      const only = new FakeSentinel();
+      grant(only);
+      await settle();
+      connection.leave();
+      expect(only.release).toHaveBeenCalledTimes(1);
+    });
   });
 });
