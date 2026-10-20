@@ -38,7 +38,7 @@ export interface Screens {
   /**
    * A snapshot download gave up. While a scene is shown it stays, with a notice over it; before that, the session
    * is left and the code entry says so with the code still typed — Join tries again. Ignored unless connected: a
-   * late failure must not cancel a new join or replace a "connection lost" message.
+   * late failure must not cancel a new join or replace a message about the connection.
    */
   failSnapshot(): void;
   /** Live changes were applied to the shown scene (WEB-12): draw them, refresh or rebuild the node list. */
@@ -174,8 +174,8 @@ export function bindScreens(options: ScreensOptions): Screens {
 
   models.onChange((model) => {
     if (model) {
-      // Only on a live session: a download finishing after a drop must not cover the "connection lost" message;
-      // the model is kept and shown when the same session is rejoined (below).
+      // Only on a live session: a download finishing after a drop waits for the rejoin of the same session, which
+      // shows the kept model (below); a first join that dropped keeps its "connection lost" message.
       if (connection.state.kind === "connected") showViewer(model);
       return;
     }

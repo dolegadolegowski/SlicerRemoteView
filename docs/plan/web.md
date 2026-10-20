@@ -67,6 +67,12 @@ device per `docs/testing/web.md`; Playwright WebKit is not Safari.
   same session waits for the next snapshot or gap there; the real relay (SRV-12/13) sends the state — re-run
   `e2e/live-updates.spec.ts` against it when SRV-22 is on `main`.
 
+- WEB-14 (low): ≈ 630 source + 1,400 test lines, about four times the ~300-line guideline, and committed before the
+  last review lens finished (its findings are in the follow-up commit). It could have been split into the
+  `connection.ts` liveness changes (`checkAlive`, late pong timer, open timeout), the reconnect policy with its
+  `ends` plumbing through the model lifecycle, loader and versions, and the status-line work (code-entry status,
+  always-present live regions, the top stack).
+
 - WEB-07 review (low): rules for the Slicer exporter (SLC) to raise in `docs/testing/reports/` when its export task
   starts: (1) pad strided views to whole strides — three.js `GLTFLoader` reads `count × byteStride` bytes (from
   `floor(byteOffset / stride) × stride`), more than the glTF minimum `(count − 1) × stride + elementSize`, so a view

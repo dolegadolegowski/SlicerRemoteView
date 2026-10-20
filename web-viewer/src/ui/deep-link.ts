@@ -53,8 +53,8 @@ export function takeDeepLink(loc: LocationLike = location, hist: HistoryLike = h
 /**
  * Acts on a deep link: a valid code is put into the cells (so a failed join can be retried with Join) and joined at
  * once. An invalid one is reported; when no session is live it is also put into the cells, where the code entry shows
- * its hint (e.g. `0`/`O`). During a session the cells keep the code that was joined: a later drop must still say
- * "connection lost" and Join must retry that code. Returns whether it did anything.
+ * its hint (e.g. `0`/`O`). During a session (also while it reconnects, WEB-14) the cells keep the code that was
+ * joined: should the session end, Join retries that code. Returns whether it did anything.
  */
 export function startFromDeepLink(
   link: DeepLink,

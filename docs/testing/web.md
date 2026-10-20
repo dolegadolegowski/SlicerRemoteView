@@ -33,9 +33,11 @@ Publisher on the computer, phone on **4G** (Wi-Fi off). Use the largest fixture 
    10 s of tapping Join for a 10 MB scene (NFR-01) — record the time and the file size.
 2. Open **Structures**. **Expect:** one row per structure of the fixture, in the publisher's order.
 3. Check the address bar. **Expect:** no code in it at any time.
-4. On a second run, switch on airplane mode during "Joining…", wait 30 s, switch it off. **Expect:** the code
-   entry is usable again with a message ("connection lost" or "Scene could not be downloaded") and the code still
-   typed; **Join** tries again and shows the model.
+4. On a second run, switch on airplane mode during "Joining…", wait 30 s, switch it off. **Expect** one of: the
+   code entry usable again with "Scene could not be downloaded" or "connection lost" and the code still typed
+   (the download gave up, or the socket dropped before the join was answered) — **Join** tries again and shows the
+   model; or "Reconnecting…" under a busy Join and then the model by itself (the socket dropped after the join,
+   WEB-14).
 
 ### Deep link (WEB-11, US-07)
 
@@ -95,9 +97,8 @@ Join with a valid code (`asymmetric-2nodes.glb`).
     idle page (render on demand — nothing is drawn while still; optional: Safari Web Inspector → Timelines shows
     no rendering frames).
 12. Switch to another app for 10 s and come back. **Expect:** if the connection survived, the model is drawn
-    again at once with the same camera; if Safari closed it meanwhile, the code entry says the connection was lost,
-    with the code still typed, and **Join** shows the same model with the same camera (automatic reconnect is
-    WEB-14). Both pass for WEB-08 — note which one happened.
+    again at once with the same camera; if Safari closed it meanwhile, "Reconnecting…" over the same model and
+    then "Connected again", with the same camera and nothing typed (WEB-14). Note which one happened.
 
 ### Node panel (WEB-09)
 
@@ -160,8 +161,9 @@ Joined with `toggle-visibility --loop` playing.
 2. Lock the phone for 2 minutes, unlock. **Expect:** the same as step 1, within about 10 s of unlocking.
 3. Take the presenter's laptop off the network for 30 s, then back (Slicer resumes within the 120 s grace).
    **Expect:** "Presenter is offline" over the frozen scene while it is away; it goes when the presenter is back.
-4. Restart or redeploy the relay while joined. **Expect:** "Reconnecting…", then "Waiting for the presenter" under
-   Join (cells disabled), then the scene again — about 5–10 s, nothing typed.
+4. Restart or redeploy the relay while joined. **Expect:** "Reconnecting…", then "Waiting for the presenter" (or
+   "Loading the scene…" if the presenter has shared it again already) under Join (cells disabled), then the scene
+   again — about 5–10 s, nothing typed.
 5. The presenter stops the session. **Expect:** "Presentation ended" on the code entry, the code still in the
    cells; nothing retries.
 6. Lock the phone, let the presenter stop the session, unlock after a minute. **Expect:** "Reconnecting…" for up to

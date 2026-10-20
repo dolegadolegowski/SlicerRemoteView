@@ -121,7 +121,8 @@ test("a dropped connection is rejoined with the token: the scene stays, no new d
     snapshot: { sceneVersion: 1, byteLength: GLB.length, sha256, format: "glb" },
   });
   state(second, 1, 1);
-  await expect(status(page)).toBeHidden();
+  await expect(status(page)).toHaveText("Connected again"); // the cue that the link is back …
+  await expect(status(page)).toBeHidden({ timeout: 3_000 + 5_000 }); // … for PRESENTER_NOTICE_MS (3 s)
   await expect(page.locator(".viewer[data-model='loaded']")).toBeVisible();
   expect(downloads).toEqual([]); // the version it shows is the one the relay caches
 });

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createConnection } from "../../src/protocol/connection";
 import type { Connection, ConnectionState, LogFn } from "../../src/protocol/connection";
 import {
+  MAX_RETRY_AFTER_MS,
   STABLE_MS,
   BACKOFF_MAX_MS,
   CODE_FALLBACK_AT_MS,
@@ -343,6 +344,36 @@ describe("relay restart: SESSION_NOT_FOUND → join by code (§13 step 9, US-11,
     MockSocket.last.serverClose(1006);
     vi.advanceTimersByTime(500);
     expect(join(MockSocket.last)).toMatchObject({ viewerToken: NEW_TOKEN });
+    // The fallback is over: an INVALID_CODE now (a first code join of a later session) is not retried.
+    reconnect.join(CODE);
+    MockSocket.last.serverClose(4004);
+    expect(reconnect.willRetry(connection.state)).toBe(false);
+  });
+
+  it("a joined session ends the fallback: its later INVALID_CODE is not retried", () => {
+    lostSession();
+    vi.advanceTimersByTime(CODE_FALLBACK_AT_MS[0]!);
+    accept({ sessionId: NEW_SESSION, viewerToken: NEW_TOKEN });
+    const s = MockSocket.last;
+    s.receive({ type: "error", code: "INVALID_CODE", message: "x", retryable: false });
+    s.serverClose(4004);
+    expect(reconnect.willRetry(connection.state)).toBe(false);
+  });
+
+  it("INVALID_CODE followed by a bare drop (1006) during the fallback waits for the next scheduled code join", () => {
+    lostSession();
+    vi.advanceTimersByTime(CODE_FALLBACK_AT_MS[0]!);
+    const s = MockSocket.last;
+    expect(join(s)).toMatchObject({ code: CODE });
+    s.receive({ type: "error", code: "INVALID_CODE", message: "x", retryable: false });
+    s.serverClose(1006);
+    expect(connection.state.kind).toBe("enterCode"); // the error coloured the bare drop
+    expect(reconnect.willRetry(connection.state)).toBe(true);
+    const sockets = MockSocket.instances.length;
+    vi.advanceTimersByTime(CODE_FALLBACK_AT_MS[1]! - CODE_FALLBACK_AT_MS[0]! - 1);
+    expect(MockSocket.instances).toHaveLength(sockets);
+    vi.advanceTimersByTime(1);
+    expect(MockSocket.instances).toHaveLength(sockets + 1);
   });
 
   it("a network drop during the fallback is retried by code with the normal backoff", () => {
@@ -407,6 +438,28 @@ describe("visibility and page lifecycle (§13 step 8, §5.4)", () => {
     expect(connection.state.kind).toBe("disconnected");
     vi.advanceTimersByTime(500);
     expect(join(MockSocket.last)).toMatchObject({ viewerToken: TOKEN });
+  });
+
+  it("a retryAfterS above an hour is capped at MAX_RETRY_AFTER_MS", () => {
+    reconnect.join(CODE);
+    accept();
+    MockSocket.last.serverClose(1006);
+    vi.advanceTimersByTime(500);
+    const s = MockSocket.last;
+    s.open();
+    s.receive({
+      type: "error",
+      code: "RATE_LIMITED",
+      message: "x",
+      retryable: true,
+      details: { retryAfterS: 999_999 },
+    });
+    s.serverClose(4006);
+    const sockets = MockSocket.instances.length;
+    vi.advanceTimersByTime(MAX_RETRY_AFTER_MS - 1);
+    expect(MockSocket.instances).toHaveLength(sockets);
+    vi.advanceTimersByTime(1);
+    expect(MockSocket.instances).toHaveLength(sockets + 1);
   });
 
   it("the relay's retryAfterS holds against a visibility change even when the backoff is longer", () => {
@@ -510,8 +563,14 @@ describe("visibility and page lifecycle (§13 step 8, §5.4)", () => {
     MockSocket.last.serverClose(1006);
     reconnect.dispose();
     vi.advanceTimersByTime(60_000);
-    doc.show("visible");
-    expect(MockSocket.instances).toHaveLength(1);
+    expect(MockSocket.instances).toHaveLength(1); // the pending retry is gone
+    connection.connect({ code: CODE }); // connected again by someone else
+    const s = accept();
+    doc.show("visible"); // no checkAlive ping from a disposed reconnect
+    expect(s.frames.filter((f) => f["type"] === "ping")).toHaveLength(0);
+    s.serverClose(1006);
+    vi.advanceTimersByTime(60_000);
+    expect(MockSocket.instances).toHaveLength(2); // no state listener either
   });
 });
 
