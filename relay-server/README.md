@@ -126,7 +126,7 @@ HMAC'd `clientKey` — never an address. Memory figures are not on `/healthz` (S
 
 ```bash
 npm test -w relay-server             # vitest (all relay tests)
-npm test -w relay-server -- app      # one file by name filter, e.g. `app`, `config`, `codes`, `viewer`, `snapshot`, `fanout`, `http-scene`, `heartbeat`, `static`, `logs`, `docker-smoke`
+npm test -w relay-server -- app      # one file by name filter, e.g. `app`, `config`, `codes`, `viewer`, `snapshot`, `fanout`, `http-scene`, `heartbeat`, `static`, `logs`, `e2e-fake-slicer`, `docker-smoke`
 npm run lint -w relay-server         # eslint + prettier --check
 npm run typecheck -w relay-server
 npm run build -w relay-server        # tsc → relay-server/dist (needs `npm run build -w shared` first)
@@ -137,6 +137,24 @@ The root `npm test`, `npm run lint`, `npm run typecheck`, `npm run build` run ev
 The per-address limits (`src/ratelimit.ts`) also apply to E2E and load tests: from one address, more than 30
 upgrades, 10 wrong codes or 5 sessions per minute are refused, and 20 wrong codes within 10 minutes ban it. Harnesses run the relay with `TRUST_PROXY=true`
 and give each simulated client its own `X-Forwarded-For` address, as `test/ratelimit.test.ts` does.
+
+## Test with fake-slicer
+
+`test/e2e-fake-slicer.test.ts` (part of `npm test -w relay-server`, about 4 s) runs the relay in-process and
+`tools/fake-slicer` (PRO-14…16) from its sources as a child process — `node --import tsx` on
+`tools/fake-slicer/src/cli.ts` with `relay-server/` as working directory, so `shared` comes from its sources too (no
+build needed); not `npx`/`npm run`, which do not pass fd 3 on. The session code comes only through `--code-fd 3 --json` (NFR-12; the test asserts that neither the code nor a
+token or id is on stdout/stderr, without printing them). Two scenarios: a viewer that joins after `snapshot 1
+acknowledged` fetches `GET /api/scene/1` with its token, and a viewer that joins before a second snapshot (a one-entry
+`--script`) gets it streamed — decided by the viewer's own frames (`end`, not `ready`); both byte streams must match
+`shared/fixtures/glb/manifest.json`, and `{"event":"viewer.count","count":1}` must reach fake-slicer's fd 3. By hand,
+against a running relay (`npm run dev -w relay-server`), with the code written outside the working tree:
+
+```bash
+npm run build -w shared -w tools/fake-slicer
+f="$(mktemp)"; echo "code file: $f"   # read it from another shell (cat "$f"), rm "$f" afterwards
+node_modules/.bin/fake-slicer --relay ws://localhost:8787/ws --code-fd 3 --json 3>"$f"   # JSON Lines; Ctrl-C
+```
 
 ## Docker
 
