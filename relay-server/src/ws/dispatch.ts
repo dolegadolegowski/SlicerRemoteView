@@ -11,8 +11,9 @@
  *    `viewer.join` → viewer); anything else → `error UNAUTHORIZED` + `1008` (§3.1);
  * 3. unknown type of major 1 → `error UNSUPPORTED_TYPE`, the socket stays open (§2) — before a
  *    session is bound it counts as an `UNAUTHORIZED` offence instead (see 5);
- * 4. schema violation → `error INVALID_MESSAGE{details.instancePath}` (≤ 128 chars); the third on a
- *    socket → `4007`. A known type outside the role's column is judged by 5 before its schema;
+ * 4. schema violation → `error INVALID_MESSAGE{details.instancePath}` (≤ 128 chars); the third
+ *    protocol violation on a socket (`INVALID_MESSAGE` or `BAD_SEQUENCE`, `Connection.violation`) →
+ *    `4007`. A known type outside the role's column is judged by 5 before its schema;
  * 5. a type outside the role's column of §11 — or a handshake type once the socket is bound to a
  *    session, or anything but `ping` before it is — → `error UNAUTHORIZED`; the second → `1008`;
  * 6. the handler of the type (`HandlerTable`; SRV-06 onwards add theirs). An allowed type without a
@@ -35,8 +36,6 @@ import type { Connection } from "./connection.js";
 import { checkEnvelope } from "./frame.js";
 import type { TextFrame } from "./frame.js";
 
-/** `INVALID_MESSAGE` answers per socket before close `4007` (§9.2: "3 strikes"). */
-export const INVALID_MESSAGE_STRIKES = 3;
 /** `UNAUTHORIZED` answers per socket before close `1008` (§11: "a second offence"). */
 export const UNAUTHORIZED_STRIKES = 2;
 /** Cap on the echoed `details.instancePath` (JSON Pointers of client messages are short). */
@@ -150,16 +149,10 @@ export function createDispatcher(
         else connection.sendError("UNSUPPORTED_TYPE", parsed.error.message, { replyTo });
         return;
       }
-      connection.invalidMessages += 1;
-      const details = {
-        instancePath: parsed.error.instancePath.slice(0, MAX_INSTANCE_PATH_LENGTH),
-      };
-      if (connection.invalidMessages >= INVALID_MESSAGE_STRIKES)
-        connection.fail("INVALID_MESSAGE", parsed.error.message, CLOSE_CODES.PROTOCOL_VIOLATION, {
-          replyTo,
-          details,
-        });
-      else connection.sendError("INVALID_MESSAGE", parsed.error.message, { replyTo, details });
+      connection.violation("INVALID_MESSAGE", parsed.error.message, {
+        replyTo,
+        details: { instancePath: parsed.error.instancePath.slice(0, MAX_INSTANCE_PATH_LENGTH) },
+      });
       return;
     }
 

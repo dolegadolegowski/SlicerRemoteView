@@ -56,10 +56,22 @@ export interface CachedSnapshot {
   sceneVersion: number;
 }
 
-/** A snapshot being received (SRV-09 fills it). */
+/** A snapshot being received (`ws/snapshot.ts`; SRV-24 verifies and swaps it in at `end`). */
 export interface AssemblingSnapshot {
+  /** `byteLength` bytes, zero-filled at `begin`; never pooled or reused (T11). */
   buffer: Buffer;
   sceneVersion: number;
+  byteLength: number;
+  chunkSize: number;
+  chunkCount: number;
+  /** Index of the next expected chunk (§6.3). */
+  nextIndex: number;
+  /** SHA-256 announced in `begin`, checked against the bytes at `end` (§6.4). */
+  sha256: string;
+  /** Copied into `scene.snapshot.ready` (§6.4); the relay never parses the GLB. */
+  extensionsRequired: string[];
+  /** Arrival of the last chunk (or `begin`), for the 120 s chunk timeout (§3.3). */
+  lastChunkAt: number;
 }
 
 /**
@@ -112,6 +124,10 @@ export interface Session {
   sceneVersion: number;
   snapshot: CachedSnapshot | undefined;
   assembling: AssemblingSnapshot | undefined;
+  /** Highest `sceneVersion` announced in a `scene.snapshot.begin`, refused or not (§6.2, §8.4). */
+  lastSnapshotVersion: number;
+  /** A refused or discarded snapshot version whose remaining chunks are ignored (§6.2, §6.3). */
+  ignoredSnapshotVersion: number | undefined;
   /** Merged `scene.update` / `scene.nodeRemoved` since the snapshot (SRV-12); never names. */
   readonly nodeState: Map<string, NodeState | "removed">;
   /** The publisher's socket; `undefined` while in grace and after the session ended. */
@@ -281,6 +297,8 @@ export class Registry extends EventEmitter<RegistryEvents> {
       sceneVersion: 0,
       snapshot: undefined,
       assembling: undefined,
+      lastSnapshotVersion: 0,
+      ignoredSnapshotVersion: undefined,
       nodeState: new Map(),
       publisher: undefined,
       viewers: new Map(),

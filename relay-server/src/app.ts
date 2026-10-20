@@ -22,6 +22,7 @@ import { createDispatcher } from "./ws/dispatch.js";
 import type { HandlerTable } from "./ws/dispatch.js";
 import { registerWsEndpoint } from "./ws/endpoint.js";
 import { publisherHandlers } from "./ws/publisher.js";
+import { snapshotHandlers } from "./ws/snapshot.js";
 import { viewerHandlers } from "./ws/viewer.js";
 import type { FrameHandlers } from "./ws/endpoint.js";
 
@@ -128,6 +129,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   const limiter = options.limiter ?? new RateLimiter({ clock, logger });
   const publisher = publisherHandlers({ registry, config, limiter, logger });
   const viewer = viewerHandlers({ registry, limiter, logger, clock });
+  const snapshot = snapshotHandlers({ registry, config, logger, clock });
 
   // First: the WebSocket plugin wraps every route registered after it (upgrade interception).
   await registerWsEndpoint(app, {
@@ -139,10 +141,15 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
       text: createDispatcher({
         clock,
         validators,
-        normalizers: viewer.normalizers,
-        handlers: { ...publisher.handlers, ...viewer.handlers, ...options.messageHandlers },
+        normalizers: { ...viewer.normalizers, ...snapshot.normalizers },
+        handlers: {
+          ...publisher.handlers,
+          ...viewer.handlers,
+          ...snapshot.handlers,
+          ...options.messageHandlers,
+        },
       }),
-      binary: () => {}, // snapshot chunks: SRV-09
+      binary: (connection, frame) => snapshot.chunk(connection, frame),
       closed: (connection, closeCode) => {
         if (connection.role === "publisher") publisher.publisherClosed(connection, closeCode);
         else if (connection.role === "viewer") viewer.viewerClosed(connection);

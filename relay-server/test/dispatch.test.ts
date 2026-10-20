@@ -12,9 +12,11 @@ function fakeConnection(role: "publisher" | "viewer") {
   const connection = {
     role,
     bound: true,
-    invalidMessages: 0,
+    violations: 0,
     offences: 0,
     sendError: (code: string, message: string, options: Record<string, unknown> = {}) =>
+      sent.push({ code, message, ...options }),
+    violation: (code: string, message: string, options: Record<string, unknown> = {}) =>
       sent.push({ code, message, ...options }),
     fail: (
       code: string,

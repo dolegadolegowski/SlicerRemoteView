@@ -3,7 +3,7 @@
  * send conventions: every outgoing JSON message gets `protocolVersion` and `ts`; an `error` is
  * optionally followed by a close; once a close has been started nothing more is sent or handled.
  */
-import { PROTOCOL_VERSION } from "@slicerremoteview/shared";
+import { CLOSE_CODES, PROTOCOL_VERSION } from "@slicerremoteview/shared";
 import type { ErrorCode } from "@slicerremoteview/shared";
 import { WebSocket } from "ws";
 import type { Clock, TimerHandle } from "../clock.js";
@@ -28,6 +28,9 @@ export interface ErrorOptions {
   details?: Record<string, unknown>;
 }
 
+/** `INVALID_MESSAGE`/`BAD_SEQUENCE` answers per socket before close `4007` (§9.2: "3 strikes"). */
+export const PROTOCOL_VIOLATION_STRIKES = 3;
+
 let nextConnectionId = 1;
 
 export class Connection implements Peer {
@@ -39,8 +42,8 @@ export class Connection implements Peer {
   session: Session | undefined;
   /** The registry entry of a joined viewer (`ws/viewer.ts`). */
   viewer: Viewer | undefined;
-  /** `INVALID_MESSAGE` answers so far (3 → close `4007`, §9.2). */
-  invalidMessages = 0;
+  /** `INVALID_MESSAGE` and `BAD_SEQUENCE` answers so far (the third closes `4007`, §9.2, §9.3). */
+  violations = 0;
   /** `UNAUTHORIZED` answers so far (2 → close `1008`, §11). */
   offences = 0;
   #bound = false;
@@ -78,6 +81,21 @@ export class Connection implements Peer {
       ...(options.retryable !== undefined && { retryable: options.retryable }),
       ...(options.details !== undefined && { details: options.details }),
     });
+  }
+
+  /**
+   * A protocol violation (`INVALID_MESSAGE` or `BAD_SEQUENCE`): `error`, and close `4007` on the
+   * third of this socket ("3 strikes", §9.2, §9.3).
+   */
+  violation(
+    code: "INVALID_MESSAGE" | "BAD_SEQUENCE",
+    message: string,
+    options: ErrorOptions = {},
+  ): void {
+    this.violations += 1;
+    if (this.violations >= PROTOCOL_VIOLATION_STRIKES)
+      this.fail(code, message, CLOSE_CODES.PROTOCOL_VIOLATION, options);
+    else this.sendError(code, message, options);
   }
 
   /** `error` then close with `closeCode` (§9.3). */

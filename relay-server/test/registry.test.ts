@@ -245,7 +245,17 @@ function attachBuffers(session: Session): WeakRef<Buffer>[] {
     byteLength: snapshot.length,
     sceneVersion: 3,
   };
-  session.assembling = { buffer: assembling, sceneVersion: 4 };
+  session.assembling = {
+    buffer: assembling,
+    sceneVersion: 4,
+    byteLength: assembling.byteLength,
+    chunkSize: 1 << 16,
+    chunkCount: 8,
+    nextIndex: 0,
+    sha256: "0".repeat(64),
+    extensionsRequired: [],
+    lastChunkAt: 0,
+  };
   return [new WeakRef(snapshot), new WeakRef(assembling)];
 }
 
