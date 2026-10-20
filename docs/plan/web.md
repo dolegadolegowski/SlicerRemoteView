@@ -53,9 +53,9 @@ device per `docs/testing/web.md`; Playwright WebKit is not Safari.
   viewer that traps a zoomed page or hides errors behind the canvas.
 
 - WEB-09 (low): FR-40 / US-09 say a presenter change of `visible` replaces the local choice and clears it with a short
-  notice, while the WEB-12 row says presenter `visible` applies "unless locally overridden" — WEB-12 must follow
-  FR-40 (requirements win) and fix its row. The panel keeps no override state of its own: WEB-12 sets `T.visible`,
-  calls `nodePanel.refresh()` and shows the notice. Opacity sliders are WEB-13 (M2). WEB-09 is ≈ 385 source (150 of
+  notice (as the WEB-13 row says), while the WEB-12 row says presenter `visible` applies "unless locally
+  overridden" — WEB-12 must follow FR-40 (requirements win) and fix its row. The panel keeps no override state of
+  its own: WEB-12 sets `T.visible` and calls `nodePanel.refresh()`; WEB-13 adds the notice and the opacity sliders. WEB-09 is ≈ 385 source (150 of
   them CSS) + 715 test lines, slightly above the ~300-line guideline: the review added the whole-model clip/zoom
   bounds in `viewer.ts` and the long-list e2e (`e2e/glb.ts`); the zoom e2e of WEB-08 now waits for a settled zoom.
 
