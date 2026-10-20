@@ -291,6 +291,12 @@ module self-test in Slicer. Rule 10 of `CLAUDE.md` applies: never claim a Slicer
 - (SLC-09 post-review, low) `test_panel_texts_are_plain_and_complete` does not stop a fixed duration returning to the
   `MAX_LIFETIME` text (assert no digits in `END_REASONS`), and the `repr(ctl.view)`/`repr(ctl)` checks in
   `test_panel_never_logs_or_prints_the_code_or_token` run on an idle view — take the repr of the live view instead.
+- (SLC-22 post-review, low) Consent text: show `ENCRYPTED` only for `wss://` and no encryption sentence for addresses
+  Start refuses (`WS://…`, `http://…`, a bare host); `wss://[::]/ws` and zone-ID IPv6 hosts fall back to the generic
+  receiver. Tests: the stdlib-only AST check must also fail on relative imports (`ImportFrom.level > 0`); assert
+  `relay_host("ws://[::1]:8787/ws") == "::1"` and that `consent._LOOPBACK` equals `transport._LOOPBACK`. Docs: the
+  consent text covers clipping, not opacity 0 (`mrml_scene.py` docstring, `slicer-scene.md` §1 and its accepted
+  differences) until `release` answers `2026-10-20-slicer-5`.
 - (SLC-22) The consent text describes models only: SLC-13 (segments) and SLC-18 (*Hide node names*) extend the text and
   its string test together with what they add to the export.
 - (SLC-22) *Reload* re-executes only `RemoteView.py`; `remoteview_core` stays imported (`docs/research/slicer-scene.md`
