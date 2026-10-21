@@ -21,6 +21,8 @@ const INDEX =
   "<!doctype html><title>viewer</title><script type=module src=/assets/index-Ab12Cd34.js></script>\n";
 const SCRIPT = "export const viewer = 1;\n";
 const SCRIPT_BR = Buffer.from([0x1b, 0x18, 0x00, 0xf8]); // any bytes: served as they are
+const MANIFEST = '{"name":"viewer","icons":[{"src":"/icons/icon-192.png","sizes":"192x192"}]}\n';
+const ICON = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]); // a PNG signature
 
 beforeAll(() => {
   root = mkdtempSync(join(tmpdir(), "srv16-"));
@@ -30,6 +32,14 @@ beforeAll(() => {
   writeFileSync(join(root, "assets", "index-Ab12Cd34.js.br"), SCRIPT_BR);
   writeFileSync(join(root, "assets", ".env"), "SECRET=1\n");
   writeFileSync(join(root, "secret.txt"), "outside assets\n");
+  writeFileSync(join(root, "manifest.webmanifest"), MANIFEST);
+  mkdirSync(join(root, "icons"));
+  writeFileSync(join(root, "icons", "icon-192.png"), ICON);
+  writeFileSync(join(root, "icons", "notes.txt"), "not an icon\n");
+  writeFileSync(join(root, "icons", ".hidden.png"), ICON);
+  mkdirSync(join(root, "icons", "nested.png")); // a directory with an icon-like name
+  writeFileSync(join(root, "icons", "upper.PNG"), ICON); // exists, but not a plain lower-case .png
+  writeFileSync(join(root, "icons", "a.b.png"), ICON); // exists, but has a second dot
 });
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
@@ -249,6 +259,77 @@ describe("security headers (SRV-16 criterion 2, architecture §8 T6, ADR 0006 §
   );
 });
 
+describe("root files of the viewer build (SRV-26, report 2026-10-21-web, WEB-17)", () => {
+  it("GET /manifest.webmanifest → the manifest, application/manifest+json, no-cache", async () => {
+    const res = await get("/manifest.webmanifest");
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toMatch(/^application\/manifest\+json\b/);
+    expect(res.headers["cache-control"]).toBe("no-cache");
+    expect(res.body).toBe(MANIFEST);
+  });
+
+  it("GET and HEAD /icons/<name>.png → image/png, no-cache", async () => {
+    const res = await get("/icons/icon-192.png");
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toBe("image/png");
+    expect(res.headers["cache-control"]).toBe("no-cache");
+    expect(res.rawPayload.equals(ICON)).toBe(true);
+    const head = await get("/icons/icon-192.png", {}, "HEAD");
+    expect(head.statusCode).toBe(200);
+    expect(head.headers["content-type"]).toBe("image/png");
+    expect(head.body).toBe("");
+  });
+
+  it.each([
+    "/icons/notes.txt",
+    "/icons/.hidden.png",
+    "/icons/nested.png",
+    "/icons/",
+    "/icons",
+    "/manifest.json",
+    "/icons/../secret.txt",
+    "/icons/%2e%2e/secret.txt",
+    "/icons/icon-192.png/x",
+    "/secret.txt",
+  ])("%s → 404 NOT_FOUND, nothing echoed", async (url) => {
+    const res = await get(url);
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual({ error: "NOT_FOUND" });
+    expect(res.body).not.toContain("icons");
+  });
+
+  it("an existing file whose name breaks the plain-PNG rule is not served", async () => {
+    // these files exist in icons/, so only the name rule can refuse them
+    for (const url of ["/icons/upper.PNG", "/icons/a.b.png", "/icons/notes.txt"]) {
+      const res = await get(url);
+      expect(res.statusCode, url).toBe(404);
+      expect(res.json()).toEqual({ error: "NOT_FOUND" });
+    }
+    expect((await get("/icons/icon-192.png")).statusCode).toBe(200); // the rule itself lets icons in
+  });
+
+  it("a build without manifest or icons: both paths are 404", async () => {
+    const bare = mkdtempSync(join(tmpdir(), "srv26-"));
+    try {
+      writeFileSync(join(bare, "index.html"), INDEX);
+      mkdirSync(join(bare, "assets"));
+      const app = await buildApp({ staticRoot: bare });
+      try {
+        for (const url of ["/manifest.webmanifest", "/icons/icon-192.png"]) {
+          const res = await app.inject({ method: "GET", url });
+          expect(res.statusCode, url).toBe(404);
+          expect(res.headers["content-type"], url).toBe("application/json; charset=utf-8");
+          expect(res.json()).toEqual({ error: "NOT_FOUND" });
+        }
+      } finally {
+        await app.close();
+      }
+    } finally {
+      rmSync(bare, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("hashed assets (SRV-16 criterion 3, FR-28)", () => {
   it("a hashed asset is served immutable for 30 days", async () => {
     const res = await get("/assets/index-Ab12Cd34.js");
@@ -268,29 +349,66 @@ describe("hashed assets (SRV-16 criterion 3, FR-28)", () => {
     expect(res.headers["cache-control"]).toBe(`public, max-age=${ASSET_MAX_AGE_S}, immutable`);
   });
 
+  /** Every file `index.html` and the manifest name is served with the cache policy of its kind. */
+  async function expectWholeBuildServed(dir: string): Promise<number> {
+    const app = await buildApp({ staticRoot: dir });
+    try {
+      const html = readFileSync(join(dir, "index.html"), "utf8");
+      const page = await app.inject({ method: "GET", url: "/j" });
+      expect(page.statusCode).toBe(200);
+      expect(page.body).toBe(html);
+      const refs = [...html.matchAll(/\b(?:src|href)="(\/[^"]*)"/g)].map((m) => m[1]!);
+      expect(refs.length).toBeGreaterThan(0);
+      const manifestPath = join(dir, "manifest.webmanifest");
+      if (existsSync(manifestPath)) {
+        const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+          icons?: Array<{ src?: string }>;
+        };
+        for (const icon of manifest.icons ?? []) if (icon.src) refs.push(icon.src);
+      }
+      const rootFile = (ref: string) =>
+        ref === "/manifest.webmanifest" || ref.startsWith("/icons/");
+      for (const ref of refs) {
+        // nothing else is served (§10): hashed assets, the manifest and its icons (SRV-26)
+        expect(ref.startsWith("/assets/") || rootFile(ref), ref).toBe(true);
+        const asset = await app.inject({ method: "GET", url: ref });
+        expect(asset.statusCode, ref).toBe(200);
+        expect(asset.headers["cache-control"], ref).toBe(
+          rootFile(ref) ? "no-cache" : `public, max-age=${ASSET_MAX_AGE_S}, immutable`,
+        );
+      }
+      return refs.filter(rootFile).length;
+    } finally {
+      await app.close();
+    }
+  }
+
+  it("a WEB-17-style build (fixture): index.html, manifest and icons are all served", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "srv26-build-"));
+    try {
+      mkdirSync(join(dir, "assets"));
+      mkdirSync(join(dir, "icons"));
+      writeFileSync(
+        join(dir, "index.html"),
+        '<!doctype html><link rel="manifest" href="/manifest.webmanifest">' +
+          '<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">' +
+          '<script type=module src="/assets/index-Ab12Cd34.js"></script>\n',
+      );
+      writeFileSync(join(dir, "assets", "index-Ab12Cd34.js"), SCRIPT);
+      writeFileSync(join(dir, "manifest.webmanifest"), MANIFEST);
+      for (const name of ["icon-192.png", "apple-touch-icon.png"])
+        writeFileSync(join(dir, "icons", name), ICON);
+      expect(await expectWholeBuildServed(dir)).toBe(3); // manifest + 2 icons
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   const built = fileURLToPath(new URL("../../web-viewer/dist/", import.meta.url));
   it.skipIf(!existsSync(join(built, "index.html")))(
-    "the web viewer's own build (when built): every file index.html refers to is served",
+    "the web viewer's own build (when built): every file index.html and the manifest refer to is served",
     async () => {
-      const app = await buildApp({ staticRoot: built });
-      try {
-        const html = readFileSync(join(built, "index.html"), "utf8");
-        const page = await app.inject({ method: "GET", url: "/j" });
-        expect(page.statusCode).toBe(200);
-        expect(page.body).toBe(html);
-        const refs = [...html.matchAll(/\b(?:src|href)="(\/[^"]*)"/g)].map((m) => m[1]!);
-        expect(refs.length).toBeGreaterThan(0);
-        for (const ref of refs) {
-          expect(ref.startsWith("/assets/")).toBe(true); // nothing else is served (§10)
-          const asset = await app.inject({ method: "GET", url: ref });
-          expect(asset.statusCode).toBe(200);
-          expect(asset.headers["cache-control"]).toBe(
-            `public, max-age=${ASSET_MAX_AGE_S}, immutable`,
-          );
-        }
-      } finally {
-        await app.close();
-      }
+      await expectWholeBuildServed(built);
     },
   );
 });
