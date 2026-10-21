@@ -3,15 +3,27 @@
 // the viewer — while live updates keep changing the same scene objects. Controller and hand models come from the
 // self-hosted `/assets/xr-profiles-<version>/` (never the jsDelivr default), and their GLBs' textures load as images,
 // which the relay's CSP allows (`img-src blob:`), not with `fetch(blob:)`, which it does not (`connect-src 'self' wss:`).
+// The user grabs the scene with a controller's trigger or a pinch (WEB-20, grab.ts) and puts it back in front of them
+// with a controller's grip button (squeeze) or two quick presses.
 
 import { TextureLoader } from "three";
-import type { Object3D } from "three";
+import type { Matrix4, Mesh, Object3D } from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { XRControllerModelFactory } from "three/addons/webxr/XRControllerModelFactory.js";
 import { XRHandModelFactory } from "three/addons/webxr/XRHandModelFactory.js";
 import { version as profilesVersion } from "@webxr-input-profiles/assets/package.json";
 import type { XrHost } from "../render/viewer";
+import { createGrab } from "./grab";
+import { createTextPanel, disposeTextPanel } from "./panel";
 import type { XrMode } from "./support";
+
+/**
+ * Two presses (trigger or pinch) of the same hand within this many ms put the scene back in front of the user
+ * (WEB-20). Both hands pressing together is a two-hand grab, not a reset.
+ */
+export const DOUBLE_PRESS_MS = 400;
+/** How long the Quest 2 budget warning stays (WEB-20). */
+export const WARNING_MS = 10_000;
 
 /** Where `scripts/copy-xr-profiles.mjs` puts the input profiles (`dist/assets/`, served by the relay as is). */
 export const XR_PROFILES_PATH = `/assets/xr-profiles-${profilesVersion}`;
@@ -58,6 +70,10 @@ export interface XrSessionOptions {
   readonly path?: string;
   /** Called once when the session is over and the 2D view is back, however the session ended. */
   readonly onEnd?: () => void;
+  /** A warning shown in front of the user for `WARNING_MS` when the session starts (the Quest 2 budget, WEB-20). */
+  readonly warning?: string | null;
+  /** Draws a text panel (default `createTextPanel`); `null` when it cannot. */
+  readonly panel?: (text: string) => Mesh | null;
 }
 
 /**
@@ -80,15 +96,93 @@ export async function runXrSession(
   const added = inputs(host, path);
   scene.add(...added);
 
+  // Grabbing (WEB-20). A press is `selectstart` on an input's target-ray space: a controller's trigger or a hand's
+  // pinch. The pose that drags the scene must be rigid to the hand: a controller's target ray is (Touch controllers),
+  // a hand's is the runtime's aim ray, which may follow the forearm rather than the wrist (OpenXR
+  // XR_EXT_hand_interaction §Aim pose; research web-xr.md §1), so hands use their wrist joint. [TODO verify] on Quest 3.
+  const grab = createGrab();
+  const rays = [0, 1].map((index) => renderer.xr.getController(index));
+  const hands = [0, 1].map((index) => renderer.xr.getHand(index));
+  const isHand = [false, false];
+  const pose = (i: number): Matrix4 | null => {
+    if (isHand[i]) {
+      const wrist = hands[i]!.joints["wrist"];
+      return wrist?.visible ? wrist.matrix : null;
+    }
+    return rays[i]!.visible ? rays[i]!.matrix : null;
+  };
+  const poses = () =>
+    new Map<number, Matrix4>(
+      [0, 1].flatMap((i) => {
+        const m = pose(i);
+        return m ? [[i, m]] : [];
+      }),
+    );
+  let eyeHeight = Number.NaN;
+  const lastPress = [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY];
+  const reset = () => {
+    grab.release(0, host.stageMatrix());
+    grab.release(1, host.stageMatrix());
+    host.place(eyeHeight);
+  };
+  const listeners = rays.flatMap((ray, i) => {
+    const onConnected = (event: { data?: XRInputSource }) =>
+      (isHand[i] = Boolean(event.data?.hand));
+    // A source that goes away lets go (Chromium sends `selectend` first; this is the fallback).
+    const onDisconnected = () => grab.release(i, host.stageMatrix());
+    const onSelectStart = () => {
+      const now = performance.now();
+      const double = now - lastPress[i]! < DOUBLE_PRESS_MS;
+      lastPress[i] = double ? Number.NEGATIVE_INFINITY : now;
+      if (double) return reset(); // a reset, not a grab of the scene just put back
+      grab.press(i, host.stageMatrix());
+    };
+    const onSelectEnd = () => grab.release(i, host.stageMatrix());
+    const all = [
+      ["connected", onConnected],
+      ["disconnected", onDisconnected],
+      ["selectstart", onSelectStart],
+      ["selectend", onSelectEnd],
+      ["squeezestart", reset],
+    ] as const;
+    for (const [type, listener] of all) ray.addEventListener(type, listener as () => void);
+    return all.map(
+      ([type, listener]) =>
+        () =>
+          ray.removeEventListener(type, listener as () => void),
+    );
+  });
+
+  // The Quest 2 budget warning, below the scene, once the scene is placed.
+  const text = options.warning;
+  let warning: Mesh | null = null;
+  let warningTimer: ReturnType<typeof setTimeout> | undefined;
+  const showWarning = () => {
+    warning = text ? (options.panel ?? createTextPanel)(text) : null;
+    if (!warning) return;
+    warning.position.set(0, (Number.isFinite(eyeHeight) ? eyeHeight : 1.4) - 0.45, -0.9);
+    scene.add(warning);
+    warningTimer = setTimeout(hideWarning, WARNING_MS);
+  };
+  const hideWarning = () => {
+    clearTimeout(warningTimer);
+    if (warning) disposeTextPanel(warning);
+    warning = null;
+  };
+
   let placed = false;
   renderer.setAnimationLoop((_time, frame) => {
+    const space = renderer.xr.getReferenceSpace();
+    const pose = space ? frame?.getViewerPose(space) : undefined;
+    if (pose) eyeHeight = pose.transform.position.y; // `getViewerPose` gives null while tracking is not ready
     if (!placed) {
-      const space = renderer.xr.getReferenceSpace();
-      const pose = space ? frame?.getViewerPose(space) : undefined;
       // Until the headset reports a pose the default eye height holds; the first pose places the scene for good.
-      host.place(pose ? pose.transform.position.y : Number.NaN);
-      placed = Boolean(pose); // `getViewerPose` gives null while tracking is not ready
+      host.place(eyeHeight);
+      placed = Boolean(pose);
+      if (placed) showWarning();
     }
+    const held = grab.update(poses());
+    if (held) host.setStageMatrix(held);
     renderer.render(scene, camera);
   });
 
@@ -98,6 +192,8 @@ export async function runXrSession(
     ended = true;
     renderer.xr.removeEventListener("sessionend", onEnd);
     renderer.setAnimationLoop(null); // after the renderer's own handler, which restarts its window loop
+    for (const off of listeners) off();
+    hideWarning();
     scene.remove(...added); // kept with their models for the next session
     renderer.xr.enabled = false;
     host.end();

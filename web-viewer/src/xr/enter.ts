@@ -2,6 +2,7 @@
 // (transient activation) — and only then is the XR module loaded, so the 2D viewer never downloads it unasked.
 
 import type { XrHost } from "../render/viewer";
+import type { XrSessionOptions } from "./session";
 import { XR_SESSION_INIT } from "./support";
 import type { XrMode, XrSystemLike } from "./support";
 
@@ -14,14 +15,14 @@ export function preloadXr(): void {
 }
 
 /**
- * `true` once the session runs (`onEnd` follows when it is over); `false` when the browser refused or it could not
- * start (`onEnd` is not called).
+ * `true` once the session runs (`options.onEnd` follows when it is over); `false` when the browser refused or it
+ * could not start (`onEnd` is not called).
  */
 export async function enterXr(
   host: XrHost,
   xr: XrSystemLike,
   mode: XrMode,
-  onEnd?: () => void,
+  options: Pick<XrSessionOptions, "onEnd" | "warning"> = {},
 ): Promise<boolean> {
   let session: XRSession;
   try {
@@ -31,7 +32,7 @@ export async function enterXr(
   }
   try {
     const { runXrSession } = await import("./session");
-    await runXrSession(host, session, mode, onEnd ? { onEnd } : {});
+    await runXrSession(host, session, mode, options);
     return true;
   } catch {
     await session.end().catch(() => undefined); // e.g. the module did not load: the granted session must not hang

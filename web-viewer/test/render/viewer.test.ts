@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Box3, BoxGeometry, Group, Mesh, TOUCH, Vector3 } from "three";
+import { Box3, BoxGeometry, Group, Matrix4, Mesh, TOUCH, Vector3 } from "three";
 import type { Object3D } from "three";
 import { parseSceneModel } from "../../src/render/scene-model";
 import type { SceneModel } from "../../src/render/scene-model";
@@ -855,5 +855,36 @@ describe("WebXR host (WEB-19)", () => {
     expect(viewer.camera.far).toBe(100); // still the XR range
     viewer.xr!.end();
     expect(viewer.camera.far).toBeCloseTo(far2d, 6); // measured with the stage back in millimetres
+  });
+
+  it("setStageMatrix moves the scene while presenting; place() puts it back unturned at real size (WEB-20)", async () => {
+    const { viewer } = xrHarness();
+    const m = await model();
+    // A small structure off to one side: the box of the turned model is then not the turned box of the model.
+    const side = new Mesh(new BoxGeometry(0.02, 0.02, 0.02));
+    side.position.set(0.15, 0.05, 0);
+    m.root.add(side);
+    viewer.setModel(m);
+    const xr = viewer.xr!;
+    xr.setStageMatrix(new Matrix4().makeTranslation(1, 1, 1)); // not presenting: ignored
+    expect(xr.stageMatrix().elements[0]).toBe(PRESENTATION_SCALE);
+    xr.begin({ ar: false });
+    xr.place(1.5);
+    const first = centreInWorld(m);
+    const grabbed = new Matrix4()
+      .makeTranslation(0.3, 1.2, -0.7)
+      .multiply(new Matrix4().makeRotationAxis(new Vector3(0.7, 1.1, 0.3).normalize(), 2))
+      .multiply(new Matrix4().makeScale(3, 3, 3));
+    xr.setStageMatrix(grabbed);
+    xr.stageMatrix().elements.forEach((v, i) => expect(v).toBeCloseTo(grabbed.elements[i]!, 12));
+    xr.place(1.5);
+    expect(new Vector3().setFromMatrixScale(xr.stageMatrix()).x).toBeCloseTo(1, 9);
+    // Back exactly where it was first placed (measured unturned, not as the turned model's box).
+    expect(centreInWorld(m).distanceTo(first)).toBeLessThan(1e-9);
+    expect(first.distanceTo(new Vector3(0, 1.5, -1.3))).toBeLessThan(1e-6);
+    side.removeFromParent();
+    xr.setStageMatrix(grabbed);
+    xr.end(); // the 2D stage is unturned again
+    expect(xr.stageMatrix().equals(new Matrix4().makeScale(1000, 1000, 1000))).toBe(true);
   });
 });

@@ -44,6 +44,19 @@ npm registry. Device behaviour on Quest Browser stays `[TODO verify]` until `doc
   `TextureLoader` (an `<img>` on the `blob:` URL, allowed by `img-src 'self' data: blob:`). Reported to the server workstream as
   well (`docs/testing/reports/2026-10-21-web.md`).
 
+- Grabbing (WEB-20). `src/renderers/webxr/WebXRController.js`: `getTargetRaySpace()` groups get `selectstart`,
+  `selectend` (trigger or pinch) and `squeezestart` (grip button), and `connected` with the `XRInputSource` (its
+  `hand` set for hand input); their `matrix` is the target-ray pose (`matrixAutoUpdate` off), and `visible` is false
+  while that pose is null. For hand input `update()` takes the hand-joint branch: joints (`hand.joints[name]`) get
+  their poses and the target ray its, the grip does not. WebXR sends input events before the frame in which three
+  updates these matrices, so the viewer anchors a grab at the next frame (`src/xr/grab.ts`).
+- A hand's target ray is the runtime's aim ray. OpenXR `XR_EXT_hand_interaction` §Aim pose: "the rotation of the
+  'aim' pose may account for forearm or shoulder motion as well as hand rotation. Hence, the 'aim' pose may not
+  always rigidly attach to the user's hand rotation. If the application desires to rotate the targeted remote object
+  in place, it should use the rotation of the 'grip' pose instead" [5]. Hands therefore drag the scene with their
+  wrist joint (rigid to the hand); whether Quest Browser's hand target ray is that aim pose is `[TODO verify]` on a
+  device (`docs/testing/web.md` §WebXR step 10).
+
 ## 2. `@webxr-input-profiles/assets` 1.0.20
 
 - MIT (`LICENSE.md`); the README notes that some assets depict device trademarks. 133 files, 101.7 MB unpacked; the
@@ -77,3 +90,5 @@ npm registry. Device behaviour on Quest Browser stays `[TODO verify]` until `doc
    contents read from the installed tarball).
 3. `iwer@2.6.0` — https://www.npmjs.com/package/iwer/v/2.6.0 (package contents read from the installed tarball).
 4. ADR 0003 (M3a), ADR 0006 (CSP), FR-47, US-14, research `web.md` §3.
+5. OpenXR specification source, `XR_EXT_hand_interaction` §Aim pose, lines 100–108 —
+   https://github.com/KhronosGroup/OpenXR-Docs/blob/18ebc0374da23c020ef4c949f9b144ffae6160ef/specification/sources/chapters/extensions/ext/ext_hand_interaction.adoc

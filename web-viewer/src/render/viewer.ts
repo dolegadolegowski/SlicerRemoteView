@@ -17,7 +17,7 @@ import {
   Vector3,
   WebGLRenderer,
 } from "three";
-import type { Camera, Object3D, Quaternion } from "three";
+import type { Camera, Matrix4, Object3D, Quaternion } from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import WebGL from "three/addons/capabilities/WebGL.js";
 import { detectLang, t } from "../i18n/strings";
@@ -111,8 +111,14 @@ export interface XrHost {
   readonly scene: Scene;
   readonly camera: PerspectiveCamera;
   begin(options: { readonly ar: boolean }): void;
-  /** Puts the centre of the whole model in front of the user at `eyeHeight` metres (`local-floor`, placement.ts). */
+  /**
+   * Puts the centre of the whole model in front of the user at `eyeHeight` metres (`local-floor`, placement.ts), at
+   * real size and unturned: also the reset after grabbing (WEB-20).
+   */
   place(eyeHeight: number): void;
+  /** The stage's transform in the room (metres), and setting it while the user holds the scene (WEB-20). */
+  stageMatrix(): Matrix4;
+  setStageMatrix(matrix: Matrix4): void;
   /** The 2D view again, camera as it was (or fitted again when the model changed meanwhile). */
   end(): void;
   /** Ends the running session, if any (the scene went away: the 2D page says why); `end` follows from it. */
@@ -416,12 +422,16 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
     element.dataset["model"] = model ? "loaded" : "none";
     resize(); // fit needs the current aspect (portrait phones need ≈ 2× the distance of a square view)
     fit(true);
-    if (presenting?.eyeHeight != null) place(presenting.eyeHeight); // a new scene in XR stands where the old one did
+    // A new scene in XR stands where the first one was put (in front, real size, unturned), whatever was grabbed.
+    if (presenting?.eyeHeight != null) place(presenting.eyeHeight);
   }
 
   function place(eyeHeight: number): void {
     if (!presenting) return;
     presenting.eyeHeight = eyeHeight;
+    // Unturned and at real size first: the box of a turned model is not the turned box of the model.
+    stage.quaternion.identity();
+    stage.scale.setScalar(1);
     // The centre of the whole model in stage coordinates (metres, the stage's own unit while presenting).
     stage.updateMatrixWorld(true);
     const box = model ? new Box3().setFromObject(model.root) : new Box3();
@@ -579,12 +589,20 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
       element.dataset["xr"] = ar ? "ar" : "vr";
     },
     place,
+    stageMatrix() {
+      stage.updateMatrix();
+      return stage.matrix.clone();
+    },
+    setStageMatrix(matrix) {
+      if (presenting) matrix.decompose(stage.position, stage.quaternion, stage.scale);
+    },
     end() {
       if (!presenting) return;
       const { saved, refit, remeasure } = presenting;
       presenting = null;
       stage.scale.setScalar(PRESENTATION_SCALE);
       stage.position.set(0, 0, 0);
+      stage.quaternion.identity(); // grabbing may have turned it (WEB-20)
       scene.background = new Color(BACKGROUND);
       renderer.setClearColor(BACKGROUND, 1);
       // WebXR moved the camera with the head and restores only its fov and zoom.

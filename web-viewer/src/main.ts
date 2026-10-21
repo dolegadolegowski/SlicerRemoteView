@@ -23,6 +23,8 @@ import { startDevOverlay } from "./ui/dev-overlay";
 import { createLangToggle } from "./ui/lang-toggle";
 import { bindScreens } from "./ui/screens";
 import { bindWakeLock } from "./ui/wake-lock";
+import { t } from "./i18n/strings";
+import { quest2Concern } from "./xr/budget";
 import { enterXr, preloadXr } from "./xr/enter";
 import { browserXr, xrMode } from "./xr/support";
 
@@ -149,11 +151,22 @@ if (app) {
   void xrMode(xr, device.platform).then((mode) => {
     if (!mode || !xr) return;
     preloadXr();
-    screens.offerXr(mode, (host, ended) => enterXr(host, xr, mode, ended));
+    // On a Quest 2 a scene above its budget may stutter: the headset says so (WEB-20, §7.5).
+    const warning = () => {
+      const concern =
+        device.profile === "quest2" && models.current ? quest2Concern(models.current) : null;
+      if (!concern) return null;
+      return t(langs.lang, concern === "triangles" ? "xr.quest2Budget" : "xr.quest2Profile");
+    };
+    screens.offerXr(mode, (host, ended) =>
+      enterXr(host, xr, mode, { onEnd: ended, warning: warning() }),
+    );
   });
   // Test hook (WEB-16): GPU resource counts only — no scene content, names or credentials.
   const rendererInfo = () => screens.viewer?.rendererInfo() ?? null;
-  (window as unknown as { __rv: { rendererInfo: typeof rendererInfo } }).__rv = { rendererInfo };
+  // Test hook (WEB-20): where the scene stands in XR — numbers only.
+  const xrStage = () => screens.viewer?.xr?.stageMatrix().toArray() ?? null;
+  (window as unknown as { __rv: object }).__rv = { rendererInfo, xrStage };
   if (import.meta.env.DEV) startDevOverlay(rendererInfo);
 
   app.append(entry.element);

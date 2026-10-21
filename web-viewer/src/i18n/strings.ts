@@ -119,6 +119,10 @@ const en = {
   "viewer.fit": "Fit view",
   "xr.enterAr": "View in AR",
   "xr.enterVr": "View in VR",
+  "xr.quest2Budget":
+    "This scene is above the Quest 2 budget and may stutter. Ask the presenter to share it with the Quest 2 profile.",
+  "xr.quest2Profile":
+    "This scene was not prepared for Quest 2 and may stutter. Ask the presenter to share it with the Quest 2 profile.",
   "viewer.dismiss": "Dismiss",
   "viewer.canvasLabel":
     "3D scene. Drag with one finger to rotate, pinch with two fingers to zoom and move, double-tap to fit.",
@@ -253,6 +257,10 @@ const pl: Record<StringKey, string> = {
   "viewer.fit": "Dopasuj widok",
   "xr.enterAr": "Zobacz w AR",
   "xr.enterVr": "Zobacz w VR",
+  "xr.quest2Budget":
+    "Ta scena przekracza budżet Questa 2 i może się zacinać. Poproś prezentera o udostępnienie jej z profilem Quest 2.",
+  "xr.quest2Profile":
+    "Ta scena nie została przygotowana dla Questa 2 i może się zacinać. Poproś prezentera o udostępnienie jej z profilem Quest 2.",
   "viewer.dismiss": "Zamknij",
   "viewer.canvasLabel":
     "Scena 3D. Przeciągnij jednym palcem, aby obrócić, rozsuń dwa palce, aby przybliżyć i przesunąć, stuknij dwukrotnie, aby dopasować.",

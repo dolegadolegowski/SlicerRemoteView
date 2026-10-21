@@ -23,8 +23,8 @@ describe("entering XR (WEB-19)", () => {
     expect(xr.requestSession).toHaveBeenCalledWith("immersive-ar", XR_SESSION_INIT);
     expect(run).toHaveBeenCalledWith(host, granted, "immersive-ar", {});
     const onEnd = vi.fn();
-    await enterXr(host, xr, "immersive-ar", onEnd);
-    expect(run).toHaveBeenLastCalledWith(host, granted, "immersive-ar", { onEnd });
+    await enterXr(host, xr, "immersive-ar", { onEnd, warning: "w" });
+    expect(run).toHaveBeenLastCalledWith(host, granted, "immersive-ar", { onEnd, warning: "w" });
   });
 
   it("a refused request changes nothing", async () => {

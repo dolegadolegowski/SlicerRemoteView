@@ -320,7 +320,22 @@ its corner at the origin, and the edge between them ≈ 141 mm (`shared/fixtures
 8. Enter XR again, then take the headset off for 10 s and put it back on. **Expect:** the session resumes or ends
    cleanly; either way the 2D page works afterwards.
 9. Quest Browser performance HUD (developer settings) during step 2 with `asymmetric-2nodes.glb`: record the frame
-   rate (72 Hz expected, NFR-07; budgets are WEB-20's).
+   rate (72 Hz expected, NFR-07).
+10. Grab (WEB-20) with a controller's trigger: move and turn your hand. **Expect:** the scene follows it rigidly and
+    stays when you let go. Then both triggers: pull your hands apart and together, turn the line between them.
+    **Expect:** the scene scales about the point between your hands, never below 0.1× or above 5× of real size, and
+    turns about the vertical with the line (it stays upright, also through a half turn). Repeat with your hands (pinch
+    instead of trigger), and twist the pinching wrist: **Expect:** the scene turns with the wrist (`[TODO verify]`:
+    research web-xr.md §1). Move one hand out of view during a two-hand grab: **Expect:** no jump, then or when it
+    comes back.
+11. Walk a step aside and turn, then press a controller's grip button, then pinch twice quickly with one hand.
+    **Expect:** each time the scene goes back exactly where it was first placed — 1.3 m ahead of where you stood when
+    XR started, at your current eye height, real size, unturned — and the second pinch does not drag it.
+12. On Quest 2 join `large-synthetic.glb` (above 500 k triangles), enter XR. **Expect:** a panel below the scene:
+    "This scene is above the Quest 2 budget …" (Polish when the UI is Polish), gone after about 10 s. A small scene
+    shared with the `mobile` profile: "This scene was not prepared for Quest 2 …". On Quest 3 neither shows a panel.
+13. Performance HUD with `asymmetric-2nodes.glb` and with the `quest2` budget fixture on Quest 2, while grabbing:
+    **Expect:** 72 Hz sustained (NFR-07); record the values in **Results**.
 
 ## Results
 

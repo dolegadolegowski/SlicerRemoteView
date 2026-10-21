@@ -1,10 +1,24 @@
 import { describe, expect, it, vi } from "vitest";
-import { EventDispatcher, Group, PerspectiveCamera, Scene, TextureLoader } from "three";
+import {
+  EventDispatcher,
+  Group,
+  Matrix4,
+  Mesh,
+  PerspectiveCamera,
+  Scene,
+  TextureLoader,
+} from "three";
 import { XRControllerModelFactory } from "three/addons/webxr/XRControllerModelFactory.js";
 import { XRHandModelFactory } from "three/addons/webxr/XRHandModelFactory.js";
 import { targetName } from "../../scripts/copy-xr-profiles.mjs";
 import type { XrHost } from "../../src/render/viewer";
-import { imageTextureGltfLoader, runXrSession, XR_PROFILES_PATH } from "../../src/xr/session";
+import {
+  DOUBLE_PRESS_MS,
+  imageTextureGltfLoader,
+  runXrSession,
+  WARNING_MS,
+  XR_PROFILES_PATH,
+} from "../../src/xr/session";
 
 type Loop = ((time: number, frame?: XRFrame) => void) | null;
 
@@ -18,6 +32,7 @@ function fakeHost(setSession: () => Promise<void> = async () => {}) {
     enabled: false,
     setReferenceSpaceType: vi.fn(),
     getControllerGrip: (i: number) => group(`grip${i}`),
+    getController: (i: number) => group(`ray${i}`),
     getHand: (i: number) => group(`hand${i}`),
     getReferenceSpace: vi.fn(() => ({}) as XRReferenceSpace),
     setSession: vi.fn(setSession),
@@ -28,6 +43,7 @@ function fakeHost(setSession: () => Promise<void> = async () => {}) {
     render: vi.fn(),
     setAnimationLoop: vi.fn((fn: Loop) => void (loop = fn)),
   };
+  let stage = new Matrix4();
   const host = {
     renderer,
     scene: new Scene(),
@@ -35,6 +51,8 @@ function fakeHost(setSession: () => Promise<void> = async () => {}) {
     begin: vi.fn(),
     place: vi.fn(),
     end: vi.fn(),
+    stageMatrix: () => stage.clone(),
+    setStageMatrix: vi.fn((m: Matrix4) => void (stage = m.clone())),
   };
   return {
     host: host as unknown as XrHost,
@@ -132,7 +150,8 @@ describe("an XR session (WEB-19)", () => {
     await runXrSession(host, fakeSession() as unknown as XRSession, "immersive-vr");
     sessionEnd();
     await runXrSession(host, fakeSession() as unknown as XRSession, "immersive-vr");
-    for (const group of groups.values()) expect(group.children).toHaveLength(1);
+    for (const [name, group] of groups)
+      if (!name.startsWith("ray")) expect(group.children, name).toHaveLength(1);
   });
 
   it("the models' textures load as images (TextureLoader), which the relay's CSP allows", () => {
@@ -143,5 +162,141 @@ describe("an XR session (WEB-19)", () => {
     const plugin = loader.pluginCallbacks.at(-1)!(parser);
     expect(plugin.name).toBeTruthy();
     expect(parser.textureLoader).toBeInstanceOf(TextureLoader);
+  });
+
+  describe("grabbing (WEB-20)", () => {
+    const at = (x: number, y: number, z: number) => new Matrix4().makeTranslation(x, y, z);
+
+    it("a press (trigger or pinch) grabs: the scene follows that hand until it lets go", async () => {
+      const { host, fake, groups, frame } = fakeHost();
+      await runXrSession(host, fakeSession() as unknown as XRSession, "immersive-vr");
+      const ray = groups.get("ray1")!;
+      ray.matrix.copy(at(0.2, 1.2, -0.4));
+      ray.dispatchEvent({ type: "selectstart" } as never);
+      frame(frameAt(1.5)); // the frame after the press anchors the hand
+      ray.matrix.copy(at(0.3, 1.2, -0.4)); // 10 cm to the right
+      frame(frameAt(1.5));
+      const moved = fake.setStageMatrix.mock.calls.at(-1)![0];
+      expect(moved.elements[12]).toBeCloseTo(0.1, 9);
+      ray.dispatchEvent({ type: "selectend" } as never);
+      fake.setStageMatrix.mockClear();
+      ray.matrix.copy(at(1, 1, 1));
+      frame(frameAt(1.5));
+      expect(fake.setStageMatrix).not.toHaveBeenCalled(); // let go: the scene stays
+    });
+
+    it("the grip button, or two quick presses, put the scene back in front at the eye height", async () => {
+      vi.useFakeTimers();
+      try {
+        const { host, fake, groups, frame } = fakeHost();
+        await runXrSession(host, fakeSession() as unknown as XRSession, "immersive-vr");
+        frame(frameAt(1.62));
+        fake.place.mockClear();
+        groups.get("ray0")!.dispatchEvent({ type: "squeezestart" } as never);
+        expect(fake.place).toHaveBeenLastCalledWith(1.62);
+        fake.place.mockClear();
+        const ray = groups.get("ray1")!;
+        ray.dispatchEvent({ type: "selectstart" } as never);
+        ray.dispatchEvent({ type: "selectend" } as never);
+        vi.advanceTimersByTime(DOUBLE_PRESS_MS + 1);
+        ray.dispatchEvent({ type: "selectstart" } as never); // too late for a double press: a grab
+        expect(fake.place).not.toHaveBeenCalled();
+        ray.dispatchEvent({ type: "selectend" } as never);
+        groups.get("ray0")!.dispatchEvent({ type: "selectstart" } as never); // the other hand: a two-hand grab
+        expect(fake.place).not.toHaveBeenCalled();
+        ray.dispatchEvent({ type: "selectstart" } as never); // the same hand again: reset
+        expect(fake.place).toHaveBeenLastCalledWith(1.62);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("a hand drags with its wrist (rigid to the hand), not its aim ray", async () => {
+      const { host, fake, groups, frame } = fakeHost();
+      await runXrSession(host, fakeSession() as unknown as XRSession, "immersive-vr");
+      const ray = groups.get("ray0")!;
+      const wrist = new Group();
+      Object.assign(groups.get("hand0")!, { joints: { wrist } });
+      ray.dispatchEvent({ type: "connected", data: { hand: {} } } as never);
+      wrist.matrix.copy(at(0.1, 1.1, -0.3));
+      ray.matrix.copy(at(5, 5, 5)); // the aim ray goes elsewhere: ignored
+      ray.dispatchEvent({ type: "selectstart" } as never); // a pinch
+      frame(frameAt(1.5));
+      wrist.matrix.copy(at(0.1, 1.3, -0.3)); // the wrist rises 20 cm
+      frame(frameAt(1.5));
+      expect(fake.setStageMatrix.mock.calls.at(-1)![0].elements[13]).toBeCloseTo(0.2, 9);
+      wrist.visible = false; // the hand out of view: the scene stays
+      fake.setStageMatrix.mockClear();
+      frame(frameAt(1.5));
+      expect(fake.setStageMatrix).not.toHaveBeenCalled();
+    });
+
+    it("the second press of a double press only resets: moving before letting go does not drag", async () => {
+      const { host, fake, groups, frame } = fakeHost();
+      await runXrSession(host, fakeSession() as unknown as XRSession, "immersive-vr");
+      const ray = groups.get("ray0")!;
+      ray.dispatchEvent({ type: "selectstart" } as never);
+      ray.dispatchEvent({ type: "selectend" } as never);
+      ray.dispatchEvent({ type: "selectstart" } as never); // within DOUBLE_PRESS_MS: reset
+      fake.setStageMatrix.mockClear();
+      ray.matrix.copy(at(0.3, 1.2, -0.4));
+      frame(frameAt(1.5));
+      expect(fake.setStageMatrix).not.toHaveBeenCalled();
+    });
+
+    it("an input that disconnects lets go", async () => {
+      const { host, fake, groups, frame } = fakeHost();
+      await runXrSession(host, fakeSession() as unknown as XRSession, "immersive-vr");
+      const ray = groups.get("ray1")!;
+      ray.dispatchEvent({ type: "selectstart" } as never);
+      ray.dispatchEvent({ type: "disconnected" } as never);
+      fake.setStageMatrix.mockClear();
+      ray.matrix.copy(at(0.3, 1.2, -0.4)); // a new source in the same slot
+      frame(frameAt(1.5));
+      expect(fake.setStageMatrix).not.toHaveBeenCalled();
+    });
+
+    it("presses after the session are not heard", async () => {
+      const { host, fake, groups, sessionEnd } = fakeHost();
+      await runXrSession(host, fakeSession() as unknown as XRSession, "immersive-vr");
+      sessionEnd();
+      fake.place.mockClear();
+      groups.get("ray0")!.dispatchEvent({ type: "squeezestart" } as never);
+      expect(fake.place).not.toHaveBeenCalled();
+    });
+  });
+
+  it("a warning stands below the scene once it is placed, for WARNING_MS (the Quest 2 budget, WEB-20)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { host, fake, frame } = fakeHost();
+      const panel = new Mesh();
+      const make = vi.fn(() => panel);
+      await runXrSession(host, fakeSession() as unknown as XRSession, "immersive-vr", {
+        warning: "Above the Quest 2 budget",
+        panel: make,
+      });
+      frame(frameAt(null));
+      expect(make).not.toHaveBeenCalled(); // not before the scene has its place
+      frame(frameAt(1.6));
+      expect(make).toHaveBeenCalledWith("Above the Quest 2 budget");
+      expect(panel.parent).toBe(fake.scene);
+      expect(panel.position.y).toBeCloseTo(1.15, 9); // below the eyes, in front
+      expect(panel.position.z).toBeLessThan(0);
+      vi.advanceTimersByTime(WARNING_MS);
+      expect(panel.parent).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("no warning, no panel", async () => {
+    const { host, frame } = fakeHost();
+    const make = vi.fn(() => new Mesh());
+    await runXrSession(host, fakeSession() as unknown as XRSession, "immersive-vr", {
+      panel: make,
+    });
+    frame(frameAt(1.6));
+    expect(make).not.toHaveBeenCalled();
   });
 });

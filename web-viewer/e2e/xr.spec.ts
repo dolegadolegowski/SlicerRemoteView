@@ -19,26 +19,34 @@ const RELAY_CSP =
   "img-src 'self' data: blob:;object-src 'none';script-src 'self';script-src-attr 'none';" +
   "style-src 'self' 'unsafe-inline';connect-src 'self' ws: wss:;worker-src 'self' blob:";
 
+interface IwerInput {
+  position: { set(x: number, y: number, z: number): void; x: number; y: number; z: number };
+  updateButtonValue(id: string, value: number): void;
+  updatePinchValue(value: number): void;
+}
 interface Iwer {
   activeSession?: { end(): Promise<void> };
   primaryInputMode: "controller" | "hand";
+  controllers: { left: IwerInput; right: IwerInput };
+  hands: { left: IwerInput; right: IwerInput };
 }
 
-/** A Quest 3 (IWER) before the page runs, and the relay's CSP on the page itself. */
-async function quest3(page: Page): Promise<void> {
+/** A Quest 3 (or `model`) emulated by IWER before the page runs, and the relay's CSP on the page itself. */
+async function quest3(
+  page: Page,
+  model: "metaQuest3" | "metaQuest2" = "metaQuest3",
+): Promise<void> {
   await page.addInitScript({ path: IWER });
-  await page.addInitScript(() => {
-    const iwer = (
-      window as unknown as {
-        IWER: { XRDevice: new (config: unknown) => Iwer; metaQuest3: unknown };
-      }
-    ).IWER;
-    const device = new iwer.XRDevice(iwer.metaQuest3) as Iwer & {
+  await page.addInitScript((name) => {
+    const iwer = (window as unknown as { IWER: Record<string, unknown> }).IWER as {
+      XRDevice: new (config: unknown) => Iwer;
+    } & Record<string, unknown>;
+    const device = new iwer.XRDevice(iwer[name]) as Iwer & {
       installRuntime(o: object): void;
     };
     device.installRuntime({ forceInstall: true }); // headless Chromium has a native `navigator.xr`
     (window as unknown as { __iwer: Iwer }).__iwer = device;
-  });
+  }, model);
   await page.route(/\/(j)?(\?.*)?$/, async (route) => {
     const response = await route.fetch();
     await route.fulfill({
@@ -253,4 +261,141 @@ test("a phone gets no XR button, even with WebXR AR available", async ({ page })
   expect(await page.evaluate(() => navigator.xr?.isSessionSupported("immersive-ar"))).toBe(true);
   await page.waitForTimeout(500); // the support check is asynchronous; a Quest gets its button within it
   await expect(page.locator(".viewer__xr")).toHaveCount(0);
+});
+
+/** The stage's position and uniform scale in the room (the `__rv.xrStage()` test hook). */
+const stage = (page: Page) =>
+  page.evaluate(() => {
+    const m = (window as unknown as { __rv: { xrStage(): number[] | null } }).__rv.xrStage()!;
+    return { x: m[12]!, y: m[13]!, z: m[14]!, scale: Math.hypot(m[0]!, m[1]!, m[2]!) };
+  });
+const controller = (page: Page, hand: "left" | "right", action: string, ...args: number[]) =>
+  page.evaluate(
+    ([h, a, rest]) => {
+      const input = (window as unknown as { __iwer: Iwer }).__iwer.controllers[
+        h as "left" | "right"
+      ];
+      if (a === "move") input.position.set(rest[0]!, rest[1]!, rest[2]!);
+      else input.updateButtonValue(a, rest[0]!);
+    },
+    [hand, action, args] as const,
+  );
+const where = (page: Page, hand: "left" | "right") =>
+  page.evaluate((h) => {
+    const p = (window as unknown as { __iwer: Iwer }).__iwer.controllers[h as "left" | "right"]
+      .position;
+    return { x: p.x, y: p.y, z: p.z };
+  }, hand);
+
+test("grabbing (WEB-20): one controller moves the scene, two scale it up to 5×, the grip button puts it back", async ({
+  page,
+}) => {
+  await quest3(page);
+  await joinAndView(page);
+  await page.locator(".viewer__xr").click();
+  await expect(page.locator(".viewer")).toHaveAttribute("data-xr", "ar");
+  await expect.poll(async () => (await stage(page)).z).toBeLessThan(-0.5); // placed in front
+  const placed = await stage(page);
+  expect(placed.scale).toBeCloseTo(1, 6);
+
+  // One hand: trigger, 20 cm to the right, release.
+  const right = await where(page, "right");
+  await controller(page, "right", "trigger", 1);
+  await page.waitForTimeout(100);
+  await controller(page, "right", "move", right.x + 0.2, right.y, right.z);
+  await expect.poll(async () => (await stage(page)).x - placed.x).toBeCloseTo(0.2, 3);
+  await controller(page, "right", "trigger", 0);
+  await page.waitForTimeout(100);
+  await controller(page, "right", "move", right.x, right.y, right.z);
+  await page.waitForTimeout(200);
+  expect((await stage(page)).x - placed.x).toBeCloseTo(0.2, 3); // let go: it stays
+
+  // Two hands: both triggers, each hand 1.5 m out at once (0.5 m → 3.5 m apart: 7× uncapped, never 5× on the way)
+  // — larger, but never above 5×.
+  const left = await where(page, "left");
+  await controller(page, "left", "trigger", 1);
+  await controller(page, "right", "trigger", 1);
+  await page.waitForTimeout(100);
+  await page.evaluate(
+    ([l, r]) => {
+      const iwer = (window as unknown as { __iwer: Iwer }).__iwer;
+      iwer.controllers.left.position.set(l.x - 1.5, l.y, l.z);
+      iwer.controllers.right.position.set(r.x + 1.5, r.y, r.z);
+    },
+    [left, right] as const,
+  );
+  await expect.poll(async () => (await stage(page)).scale).toBeCloseTo(5, 3);
+  await page.waitForTimeout(300);
+  expect((await stage(page)).scale).toBeCloseTo(5, 3); // settled there
+  await controller(page, "left", "trigger", 0);
+  await controller(page, "right", "trigger", 0);
+
+  // The grip button: back in front, real size.
+  await controller(page, "left", "squeeze", 1);
+  await expect.poll(async () => (await stage(page)).scale).toBeCloseTo(1, 6);
+  const back = await stage(page);
+  expect([back.x, back.y, back.z].map((v) => v.toFixed(4))).toEqual(
+    [placed.x, placed.y, placed.z].map((v) => v.toFixed(4)),
+  );
+});
+
+test("a pinching hand drags the scene by its wrist (WEB-20)", async ({ page }) => {
+  await quest3(page);
+  await page.addInitScript(() => {
+    (window as unknown as { __iwer: Iwer }).__iwer.primaryInputMode = "hand";
+  });
+  await joinAndView(page);
+  await page.locator(".viewer__xr").click();
+  await expect.poll(async () => (await stage(page)).z).toBeLessThan(-0.5);
+  const placed = await stage(page);
+  const start = await page.evaluate(() => {
+    const p = (window as unknown as { __iwer: Iwer }).__iwer.hands.right.position;
+    return { x: p.x, y: p.y, z: p.z };
+  });
+  await page.evaluate(() =>
+    (window as unknown as { __iwer: Iwer }).__iwer.hands.right.updatePinchValue(1),
+  );
+  await page.waitForTimeout(100);
+  await page.evaluate(
+    (p) =>
+      (window as unknown as { __iwer: Iwer }).__iwer.hands.right.position.set(p.x, p.y + 0.15, p.z),
+    start,
+  );
+  await expect.poll(async () => (await stage(page)).y - placed.y).toBeCloseTo(0.15, 3);
+  expect((await stage(page)).scale).toBeCloseTo(1, 6);
+});
+
+/** Text the page draws on canvases (the XR panel is a canvas texture): recorded from `fillText`. */
+async function recordCanvasText(page: Page): Promise<() => Promise<string>> {
+  await page.addInitScript(() => {
+    const texts: string[] = [];
+    (window as unknown as { __texts: string[] }).__texts = texts;
+    const fillText = CanvasRenderingContext2D.prototype.fillText;
+    CanvasRenderingContext2D.prototype.fillText = function (text, ...rest) {
+      texts.push(String(text));
+      return fillText.call(this, text, ...rest);
+    };
+  });
+  return () => page.evaluate(() => (window as unknown as { __texts: string[] }).__texts.join(" "));
+}
+
+test("on a Quest 2 a scene above its budget gets a warning in the headset (WEB-20, §7.5)", async ({
+  page,
+}) => {
+  await quest3(page, "metaQuest2");
+  const drawn = await recordCanvasText(page);
+  await joinAndView(page); // the fixture is not prepared with the quest2 profile
+  await page.locator(".viewer__xr").click();
+  await expect(page.locator(".viewer")).toHaveAttribute("data-xr", /ar|vr/);
+  await expect.poll(drawn).toContain("not prepared for Quest 2"); // a small scene from the mobile profile
+});
+
+test("on a Quest 3 the same scene gets no warning", async ({ page }) => {
+  await quest3(page);
+  const drawn = await recordCanvasText(page);
+  await joinAndView(page);
+  await page.locator(".viewer__xr").click();
+  await expect(page.locator(".viewer")).toHaveAttribute("data-xr", "ar");
+  await expect.poll(async () => (await stage(page)).z).toBeLessThan(-0.5); // placed: a warning would be up now
+  expect(await drawn()).not.toContain("Quest 2");
 });
