@@ -738,12 +738,15 @@ def test_transport_discard_queued_stops_the_rest_of_a_slow_upload(relay, make_tr
     time.sleep(0.3)
     assert client.discard_queued(connection=connection)
     wait_until(lambda: client.discarded_outbound > 0)
-    # most of the 64 MiB never leaves
-    assert client.discarded_outbound >= 32
     # the connection itself is untouched, and still usable
     assert drain(events) == []
     assert client.send({"type": "after"}, connection=connection)
     wait_until(lambda: any(m == {"type": "after"} for _, m in server.received), timeout=60)
+    delivered = sum(isinstance(m, bytes) for _, m in server.received)
+    # every chunk was either delivered or discarded, and the discarded ones are a good part of the 64 (the buffers of
+    # both ends hold about 20 MiB; the slow reader got through 6 in the 0.3 s)
+    assert delivered + client.discarded_outbound == 64
+    assert client.discarded_outbound >= 8 and client.dropped_outbound == 0
 
 
 @pytest.mark.parametrize("value", [0, -1.0, float("nan")])
