@@ -1,0 +1,51 @@
+# Development configuration of the Slicer extension (SLC-02). Slicer itself never reads this file: the
+# extension is built with CMake (CMakeLists.txt) and runs inside Slicer's own Python 3.12.
+[project]
+name = "slicer-remote-view-extension"
+version = "0.1.0" # keep in sync with RemoteView/remoteview_core/__init__.py (SLC-20 makes it single-source)
+description = "3D Slicer extension SlicerRemoteView (module RemoteView): development and test tooling."
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+# Direct development pins; requirements-dev.txt pins the full (transitive) set compiled from this list.
+dev = [
+  "pytest==9.1.1",
+  "ruff==0.17.1",
+  "numpy==2.5.4",
+  "vtk==9.6.2", # Slicer 5.12.x ships VTK 9.6 (docs/research/slicer.md §1)
+  "pygltflib==1.16.5", # test-only GLB reader
+  "jsonschema==4.26.0", # vendored remoteview_protocol validation (SLC-03, SLC-06)
+  "websockets==17.2", # transport tests (SLC-08)
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = [".venv", "RemoteView/_vendor"] # _vendor is a generated copy of shared/py (SLC-03)
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "N", "RUF", "SIM", "PL", "S", "BLE"] # S = bandit security rules
+ignore = ["PLR2004"] # magic numbers are protocol constants with a § reference next to them
+# Maths in docstrings/comments uses the real signs (protocol.md writes them too).
+allowed-confusables = ["×", "−", "–"]
+
+[tool.ruff.lint.pycodestyle]
+# Code is formatted at 100 columns (ruff format); docstrings and comments may run to 120 (E501).
+max-line-length = 120
+
+[tool.ruff.lint.per-file-ignores]
+# Slicer/Qt naming: ScriptedLoadableModule API (setUp, runTest, delayDisplay, singleShot) and camelCase widgets.
+"RemoteView/RemoteView.py" = ["N802", "N803", "N806", "N815"]
+"tests/conftest.py" = ["N802", "N803", "N806", "N815"]
+# Tests use assert and run fixed local commands (node validator, git).
+"tests/**" = ["S101", "S603", "S607"]
+# Development scripts run fixed argv lists (node, shared/scripts) — never user input.
+"scripts/**" = ["S603"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["remoteview_core", "remoteview_protocol", "RemoteView"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

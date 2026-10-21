@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/viewer.joined.schema.json",
+  "title": "viewer.joined (relay → viewer)",
+  "description": "Successful viewer.join: viewer identity and token, current scene/snapshot versions and whether a cached GLB can be fetched over HTTP; a scene.state message always follows (docs/protocol.md §5.2, §6.5, §8.3).",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.schema.json" }],
+  "properties": {
+    "type": { "type": "string", "const": "viewer.joined" },
+    "sessionId": { "$ref": "defs.schema.json#/definitions/sessionId" },
+    "viewerId": {
+      "description": "Relay-generated viewer identifier, opaque; never a device identifier (§5.2).",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "viewerToken": { "$ref": "defs.schema.json#/definitions/token" },
+    "sceneVersion": { "$ref": "defs.schema.json#/definitions/sceneVersion" },
+    "snapshotVersion": {
+      "description": "Version of the cached snapshot, or null when the relay holds none (§5.2).",
+      "type": ["integer", "null"],
+      "minimum": 1
+    },
+    "snapshotAvailable": {
+      "description": "true = the viewer SHOULD fetch GET /api/scene/:sceneVersion now (§5.2, §6.5); then `snapshot` is present.",
+      "type": "boolean"
+    },
+    "snapshot": { "$ref": "defs.schema.json#/definitions/snapshotInfo" },
+    "publisherOnline": { "type": "boolean" },
+    "viewerCount": { "type": "integer", "minimum": 0 },
+    "viewerLimit": { "$ref": "defs.schema.json#/definitions/viewerLimit" },
+    "profile": {
+      "description": "Budget profile the publisher exported for (§4.1, §7.5).",
+      "$ref": "defs.schema.json#/definitions/profile"
+    }
+  },
+  "required": [
+    "type",
+    "sessionId",
+    "viewerId",
+    "viewerToken",
+    "sceneVersion",
+    "snapshotVersion",
+    "snapshotAvailable",
+    "publisherOnline",
+    "viewerCount",
+    "viewerLimit",
+    "profile"
+  ],
+  "if": {
+    "$comment": "§5.2: a fetchable snapshot is described by `snapshot`.",
+    "properties": { "snapshotAvailable": { "type": "boolean", "const": true } },
+    "required": ["snapshotAvailable"]
+  },
+  "then": {
+    "properties": {
+      "snapshot": { "$ref": "defs.schema.json#/definitions/snapshotInfo" },
+      "snapshotVersion": { "type": "integer", "minimum": 1 }
+    },
+    "required": ["snapshot"]
+  }
+}

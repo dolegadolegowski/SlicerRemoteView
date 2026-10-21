@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/scene.nodeAdded.schema.json",
+  "title": "scene.nodeAdded (publisher → relay → viewers)",
+  "description": "Hint that a snapshot containing these new nodes follows; v1 has no per-node GLB delta, so snapshotFollows is always true and a scene.snapshot.begin with a higher sceneVersion MUST come next (docs/protocol.md §8.2). Viewers MAY ignore it.",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.schema.json" }],
+  "properties": {
+    "type": { "type": "string", "const": "scene.nodeAdded" },
+    "sceneVersion": { "$ref": "defs.schema.json#/definitions/updateVersion" },
+    "baseVersion": { "$ref": "defs.schema.json#/definitions/sceneVersion" },
+    "nodes": {
+      "description": "Ids and kinds of the nodes the next snapshot will add; never names (§7, §8.3). 1..1000 per message: a schema-defined cap (§14) mirroring the §3.3 maximum for scene.update.changes.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "nodeId": { "$ref": "defs.schema.json#/definitions/nodeId" },
+          "kind": { "$ref": "defs.schema.json#/definitions/nodeKind" }
+        },
+        "required": ["nodeId", "kind"],
+        "not": {
+          "$comment": "§7/§8.3: the JSON protocol never carries node names (PHI); the GLB does.",
+          "properties": { "name": {} },
+          "required": ["name"]
+        }
+      },
+      "minItems": 1,
+      "maxItems": 1000
+    },
+    "snapshotFollows": {
+      "description": "Always true in v1.0; a per-node GLB in v1.1 would set it to false (§8.2, §14).",
+      "type": "boolean",
+      "const": true
+    }
+  },
+  "required": ["type", "sceneVersion", "baseVersion", "nodes", "snapshotFollows"]
+}

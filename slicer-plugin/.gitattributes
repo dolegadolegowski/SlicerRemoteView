@@ -1,0 +1,3 @@
+# The vendored copy of shared/py must keep its exact bytes (VENDORED.json hashes; vendor_shared.py --check):
+# no end-of-line conversion on any OS (core.autocrlf on Windows checkouts).
+RemoteView/_vendor/** -text

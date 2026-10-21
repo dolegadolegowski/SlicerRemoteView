@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/session.renewed.schema.json",
+  "title": "session.renewed (relay → publisher)",
+  "description": "Reply to session.renew with the new TTL parameters (docs/protocol.md §4.4); ttl reuses the session.created shape.",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.schema.json" }],
+  "properties": {
+    "type": { "type": "string", "const": "session.renewed" },
+    "ttl": { "$ref": "defs.schema.json#/definitions/ttl" }
+  },
+  "required": ["type", "ttl"]
+}

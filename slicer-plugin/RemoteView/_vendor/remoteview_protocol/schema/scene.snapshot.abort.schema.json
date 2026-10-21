@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/scene.snapshot.abort.schema.json",
+  "title": "scene.snapshot.abort (publisher or relay → viewers)",
+  "description": "Cancels an in-flight snapshot; receivers free the partial buffer (docs/protocol.md §6.4).",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.schema.json" }],
+  "properties": {
+    "type": { "type": "string", "const": "scene.snapshot.abort" },
+    "sceneVersion": { "$ref": "defs.schema.json#/definitions/snapshotVersion" },
+    "reason": { "$ref": "defs.schema.json#/definitions/snapshotAbortReason" }
+  },
+  "required": ["type", "sceneVersion", "reason"]
+}

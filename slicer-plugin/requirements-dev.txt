@@ -1,0 +1,43 @@
+# Development and test dependencies of slicer-plugin (SLC-02); never installed into Slicer.
+# Exact pins of every package, direct and transitive (T12); the direct pins are the `dev` extra in
+# pyproject.toml. Regenerate from the repository root after changing them, then re-add this comment header:
+#   uv pip compile --universal --python-version 3.12 --no-header --no-annotate --only-binary :all: \
+#     --emit-build-options --extra dev slicer-plugin/pyproject.toml -o slicer-plugin/requirements-dev.txt
+# Wheels only (`--only-binary :all:`, emitted by the command): no build-time code from source distributions.
+# No hashes (decision, SLC-02 review): dev/test tools only, never installed into Slicer, no CI job with secrets
+# installs them, and exact pins already block new releases. Switch to `--generate-hashes` +
+# `pip install --require-hashes` once a secret-holding CI job installs this file.
+--only-binary :all:
+
+attrs==26.1.0
+colorama==0.4.6 ; sys_platform == 'win32'
+contourpy==1.4.0
+cycler==0.12.1
+dataclasses-json==0.6.7
+deprecated==3.0.0
+fonttools==4.67.0
+iniconfig==2.3.1
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+kiwisolver==1.5.1
+marshmallow==3.26.2
+matplotlib==3.11.2
+mypy-extensions==1.1.0
+numpy==2.5.4
+packaging==26.3
+pillow==13.0.0
+pluggy==1.7.0
+pygltflib==1.16.5
+pygments==2.21.0
+pyparsing==3.3.3
+pytest==9.1.1
+python-dateutil==2.9.0.post0
+referencing==0.37.0
+rpds-py==2026.9.1
+ruff==0.17.1
+six==1.17.0
+typing-extensions==4.16.0
+typing-inspect==0.9.0
+vtk==9.6.2
+websockets==17.2
+wrapt==2.5.1

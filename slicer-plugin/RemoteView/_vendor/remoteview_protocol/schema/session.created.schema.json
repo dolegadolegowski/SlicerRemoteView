@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/session.created.schema.json",
+  "title": "session.created (relay → publisher)",
+  "description": "Reply to session.create: code, publisherToken (shown once, resume credential), effective limits and TTLs (docs/protocol.md §4.2).",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.schema.json" }],
+  "properties": {
+    "type": { "type": "string", "const": "session.created" },
+    "sessionId": { "$ref": "defs.schema.json#/definitions/sessionId" },
+    "code": { "$ref": "defs.schema.json#/definitions/code" },
+    "publisherToken": { "$ref": "defs.schema.json#/definitions/token" },
+    "viewerLimit": { "$ref": "defs.schema.json#/definitions/viewerLimit" },
+    "ttl": { "$ref": "defs.schema.json#/definitions/ttl" },
+    "limits": { "$ref": "defs.schema.json#/definitions/limits" }
+  },
+  "required": ["type", "sessionId", "code", "publisherToken", "viewerLimit", "ttl", "limits"]
+}

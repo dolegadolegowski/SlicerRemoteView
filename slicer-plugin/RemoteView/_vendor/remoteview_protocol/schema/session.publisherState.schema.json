@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/session.publisherState.schema.json",
+  "title": "session.publisherState (relay → viewers)",
+  "description": "Publisher presence: sent when the publisher disconnects (grace starts, online:false with graceEndsAt) and when it resumes (online:true) (docs/protocol.md §4.6, §9.1).",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.schema.json" }],
+  "properties": {
+    "type": { "type": "string", "const": "session.publisherState" },
+    "online": { "type": "boolean" },
+    "graceEndsAt": {
+      "description": "End of the publisher grace period; required while online is false (§4.6).",
+      "$ref": "defs.schema.json#/definitions/timestampMs"
+    }
+  },
+  "required": ["type", "online"],
+  "if": {
+    "$comment": "§4.6: graceEndsAt accompanies online:false.",
+    "properties": { "online": { "type": "boolean", "const": false } },
+    "required": ["online"]
+  },
+  "then": {
+    "properties": { "graceEndsAt": { "$ref": "defs.schema.json#/definitions/timestampMs" } },
+    "required": ["graceEndsAt"]
+  }
+}

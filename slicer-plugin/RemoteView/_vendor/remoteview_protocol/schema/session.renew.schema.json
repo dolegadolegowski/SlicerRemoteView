@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/session.renew.schema.json",
+  "title": "session.renew (publisher → relay)",
+  "description": "Answer to session.expiring: keep the idle session alive; the relay replies with session.renewed (docs/protocol.md §4.4). No payload fields.",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.schema.json" }],
+  "properties": {
+    "type": { "type": "string", "const": "session.renew" }
+  },
+  "required": ["type"]
+}

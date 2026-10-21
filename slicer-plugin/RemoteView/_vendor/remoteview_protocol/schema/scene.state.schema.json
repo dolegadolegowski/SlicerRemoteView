@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/scene.state.schema.json",
+  "title": "scene.state (relay → viewer)",
+  "description": "Merged per-session state since the cached snapshot (docs/protocol.md §8.3): visual properties and removed ids only, never names. Always sent right after viewer.joined — as {nodes: [], removed: []} when nothing accumulated and snapshotVersion: null while no snapshot exists —, after scene.snapshot.ready and in reply to scene.request.",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.schema.json" }],
+  "properties": {
+    "type": { "type": "string", "const": "scene.state" },
+    "sceneVersion": {
+      "description": "Last accepted scene version; 0 while nothing was published (§8.3, §8.4).",
+      "$ref": "defs.schema.json#/definitions/sceneVersion"
+    },
+    "snapshotVersion": {
+      "description": "Version of the cached GLB this state applies to, or null while no snapshot exists (§8.3).",
+      "type": ["integer", "null"],
+      "minimum": 1
+    },
+    "nodes": {
+      "description": "Merged changes per node, in no particular order; empty when nothing accumulated.",
+      "type": "array",
+      "items": { "$ref": "defs.schema.json#/definitions/nodeChange" }
+    },
+    "removed": {
+      "description": "Ids removed since the snapshot; empty when none.",
+      "type": "array",
+      "items": { "$ref": "defs.schema.json#/definitions/nodeId" }
+    }
+  },
+  "required": ["type", "sceneVersion", "snapshotVersion", "nodes", "removed"]
+}

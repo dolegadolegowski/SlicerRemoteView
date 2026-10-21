@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/envelope.schema.json",
+  "title": "SlicerRemoteView protocol v1.0 — message envelope",
+  "description": "Every text frame is one JSON object with these fields; payload fields are flat in the envelope (docs/protocol.md §3.2). Unknown fields MUST be accepted (§14), so `additionalProperties` is deliberately not false here.",
+  "type": "object",
+  "properties": {
+    "protocolVersion": {
+      "description": "MAJOR.MINOR; this contract is 1.x (§2).",
+      "type": "string",
+      "pattern": "^1\\.\\d+$"
+    },
+    "type": {
+      "description": "Message type `<namespace.verb>` (§3.2); each message schema fixes it with `const`.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z][a-zA-Z0-9]*(\\.[a-z][a-zA-Z0-9]*)*$"
+    },
+    "id": { "$ref": "defs.schema.json#/definitions/id" },
+    "replyTo": { "$ref": "defs.schema.json#/definitions/id" },
+    "ts": { "$ref": "defs.schema.json#/definitions/timestampMs" }
+  },
+  "required": ["protocolVersion", "type"]
+}

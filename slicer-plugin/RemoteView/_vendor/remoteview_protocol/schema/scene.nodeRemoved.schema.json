@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slicerremoteview.dev/schema/scene.nodeRemoved.schema.json",
+  "title": "scene.nodeRemoved (publisher → relay → viewers)",
+  "description": "Nodes removed from the scene; viewers dispose geometry and material of T/M and drop the ids from their list (docs/protocol.md §8.2). Version rules as for scene.update (§8.1, §8.4).",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.schema.json" }],
+  "properties": {
+    "type": { "type": "string", "const": "scene.nodeRemoved" },
+    "sceneVersion": { "$ref": "defs.schema.json#/definitions/updateVersion" },
+    "baseVersion": { "$ref": "defs.schema.json#/definitions/sceneVersion" },
+    "nodeIds": {
+      "description": "Stable ids of the removed nodes, 1..1000 per message (§3.3 max changes).",
+      "type": "array",
+      "items": { "$ref": "defs.schema.json#/definitions/nodeId" },
+      "minItems": 1,
+      "maxItems": 1000
+    }
+  },
+  "required": ["type", "sceneVersion", "baseVersion", "nodeIds"]
+}
