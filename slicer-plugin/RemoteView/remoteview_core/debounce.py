@@ -1,0 +1,197 @@
+"""Coalescing scene changes before they are sent (SLC-15; FR-11, FR-12, NFR-02, architecture §6.2).
+
+The Slicer adapter's MRML observers only *mark* what changed — :meth:`Debouncer.mark` with a node ID and
+:class:`Change` flags — and one single-shot timer later hands everything marked since the last flush to the sender as
+one :class:`Drained` set (SLC-16 turns it into ``scene.update`` / ``scene.nodeRemoved`` / a new snapshot):
+
+- appearance, transform and removal wait :data:`APPEARANCE_MS` (150 ms) after the **last** mark (protocol §8.1: coalesce
+  100–250 ms) and at most :data:`APPEARANCE_MAX_MS` after the first, so a slider dragged for seconds still updates the
+  viewers four times a second (NFR-02: ≤ 500 ms from Slicer to the viewers);
+- a mesh change or a new node (both need a re-export) waits :data:`GEOMETRY_MS` (750 ms; protocol §8.1: 500–1000 ms;
+  segment editing fires mesh events continuously), at most :data:`GEOMETRY_MAX_MS` after the first;
+- while Slicer imports a scene or runs a batch process nothing is flushed: the marks are kept and flushed once when the
+  last import/batch ends (``EndImportEvent`` / ``EndBatchProcessEvent``);
+- a closed scene (``EndCloseEvent``) drops every mark and flushes a reset: the next scene is a new snapshot.
+
+One timer serves both: while a re-export is pending, appearance changes wait with it (at most
+:data:`GEOMETRY_MAX_MS`) — the re-exported snapshot carries them anyway.
+
+Pure logic: the timer and the clock are injected (``qt.QTimer`` and ``time.monotonic`` in Slicer, fakes in tests). Main
+thread only, like the observers that call it.
+"""
+
+from __future__ import annotations
+
+import enum
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Protocol
+
+#: Delays in milliseconds (see the module docstring).
+APPEARANCE_MS = 150
+APPEARANCE_MAX_MS = 250
+GEOMETRY_MS = 750
+GEOMETRY_MAX_MS = 2_000
+
+
+class Change(enum.Flag):
+    """What changed on a node since the last flush (a node can collect several)."""
+
+    APPEARANCE = enum.auto()  # colour, opacity, visibility (display node)
+    #: the parent transform or its matrix — of a node sent with ``T.matrix``; a node whose world transform is baked
+    #: (non-linear or not TRS, SLC-13) needs a re-export, so its transform change is marked GEOMETRY (FR-12)
+    TRANSFORM = enum.auto()
+    GEOMETRY = enum.auto()  # the mesh (or a segment's surface)
+    ADDED = enum.auto()
+    REMOVED = enum.auto()
+
+
+#: The changes that need a re-export, hence the longer wait.
+SLOW = Change.GEOMETRY | Change.ADDED
+
+
+@dataclass(frozen=True)
+class Drained:
+    """One flush: ``changes`` maps node IDs to what changed on them, in the order they were first marked; ``reset``
+    says the scene was closed meanwhile (then ``changes`` holds only what came after the close)."""
+
+    changes: Mapping[str, Change] = field(default_factory=lambda: MappingProxyType({}), repr=False)
+    reset: bool = False
+
+    def __bool__(self) -> bool:
+        return self.reset or bool(self.changes)
+
+    def __repr__(self) -> str:
+        """Counts only: the IDs are not filtered yet (T7) and must not reach a log."""
+        return f"Drained(nodes={len(self.changes)}, reset={self.reset})"
+
+
+class DirtySet:
+    """Node ID → accumulated :class:`Change` flags, drained all at once."""
+
+    def __init__(self) -> None:
+        self._changes: dict[str, Change] = {}
+        self._union = Change(0)
+        self._reset = False
+
+    def mark(self, node_id: str, flags: Change) -> None:
+        if not isinstance(node_id, str) or not isinstance(flags, Change):
+            raise TypeError("mark needs a str node ID and Change flags")
+        if not node_id or not flags:
+            raise ValueError("mark needs a node ID and at least one change")
+        self._changes[node_id] = self._changes.get(node_id, Change(0)) | flags
+        self._union |= flags
+
+    def reset(self) -> None:
+        """The scene was closed: forget every mark and remember the reset."""
+        self._changes.clear()
+        self._union = Change(0)
+        self._reset = True
+
+    def pending(self) -> Change:
+        """The union of every pending flag (``Change(0)`` when only a reset or nothing is pending)."""
+        return self._union
+
+    def drain(self) -> Drained:
+        drained = Drained(MappingProxyType(dict(self._changes)), self._reset)
+        self._changes.clear()
+        self._union = Change(0)
+        self._reset = False
+        return drained
+
+    def __bool__(self) -> bool:
+        return self._reset or bool(self._changes)
+
+
+class Timer(Protocol):
+    """A restartable single-shot timer (``qt.QTimer`` with ``singleShot`` set); its timeout calls
+    :meth:`Debouncer.flush`."""
+
+    def start(self, msec: int) -> None: ...
+
+    def stop(self) -> None: ...
+
+
+class Debouncer:
+    """Marks in, one :class:`Drained` set out per quiet period (see the module docstring).
+
+    ``timer`` is started with the delay of the next flush and must call :meth:`flush` when it fires; ``clock`` returns
+    seconds (monotonic); ``on_flush`` receives each non-empty :class:`Drained` set exactly once and must handle its own
+    errors (a set it loses is gone: SLC-16 answers that with a fresh snapshot). Main thread only, no locks.
+    """
+
+    def __init__(
+        self,
+        timer: Timer,
+        on_flush: Callable[[Drained], object],
+        clock: Callable[[], float],
+    ) -> None:
+        self._timer = timer
+        self._on_flush = on_flush
+        self._clock = clock
+        self._dirty = DirtySet()
+        self._first_mark: float | None = None
+        self._holds = 0
+        self._handoff = False  # the last release started the timer at 0 ms
+
+    @property
+    def held(self) -> bool:
+        """An import or batch process is running: marks are kept, nothing is flushed."""
+        return self._holds > 0
+
+    def mark(self, node_id: str, flags: Change) -> None:
+        self._dirty.mark(node_id, flags)
+        self._schedule()
+
+    def reset(self) -> None:
+        """The scene was closed (``EndCloseEvent``)."""
+        self._dirty.reset()
+        self._schedule()
+
+    def hold(self) -> None:
+        """``StartImportEvent`` / ``StartBatchProcessEvent``: keep the marks until :meth:`release`."""
+        self._holds += 1
+        self._timer.stop()
+
+    def release(self) -> None:
+        """``EndImportEvent`` / ``EndBatchProcessEvent``: once the last hold ends, flush what was kept — from the timer
+        at 0 ms, so the flush runs from the event loop, not inside the MRML event that ended the import."""
+        if self._holds == 0:
+            return
+        self._holds -= 1
+        if self._holds == 0 and self._dirty:
+            self._handoff = True  # a mark before the event loop runs keeps this 0 ms deadline
+            self._timer.start(0)
+
+    def flush(self) -> None:
+        """The timer fired: hand the pending set to ``on_flush``. Does nothing while held. A mark made by ``on_flush``
+        itself (or after it raised) starts a fresh window."""
+        self._timer.stop()
+        self._handoff = False
+        if self.held or not self._dirty:
+            return
+        self._first_mark = None
+        self._on_flush(self._dirty.drain())
+
+    def stop(self) -> None:
+        """The session ended or the module is unloaded: forget everything; nothing is flushed."""
+        self._timer.stop()
+        self._dirty = DirtySet()
+        self._first_mark = None
+        self._holds = 0
+        self._handoff = False
+
+    def _schedule(self) -> None:
+        if self.held or self._handoff:
+            return
+        now = self._clock()
+        if self._first_mark is None:
+            self._first_mark = now
+        slow = bool(self._dirty.pending() & SLOW)
+        quiet, longest = (
+            (GEOMETRY_MS, GEOMETRY_MAX_MS) if slow else (APPEARANCE_MS, APPEARANCE_MAX_MS)
+        )
+        left = longest - (now - self._first_mark) * 1000.0
+        # a main thread that was busy longer than the longest wait: flush as soon as control returns to the event loop
+        self._timer.start(max(0, round(min(quiet, left))))
