@@ -30,9 +30,10 @@ Expected results:
 
 - Step 2: no error about the module path; after the restart there is no traceback mentioning `RemoteView` in the
   Python console or in *Help → Report a bug → log*.
-- Step 4: the category *Remote* contains *RemoteView* with the Wi-Fi-style blue icon; the panel opens and shows
-  "RemoteView is not connected. Session controls arrive in a later version." The *Help & Acknowledgement* section
-  says nothing is sent before *Start session* and lists what is sent afterwards; no error in the Python console.
+- Step 4: the category *Remote* contains *RemoteView* with the Wi-Fi-style blue icon; the panel opens with the
+  sections *Session* ("Not connected.", *Start session*, *Stop session* greyed out), *Shared nodes* and a collapsed
+  *Advanced* (since SLC-09; §2 tests them). The *Help & Acknowledgement* section says nothing is sent before *Start
+  session* and lists what is sent afterwards; no error in the Python console.
 - Step 5: the Python console shows "RemoteView load test passed" and no error dialog appears (*Reload and Test*
   shows a dialog only on failure); the scene is not cleared.
 - Step 6: no connection beyond the baseline (opt-in rule — FR-02, Extension Index tier 1); no pip/installation
@@ -109,8 +110,8 @@ Expected: `1 () [ 0.1  -0.02 -0.03]` (RAS (100, 30, −20) mm → glTF metres, +
 untouched), `b'glTF'`; no traceback (in particular no `DeprecationWarning`/`ImportError` from `vtkmodules`) and no
 network connection beyond the baseline.
 
-Re-run after SLC-08 (transport: Slicer's own Python `ssl`/OpenSSL 1.1.1; Windows, macOS **and** Linux). Until SLC-10
-installs it after consent, install the pinned client by hand in a **test** Slicer only: `slicer.util.pip_install(
+Re-run after SLC-08 (transport: Slicer's own Python `ssl`/OpenSSL 1.1.1; Windows, macOS **and** Linux). Install the pinned
+client first, by a first *Start session* (§3) or by hand in a **test** Slicer only: `slicer.util.pip_install(
 "websockets==17.2")`. With internet access, paste into the Python console:
 
 ```python
@@ -133,6 +134,313 @@ store is added); then `('Disconnected', 'tls-certificate', 18, None)`, `(…, 10
 within 3 s (run that line 20 times: no 10-second stall, ADR 0009). No traceback, no code or token in the Python console
 or the application log. Behind a TLS-inspecting proxy note the code shown on each OS (report
 `docs/testing/reports/2026-10-20-slicer-1.md`).
+
+| Date | Slicer version | OS | Result | Tester |
+|---|---|---|---|---|
+| | | | | |
+
+## §2 Session panel: Start, code, scene, Stop (SLC-09, SLC-25; US-01, US-03, FR-03, FR-05, FR-08, FR-13)
+
+Preconditions: a **test** Slicer 5.12.x with the module path of §1; the first *Start session* asks before installing the
+pinned client (§3); or install it once in that Slicer's Python console: `slicer.util.pip_install("websockets==17.2 segno==1.6.6")`. Relays: (a) the
+relay stub of `tools/fake-slicer` on the same machine — once, from the repository root (Node 22): `npm ci` and
+`npm run build -w shared -w tools/fake-slicer`; then, in a terminal kept open next to Slicer,
+`node slicer-plugin/tests/relay_stub.mjs --port 8787`, which prints `ws://127.0.0.1:8787/ws` and, when you end its
+input (Ctrl-D; Ctrl-Z then Enter on Windows), two numbers — the `session.close` messages and the heartbeat `ping`s it
+received (e.g. `1 4`), then one `v<sceneVersion>:<sha256>` per scene snapshot it received — then exits; (b) a deployed
+relay (`wss://<relay-host>/ws`, `docs/deploy.md`) with its viewer page (ADR 0006); (c) `relay-server` and `web-viewer`
+from `main` on this machine — in a checkout of `main`, `npm ci`, then `ALLOWED_ORIGINS=http://localhost:5173
+TRUST_PROXY=false npm run dev -w relay-server` and `npm run dev -w web-viewer` (relay address
+`ws://127.0.0.1:8787/ws`, viewer `http://localhost:5173`; in PowerShell set the two variables first:
+`$env:ALLOWED_ORIGINS='http://localhost:5173'; $env:TRUST_PROXY='false'`) — it listens unencrypted on every interface, so use sample
+data only or a host firewall. Step 10 needs (b); steps 11–14 need (b) or (c); the others
+work with any. For the CA steps keep any small non-certificate file and any PEM certificate at
+hand (e.g. Slicer's own `Slicer.crt`, whose path the SLC-08 snippet prints).
+
+Steps:
+
+1. Start the test Slicer with no RemoteView settings (a fresh profile, or remove the `RemoteView/*` keys from its
+   settings file) and open *RemoteView*. The panel shows *Session* (relay address, *Start session*, *Stop session*
+   greyed out, "Not connected."), *Shared nodes* (placeholder text) and a collapsed *Advanced* section (additional CA
+   certificate).
+2. Type `wss://user:secret@relay.example.org/ws` and click *Start session*. Then restart Slicer and open *RemoteView*.
+3. Type the relay address of the preconditions and click *Start session*.
+4. Leave Slicer idle (no mouse/keyboard) for at least 70 s with the session running.
+5. Click *Stop session*. For relay (a), end its input and note the two numbers it prints; start it again with the same
+   command (same port).
+6. Restart Slicer and open *RemoteView* again.
+7. Click *Start session* (the remembered address), wait for the code, then reload the module (*Developer mode →
+   Reload*). For relay (a), end its input and note the numbers.
+8. With relay (a) still stopped (with relay (b): type `wss://127.0.0.1:9/ws`, where nothing listens), click *Start
+   session*; after a few seconds click *Stop session*. Start relay (a) again (same command).
+9. In *Advanced*, pick the non-certificate file as *Additional trusted CA certificate* and click *Start session*. Then
+   reload the module and open *Advanced*.
+10. Pick the PEM certificate instead and start a session with relay (b) (`wss://`; with relay (a) the connection uses no
+    TLS, so the certificate plays no part); stop it. Restart Slicer and open *RemoteView*.
+11. With relay (b) or (c): load *MRHead* (*Sample Data*) and a model — e.g. the spheres of §12 — and click *Start
+    session*.
+12. Open the viewer (a phone with relay (b), or `http://localhost:5173` with relay (c)) and join with the code.
+13. Click *Stop session* while the viewer shows the scene.
+14. Start again, join with the viewer, then quit Slicer (*File → Exit*, confirm).
+15. Orientation phantom (SLC-05 follow-up): in a new scene, run in the Python console
+
+    ```python
+    import vtk
+    for name, center, color in (("R+100", (100, 0, 0), (1, 0, 0)), ("A+100", (0, 100, 0), (0, 1, 0)),
+                                ("S+100", (0, 0, 100), (0, 0, 1)), ("Origin", (0, 0, 0), (1, 1, 1))):
+        source = vtk.vtkSphereSource()
+        source.SetRadius(10 if name == "Origin" else 15)
+        source.SetCenter(center)
+        source.Update()
+        model = slicer.modules.models.logic().AddModel(source.GetOutput())
+        model.SetName(name)
+        model.GetDisplayNode().SetColor(color)
+    ```
+
+    start a session, join with the viewer, and turn Slicer's 3D view and the viewer to look from the front (Slicer:
+    *Anterior* view).
+16. Slow uplink (SLC-26): with relay (c) — its viewer shows the result; relay (a) works too, without a viewer. In a
+    second terminal start the throttle proxy, `node slicer-plugin/tests/throttle_proxy.mjs --target 127.0.0.1:8787
+    --rate 125000 --listen 8788` (1 Mbit/s towards the relay; end its input like the relay's to see how many bytes it
+    passed), and enter `ws://127.0.0.1:8788/ws` as the relay address. In a new scene run in the Python console
+
+    ```python
+    import vtk
+    def spheres(count=5, n=220):  # each 95,920 triangles; five are about 5.8 MB of (quantised) scene
+        for i in range(count):
+            source = vtk.vtkSphereSource()
+            source.SetRadius(40)
+            source.SetCenter(100 * i, 0, 0)
+            source.SetThetaResolution(n)
+            source.SetPhiResolution(n)
+            source.Update()
+            slicer.modules.models.logic().AddModel(source.GetOutput())
+    spheres()
+    ```
+
+    (five spheres stay within the `mobile` budget — 500k triangles, 100k per model — so nothing is decimated), click
+    *Start session*, join with the viewer and wait. Then click *Stop session*, start again, join, and click *Stop
+    session* about 20 s into the upload. Repeat once more and quit Slicer (*File → Exit*) about 20 s into the upload
+    instead.
+
+Expected results:
+
+- Step 2: "Cannot start the session." and "relay URL must not carry user info, a query or a fragment (no secrets in
+  URLs, §3.1)" — the address is never echoed; nothing is sent; after the restart the address field is **empty** (the
+  refused address was not remembered).
+- Step 3: "Connecting to …", then within 3 s a 5-character code in large letters (monospace, visibly letter-spaced —
+  `[TODO verify]` the PythonQt `QFont` calls) and "Sending the scene · no viewers yet.", then "Live · no viewers yet."
+  (the scene loaded, possibly empty, was sent and the relay acknowledged it); *Start* and the address field are
+  disabled, *Stop* enabled (US-01, FR-03).
+- Step 4: the status stays "Live" (the transport thread pings every 15 s and the relay answers, also with the GUI
+  idle — the 50 ms pump yields the GIL; architecture §6).
+- Step 5: "Stopping…", then "Not connected."; the code disappears; relay (a) prints `1 N v1:…` with N ≥ 4: one
+  `session.close` (FR-13) and a heartbeat every 15 s after the code appeared (N is about the session's seconds / 15;
+  fewer means the transport thread was starved — report it with the Slicer version and OS).
+- Step 6: the relay address of step 3 is filled in (remembered in Slicer's settings); *Advanced* is collapsed.
+- Step 7: after the reload the panel is idle and relay (a) prints `1 …` (first number 1): unloading the module closed
+  the session.
+- Step 8: "Relay unreachable — retrying in N s." with guidance; N is rounded up (at least 1) and grows (1, 1–2, 2–3, …
+  up to 30 s); *Stop* returns to "Not connected." at once.
+- Step 9: "Cannot start the session." and "the extra CA file holds no usable certificate (PEM or DER)"; nothing is
+  sent; after the reload the CA field is **empty** (the refused file was not remembered).
+- Step 10: while the session connects and runs, the line under the status reads "An additional CA certificate is
+  trusted for this connection." (T5); after the restart the PEM path is still selected and *Advanced* is expanded, so
+  the extra trust anchor stays visible.
+- Step 11: "Sending the scene · no viewers yet.", then within 3 s of the code "Live · no viewers yet." (a large scene
+  takes longer: Slicer collects it on the main thread); a model that cannot be shared is counted under the status.
+- Step 12: the viewer shows the model within 10 s, in the colours and position of Slicer's 3D view, and nothing of
+  *MRHead* (a volume); Slicer shows "Live · 1 viewer." (US-01, FR-05, FR-08).
+- Step 13: the viewer shows "presentation ended" within 5 s (US-03, FR-13).
+- Step 14: Slicer exits without waiting more than 3 s; the viewer shows "presentation ended" within 5 s — the panel's
+  `cleanup()` runs while Slicer quits and sends `session.close` (`docs/research/slicer-scene.md` §2). This assumes the
+  scene had finished uploading ("Live"); during an upload on a slow link the stop message can be late (step 16).
+- Step 15: both show the same picture — red (R+100) on the patient's right, i.e. the left of the screen when looking
+  from the front, blue (S+100) at the top, green (A+100) nearest to the camera. A mirror image or a swapped pair is an
+  axis error (protocol §7.1, ADR 0005): report it with a screenshot of both.
+- Step 16, first upload: the status stays "Sending the scene · …" for about 46 s (5.8 MB at 1 Mbit/s; snapshots are
+  quantised, `KHR_mesh_quantization` — SLC-12), then "Live"; the viewer then shows the five spheres; the panel never
+  shows "Relay unreachable" or "Session ended" on the way, the console shows no reconnect, and the proxy passed about
+  5.8 MB. With the old fixed 10 s deadline the first `ping` (at 15 s)
+  would have been late and the connection cut about 25 s in ("Relay unreachable"). A relay that closes the connection on its own
+  WebSocket ping (SRV-14, report `2026-10-20-slicer-7`) would show as a reconnect here: note it.
+- Step 16, stop during the upload: the panel leaves "Sending the scene". The stop message waits behind the bytes already
+  written (several MB at 1 Mbit/s), so after 2 s the connection is aborted and the panel says the relay keeps the
+  session for up to 2 minutes; the viewer shows the frozen scene as offline until the relay expires it. Quitting Slicer
+  behaves the same and Slicer exits within 3 s. Expected, not a defect (`docs/research/slicer-heartbeat.md`).
+- Throughout: no traceback in the Python console, no session code or token in the console or the application log.
+
+| Date | Slicer version | OS | Result | Tester |
+|---|---|---|---|---|
+| | | | | |
+
+## §3 Dependencies on first use (SLC-10; FR-16, FR-02, US-01, NFR-31)
+
+Preconditions: a 3D Slicer 5.12.x profile in which neither package is installed — a fresh installation, or in the
+Python console `slicer.util.pip_uninstall("websockets segno")` and a restart. The module path of §1, relay (a) of §2
+(any relay works), and the network monitor of §1 step 1 running on `SlicerApp-real`. Check the starting point in the
+console: `import importlib.metadata as m; m.version("websockets")` raises `PackageNotFoundError`.
+
+Steps:
+
+1. Open *RemoteView*. Type `wss://user:secret@relay.example.org/ws` and click *Start session*.
+2. Type the relay address of the preconditions and click *Start session*. Read the dialog, then click *Cancel*.
+3. Click *Start session* again and click *OK*. Wait for Slicer's installation window to close.
+4. Click *Stop session*, then *Start session* once more. Restart Slicer, open *RemoteView*, click *Start session*.
+5. Replace case: *Stop session* and quit Slicer; start it again and, **before** opening *RemoteView* (nothing has
+   imported `websockets` yet), run `slicer.util.pip_install("websockets==16.0")` in the console and restart Slicer; open
+   *RemoteView*, click *Start session*, read the dialog, click *OK*. Repeat with `websockets==17.3` (a newer release).
+6. Restart case: quit Slicer; start it, run `slicer.util.pip_install("websockets==16.0")` before opening *RemoteView*
+   and restart; then run `import websockets; print(websockets.__version__)` in the console (16.0 is now loaded), open
+   *RemoteView*, click *Start session*, click *OK*. Then restart Slicer and click *Start session* again.
+7. Offline case: uninstall as in the preconditions, restart, disconnect the computer from the network, click *Start
+   session*, click *OK*. Repeat with the network *dropping* packets (a firewall rule for `pypi.org` and
+   `files.pythonhosted.org`) instead of refusing. Reconnect, follow the README section *Offline installation* on a
+   second computer (download the wheels, copy them over, run the `slicer.util.pip_install([...])` line with the real
+   path — on Windows one with a space in it too), then click *Start session*.
+8. While the dialog of step 2 or Slicer's installation window is open, click the greyed-out *Start session* button and
+   try to edit the relay address.
+
+Expected results:
+
+- Step 1: "Cannot start the session." with the URL message of §2 step 2; **no** dialog, no pip, no network traffic.
+- Step 2: the dialog "RemoteView — install Python packages" names *websockets 17.2* (the secure connection to the relay)
+  and *segno 1.6.6* (the QR code of the join link), says they come from PyPI or the package index configured for pip
+  and that the server sees the computer's address and the Python/OS versions, nothing from the scene; *Details* shows
+  `websockets==17.2` and `segno==1.6.6`. After *Cancel*: "Cannot start the session." and "Nothing was installed or
+  changed. …"; the monitor shows no connection at all (neither PyPI nor the relay) and the console has no traceback.
+- Step 3: Slicer's installation window runs and closes, and the panel goes on as in §2 step 3 (code within 3 s). The
+  monitor shows pip's connections to PyPI/`files.pythonhosted.org` first and the relay connection only after the
+  installation.
+- Step 4: no dialog either time (FR-16); the session starts as in §2.
+- Step 5: the dialog lists only *websockets 17.2* under "Installed now" as "websockets 16.0 will be replaced by 17.2"
+  (second run: "websockets 17.3 will be downgraded to 17.2"); afterwards the session starts without a restart, and
+  `m.version("websockets")` is 17.2.
+- Step 6: after *OK* Slicer shows **no** restart question of its own (`prompt_restart=False`); the panel says "Cannot
+  start the session." and "The Python packages are in place, but this Slicer session already loaded another version of
+  websockets. Restart Slicer, then click Start session again."; after the restart the session starts. On Windows the installer may be unable to replace a
+  loaded `websockets` extension file: then the panel shows the fixed "could not be installed" text, `websockets`
+  stays at 16.0 (no half-installed package) and the restart-and-retry works — note which of the two happened.
+- Step 7: Slicer's own error window shows pip's log (and the console and application log hold it too — pip's output is
+  Slicer's, it may include a proxy address); the panel says "The Python packages could not be installed. Check the
+  network connection and the proxy settings …" and holds no pip text; the application log gains one RemoteView line,
+  `deps: installation failed (CalledProcessError)`; the monitor shows no connection to the relay. With dropped packets the
+  window keeps spinning until pip's own timeouts and retries end (note the wait). After the offline installation the
+  session starts; a path with a space and a Windows backslash path work in the list form.
+- Step 8: the button stays greyed out and the address field cannot be edited until the dialog and the window are gone.
+- Throughout: no traceback, no session code or token in the console or the application log.
+
+| Date | Slicer version | OS | Result | Tester |
+|---|---|---|---|---|
+| | | | | |
+
+## §4 QR code, Copy link and the Presentation window (SLC-11; FR-04, NFR-29, NFR-30, US-07, T6)
+
+Preconditions: §2's setup, `segno` installed (§3), a stock phone camera app (iPhone Camera, Android camera or Google
+Lens), a 24" monitor. **Relay (b)** (a deployed relay, `wss://<relay-host>/ws`) for every step in which a phone scans
+the code and opens it: the link is then `https://<relay-host>/j#<CODE>`. With relay (a) or (c) the address is
+`ws://127.0.0.1:8787/ws` and the link `http://127.0.0.1:8787/j#<CODE>` — on a phone that is the phone itself, so with
+them a scan only checks that the camera reads the link (the banner shows it); opening it cannot join. Joining from the
+link also needs the web viewer's deep link (WEB-11) and the relay serving the viewer at `/j` (ADR 0006); until both are
+deployed, step 4 checks the banner only.
+
+Steps:
+
+1. Start a session. Look at the panel.
+2. Click *Copy link* and paste into a text editor.
+3. Click *Presentation window*. Stand 2 m from the monitor and read the code aloud; scan the window's QR code.
+4. With the phone camera scan the QR code **in the panel** from about 1 m and open the link it offers.
+5. Switch Slicer to a dark theme (*Edit → Application Settings → Appearance*) and scan again.
+6. Click *Stop session*. Click *Start session* again and click *Presentation window* again.
+7. Paste into the editor again (the clipboard after step 6).
+8. Start a third session, open the Presentation window and quit Slicer (*File → Exit*) while it is open.
+9. Make the module panel as narrow as Slicer allows and the Presentation window as small as possible; scan both codes.
+10. Optional — only with a `wss://` relay reachable under a host name of more than 48 characters (relay (b) behind such a
+    DNS name, or a TLS proxy with a certificate for it and that certificate's CA under *Advanced*): start a session and
+    open the Presentation window. Without such a relay this case is covered by
+    `test_adapter_a_link_too_long_for_a_qr_code_still_offers_the_large_code` (`tests/test_links.py`).
+
+Expected results:
+
+- Step 1: under the code a QR code of at least 240 × 240 px (black on white, with a white margin) and the buttons *Copy
+  link* and *Presentation window*, both enabled only now.
+- Step 2: `https://<relay host>/j#<CODE>` (`http://127.0.0.1:8787/j#<CODE>` for a local relay), one line, ≤ 64
+  characters; the button says "Link copied" for a moment. Nothing else is on the clipboard.
+- Step 3: the code in large print (≥ 48 pt; 64 pt expected) is readable from 2 m, the QR code is larger than the
+  panel's and scans.
+- Step 4: the camera shows the link banner for the relay host (a link, not text or a search); opening it joins the
+  session (once the web viewer's deep link exists, WEB-11) within 10 s.
+- Step 5: the QR code is still dark modules on a white field and scans (the code is painted by RemoteView, not by the
+  theme).
+- Step 6: the QR code disappears and both buttons switch off when the session stops; the Presentation window hides and
+  holds no code; the second session shows its new code and a QR code of the new link in the same window.
+- Step 7: the clipboard still holds the old link (it stays until you copy something else — the *Copy link* tooltip says
+  so).
+- Step 8: Slicer exits without waiting more than 3 s and the Presentation window is gone.
+- Step 9: neither QR code is cropped (the panel or window scrolls or grows instead); both scan, also with a dark theme.
+- Step 10: no QR code and *Copy link* off; the panel says "No QR code for this relay address: the join link would be longer
+  than 64 characters, or the relay is not at /ws. Read the code to the viewers instead."; the Presentation window opens and
+  shows the code with the hint "Open the viewer and type the code."
+- Throughout: no traceback in the Python console; no session code, link or QR data in the console or the application log.
+- `[TODO verify]` in Slicer 5.12.4 (PythonQt): `qt.QPixmap(w, h)` + `qt.QPainter(pixmap)` + `painter.fillRect(x, y, w, h,
+  qt.QColor("black"))`, `qt.QApplication.clipboard().setText(...)`, `QLabel.pixmap = …`, `QLabel.setMinimumSize(w, h)`
+  and the `QFont` calls (`setStyleHint`, `setPointSize`, `setLetterSpacing`) as the adapter uses them; the Presentation
+  window as a parentless top-level widget from `slicer.util.loadUI` with `show()`, `raise_()` and `hide()`; the panel's
+  QR label hidden before the first session (the `.ui` property).
+
+| Date | Slicer version | OS | Result | Tester |
+|---|---|---|---|---|
+| | | | | |
+
+## §12 Consent text and the scene adapter (SLC-22; R-06, NFR-16, FR-05)
+
+Preconditions: the test Slicer of §2; the *MRHead* sample (*Sample Data*) and two models made in the Python console:
+
+```python
+import vtk
+for name, center in (("Sphere A", (100, 0, 0)), ("Sphere B", (0, 100, 0))):
+    source = vtk.vtkSphereSource()
+    source.SetRadius(20)
+    source.SetCenter(center)
+    source.Update()
+    slicer.modules.models.logic().AddModel(source.GetOutput()).SetName(name)
+```
+
+Steps:
+
+1. Open *RemoteView*. Read the text above *Start session* with the address field empty, then type
+   `wss://relay.example.org/ws`, then `wss://user:secret@relay.example.org/ws`, then `ws://127.0.0.1:8787/ws`.
+2. In *Data*, move *Sphere B* into a new folder and hide the folder (eye icon). In *Models*, set *Sphere A*'s opacity to
+   0.5. In *Transforms*, create a linear transform *T1* with a translation of 50 mm along R and apply it to *Sphere A*;
+   create *T2* with 30 mm along R and apply it to *T1* (a two-level chain).
+3. In the Python console run:
+
+   ```python
+   import RemoteView
+   from remoteview_core.collect import collect_scene
+   api = RemoteView.RemoteViewLogic.sceneApi()
+   print([node.GetName() for node in api.visible_model_nodes()])
+   scene = collect_scene(api)
+   print([(e.name, round(e.opacity, 3), None if e.matrix is None else round(e.matrix[0][3], 3))
+          for e in scene.entities], scene.skipped)
+   ```
+
+4. Show the folder again, close *Sphere A*'s eye in *Data* and run the snippet again.
+
+Expected results:
+
+- Step 1: the text lists what *Start session* sends (the complete surface meshes of the models shown in the 3D view —
+  clipping is not applied — no images or volumes, names and MRML node IDs, colours, opacity, visibility, position, the
+  Slicer/RemoteView/OS versions) and who can see it. It names "the relay whose address you enter above" for the empty
+  field and "the relay at relay.example.org" for both `wss://` addresses (never `user` or `secret`); for
+  `ws://127.0.0.1:8787/ws` it names "the relay at 127.0.0.1" and ends with "A ws:// address is not encrypted; Start
+  session accepts it only for a relay on this computer (development)." The status stays "Not connected."; nothing is
+  sent.
+- Step 3: the first line is `['Sphere A']` — no slice planes (*Red/Green/Yellow Volume Slice*), no *Sphere B* (hidden
+  folder), nothing from *MRHead* (a volume). The second line is `[('Sphere A', 0.5, 0.08)] ()`: opacity as shown, the
+  80 mm of the two transforms as 0.08 m along glTF +X.
+- Step 4: the first line is `['Sphere B']`.
+- Throughout: no traceback and no error logged by Slicer (in particular none from `GetMatrixTransformToWorld`).
 
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|

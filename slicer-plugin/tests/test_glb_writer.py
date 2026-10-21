@@ -5,8 +5,6 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
-import os
-import shutil
 import struct
 import subprocess
 import sys
@@ -16,6 +14,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from pygltflib import GLTF2
+from support import needs_validator, validate_glb
 
 from remoteview_core import (
     __version__,
@@ -35,18 +34,7 @@ from remoteview_protocol import generated
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = PLUGIN_ROOT.parent
 CORE_DIR = PLUGIN_ROOT / "RemoteView" / "remoteview_core"
-VALIDATOR_SCRIPT = Path(__file__).with_name("validate_glb.mjs")
 ROOT = RootExtras(scene_version=7, profile="mobile", slicer_version="5.12.4")
-HAS_VALIDATOR = (
-    shutil.which("node") is not None and (REPO_ROOT / "node_modules" / "gltf-validator").is_dir()
-)
-# CI must set REMOTEVIEW_REQUIRE_GLTF_VALIDATOR=1 (exactly "1"; report 2026-10-19-slicer-1) so a missing `npm ci`
-# fails instead of skipping the spec gate.
-needs_validator = pytest.mark.skipif(
-    not HAS_VALIDATOR and os.environ.get("REMOTEVIEW_REQUIRE_GLTF_VALIDATOR") != "1",
-    reason="Node 22 + `npm ci` at the repository root are needed for the Khronos glTF validator",
-)
-
 
 # --------------------------------------------------------------------------- fixtures
 
@@ -187,22 +175,6 @@ def _accessor_array(doc: dict, binary: bytes, index: int) -> np.ndarray:
     return np.frombuffer(binary, dtype=dtype, count=acc["count"] * width, offset=start).reshape(
         -1, width
     )
-
-
-def _validate(tmp_path: Path, files: dict[str, bytes]) -> dict:
-    for name, data in files.items():
-        (tmp_path / name).write_bytes(data)
-    result = subprocess.run(
-        ["node", str(VALIDATOR_SCRIPT), *[str(tmp_path / n) for n in files]],
-        capture_output=True,
-        text=True,
-        check=False,
-        cwd=REPO_ROOT,
-        timeout=120,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    reports = json.loads(result.stdout)
-    return {name: reports[str(tmp_path / name)] for name in files}
 
 
 @pytest.fixture(scope="module")
@@ -686,7 +658,7 @@ def test_glb_writer_passes_khronos_gltf_validator(two_node_glb, odd_glb, tmp_pat
         "uint32-min.glb": write_glb([_grid_entity(256, 256), _triangle()], ROOT),
         "empty.glb": write_glb([], ROOT),
     }
-    for name, report in _validate(tmp_path, files).items():
+    for name, report in validate_glb(tmp_path, files).items():
         assert report["numErrors"] == 0 and report["numWarnings"] == 0, (name, report)
         assert report["violations"] == [], (name, report)
 
@@ -697,7 +669,7 @@ def test_glb_writer_validator_helper_flags_broken_files(tmp_path):
     and the §7.1 pre-check reports rule violations (PRO-08 broken fixtures)."""
     names = ("truncated.glb", "bad-magic.glb", "two-scenes.glb", "external-uri.glb")
     glb_dir = REPO_ROOT / "shared" / "fixtures" / "glb"
-    reports = _validate(tmp_path, {n: (glb_dir / n).read_bytes() for n in names})
+    reports = validate_glb(tmp_path, {n: (glb_dir / n).read_bytes() for n in names})
     assert reports["truncated.glb"]["numErrors"] > 0 and reports["bad-magic.glb"]["numErrors"] > 0
     assert reports["two-scenes.glb"]["violations"] == ["exactly one scene"]
     assert "no uri" in reports["external-uri.glb"]["violations"]
@@ -705,7 +677,7 @@ def test_glb_writer_validator_helper_flags_broken_files(tmp_path):
     doc["bufferViews"][3]["byteOffset"] -= (
         2  # a view at an offset that breaks the float32 alignment
     )
-    report = _validate(tmp_path, {"misaligned.glb": _repack(doc, binary)})["misaligned.glb"]
+    report = validate_glb(tmp_path, {"misaligned.glb": _repack(doc, binary)})["misaligned.glb"]
     assert report["numErrors"] > 0, report
 
 
@@ -714,5 +686,5 @@ def test_glb_writer_validator_helper_reports_warnings(tmp_path):
     """The zero-warning gate is live: alphaCutoff on an OPAQUE material is a validator warning."""
     doc, binary, _ = _parse(write_glb([_triangle()], ROOT))
     doc["materials"][0]["alphaCutoff"] = 0.5
-    report = _validate(tmp_path, {"warning.glb": _repack(doc, binary)})["warning.glb"]
+    report = validate_glb(tmp_path, {"warning.glb": _repack(doc, binary)})["warning.glb"]
     assert report["numErrors"] == 0 and report["numWarnings"] > 0, report

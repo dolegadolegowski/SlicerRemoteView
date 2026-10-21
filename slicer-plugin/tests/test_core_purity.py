@@ -93,24 +93,33 @@ CORE_MODULES = [
     *sorted(f"remoteview_core.{p.stem}" for p in CORE_DIR.glob("*.py") if p.stem != "__init__"),
 ]
 _IMPORT_PROBE = """
-import importlib, json, socket, sys, threading
+import importlib, json, os, socket, subprocess, sys, threading
 sys.path.append(sys.argv[1])
 created = []
+spawned = []
 class _Socket(socket.socket):
     def __init__(self, *args, **kwargs):
         created.append(args)
         super().__init__(*args, **kwargs)
+class _Popen(subprocess.Popen):
+    def __init__(self, *args, **kwargs):
+        spawned.append(args)
+        super().__init__(*args, **kwargs)
 socket.socket = _Socket
+subprocess.Popen = _Popen
+os.system = lambda *args, **kwargs: spawned.append(args) or 0
 importlib.import_module(sys.argv[2])
 watched = {"websockets", "segno", "jsonschema", "slicer", "qt", "ctk"}
-print(json.dumps([sorted({m.split(".")[0] for m in sys.modules} & watched), threading.active_count(), len(created)]))
+loaded = sorted({m.split(".")[0] for m in sys.modules} & watched)
+print(json.dumps([loaded, threading.active_count(), len(created), len(spawned)]))
 """
 
 
 @pytest.mark.parametrize("module", CORE_MODULES)
 def test_core_purity_import_starts_nothing(module):
     """FR-02/FR-16: importing a core module loads no runtime dependency (``websockets``, ``segno``, ``jsonschema``) and
-    no Slicer/Qt, opens no socket and starts no thread — all of that waits for *Start session* (branch audit)."""
+    no Slicer/Qt, opens no socket, starts no thread and no process (no pip) — all of that waits for *Start session*
+    (branch audit)."""
     result = subprocess.run(
         [sys.executable, "-I", "-c", _IMPORT_PROBE, str(CORE_DIR.parent), module],
         capture_output=True,
@@ -119,7 +128,7 @@ def test_core_purity_import_starts_nothing(module):
         timeout=60,
     )
     assert result.returncode == 0, result.stderr[-2000:]
-    assert json.loads(result.stdout) == [[], 1, 0]
+    assert json.loads(result.stdout) == [[], 1, 0, 0]
 
 
 def test_core_purity_no_slicer_qt_imports_in_remoteview_core():

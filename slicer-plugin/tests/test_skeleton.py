@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import _socket
 import ast
+import importlib.metadata
 import os
 import re
 import socket
@@ -12,6 +13,7 @@ import sys
 import threading
 import urllib.request
 from pathlib import Path
+from typing import NoReturn
 from unittest import mock
 
 import pytest
@@ -23,8 +25,9 @@ MODULE_DIR = PLUGIN_ROOT / "RemoteView"
 LAZY_MODULES = ("websockets", "segno", "jsonschema", "remoteview_protocol")
 #: The module's own packages: re-imported inside the guard so cached imports cannot hide eager work.
 PROJECT_PACKAGES = ("RemoteView", "remoteview_core", "remoteview_protocol")
-#: Modules ``RemoteView.py`` may import while Slicer loads it (everything else only inside functions).
-IMPORT_ALLOWLIST = {"__future__", "ctk", "logging", "os", "qt", "slicer"}
+#: Modules ``RemoteView.py`` may import while Slicer loads it (everything else only inside functions); ``sys`` and
+#: ``time`` are built into the interpreter (already loaded, no import-time work).
+IMPORT_ALLOWLIST = {"__future__", "ctk", "logging", "os", "qt", "slicer", "sys", "time"}
 #: Words the help text must contain so the consent statement names what is sent (NFR-16, T7).
 DISCLOSURE_WORDS = (
     "Start session",
@@ -72,6 +75,10 @@ def _forbid(what: str):
     return _raise
 
 
+def _not_installed(name: str) -> NoReturn:
+    raise importlib.metadata.PackageNotFoundError(name)
+
+
 @pytest.fixture
 def no_side_effects(monkeypatch: pytest.MonkeyPatch, slicer_stubs):
     """Make every network, DNS, process and pip entry point raise and record the call."""
@@ -87,6 +94,13 @@ def no_side_effects(monkeypatch: pytest.MonkeyPatch, slicer_stubs):
     monkeypatch.setattr(slicer.util, "pip_install", _forbid("slicer.util.pip_install"))
     monkeypatch.setattr(slicer.packaging, "pip_install", _forbid("slicer.packaging.pip_install"))
     monkeypatch.setattr(slicer.packaging, "pip_ensure", _forbid("slicer.packaging.pip_ensure"))
+    # asking the user anything (the install consent included) waits for Start session
+    monkeypatch.setattr(
+        slicer.util, "confirmOkCancelDisplay", _forbid("slicer.util.confirmOkCancelDisplay")
+    )
+    # a fresh Slicer: the runtime packages are not installed, whatever the development environment has — a panel
+    # that ran the dependency sequence while opening would then reach the forbidden calls above
+    monkeypatch.setattr(importlib.metadata, "version", _not_installed)
     # Forget runtime dependencies and the project's own modules, so whatever RemoteView.py pulls in at import
     # (also transitively through remoteview_core) is imported afresh inside the guard; restored afterwards.
     watched = (*LAZY_MODULES, *PROJECT_PACKAGES)
@@ -101,7 +115,15 @@ def no_side_effects(monkeypatch: pytest.MonkeyPatch, slicer_stubs):
             del sys.modules[loaded]
 
 
-def test_skeleton_import_and_construct_have_no_side_effects(no_side_effects, import_remote_view):
+@pytest.mark.parametrize("remembered", [False, True], ids=["fresh", "remembered-relay"])
+def test_skeleton_import_and_construct_have_no_side_effects(
+    no_side_effects, import_remote_view, slicer_stubs, remembered
+):
+    # SLC-09: setup() restores these; opening the panel must still connect nothing (FR-02)
+    if remembered:
+        settings = slicer_stubs["qt"].QSettings()
+        settings.setValue("RemoteView/RelayURL", "wss://relay.example.org/ws")
+        settings.setValue("RemoteView/ExtraCACertificate", "/etc/hospital-root.pem")
     threads_before = set(threading.enumerate())
     before = set(sys.modules)
     module = import_remote_view()
@@ -149,6 +171,11 @@ def test_skeleton_side_effect_guard_detects_calls(no_side_effects, slicer_stubs)
         os.system("true")  # noqa: S605 — guarded: the patched os.system raises
     with pytest.raises(ForbiddenSideEffectError):
         sys.modules["slicer"].util.pip_install("websockets")
+    # the install consent is a call the opened panel must not make, and the fixture reports a fresh Slicer
+    with pytest.raises(ForbiddenSideEffectError):
+        sys.modules["slicer"].util.confirmOkCancelDisplay("Install?")
+    with pytest.raises(importlib.metadata.PackageNotFoundError):
+        importlib.metadata.version("websockets")
     try:  # a swallowed call is still recorded
         sys.modules["slicer"].packaging.pip_ensure(["segno"])
     except Exception:  # noqa: BLE001, S110 — `except Exception` cannot catch the guard

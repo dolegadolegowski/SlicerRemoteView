@@ -13,7 +13,13 @@ thread talks to it only through a ``queue.Queue`` of events (:class:`Connected`,
   text).
 - Heartbeat (§9.1): ``ping`` every 15 s once the connection's first text message is out (the relay wants
   ``session.create``/``session.resume`` first, §3.1); a ``pong`` 10 s late aborts the connection. Matching pongs are
-  consumed here.
+  consumed here. The relay answers a ``ping`` only after it has read the bytes written before it (one TCP stream), so
+  the deadline grows by the time the bytes it can still have to read need at :data:`MIN_UPLINK_BYTES_PER_S`: those
+  written since the last answered ``ping``, less what a link of that speed has carried since then, and at most
+  :data:`MAX_UNREAD_BYTES` (what the buffers hold). A snapshot going out on a slow uplink does not look like a dead
+  connection; a peer that reads and never answers is ended after at most ``pong_timeout`` + :data:`MAX_UNREAD_BYTES` /
+  :data:`MIN_UPLINK_BYTES_PER_S` (≈ 77 s), one that stops reading by ``send_timeout``. The deadline is checked between
+  sends only, so one blocked ``send()`` can hold it back by up to ``send_timeout``.
 - Reconnect: exponential backoff 0.5 s → 30 s with ±20 % jitter (0–3 s after ``4008``; after ``4005``/``4006`` at
   least the ``retryAfterS`` of the relay's last ``error`` on that connection, §9.3). Errors the user has to fix
   (certificate, proxy, HTTP 3xx/4xx) and the close codes of :data:`NO_RECONNECT_CLOSE_CODES` stop the transport.
@@ -68,6 +74,14 @@ OPEN_TIMEOUT_S = 10.0  # TCP, TLS, proxy and HTTP upgrade together
 CLOSE_TIMEOUT_S = 2.0
 STOP_GRACE_S = 2.0  # stop(): final message + closing handshake, then the socket is aborted
 SEND_TIMEOUT_S = 60.0  # one frame (≤ 1 MiB) on a slow uplink; the relay gives up on a snapshot after 120 s (§3.3)
+#: The slowest uplink a snapshot upload is expected to survive without a reconnect: 1 Mbit/s.
+MIN_UPLINK_BYTES_PER_S = 125_000.0
+#: What the buffers between ``send()`` and the relay's reader can hold: ``send()`` returns once the library's own
+#: write buffer is nearly empty, so the rest of the written bytes sit in the kernel's send buffer, the network and the
+#: relay's receive buffer (≈ 4.3 MB on a Linux loopback pair that reads nothing, docs/research/slicer-heartbeat.md).
+#: Bounds how much a ``ping`` can wait for, so a peer that reads and never answers is still ended; a link that holds
+#: more errs towards an earlier abort.
+MAX_UNREAD_BYTES = 8 * 1_048_576
 MAX_TEXT_BYTES = 262_144  # §3.3, publisher text message
 MAX_BINARY_BYTES = 1_048_576 + 12  # §3.3, chunk payload + header
 MAX_INBOUND_BYTES = 1_114_112  # §3.3, the relay's maxPayload
@@ -383,7 +397,8 @@ class RelayTransport:
     certificates (or one DER certificate) trusted in addition to the defaults, read once, here: ``OSError`` if it
     cannot be read, ``ValueError`` if it holds no usable certificate.
     ``use_proxy=False`` ignores the system proxy settings (tests).
-    ``ping_interval``, ``pong_timeout``, ``send_timeout``, ``sleep`` (the backoff wait) and ``rng`` exist for tests.
+    ``ping_interval``, ``pong_timeout``, ``send_timeout``, ``min_uplink``, ``sleep`` (the backoff wait) and ``rng``
+    exist for tests.
     """
 
     def __init__(  # noqa: PLR0913 — tuning knobs are keyword-only and default to the protocol values
@@ -396,6 +411,7 @@ class RelayTransport:
         ping_interval: float = PING_INTERVAL_S,
         pong_timeout: float = PONG_TIMEOUT_S,
         send_timeout: float = SEND_TIMEOUT_S,
+        min_uplink: float = MIN_UPLINK_BYTES_PER_S,
         sleep: Callable[[float], Awaitable[None]] | None = None,
         rng: random.Random | None = None,
     ) -> None:
@@ -408,6 +424,9 @@ class RelayTransport:
         self._ping_interval = ping_interval
         self._pong_timeout = pong_timeout
         self._send_timeout = send_timeout
+        if not min_uplink > 0:
+            raise ValueError("min_uplink must be positive")
+        self._min_uplink = min_uplink
         self._sleep = sleep or asyncio.sleep
         self._rng = rng or random.SystemRandom()
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -424,10 +443,16 @@ class RelayTransport:
         self._ws: Any = None
         self._ping_id: str | None = None
         self._pong_deadline: float | None = None
+        #: Bytes handed to the socket on this connection; at the outstanding ping; at the last answered ping (and when
+        #: that was, on the loop's clock).
+        self._written = self._ping_mark = self._confirmed = 0
+        self._confirmed_at = 0.0
         #: Inbound text frames that were not a JSON object, and frames dropped because their connection had ended
         #: (counts only; their content is never logged).
         self.dropped_inbound = 0
         self.dropped_outbound = 0
+        #: Frames removed by :meth:`discard_queued`.
+        self.discarded_outbound = 0
 
     @property
     def running(self) -> bool:
@@ -502,6 +527,23 @@ class RelayTransport:
 
     def _emit(self, event: Event) -> None:
         self._events.put(event)
+
+    def discard_queued(self, *, connection: int) -> bool:
+        """Drop every frame still waiting for ``connection`` — e.g. the rest of a snapshot the relay refused. The frame
+        being written is finished; frames of other connections stay. Thread-safe; ``False`` when not running."""
+        if self._loop is None or not self.running:
+            return False
+        try:
+            self._loop.call_soon_threadsafe(self._discard, connection)
+        except RuntimeError:  # the loop closed in between: the thread has ended
+            return False
+        return True
+
+    def _discard(self, connection: int) -> None:
+        kept = [item for item in self._pending if item[0] != connection]
+        self.discarded_outbound += len(self._pending) - len(kept)
+        self._pending.clear()
+        self._pending.extend(kept)
 
     def _push(self, connection: int, data: str | bytes) -> None:
         if not self._stop_requested:
@@ -631,6 +673,8 @@ class RelayTransport:
     async def _serve(self, ws: Any, connection: int) -> TransportError | None:
         """Run one open connection until it ends: ``None`` after stop(), else why it ended."""
         self._ping_id = self._pong_deadline = self._retry_after = None
+        self._written = self._ping_mark = self._confirmed = 0
+        self._confirmed_at = asyncio.get_running_loop().time()
         reader = asyncio.ensure_future(self._read(ws, connection))
         writer = asyncio.ensure_future(self._write(ws, connection))
         done, _ = await asyncio.wait({reader, writer}, return_when=asyncio.FIRST_COMPLETED)
@@ -662,6 +706,11 @@ class RelayTransport:
                 and (message.get("replyTo") == self._ping_id)
             ):
                 self._ping_id = self._pong_deadline = None
+                # the relay has read everything written before this ping
+                self._confirmed, self._confirmed_at = (
+                    self._ping_mark,
+                    asyncio.get_running_loop().time(),
+                )
                 self._wakeup.set()  # the writer waits for the deadline: let it schedule the next ping
             else:
                 if message.get("type") == "error":
@@ -699,8 +748,15 @@ class RelayTransport:
             if not awaiting_pong and next_ping is not None and now >= next_ping:
                 pings += 1
                 self._ping_id = f"hb-{pings}"
+                self._ping_mark = self._written
+                # at most what is written since the last answered ping, less what a link of the minimum speed has
+                # read since, and what the buffers hold
+                unread = (
+                    self._written - self._confirmed - self._min_uplink * (now - self._confirmed_at)
+                )
+                unread = max(0.0, min(unread, MAX_UNREAD_BYTES))
                 # set before the send: the pong may arrive before the send returns
-                self._pong_deadline = now + self._pong_timeout
+                self._pong_deadline = now + self._pong_timeout + unread / self._min_uplink
                 next_ping = now + self._ping_interval
                 await self._send(ws, _encode(envelope("ping", self._ping_id)))
             elif self._pending:
@@ -724,3 +780,4 @@ class RelayTransport:
             await asyncio.wait_for(ws.send(data), self._send_timeout)
         except TimeoutError:
             raise _SendTimeoutError from None
+        self._written += len(data)

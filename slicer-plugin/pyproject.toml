@@ -17,6 +17,8 @@ dev = [
   "pygltflib==1.16.5", # test-only GLB reader
   "jsonschema==4.26.0", # vendored remoteview_protocol validation (SLC-03, SLC-06)
   "websockets==17.2", # transport tests (SLC-08)
+  "segno==1.6.6", # QR code of the join link (SLC-11); the runtime pin of remoteview_core.deps
+  "zxing-cpp==3.1.1", # test-only QR decoder: the generated code must scan back to the join URL (SLC-11)
 ]
 
 [tool.ruff]

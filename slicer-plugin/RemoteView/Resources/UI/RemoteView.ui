@@ -1,0 +1,288 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>RemoteView</class>
+ <widget class="QWidget" name="RemoteView">
+  <layout class="QVBoxLayout" name="mainLayout">
+   <item>
+    <widget class="ctkCollapsibleButton" name="sessionCollapsibleButton">
+     <property name="text">
+      <string>Session</string>
+     </property>
+     <layout class="QVBoxLayout" name="sessionLayout">
+      <item>
+       <layout class="QFormLayout" name="relayFormLayout">
+        <item row="0" column="0">
+         <widget class="QLabel" name="relayUrlLabel">
+          <property name="text">
+           <string>Relay address:</string>
+          </property>
+          <property name="textFormat">
+           <enum>Qt::PlainText</enum>
+          </property>
+         </widget>
+        </item>
+        <item row="0" column="1">
+         <widget class="QLineEdit" name="relayUrlLineEdit">
+          <property name="toolTip">
+           <string>The relay server for this session (wss://…/ws). Nothing is sent before Start session.</string>
+          </property>
+          <property name="placeholderText">
+           <string>wss://relay.example.org/ws</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <widget class="QLabel" name="consentLabel">
+        <property name="accessibleName">
+         <string>What Start session sends</string>
+        </property>
+        <property name="text">
+         <string/>
+        </property>
+        <property name="textFormat">
+         <enum>Qt::PlainText</enum>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="buttonsLayout">
+        <item>
+         <widget class="QPushButton" name="startButton">
+          <property name="toolTip">
+           <string>Connect to the relay and show a code that phones and headsets can join with.</string>
+          </property>
+          <property name="text">
+           <string>Start session</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="stopButton">
+          <property name="enabled">
+           <bool>false</bool>
+          </property>
+          <property name="toolTip">
+           <string>End the session: viewers see that the presentation ended.</string>
+          </property>
+          <property name="text">
+           <string>Stop session</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <widget class="QLabel" name="codeLabel">
+        <property name="font">
+         <font>
+          <family>Courier New</family>
+          <pointsize>32</pointsize>
+          <bold>true</bold>
+         </font>
+        </property>
+        <property name="accessibleName">
+         <string>Session code</string>
+        </property>
+        <property name="text">
+         <string/>
+        </property>
+        <property name="textFormat">
+         <enum>Qt::PlainText</enum>
+        </property>
+        <property name="alignment">
+         <set>Qt::AlignCenter</set>
+        </property>
+        <property name="textInteractionFlags">
+         <set>Qt::TextSelectableByMouse</set>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLabel" name="qrLabel">
+        <property name="visible">
+         <bool>false</bool>
+        </property>
+        <property name="minimumSize">
+         <size>
+          <width>240</width>
+          <height>240</height>
+         </size>
+        </property>
+        <property name="toolTip">
+         <string>Scan with a phone camera to join. Shown while the session runs.</string>
+        </property>
+        <property name="accessibleName">
+         <string>QR code of the join link</string>
+        </property>
+        <property name="text">
+         <string/>
+        </property>
+        <property name="textFormat">
+         <enum>Qt::PlainText</enum>
+        </property>
+        <property name="alignment">
+         <set>Qt::AlignCenter</set>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="linkButtonsLayout">
+        <item>
+         <widget class="QPushButton" name="copyLinkButton">
+          <property name="enabled">
+           <bool>false</bool>
+          </property>
+          <property name="toolTip">
+           <string>Copy the link that opens the viewer with this session's code. It stays on the clipboard until you copy something else.</string>
+          </property>
+          <property name="text">
+           <string>Copy link</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="presentButton">
+          <property name="enabled">
+           <bool>false</bool>
+          </property>
+          <property name="toolTip">
+           <string>Open a window with the code and the QR code in large print, for a projector or a shared screen.</string>
+          </property>
+          <property name="text">
+           <string>Presentation window</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <widget class="QLabel" name="statusLabel">
+        <property name="text">
+         <string>Not connected.</string>
+        </property>
+        <property name="textFormat">
+         <enum>Qt::PlainText</enum>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLabel" name="detailLabel">
+        <property name="text">
+         <string/>
+        </property>
+        <property name="textFormat">
+         <enum>Qt::PlainText</enum>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+        <property name="textInteractionFlags">
+         <set>Qt::TextSelectableByMouse</set>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="ctkCollapsibleButton" name="nodesCollapsibleButton">
+     <property name="text">
+      <string>Shared nodes</string>
+     </property>
+     <layout class="QVBoxLayout" name="nodesLayout">
+      <item>
+       <widget class="QLabel" name="nodeListPlaceholderLabel">
+        <property name="text">
+         <string>The list of the models and segments this session shares arrives in a later version.</string>
+        </property>
+        <property name="textFormat">
+         <enum>Qt::PlainText</enum>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="ctkCollapsibleButton" name="advancedCollapsibleButton">
+     <property name="text">
+      <string>Advanced</string>
+     </property>
+     <property name="collapsed">
+      <bool>true</bool>
+     </property>
+     <layout class="QFormLayout" name="advancedFormLayout">
+      <item row="0" column="0">
+       <widget class="QLabel" name="extraCaLabel">
+        <property name="text">
+         <string>Additional trusted CA certificate:</string>
+        </property>
+        <property name="textFormat">
+         <enum>Qt::PlainText</enum>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="ctkPathLineEdit" name="extraCaPathLineEdit">
+        <property name="toolTip">
+         <string>Only a certificate file (PEM or DER) from your IT department, for a network that inspects HTTPS. Certificate checks always stay on.</string>
+        </property>
+        <property name="filters">
+         <set>ctkPathLineEdit::Files|ctkPathLineEdit::Readable</set>
+        </property>
+        <property name="showHistoryButton">
+         <bool>false</bool>
+        </property>
+        <property name="nameFilters">
+         <stringlist>
+          <string>Certificates (*.pem *.crt *.cer *.der)</string>
+          <string>All files (*)</string>
+         </stringlist>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <spacer name="verticalSpacer">
+     <property name="orientation">
+      <enum>Qt::Vertical</enum>
+     </property>
+     <property name="sizeHint" stdset="0">
+      <size>
+       <width>20</width>
+       <height>40</height>
+      </size>
+     </property>
+    </spacer>
+   </item>
+  </layout>
+ </widget>
+ <customwidgets>
+  <customwidget>
+   <class>ctkCollapsibleButton</class>
+   <extends>QWidget</extends>
+   <header>ctkCollapsibleButton.h</header>
+   <container>1</container>
+  </customwidget>
+  <customwidget>
+   <class>ctkPathLineEdit</class>
+   <extends>QWidget</extends>
+   <header>ctkPathLineEdit.h</header>
+  </customwidget>
+ </customwidgets>
+ <resources/>
+ <connections/>
+</ui>

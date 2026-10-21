@@ -777,6 +777,30 @@ def test_protocol_client_correlates_session_ids_and_replies(live, bare):
     assert connecting.state is SessionState.CREATED
 
 
+def test_protocol_client_recognises_the_end_of_its_own_session_only(live):
+    """``ends_session`` applies the inbound checks and T11, also after the client closed (the panel's Stop)."""
+    mine = envelope.make("session.expired", sessionId=SESSION_ID, reason="IDLE")
+    closed = envelope.make("session.closed", sessionId=SESSION_ID, reason="PUBLISHER_CLOSED")
+    live.close()
+    assert live.ends_session(mine) and live.ends_session(closed)
+    for message in (
+        envelope.make("session.expired", sessionId="sess_OTHER", reason="IDLE"),  # T11
+        {"type": "session.expired", "sessionId": SESSION_ID, "reason": "IDLE"},  # no envelope
+        {**mine, "protocolVersion": "2.0"},
+        {**mine, "reason": "not an enum value"},
+        {**mine, "type": "session.publisherState"},
+        {**mine, "type": []},  # relay input: never raises
+        {**mine, "type": {}},
+        envelope.make("error", code="SESSION_CLOSED", message="relay text"),
+        b"session.expired",
+    ):
+        assert not live.ends_session(message)
+    fresh = ProtocolClient(make_client_info("5.12.4", "win32"))
+    assert not fresh.ends_session(mine)  # no session yet
+    # nothing changed
+    assert live.state is SessionState.CLOSED and live.close_reason == "USER_STOPPED"
+
+
 # --------------------------------------------------------------------------- secrets (T4, NFR-17)
 
 

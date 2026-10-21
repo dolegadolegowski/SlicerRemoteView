@@ -62,11 +62,21 @@ class FakeRelay:
     frame the transport sent (text parsed as JSON); ``client_close_codes`` the close codes the transport sent."""
 
     def __init__(
-        self, behaviour: str = "echo", *, tls=None, process_request=None, max_queue=16
+        self,
+        behaviour: str = "echo",
+        *,
+        tls=None,
+        process_request=None,
+        max_queue=16,
+        read_bytes_per_s: float = 0,
     ) -> None:
         self.behaviour = behaviour
-        self.received: list[tuple[int, object]] = []
-        self.received_at: list[float] = []  # time.monotonic() of each entry of received
+        #: ``slow-pong``/``slow-silent``: each frame takes ``len / read_bytes_per_s`` s to read, in order — a ping sent
+        #: behind a chunk is answered only after the chunk (the peer of a slow uplink)
+        self.read_bytes_per_s = read_bytes_per_s
+        self._log: list[
+            tuple[int, object, float]
+        ] = []  # (connection, message, time.monotonic()), one append each
         self.client_close_codes: list[int | None] = []
         self.connections = 0
         self.release = threading.Event()  # ends the "stuck" handlers
@@ -85,6 +95,20 @@ class FakeRelay:
         self.port = self._server.socket.getsockname()[1]
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
 
+    @property
+    def received(self) -> list[tuple[int, object]]:
+        return [(number, message) for number, message, _ in list(self._log)]
+
+    def ping_times(self, connection: int | None = None) -> list[float]:
+        """When the relay read each ``ping`` (of one connection, or all)."""
+        return [
+            at
+            for number, message, at in list(self._log)
+            if isinstance(message, dict)
+            and message.get("type") == "ping"
+            and connection in (None, number)
+        ]
+
     def url(self, scheme: str = "ws", host: str = "127.0.0.1") -> str:
         return f"{scheme}://{host}:{self.port}/ws"
 
@@ -101,8 +125,9 @@ class FakeRelay:
         try:
             for frame in ws:
                 message = json.loads(frame) if isinstance(frame, str) else frame
-                self.received.append((number, message))
-                self.received_at.append(time.monotonic())
+                if self.read_bytes_per_s and not isinstance(frame, str):
+                    time.sleep(len(frame) / self.read_bytes_per_s)
+                self._log.append((number, message, time.monotonic()))
                 self._answer(ws, number, frame, message)
         except ConnectionClosed:
             pass
@@ -115,11 +140,18 @@ class FakeRelay:
         if self.behaviour == "echo":
             ws.send(frame)
         elif (
-            self.behaviour == "pong" and isinstance(message, dict) and message.get("type") == "ping"
+            self.behaviour in ("pong", "slow-pong", "pong-once", "pong-then-close")
+            and isinstance(message, dict)
+            and message.get("type") == "ping"
         ):
+            if self.behaviour == "pong-once":
+                # the first ping is answered, the next ones are not
+                self.behaviour = "silent"
             ws.send(
                 json.dumps({"protocolVersion": "1.0", "type": "pong", "replyTo": message["id"]})
             )
+            if self.behaviour == "pong-then-close" and number == 1:
+                ws.close(1011, "test")
         elif (
             self.behaviour == "foreign-pong"
             and isinstance(message, dict)
@@ -482,13 +514,245 @@ def test_transport_answered_pings_keep_the_connection_and_pongs_are_consumed(rel
     ]
     validators = schemas.compile_schemas()
     assert all(schemas.validate_message(p, None, validators) == [] for p in pings)  # §9.1
-    sent = [
-        t
-        for t, (_, m) in zip(server.received_at, server.received, strict=True)
-        if m.get("type") == "ping"
-    ]
     # one per interval (0.1 s), never a storm
-    assert min(b - a for a, b in itertools.pairwise(sent)) >= 0.08
+    assert min(b - a for a, b in itertools.pairwise(server.ping_times())) >= 0.08
+
+
+# SLC-26: the relay answers a ping after it has read the bytes written before it. ``MIN_UPLINK`` is the heartbeat's
+# assumed minimum speed in these tests, so a full chunk is worth 1.05 s of waiting.
+CHUNK = bytes(transport.MAX_BINARY_BYTES)  # a full §6.3 frame: 1 MiB + the 12-byte header
+MIN_UPLINK = 1_000_000.0
+
+
+def connect_and_create(relay, make_transport, behaviour, *, read_bytes_per_s=0, **options):
+    """A transport connected to a fake relay, ``session.create`` sent (pings follow the first text message, §3.1)."""
+    server = relay(behaviour, read_bytes_per_s=read_bytes_per_s)
+    options = {"ping_interval": 0.05, "pong_timeout": 0.2, "min_uplink": MIN_UPLINK} | options
+    client, events = make_transport(server.url(), **options)
+    connection = next_event(events, Connected).connection
+    assert client.send({"type": "session.create"}, connection=connection)
+    return server, client, events, connection
+
+
+def test_transport_heartbeat_waits_for_the_bytes_written_ahead_of_a_ping(relay, make_transport):
+    server, client, events, connection = connect_and_create(
+        relay, make_transport, "slow-pong", read_bytes_per_s=2_000_000
+    )
+    started = time.monotonic()
+    # 2 MiB: the relay needs 1.05 s to read them, five times the pong timeout
+    assert client.send(CHUNK, connection=connection) and client.send(CHUNK, connection=connection)
+    wait_until(lambda: len(server.ping_times()) >= 2)
+    # the first ping was answered, and only after the chunks: otherwise this test would prove nothing
+    assert server.ping_times()[0] - started > 0.8
+    assert drain(events) == [] and server.connections == 1
+
+
+def test_transport_heartbeat_still_ends_a_peer_that_reads_but_never_answers(relay, make_transport):
+    _server, client, events, connection = connect_and_create(
+        relay, make_transport, "slow-silent", read_bytes_per_s=2_000_000, sleep=recording_sleep([])
+    )
+    started = time.monotonic()
+    assert client.send(CHUNK, connection=connection)
+    drop = next_event(events, Disconnected, timeout=5)
+    assert drop.error.kind is ErrorKind.HEARTBEAT
+    # the ping goes out 0.05 s after the create; its deadline is 0.2 s + the 1 MiB ahead of it at MIN_UPLINK, less
+    # the 0.05 s of credit: ≈ 1.2 s. Without the extension the connection would end after 0.25 s.
+    assert 1.1 <= time.monotonic() - started <= 2.5
+
+
+def test_transport_heartbeat_extension_is_bounded_by_what_buffers_can_hold(
+    relay, make_transport, monkeypatch
+):
+    monkeypatch.setattr(transport, "MAX_UNREAD_BYTES", 100_000)  # worth 0.1 s at MIN_UPLINK
+    _server, client, events, connection = connect_and_create(
+        relay, make_transport, "silent", ping_interval=0.3, sleep=recording_sleep([])
+    )
+    started = time.monotonic()
+    for _ in range(4):  # 4 MiB written ahead of the first ping: ten times the cap
+        assert client.send(CHUNK, connection=connection)
+    assert next_event(events, Disconnected, timeout=5).error.kind is ErrorKind.HEARTBEAT
+    elapsed = time.monotonic() - started
+    # ping at 0.3 s, then 0.2 s + at most the 0.1 s of the cap, less the credit; uncapped it would be 1.2 s later
+    assert 0.45 <= elapsed < 1.1
+
+
+def test_transport_heartbeat_defaults_bound_the_wait_for_a_silent_peer():
+    # 1 Mbit/s and 8 MiB of buffers: a peer that reads and never answers is ended within 10 s + 8 MiB / 1 Mbit/s
+    # (docs/research/slicer-heartbeat.md); the idle bound stays the protocol's 10 s.
+    assert transport.MIN_UPLINK_BYTES_PER_S == 125_000
+    assert transport.MAX_UNREAD_BYTES == 8 * 1_048_576
+    wait = transport.PONG_TIMEOUT_S + transport.MAX_UNREAD_BYTES / transport.MIN_UPLINK_BYTES_PER_S
+    assert 70 < wait < 80
+    assert wait > transport.SEND_TIMEOUT_S
+
+
+def test_transport_heartbeat_credits_the_time_a_minimum_link_needed_to_read_the_bytes(
+    relay, make_transport
+):
+    server, client, events, connection = connect_and_create(
+        relay, make_transport, "silent", ping_interval=0.8, sleep=recording_sleep([])
+    )
+    assert client.send(CHUNK, connection=connection)
+    wait_until(server.ping_times, timeout=5)
+    ping_read = server.ping_times()[0]
+    assert next_event(events, Disconnected, timeout=5).error.kind is ErrorKind.HEARTBEAT
+    # by the ping 0.8 s have passed: a MIN_UPLINK link has read 0.8 MB of the 1.05 MB, so 0.2 s + ≈ 0.25 s, not 1.25 s
+    assert 0.3 <= time.monotonic() - ping_read < 0.9
+
+
+def test_transport_heartbeat_credits_only_the_time_since_the_last_answered_ping(
+    relay, make_transport
+):
+    server, client, events, connection = connect_and_create(
+        relay, make_transport, "pong-once", ping_interval=0.5, sleep=recording_sleep([])
+    )
+    # ping 1 goes out at 0.5 s and is answered at once; the chunk follows it
+    wait_until(lambda: len(server.ping_times()) >= 1)
+    assert client.send(CHUNK, connection=connection)
+    # ping 2 at 1.0 s is never answered
+    wait_until(lambda: len(server.ping_times()) >= 2)
+    second = server.ping_times()[1]
+    assert next_event(events, Disconnected, timeout=5).error.kind is ErrorKind.HEARTBEAT
+    # 1.05 MB written since ping 1, 0.5 s of credit since it: 0.2 s + ≈ 0.55 s (from the connection's start: 0.25 s)
+    assert 0.55 <= time.monotonic() - second < 1.2
+
+
+def test_transport_heartbeat_forgets_the_bytes_an_answered_ping_confirmed(relay, make_transport):
+    server, client, events, connection = connect_and_create(
+        relay, make_transport, "pong-once", sleep=recording_sleep([])
+    )
+    assert client.send(CHUNK, connection=connection)
+    # the first ping is answered (1 MiB confirmed); the second is not
+    wait_until(lambda: len(server.ping_times()) >= 2)
+    second = server.ping_times()[1]
+    assert next_event(events, Disconnected, timeout=5).error.kind is ErrorKind.HEARTBEAT
+    # the 1 MiB of the first round does not count again: 0.2 s, not 0.2 s + 1.05 s
+    assert time.monotonic() - second < 0.7
+
+
+def test_transport_heartbeat_counts_chunks_written_after_a_ping_until_it_is_answered(
+    relay, make_transport
+):
+    server, client, events, connection = connect_and_create(
+        relay, make_transport, "slow-pong", read_bytes_per_s=2_000_000
+    )
+    # chunk A is read until ≈ 0.52 s; the first ping is out behind it and not yet answered
+    assert client.send(CHUNK, connection=connection)
+    time.sleep(0.25)
+    # chunk B: after ping 1 and ahead of ping 2
+    assert client.send(CHUNK, connection=connection)
+    wait_until(lambda: len(server.ping_times()) >= 3)
+    assert drain(events) == [] and server.connections == 1
+
+
+def test_transport_heartbeat_counts_bytes_per_connection(relay, make_transport):
+    # connection 1 is closed after its first frame; connection 2 stays silent
+    _server, client, events, first = connect_and_create(
+        relay, make_transport, "close-first", sleep=recording_sleep([])
+    )
+    # 1 MiB written on a connection that is about to end
+    assert client.send(CHUNK, connection=first)
+    assert next_event(events, Disconnected).connection == first
+    # the chunk was written, not dropped before it
+    assert client.dropped_outbound == 0
+    second = next_event(events, Connected).connection
+    assert client.send({"type": "session.create"}, connection=second)
+    started = time.monotonic()
+    assert next_event(events, Disconnected, timeout=5).error.kind is ErrorKind.HEARTBEAT
+    # the old connection's chunk does not stretch this deadline
+    assert time.monotonic() - started < 0.7
+
+
+def test_transport_heartbeat_forgets_what_the_previous_connection_confirmed(relay, make_transport):
+    # connection 1 answers a ping behind 2 MiB and is closed; connection 2 sends 3 MiB behind its ping and the relay
+    # needs 1.26 s to read them. Had connection 1's 2 MiB stayed "confirmed", connection 2's deadline would be 0.7 s.
+    server = relay("pong-then-close", read_bytes_per_s=2_500_000)
+    client, events = make_transport(
+        server.url(),
+        ping_interval=0.15,
+        pong_timeout=0.2,
+        min_uplink=2_000_000,
+        sleep=recording_sleep([]),
+    )
+    first = next_event(events, Connected).connection
+    assert client.send({"type": "session.create"}, connection=first)
+    assert client.send(CHUNK, connection=first) and client.send(CHUNK, connection=first)
+    assert next_event(events, Disconnected).connection == first
+    second = next_event(events, Connected).connection
+    assert client.send({"type": "session.create"}, connection=second)
+    for _ in range(3):
+        assert client.send(CHUNK, connection=second)
+    wait_until(lambda: len(server.ping_times(2)) >= 2)
+    assert drain(events) == [] and server.connections == 2
+
+
+def test_transport_heartbeat_of_an_idle_connection_is_the_protocols_pong_timeout(
+    relay, make_transport
+):
+    _server, _client, events, _connection = connect_and_create(
+        relay, make_transport, "silent", ping_interval=0.3, sleep=recording_sleep([])
+    )
+    started = time.monotonic()
+    assert next_event(events, Disconnected, timeout=5).error.kind is ErrorKind.HEARTBEAT
+    # the ping at 0.3 s and 0.2 s more, plus a few hundred bytes at MIN_UPLINK: not shorter (the credit of 0.3 s at
+    # MIN_UPLINK must not turn the deadline into the past) and not longer
+    assert 0.45 <= time.monotonic() - started < 0.8
+
+
+def test_transport_discard_queued_drops_the_waiting_frames_of_one_connection():
+    events: queue.Queue = queue.Queue()
+    client = RelayTransport("wss://relay.example.org/ws", events)
+    client._pending.extend([(1, b"a"), (2, b"b"), (1, "c"), (2, "d")])
+    client._discard(1)
+    assert list(client._pending) == [(2, b"b"), (2, "d")] and client.discarded_outbound == 2
+    # a transport that is not running discards nothing
+    assert client.dropped_outbound == 0 and client.discard_queued(connection=2) is False
+
+
+def test_transport_discard_queued_runs_in_the_worker_thread(relay, make_transport, monkeypatch):
+    server = relay("silent")
+    client, events = make_transport(server.url(), ping_interval=60)
+    next_event(events, Connected)
+    threads: list[str] = []
+    original = client._discard
+
+    def spy(connection: int) -> None:
+        threads.append(threading.current_thread().name)
+        original(connection)
+
+    monkeypatch.setattr(client, "_discard", spy)
+    assert client.discard_queued(connection=1)
+    wait_until(lambda: threads)
+    assert threads == ["RemoteView-transport"] and threading.current_thread().name not in threads
+
+
+def test_transport_discard_queued_stops_the_rest_of_a_slow_upload(relay, make_transport):
+    # 64 MiB take 3 s to read
+    server = relay("slow-silent", read_bytes_per_s=20_000_000)
+    client, events = make_transport(server.url(), ping_interval=60)
+    connection = next_event(events, Connected).connection
+    assert client.send({"type": "session.create"}, connection=connection)
+    # far more than the buffers of both ends hold; the writer is blocked on one of them
+    for _ in range(64):
+        assert client.send(CHUNK, connection=connection)
+    time.sleep(0.3)
+    assert client.discard_queued(connection=connection)
+    wait_until(lambda: client.discarded_outbound > 0)
+    # the connection itself is untouched, and still usable
+    assert drain(events) == []
+    assert client.send({"type": "after"}, connection=connection)
+    wait_until(lambda: any(m == {"type": "after"} for _, m in server.received), timeout=60)
+    delivered = sum(isinstance(m, bytes) for _, m in server.received)
+    # every chunk was either delivered or discarded, and the discarded ones are a good part of the 64 (the buffers of
+    # both ends hold about 20 MiB; the slow reader got through 6 in the 0.3 s)
+    assert delivered + client.discarded_outbound == 64
+    assert client.discarded_outbound >= 8 and client.dropped_outbound == 0
+
+
+@pytest.mark.parametrize("value", [0, -1.0, float("nan")])
+def test_transport_min_uplink_must_be_positive(value):
+    with pytest.raises(ValueError, match="min_uplink"):
+        RelayTransport("wss://relay.example.org/ws", queue.Queue(), min_uplink=value)
 
 
 def test_transport_passes_on_pongs_it_did_not_ask_for(relay, make_transport):

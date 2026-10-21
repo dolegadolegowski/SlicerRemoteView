@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>PresentationWindow</class>
+ <widget class="QWidget" name="PresentationWindow">
+  <property name="windowTitle">
+   <string>RemoteView — join this session</string>
+  </property>
+  <layout class="QVBoxLayout" name="presentationLayout">
+   <item>
+    <widget class="QLabel" name="presentationCodeLabel">
+     <property name="font">
+      <font>
+       <family>Courier New</family>
+       <pointsize>64</pointsize>
+       <bold>true</bold>
+      </font>
+     </property>
+     <property name="accessibleName">
+      <string>Session code</string>
+     </property>
+     <property name="text">
+      <string/>
+     </property>
+     <property name="textFormat">
+      <enum>Qt::PlainText</enum>
+     </property>
+     <property name="alignment">
+      <set>Qt::AlignCenter</set>
+     </property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QLabel" name="presentationQrLabel">
+     <property name="minimumSize">
+      <size>
+       <width>360</width>
+       <height>360</height>
+      </size>
+     </property>
+     <property name="accessibleName">
+      <string>QR code of the join link</string>
+     </property>
+     <property name="text">
+      <string/>
+     </property>
+     <property name="textFormat">
+      <enum>Qt::PlainText</enum>
+     </property>
+     <property name="alignment">
+      <set>Qt::AlignCenter</set>
+     </property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QLabel" name="presentationHintLabel">
+     <property name="text">
+      <string>Scan the QR code with a phone camera, or open the viewer and type the code.</string>
+     </property>
+     <property name="textFormat">
+      <enum>Qt::PlainText</enum>
+     </property>
+     <property name="alignment">
+      <set>Qt::AlignCenter</set>
+     </property>
+     <property name="wordWrap">
+      <bool>true</bool>
+     </property>
+    </widget>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

@@ -9,13 +9,41 @@ and imports nothing heavier than ``slicer``/``qt``. Runtime dependencies are imp
 user clicks *Start session* (SLC-09, SLC-10).
 """
 
+import sys
+import time
+
 import qt
+import slicer
 from slicer.ScriptedLoadableModule import (
     ScriptedLoadableModule,
     ScriptedLoadableModuleLogic,
     ScriptedLoadableModuleTest,
     ScriptedLoadableModuleWidget,
 )
+
+#: QSettings keys (Slicer's own settings file): the relay address and the path of an additional CA certificate. Only
+#: values the transport accepted are stored — a refused address may hold credentials (§3.1).
+RELAY_URL_SETTING = "RemoteView/RelayURL"
+EXTRA_CA_SETTING = "RemoteView/ExtraCACertificate"
+#: NFR-30: the QR code in the panel is at least 240 × 240 px (``remoteview_core.links.MIN_QR_PIXELS``, repeated here
+#: so that nothing but ``qt`` and ``slicer`` is imported when the module loads).
+MIN_QR_PIXELS = 240
+#: No built-in relay until `deploy` names the production host (DEP-07) and `release` confirms it: a default address
+#: would send data to whoever controls that name.
+DEFAULT_RELAY_URL = ""
+#: The main-thread pump that drains the transport's events (architecture §6, SLC-08 ADR 0009).
+PUMP_INTERVAL_MS = 50
+#: The code of the Presentation window, in points (NFR-29: readable from 2 m on a 24" screen needs ≥ 48 pt), and the
+#: size of its QR code in pixels (the panel's own is the 240 px of NFR-30).
+PRESENTATION_CODE_POINTS = 64
+PRESENTATION_QR_PIXELS = 480
+#: How long *Copy link* says "Link copied".
+COPIED_FEEDBACK_MS = 1500
+#: The Presentation window's hint, with and without a QR code to scan.
+SCAN_HINT = "Scan the QR code with a phone camera, or open the viewer and type the code."
+TYPE_HINT = "Open the viewer and type the code."
+#: Shown under the status when the link exists but its QR code cannot be drawn.
+QR_NOT_DRAWN = "The QR code could not be drawn. Read the code out or use Copy link."
 
 #
 # RemoteView
@@ -55,28 +83,248 @@ SlicerRemoteView. Module layout follows the 3D Slicer scripted module template.
 
 
 class RemoteViewWidget(ScriptedLoadableModuleWidget):
-    """Module panel. Placeholder until the session UI lands (SLC-09)."""
+    """Module panel: Qt only. What Start/Stop do and what the panel shows is ``remoteview_core.panel`` (SLC-09)."""
 
     def __init__(self, parent=None) -> None:
         # Set before the base __init__, which calls setup() itself when parent is None.
         self.logic = None
+        self.ui = None
+        self.controller = None
+        self.pumpTimer = None
+        self.link = ""  # the join link of the running session (it holds the code): never logged
+        self.qrLink = ""  # the link the cached pixmaps belong to
+        self.qrPixmaps = {}  # pixel size -> QPixmap (or None when it could not be drawn)
+        self.shownPixmaps = {}  # label name -> the pixmap it shows (assigned only when it changes)
+        self.presentation = None
+        self.presentationUi = None
         ScriptedLoadableModuleWidget.__init__(self, parent)
 
     def setup(self) -> None:
         ScriptedLoadableModuleWidget.setup(self)
         self.logic = RemoteViewLogic()
 
-        statusLabel = qt.QLabel(
-            "RemoteView is not connected. Session controls arrive in a later version."
+        uiWidget = slicer.util.loadUI(self.resourcePath("UI/RemoteView.ui"))
+        self.layout.addWidget(uiWidget)
+        self.ui = slicer.util.childWidgetVariables(uiWidget)
+
+        codeFont = self.ui.codeLabel.font
+        # "Courier New" from the .ui is not installed everywhere
+        codeFont.setStyleHint(qt.QFont.Monospace)
+        # 5 characters read aloud and retyped
+        codeFont.setLetterSpacing(qt.QFont.PercentageSpacing, 130)
+        self.ui.codeLabel.font = codeFont
+
+        # the consent statement names the relay being typed, before anything is sent (R-06)
+        self.ui.relayUrlLineEdit.connect("textChanged(QString)", self.onRelayUrlChanged)
+        self.ui.relayUrlLineEdit.text = slicer.util.settingsValue(
+            RELAY_URL_SETTING, DEFAULT_RELAY_URL
         )
-        statusLabel.objectName = "statusLabel"
-        statusLabel.wordWrap = True
-        self.layout.addWidget(statusLabel)
-        self.layout.addStretch(1)
+        self.onRelayUrlChanged(self.ui.relayUrlLineEdit.text)
+        caFile = slicer.util.settingsValue(EXTRA_CA_SETTING, "")
+        self.ui.extraCaPathLineEdit.currentPath = caFile
+        # A remembered extra trust anchor is never applied out of sight (T5): show the section that holds it.
+        self.ui.advancedCollapsibleButton.collapsed = not caFile
+        self.ui.startButton.connect("clicked(bool)", self.onStartClicked)
+        self.ui.stopButton.connect("clicked(bool)", self.onStopClicked)
+        self.ui.copyLinkButton.connect("clicked(bool)", self.onCopyLinkClicked)
+        self.ui.presentButton.connect("clicked(bool)", self.onPresentClicked)
+
+        self.pumpTimer = qt.QTimer()
+        self.pumpTimer.setInterval(PUMP_INTERVAL_MS)
+        self.pumpTimer.connect("timeout()", self.onPump)
 
     def cleanup(self) -> None:
-        """Called when the module is unloaded (SLC-22 closes a running session here)."""
-        self.logic = None
+        """Called when the module is unloaded: a running session is closed (waits up to 3 s)."""
+        if self.pumpTimer is not None:
+            self.pumpTimer.stop()
+        try:
+            # no code is left on a projector or in a hidden label
+            self.closePresentation()
+            self.showPixmap("qrLabel", self.ui.qrLabel, None)
+            self.forgetQr()
+            self.link = ""
+        finally:  # and the session is closed even if clearing the widgets failed
+            if self.controller is not None:
+                self.controller.shutdown()
+            self.controller = None
+            self.logic = None
+
+    def onRelayUrlChanged(self, url: str) -> None:
+        from remoteview_core.consent import consent_text  # noqa: PLC0415 — standard library only
+
+        self.ui.consentLabel.text = consent_text(url)
+
+    def onStartClicked(self, _checked: bool = False) -> None:
+        # Imported only now: nothing of the session machinery is loaded before the user starts (FR-02).
+        from remoteview_core.panel import PanelController  # noqa: PLC0415
+
+        if self.controller is None:
+            self.controller = PanelController(
+                slicer_version=slicer.app.applicationVersion,
+                platform=sys.platform,
+                scene=self.logic.sceneApi,
+                ensure_deps=self.ensureDependencies,
+            )
+        url = self.ui.relayUrlLineEdit.text.strip()
+        caFile = self.ui.extraCaPathLineEdit.currentPath.strip()
+        # the installation below runs Qt's event loop (dialogs, pip's progress window): no second click meanwhile
+        self.ui.startButton.enabled = False
+        try:
+            view = self.controller.start(url, extra_ca_file=caFile or None)
+        except Exception:
+            # an error in a dialog or the installer must not leave Start disabled
+            self.render(self.controller.view)
+            raise
+        if self.controller.active:  # the address and the CA file were accepted
+            settings = qt.QSettings()
+            settings.setValue(RELAY_URL_SETTING, url)
+            settings.setValue(EXTRA_CA_SETTING, caFile)
+            self.pumpTimer.start()
+        self.render(view)
+
+    def ensureDependencies(self):
+        """Install the packages the session needs, after the user agrees (SLC-10, FR-16): the controller calls this
+        once the relay address is accepted and before the transport starts."""
+        from remoteview_core import deps  # noqa: PLC0415 — standard library only
+
+        return deps.ensure_runtime_deps(self.logic.installPackages, self.confirmInstall)
+
+    def confirmInstall(self, message: str, details: str) -> bool:
+        from remoteview_core.deps import CONFIRM_TITLE  # noqa: PLC0415
+
+        return slicer.util.confirmOkCancelDisplay(message, CONFIRM_TITLE, detailedText=details)
+
+    def onStopClicked(self, _checked: bool = False) -> None:
+        if self.controller is not None:
+            self.render(self.controller.stop())
+
+    def onPump(self) -> None:
+        view = self.controller.pump()
+        self.render(view)
+        if not self.controller.active:
+            self.pumpTimer.stop()
+        # let the transport thread take the GIL (architecture §6, docs/research/slicer.md §3)
+        time.sleep(0.001)
+
+    def render(self, view) -> None:
+        """Show a ``remoteview_core.panel.PanelView`` (plain-text labels only)."""
+        self.ui.codeLabel.text = view.code
+        self.ui.statusLabel.text = view.status
+        self.ui.detailLabel.text = view.detail
+        self.ui.startButton.enabled = view.start_enabled
+        self.ui.stopButton.enabled = view.stop_enabled
+        self.ui.relayUrlLineEdit.enabled = view.settings_enabled
+        self.ui.extraCaPathLineEdit.enabled = view.settings_enabled
+        # the QR code last: Start/Stop and the texts are in place whatever drawing it does
+        drawn = self.showLink(view.link, view.code)
+        if view.link and not drawn:
+            self.ui.detailLabel.text = "\n".join(
+                part for part in (view.detail, QR_NOT_DRAWN) if part
+            )
+
+    def showLink(self, link: str, code: str) -> bool:
+        """The QR code, *Copy link* and the Presentation window follow the session: only while it runs (T6). The
+        window shows the code even without a QR code (a link too long for one, or one that cannot be drawn) — then
+        reading the code out is the way in. Returns whether the panel shows a QR code."""
+        self.link = link
+        self.ui.copyLinkButton.enabled = bool(link)
+        self.ui.presentButton.enabled = bool(code)
+        if not link:
+            self.forgetQr()  # the session's QR bitmaps hold its code
+        qr = self.qrPixmap(link, MIN_QR_PIXELS) if link else None
+        self.showPixmap("qrLabel", self.ui.qrLabel, qr)
+        if not code:
+            self.closePresentation()
+        elif self.presentation is not None:
+            ui = self.presentationUi
+            ui.presentationCodeLabel.text = code
+            big = self.qrPixmap(link, PRESENTATION_QR_PIXELS) if link else None
+            self.showPixmap("presentationQrLabel", ui.presentationQrLabel, big)
+            ui.presentationHintLabel.text = SCAN_HINT if big is not None else TYPE_HINT
+        return qr is not None
+
+    def showPixmap(self, name: str, label, pixmap) -> None:
+        """Show ``pixmap`` on ``label`` (hide and empty it for ``None``). The label never gets smaller than the code:
+        a layout that cropped the quiet zone would make it unscannable. Assigned only when it changes (every 50 ms
+        otherwise)."""
+        if name in self.shownPixmaps and self.shownPixmaps[name] is pixmap:
+            return
+        self.shownPixmaps[name] = pixmap
+        if pixmap is None:
+            label.visible = False
+            label.clear()
+            return
+        label.setMinimumSize(pixmap.width(), pixmap.height())
+        label.pixmap = pixmap
+        label.visible = True
+
+    def forgetQr(self) -> None:
+        self.qrLink, self.qrPixmaps = "", {}
+
+    def qrPixmap(self, link: str, minPixels: int):
+        """The QR code of ``link`` as a ``QPixmap`` of at least ``minPixels``, painted dark on white whatever the Slicer
+        theme (a light-on-dark code does not scan). Cached: the panel renders every 50 ms. ``None`` if it cannot be
+        drawn — the link and the code stay usable; only the exception type is logged."""
+        if link != self.qrLink:
+            self.qrLink, self.qrPixmaps = link, {}
+        if minPixels in self.qrPixmaps:
+            return self.qrPixmaps[minPixels]
+        from remoteview_core import links  # noqa: PLC0415 — imports segno, installed after consent (SLC-10)
+
+        pixmap = None
+        try:
+            modules = links.qr_modules(link)
+            scale = links.qr_scale(len(modules), minPixels)
+            side = len(modules) * scale
+            pixmap = qt.QPixmap(side, side)
+            pixmap.fill(qt.QColor("white"))
+            painter = qt.QPainter(pixmap)
+            try:
+                dark = qt.QColor("black")
+                for x, y, width in links.dark_runs(modules):
+                    painter.fillRect(x * scale, y * scale, width * scale, scale, dark)
+            finally:
+                painter.end()  # Qt must not destroy a device that is still being painted on
+        except Exception as exc:  # noqa: BLE001 — a drawing problem must not end the session
+            import logging  # noqa: PLC0415 — only for this warning
+
+            logging.getLogger(__name__).warning("QR code not drawn (%s)", type(exc).__name__)
+            pixmap = None
+        self.qrPixmaps[minPixels] = pixmap
+        return pixmap
+
+    def onCopyLinkClicked(self, _checked: bool = False) -> None:
+        if not self.link:
+            return
+        qt.QApplication.clipboard().setText(self.link)
+        self.ui.copyLinkButton.text = "Link copied"
+        qt.QTimer.singleShot(COPIED_FEEDBACK_MS, self.resetCopyLinkText)
+
+    def resetCopyLinkText(self) -> None:
+        if self.ui is not None:
+            self.ui.copyLinkButton.text = "Copy link"
+
+    def onPresentClicked(self, _checked: bool = False) -> None:
+        code = self.controller.view.code if self.controller is not None else ""
+        if not code:
+            return
+        if self.presentation is None:
+            self.presentation = slicer.util.loadUI(self.resourcePath("UI/PresentationWindow.ui"))
+            self.presentationUi = slicer.util.childWidgetVariables(self.presentation)
+            font = self.presentationUi.presentationCodeLabel.font
+            font.setStyleHint(qt.QFont.Monospace)
+            font.setPointSize(PRESENTATION_CODE_POINTS)
+            font.setLetterSpacing(qt.QFont.PercentageSpacing, 130)
+            self.presentationUi.presentationCodeLabel.font = font
+        self.showLink(self.link, code)
+        self.presentation.show()
+        self.presentation.raise_()
+
+    def closePresentation(self) -> None:
+        if self.presentation is not None:
+            self.presentation.hide()
+            self.presentationUi.presentationCodeLabel.text = ""
+            self.showPixmap("presentationQrLabel", self.presentationUi.presentationQrLabel, None)
 
 
 #
@@ -85,10 +333,30 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
 
 
 class RemoteViewLogic(ScriptedLoadableModuleLogic):
-    """Session logic. Placeholder: no state, no network until SLC-09."""
+    """Scene-side logic: the session lives in the panel's controller (SLC-09), which sends the scene this logic
+    exposes as the session's first snapshot (SLC-25)."""
 
     def __init__(self) -> None:
         ScriptedLoadableModuleLogic.__init__(self)
+
+    @staticmethod
+    def installPackages(requirements) -> None:
+        """Install exact ``requirements`` (``["websockets==17.2", …]``) with Slicer's pip support, which shows its own
+        progress window and error dialog, and raise when pip fails. The user agreed in our dialog, so Slicer's generic
+        one is off; our own result text covers a package that was loaded before (``prompt_restart=False``). Slicer
+        5.12 (NFR-24) has ``slicer.packaging``; anything older fails with the fixed text of ``remoteview_core.deps``."""
+        from slicer import packaging  # noqa: PLC0415 — Slicer's own module, imported at the first Start
+
+        packaging.pip_ensure(
+            requirements, prompt_install=False, prompt_restart=False, requester="RemoteView"
+        )
+
+    @staticmethod
+    def sceneApi():
+        """The current scene as ``remoteview_core.collect`` reads it: the model nodes the 3D view shows (SLC-22)."""
+        from remoteview_core.mrml_scene import MrmlSceneApi  # noqa: PLC0415 — imports VTK
+
+        return MrmlSceneApi(slicer.util.getNodesByClass, slicer.vtkMRMLFolderDisplayNode)
 
 
 #

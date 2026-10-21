@@ -10,10 +10,16 @@ set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}.py
   remoteview_core/__init__.py
   remoteview_core/collect.py
+  remoteview_core/consent.py
   remoteview_core/coords.py
+  remoteview_core/deps.py
   remoteview_core/glb_writer.py
+  remoteview_core/links.py
+  remoteview_core/mrml_scene.py
   remoteview_core/names.py
+  remoteview_core/panel.py
   remoteview_core/protocol_client.py
+  remoteview_core/snapshot.py
   remoteview_core/transport.py
   remoteview_core/vendored.py
   _vendor/remoteview_protocol/__init__.py
@@ -26,6 +32,8 @@ set(MODULE_PYTHON_SCRIPTS
 
 set(MODULE_PYTHON_RESOURCES
   Resources/Icons/${MODULE_NAME}.png
+  Resources/UI/${MODULE_NAME}.ui
+  Resources/UI/PresentationWindow.ui
   _vendor/remoteview_protocol/VENDORED.json
   _vendor/remoteview_protocol/py.typed
   _vendor/remoteview_protocol/schema/defs.schema.json

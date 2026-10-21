@@ -350,6 +350,9 @@ def _valid_error(m: Mapping[str, Any]) -> bool:
     )
 
 
+_SESSION_END_TYPES = frozenset({"session.expired", "session.closed"})
+
+
 def _valid_session_end(m: Mapping[str, Any]) -> bool:
     return _matches(m.get("sessionId"), _SESSION_ID) and _matches(m.get("reason"), _ENUM_VALUE)
 
@@ -425,6 +428,12 @@ class ProtocolClient:
 
     def __repr__(self) -> str:  # no code, no token (T4, T6)
         return f"ProtocolClient(state={self.state.value}, sceneVersion={self.versions.last})"
+
+    @property
+    def next_scene_version(self) -> int:
+        """The ``sceneVersion`` the next snapshot or update gets (§8.4), so a GLB's root extras can name it before
+        :meth:`begin_snapshot` allocates it; reading it allocates nothing."""
+        return self.versions.last + 1
 
     @property
     def has_publisher_token(self) -> bool:
@@ -565,6 +574,24 @@ class ProtocolClient:
             self.state = SessionState.GRACE
         elif self.state is SessionState.CONNECTING:
             self._close("CONNECT_FAILED")
+
+    def ends_session(self, message: Any) -> bool:
+        """``message`` is a valid ``session.expired``/``session.closed`` for this client's session (§4.5, T11) — also
+        once the client is closed, e.g. when the relay ended the session while our ``session.close`` was on its way.
+        Changes nothing."""
+        type_ = message.get("type") if isinstance(message, Mapping) else None
+        # relay input: a list or dict is not hashable, so the type is checked before the set lookup
+        if not isinstance(type_, str) or type_ not in _SESSION_END_TYPES:
+            return False
+        version = message.get("protocolVersion")
+        match = _VERSION.fullmatch(version) if isinstance(version, str) else None
+        return (
+            match is not None
+            and int(match.group(1)) == 1
+            and _valid_session_end(message)
+            and self.session_id is not None
+            and message["sessionId"] == self.session_id
+        )
 
     def _require_live(self, what: str) -> None:
         if self.state not in (SessionState.CREATED, SessionState.ACTIVE):
