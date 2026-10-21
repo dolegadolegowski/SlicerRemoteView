@@ -40,7 +40,7 @@ from remoteview_core.collect import SceneApi
 from remoteview_core.deps import DepsResult, Outcome
 from remoteview_core.links import join_url
 from remoteview_core.protocol_client import ProtocolClient, SessionState, envelope, make_client_info
-from remoteview_core.snapshot import SnapshotTooLargeError, build_snapshot
+from remoteview_core.snapshot import Snapshot, SnapshotTooLargeError, build_snapshot
 from remoteview_core.transport import Connected, Disconnected, Event, Received, RelayTransport
 
 _log = logging.getLogger(__name__)
@@ -163,6 +163,27 @@ def scene_refused_text(code: str | None) -> str:
         f"The relay refused the scene ({code or 'no reason'}). Stop and start the session; if it happens again, "
         "please report this."
     )
+
+
+def budget_text(snapshot: Snapshot) -> str:
+    """What the device profile's budgets left over (SLC-14, §7.5, NFR-03): nodes no filter could simplify, and a scene
+    above the profile's recommended size (sent anyway — the warning, not a refusal). Empty when the scene fits."""
+    parts = []
+    if snapshot.unreduced:
+        count = len(snapshot.unreduced)
+        parts.append(
+            f"{count} model{'s' if count != 1 else ''} could not be simplified for the device profile and "
+            f"{'are' if count != 1 else 'is'} sent whole."
+        )
+    if snapshot.over_target:
+        # MB = 10^6 bytes, one decimal; the size rounded up and the target down, so they never read the same
+        size = math.ceil(snapshot.byte_length / 100_000) / 10
+        target = math.floor(snapshot.target_bytes / 100_000) / 10
+        parts.append(
+            f"The scene is {size:.1f} MB, more than the {target:.1f} MB recommended for the device profile: viewers "
+            "may load it slowly. Hide models in 3D to make it smaller."
+        )
+    return " ".join(parts)
 
 
 def skipped_text(count: int) -> str:
@@ -433,7 +454,8 @@ class PanelController:
         for frame in snapshot.frames():
             self._send(frame)
         self._scene, self._scene_version = "sending", snapshot.scene_version
-        self._scene_detail = skipped_text(len(snapshot.skipped))
+        budget = budget_text(snapshot)
+        self._scene_detail = " ".join(t for t in (skipped_text(len(snapshot.skipped)), budget) if t)
 
     def _follow_scene(self, client: ProtocolClient) -> None:
         """After a relay message: the snapshot sent was acknowledged (``live``) or refused (``failed``)."""

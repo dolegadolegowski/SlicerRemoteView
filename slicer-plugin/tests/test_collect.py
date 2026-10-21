@@ -966,6 +966,17 @@ def test_collect_drops_triangles_without_area():
     )  # its own winding
 
 
+def test_collect_mesh_from_triangles_drops_triangles_that_are_not_there():
+    """The public helper (SLC-14 decimation output): IDs out of range or repeated are dropped, never read."""
+    positions = np.array([[0.0, 0, 0], [1, 0, 0], [0, 1, 0]])
+    mesh = collect.mesh_from_triangles(
+        positions, np.array([[0, 1, 2], [0, 1, 7], [-1, 0, 1], [1, 1, 2]])
+    )
+    np.testing.assert_array_equal(mesh.triangles, [[0, 1, 2]])
+    assert collect.mesh_from_triangles(positions, np.array([[0, 1, 9]])) is None
+    assert collect.mesh_from_triangles(positions, np.empty((0, 3))) is None
+
+
 def test_collect_exports_a_mesh_whose_normals_cancel_out():
     """Two triangles folded flat onto each other, wound consistently: their normals cancel where they meet. The node is
     exported — ``ras_to_gltf_normals`` makes a zero normal glTF +Y, so every normal written is a unit vector."""

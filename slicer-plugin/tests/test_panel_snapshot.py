@@ -97,6 +97,66 @@ def test_panel_snapshot_reports_models_left_out(fake):
     )
 
 
+def test_panel_snapshot_warns_about_the_device_profiles_budgets(fake, monkeypatch):
+    """SLC-14 (NFR-03): a scene above the profile's recommended size is sent with a warning; a model no filter could
+    simplify is sent whole and counted."""
+    from vtkmodules.vtkFiltersCore import vtkTriangleFilter  # noqa: PLC0415
+
+    from remoteview_core import decimate, snapshot  # noqa: PLC0415
+
+    def unusable(reduction):
+        return vtkTriangleFilter()  # a "decimation" that keeps every triangle
+
+    monkeypatch.setattr(decimate, "FILTERS", (unusable,))
+    small = decimate.Budget(
+        total_triangles=500_000, node_triangles=50, target_bytes=1_000
+    )  # sphere(8): 96
+    monkeypatch.setattr(snapshot, "PROFILES", {**decimate.PROFILES, "mobile": small})
+
+    def scene():
+        return FakeScene(
+            {"id": "vtkMRMLModelNode4", "mesh": sphere(8)}, {"id": "vtkMRMLModelNode5"}
+        )
+
+    ctl = controller(scene)
+    ctl.start(URL)
+    view = deliver(ctl, Connected(1), Received(1, created()))
+    assert view.detail.startswith(
+        "1 model shown in 3D could not be shared. 1 model could not be simplified for the device profile and is "
+        "sent whole. The scene is "
+    )
+    assert view.detail.endswith(
+        " MB, more than the 0.0 MB recommended for the device profile: viewers may load it slowly. Hide models in "
+        "3D to make it smaller."
+    )
+    assert (
+        view.status == "Sending the scene · no viewers yet."
+    )  # sent all the same (a warning, not a refusal)
+
+
+def test_panel_budget_text_counts_and_rounds():
+    def snap(**fields):
+        values = {
+            "messages": None,
+            "scene_version": 1,
+            "node_count": 1,
+            "triangle_count": 1,
+            "skipped": (),
+        }
+        return panel.Snapshot(
+            **(values | {"byte_length": 1_000_000, "target_bytes": 32 << 20} | fields)
+        )
+
+    assert panel.budget_text(snap()) == ""
+    assert panel.budget_text(snap(unreduced=("a", "b"))) == (
+        "2 models could not be simplified for the device profile and are sent whole."
+    )
+    text = panel.budget_text(snap(byte_length=33_554_433, target_bytes=33_554_432))  # one byte over
+    assert (
+        "33.6 MB, more than the 33.5 MB recommended" in text
+    )  # never the same number on both sides
+
+
 @pytest.mark.parametrize("withdrawn", ["stop", "timeout", "stale"])
 def test_panel_snapshot_never_collects_after_the_session_was_given_up(fake, withdrawn):
     """Opt-in (FR-02): the scene is collected only for a session that is live — not at Start or on Connected, and not
@@ -138,6 +198,9 @@ def test_panel_snapshot_too_large_keeps_the_session(fake):
     assert (
         view.detail.startswith("The scene is too large to send (")
         and "this relay accepts" in view.detail
+        and view.detail.endswith(
+            "Hide models in 3D, then stop and start the session."
+        )  # one action, NFR-23/31
     )
     assert ctl.phase is Phase.LIVE and view.code == CODE and view.stop_enabled
 

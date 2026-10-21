@@ -125,7 +125,8 @@ class CollectedScene:
 
 @dataclass(frozen=True, eq=False)
 class Mesh:
-    """Triangle mesh in the node's RAS frame (mm) — world RAS when a transform was baked: owned float64
+    """Triangle mesh in the frame of its input — a node's RAS frame (mm), world RAS when a transform was baked, glTF
+    metres for :func:`mesh_from_triangles` on an entity: owned float64
     ``positions``/``normals`` ``(n, 3)``, int64 ``triangles`` ``(m, 3)`` with every point used and no triangle
     repeating a vertex."""
 
@@ -299,6 +300,50 @@ def mesh_from_polydata(
         points, mirrored = _baked(points, transform, triangles[0])
         if mirrored:  # a mirror turns the triangles inside out: reverse them, so the normals point outwards again
             triangles = triangles[:, ::-1]
+    return _with_normals(points, triangles)
+
+
+def mesh_points_and_triangles(
+    polydata: vtkPolyData,
+) -> tuple[NDArray[np.float64], NDArray[np.int64]]:
+    """Owned float64 points ``(n, 3)`` and the 3-point polygons ``(m, 3)`` of a filter's output (e.g. a decimation)."""
+    points = polydata.GetPoints()
+    if points is None:
+        return np.empty((0, 3), dtype=np.float64), np.empty((0, 3), dtype=np.int64)
+    return _owned(points.GetData(), np.float64).reshape(-1, 3), _triangles(polydata.GetPolys())
+
+
+def polydata_from_triangles(
+    positions: NDArray[np.float64], triangles: NDArray[np.int64]
+) -> vtkPolyData:
+    """A new polydata with copies of ``positions`` (double) and ``triangles`` (point IDs, not checked)."""
+    points = vtkPoints()
+    points.SetData(numpy_to_vtk(np.asarray(positions, dtype=np.float64), deep=True))
+    data = vtkPolyData()
+    data.SetPoints(points)
+    data.SetPolys(_cell_array(np.asarray(triangles, dtype=np.int64)))
+    return data
+
+
+def mesh_from_triangles(
+    positions: NDArray[np.float64], triangles: NDArray[np.int64]
+) -> Mesh | None:
+    """The :class:`Mesh` of ``triangles`` over ``positions`` with point normals computed as for a collected node (same
+    frame as the input), or ``None`` when no triangle with an area is left. Triangles that repeat a vertex or reference
+    a missing point are dropped. A point normal can be zero (normals that cancel out): callers that write it directly
+    must check."""
+    triangles = np.asarray(triangles, dtype=np.int64).reshape(-1, 3)
+    positions = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
+    a, b, c = triangles.T
+    in_range = np.all((triangles >= 0) & (triangles < len(positions)), axis=1)
+    triangles = triangles[in_range & (a != b) & (b != c) & (a != c)]
+    if len(triangles) == 0:
+        return None
+    return _with_normals(polydata_from_triangles(positions, triangles).GetPoints(), triangles)
+
+
+def _with_normals(points: vtkPoints, triangles: NDArray[np.int64]) -> Mesh | None:
+    """The pipeline's last steps: drop triangles without area, compute the point normals, drop unused points."""
     # A triangle without area (collinear points, or flattened by a baked transform) has no normal of its own: as the
     # lowest-ID triangle it would seed ConsistencyOn with an arbitrary winding and turn the real ones over, and a
     # point only it uses would get a zero normal. It is invisible, so it goes.

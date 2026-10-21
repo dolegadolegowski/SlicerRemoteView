@@ -527,3 +527,48 @@ Expected results:
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|
 | | | | | |
+
+## §14 Decimation to the device profile (SLC-14; FR-10, NFR-03, protocol §7.5)
+
+Preconditions: §2's setup with relay (b) or (c) and a viewer joined. The panel uses the `mobile` profile (500k
+triangles in all, 100k per model; the profile selector is SLC-18). In a new scene run in the Python console
+
+```python
+import vtk
+def sphere(center, n, name):  # 2·n·(n − 2) triangles
+    source = vtk.vtkSphereSource()
+    source.SetCenter(*center)
+    source.SetRadius(40)
+    source.SetThetaResolution(n)
+    source.SetPhiResolution(n)
+    source.Update()
+    model = slicer.modules.models.logic().AddModel(source.GetOutput())
+    model.SetName(name)
+    return model
+sphere((0, 0, 0), 448, "Big")         # 399,616 triangles
+sphere((100, 0, 0), 240, "Medium")    # 114,240
+sphere((200, 0, 0), 160, "Small")     # 50,560
+sphere((300, 0, 0), 8, "Tiny")        # 96
+```
+
+Steps:
+
+1. Click *Start session* and join with the viewer.
+2. Stop the session. In *Models* select "Big" and look at *Information* (number of cells).
+
+Expected results:
+
+- Step 1: Slicer is busy for a few seconds while it simplifies "Big" and "Medium", and the code appears only then (SLC-28,
+  §15, shows the code first and a progress dialog); then "Sending the scene", then "Live". The viewer shows the four spheres, round and in
+  place — "Big" and "Medium" with visibly fewer, larger facets than in Slicer (100,000 triangles at most each; the
+  total is at most 500,000), "Small" and "Tiny" unchanged; all lit from outside. The panel shows no warning (the scene
+  is about 3 MB, below the 32 MB recommended for `mobile`).
+- Step 2: "Big" still has 399,616 cells in Slicer: only the copy that is sent is simplified.
+- Throughout: no traceback in the Python console.
+- `[TODO verify]` in Slicer 5.12.4: `vtkQuadricDecimation` and `vtkDecimatePro` from `vtkmodules.vtkFiltersCore` behave
+  as in the `vtk` 9.6.2 wheel (Slicer builds VTK 9.6.2, `docs/research/slicer-decimate.md`); how long the scene takes to
+  prepare (≈ 6 s on the development machine, which sends 250,656 triangles, 3.0 MB).
+
+| Date | Slicer version | OS | Result | Tester |
+|---|---|---|---|---|
+| | | | | |
