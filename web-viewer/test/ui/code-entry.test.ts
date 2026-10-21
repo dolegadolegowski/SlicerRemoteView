@@ -49,6 +49,21 @@ afterEach(() => {
 });
 
 describe("code entry", () => {
+  it("setCode fills the cells like a paste (deep link): canonical, hinted, or too long", () => {
+    entry.setError(describeCode("INVALID_CODE", "en"));
+    entry.setCode("7kq-4x");
+    expect(values()).toBe("7KQ4X");
+    expect(message().hidden).toBe(true); // the old error is gone
+    expect(join().disabled).toBe(false);
+    entry.setCode("7KQ0X");
+    expect(message().textContent).toContain("0 or O");
+    expect(join().disabled).toBe(true);
+    entry.setCode("7KQ4X8");
+    expect(values()).toBe("7KQ4X");
+    expect(message().textContent).toContain("exactly 5");
+    expect(join().disabled).toBe(true);
+  });
+
   it("renders five labelled cells configured for code entry", () => {
     expect(cells()).toHaveLength(5);
     for (const [i, cell] of cells().entries()) {
@@ -184,6 +199,44 @@ describe("code entry", () => {
     expect(join().disabled).toBe(false);
   });
 
+  it("offers Leave only while busy, when it is given onLeave; Leave never submits (WEB-22)", () => {
+    expect(entry.element.querySelector(".code-entry__leave")).toBeNull(); // no onLeave
+    entry.element.remove();
+    const onLeave = vi.fn();
+    entry = createCodeEntry({ onJoin, onLeave, lang: "en" });
+    document.body.append(entry.element);
+    const leave = entry.element.querySelector<HTMLButtonElement>(".code-entry__leave")!;
+    expect(leave.type).toBe("button");
+    expect(leave.textContent).toBe("Leave session");
+    expect(leave.hidden).toBe(true);
+    entry.focus();
+    type("7kq4x");
+    entry.setBusy(true);
+    expect(leave.hidden).toBe(false);
+    expect(leave.disabled).toBe(false); // unlike the cells and Join
+    leave.click();
+    expect(onLeave).toHaveBeenCalledTimes(1);
+    expect(onJoin).not.toHaveBeenCalled();
+    entry.setBusy(false);
+    expect(leave.hidden).toBe(true);
+  });
+
+  it("has a polite status line under Join that is always in the accessibility tree (WEB-14)", () => {
+    const status = entry.element.querySelector<HTMLElement>(".code-entry__status")!;
+    expect(status.getAttribute("role")).toBe("status");
+    expect(status.hidden).toBe(false);
+    expect(status.textContent).toBe("");
+    expect(status.previousElementSibling).toBe(join());
+    entry.setStatus("Waiting for the presenter");
+    expect(status.textContent).toBe("Waiting for the presenter");
+    const text = status.firstChild;
+    entry.setStatus("Waiting for the presenter"); // unchanged: not announced again
+    expect(status.firstChild).toBe(text);
+    entry.setStatus(null);
+    expect(status.textContent).toBe("");
+    expect(status.hidden).toBe(false);
+  });
+
   it("shows an error from the catalogue, and clears it on the next edit", () => {
     type("7kq4x");
     entry.setError(describeCode("INVALID_CODE", "en"));
@@ -221,11 +274,41 @@ describe("code entry", () => {
     expect(message().classList.contains("code-entry__message--error")).toBe(true);
   });
 
+  it("re-renders its texts, the hint and the error in the other language without losing input (WEB-21)", () => {
+    type("7kq0x"); // a hint
+    entry.setLang("pl");
+    expect(entry.element.querySelector("h1")!.textContent).toBe("Dołącz do sesji");
+    expect(cells()[0]!.getAttribute("aria-label")).toBe("Znak kodu 1 z 5");
+    expect(join().textContent).toBe("Dołącz");
+    expect(message().textContent).toContain("0 ani O");
+    expect(values()).toBe("7KQ0X");
+    entry.reset();
+    entry.setError(describeCode("INVALID_CODE", "en")); // made in another language
+    expect(message().textContent).toContain(describeCode("INVALID_CODE", "pl").title);
+    entry.setLang("en");
+    expect(message().textContent).toContain("Code not recognised");
+    entry.setBusy(true);
+    entry.setLang("pl");
+    expect(join().textContent).toBe("Dołączanie…");
+  });
+
+  it("puts the language switch in the title row, after the title (WEB-21)", () => {
+    const toggle = document.createElement("button");
+    const withToggle = createCodeEntry({ onJoin, lang: "en", languageToggle: toggle });
+    const head = withToggle.element.firstElementChild!;
+    expect(head.className).toBe("code-entry__head");
+    expect([...head.children].map((c) => c.tagName)).toEqual(["H1", "BUTTON"]);
+    expect(head.lastElementChild).toBe(toggle);
+    expect(entry.element.firstElementChild!.tagName).toBe("H1"); // no switch, no row
+  });
+
   it("localises to Polish", () => {
     entry.element.remove();
     entry = createCodeEntry({ onJoin, lang: "pl" });
     document.body.append(entry.element);
     expect(join().textContent).toBe("Dołącz");
+    const withLeave = createCodeEntry({ onJoin, onLeave: () => {}, lang: "pl" });
+    expect(withLeave.element.querySelector(".code-entry__leave")!.textContent).toBe("Opuść sesję");
     cells()[0]!.focus();
     type("7kq0x");
     expect(message().textContent).toContain("0 ani O");

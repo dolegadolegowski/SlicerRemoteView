@@ -1,6 +1,6 @@
 // WebSocket client for one viewer connection (WEB-04; docs/protocol.md §3, §5, §9). No DOM, no three.js:
 // the socket, the clock and the validator are injectable so the whole thing runs in vitest with a mock socket
-// and fake timers. Reconnect with backoff is WEB-14; this class is exactly one socket's lifetime.
+// and fake timers. This is exactly one socket's lifetime; reconnecting with backoff is `reconnect.ts` (WEB-14).
 //
 // Privacy (CLAUDE.md rule 6, NFR-15): the code and the viewer token are only ever sent as the body of
 // `viewer.join`; they are kept out of the URL and out of every log line (only `type` strings are logged).
@@ -22,7 +22,7 @@ export type JoinCredentials =
   { readonly code: string } | { readonly sessionId: string; readonly viewerToken: string };
 
 export interface ClientInfoOptions {
-  /** `web | quest-browser | quest2 | quest3 | other` (§5.1); WEB-15 detects it. */
+  /** `web | quest-browser | quest2 | quest3 | other` (§5.1); `platform.ts` detects it (WEB-15). */
   readonly platform?: string;
   /** `mobile | quest2 | quest3` — informational (§5.1). */
   readonly profile?: string;
@@ -53,6 +53,9 @@ export interface ConnectionOptions {
   readonly maxSnapshotBytes?: number;
   readonly heartbeatIntervalMs?: number;
   readonly pongTimeoutMs?: number;
+  /** Clock for the heartbeat's late-timer check; default `Date.now`. */
+  readonly now?: () => number;
+  readonly openTimeoutMs?: number;
   readonly lang?: Lang;
   readonly log?: LogFn;
 }
@@ -125,8 +128,14 @@ export interface Connection {
   send(message: OutboundMessage): boolean;
   /** Next message id for callers that build their own messages (`v-<n>`). */
   nextId(): string;
-  /** Sends `viewer.leave` and closes with `1000` (page unload, user leaves); the state becomes `idle`. */
+  /**
+   * Sends `viewer.leave` and closes with `1000` (page unload, user leaves); the state becomes `idle`, also from a
+   * closed state without a socket — a retry the user no longer wants (`disconnected`, WEB-14, or the code join after a
+   * relay restart, WEB-22) or a session that already ended.
+   */
   leave(): void;
+  /** While connected: sends a `ping` now and expects an answer within the pong timeout (back in view, WEB-14). */
+  checkAlive(): void;
   on<K extends keyof ConnectionEvents>(
     event: K,
     handler: (payload: ConnectionEvents[K]) => void,
@@ -186,6 +195,13 @@ const NEXT_BY_ERROR_CODE: Readonly<Record<string, ClosedState["kind"]>> = {
 };
 /** Close codes that say nothing by themselves (no frame, abnormal, normal, internal): the last `error` may. */
 const GENERIC_CLOSE_CODES = new Set([1000, 1001, 1005, 1006, 1011]);
+/**
+ * A pong timer that fires this much after its time ran while the page was frozen or throttled (iOS background, a
+ * hidden tab): the pong may be queued behind it, so it asks again instead of declaring the link dead (WEB-14).
+ */
+export const LATE_TIMER_MS = 2_000;
+/** A socket that has not opened by then is given up (black-holed route, captive portal) and retried (WEB-14). */
+export const OPEN_TIMEOUT_MS = 15_000;
 
 interface LastError {
   readonly code: string;
@@ -200,6 +216,8 @@ export function createConnection(options: ConnectionOptions = {}): Connection {
   const parse = options.parse ?? parseInbound;
   const heartbeatMs = options.heartbeatIntervalMs ?? LIMITS.HEARTBEAT_INTERVAL_S * 1000;
   const pongTimeoutMs = options.pongTimeoutMs ?? LIMITS.HEARTBEAT_TIMEOUT_S * 1000;
+  const now = options.now ?? Date.now;
+  const openTimeoutMs = options.openTimeoutMs ?? OPEN_TIMEOUT_MS;
   const createSocket =
     options.createSocket ?? ((url: string) => new WebSocket(url) as unknown as SocketLike);
 
@@ -209,6 +227,7 @@ export function createConnection(options: ConnectionOptions = {}): Connection {
   let lastError: LastError | undefined;
   let pingTimer: ReturnType<typeof setInterval> | undefined;
   let pongTimer: ReturnType<typeof setTimeout> | undefined;
+  let openTimer: ReturnType<typeof setTimeout> | undefined;
   let outstandingPing: string | undefined;
 
   const stateHandlers = new Set<(s: ConnectionState) => void>();
@@ -237,7 +256,8 @@ export function createConnection(options: ConnectionOptions = {}): Connection {
   function stopHeartbeat(): void {
     clearInterval(pingTimer);
     clearTimeout(pongTimer);
-    pingTimer = pongTimer = undefined;
+    clearTimeout(openTimer);
+    pingTimer = pongTimer = openTimer = undefined;
     outstandingPing = undefined;
   }
 
@@ -258,16 +278,23 @@ export function createConnection(options: ConnectionOptions = {}): Connection {
     return true;
   }
 
+  function ping(s: SocketLike): void {
+    if (s !== socket) return;
+    const id = `hb-${++counter}`;
+    outstandingPing = id;
+    sendNow(s, { type: "ping", id });
+    clearTimeout(pongTimer);
+    const due = now() + pongTimeoutMs;
+    pongTimer = setTimeout(
+      () => (now() - due > LATE_TIMER_MS ? ping(s) : onDead(s)),
+      pongTimeoutMs,
+    );
+  }
+
   function startHeartbeat(s: SocketLike): void {
     stopHeartbeat();
-    pingTimer = setInterval(() => {
-      if (s !== socket) return;
-      const id = `hb-${++counter}`;
-      outstandingPing = id;
-      sendNow(s, { type: "ping", id });
-      clearTimeout(pongTimer);
-      pongTimer = setTimeout(() => onDead(s), pongTimeoutMs);
-    }, heartbeatMs);
+    // An unanswered ping keeps its deadline: a `checkAlive()` one must not be extended by the next interval.
+    pingTimer = setInterval(() => outstandingPing === undefined && ping(s), heartbeatMs);
   }
 
   function onDead(s: SocketLike): void {
@@ -282,13 +309,17 @@ export function createConnection(options: ConnectionOptions = {}): Connection {
       /* already gone */
     }
     log("heartbeat timeout, closing socket");
-    setState({
-      kind: "disconnected",
-      description: describe(4009, lang),
-      closeCode: 4009,
-      immediate: false,
-      dead: true,
-    });
+    setState(
+      lastError?.code === "SESSION_CLOSED"
+        ? closedState(1006) // after `session.closed`/`.expired` the session is over however the socket ends
+        : {
+            kind: "disconnected",
+            description: describe(4009, lang),
+            closeCode: 4009,
+            immediate: false,
+            dead: true,
+          },
+    );
     notify(deadHandlers, undefined, "dead");
   }
 
@@ -351,6 +382,10 @@ export function createConnection(options: ConnectionOptions = {}): Connection {
       lastError = undefined; // only errors of the join phase may colour a later bare drop
       if (state.kind === "connecting") setState({ kind: "connected" });
     }
+    if (message.type === "session.closed" || message.type === "session.expired") {
+      // Close 4001/4002 follows (§4.5); should the socket just drop instead, the session is over all the same.
+      lastError = { code: "SESSION_CLOSED" };
+    }
     notify(messageHandlers.get(message.type) ?? [], message, message.type);
   }
 
@@ -393,6 +428,19 @@ export function createConnection(options: ConnectionOptions = {}): Connection {
     }
     socket = s;
     s.binaryType = "arraybuffer";
+    openTimer = setTimeout(() => {
+      if (s !== socket) return;
+      stopHeartbeat();
+      detach(s);
+      socket = null;
+      try {
+        s.close(1000);
+      } catch {
+        /* already gone */
+      }
+      log("socket did not open in time");
+      setState(closedState(1006));
+    }, openTimeoutMs);
     s.onopen = () => {
       if (s !== socket) return;
       sendNow(s, {
@@ -436,13 +484,20 @@ export function createConnection(options: ConnectionOptions = {}): Connection {
     nextId,
     leave() {
       const s = socket;
-      if (!s) return;
+      if (!s) {
+        if (state.kind !== "idle") setState({ kind: "idle" });
+        return;
+      }
       sendNow(s, { type: "viewer.leave" });
       stopHeartbeat();
       detach(s);
       socket = null;
       s.close(1000);
       setState({ kind: "idle" });
+    },
+    checkAlive() {
+      // An unanswered ping keeps its deadline: coming back to the page must not push the detection out.
+      if (socket && state.kind === "connected" && outstandingPing === undefined) ping(socket);
     },
     on(event, handler) {
       const set = (

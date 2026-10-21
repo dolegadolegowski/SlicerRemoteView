@@ -4,6 +4,8 @@ import {
   createConnection,
   endsSession,
   isLocalHost,
+  LATE_TIMER_MS,
+  OPEN_TIMEOUT_MS,
   relayUrl,
 } from "../../src/protocol/connection";
 import type { Connection, ConnectionState, LogFn } from "../../src/protocol/connection";
@@ -169,7 +171,11 @@ describe("errors and close codes", () => {
     const state = conn.state;
     expect(state.kind).toBe("enterCode");
     if (state.kind !== "enterCode") return;
-    expect(state.description).toEqual(describeCode("INVALID_CODE", "en"));
+    // Close 4004 and the error INVALID_CODE describe the same thing: the same text (their `subject`s differ).
+    expect({ ...state.description, subject: null }).toEqual({
+      ...describeCode("INVALID_CODE", "en"),
+      subject: null,
+    });
     expect(state.description.action).toBe("enterCode");
     expect(state.description.body).not.toMatch(/INVALID_CODE|4004/);
   });
@@ -300,6 +306,138 @@ describe("heartbeat (§9.1, NFR-21)", () => {
     const before = s.sent.length;
     vi.advanceTimersByTime(120_000);
     expect(s.sent.length).toBe(before);
+  });
+
+  it("a pong timer that fires late (frozen page) asks again instead of declaring the link dead (WEB-14)", () => {
+    let skew = 0; // how far the page's clock ran ahead of its timers
+    make({ now: () => Date.now() + skew });
+    conn.connect({ code: CODE });
+    const s = MockSocket.last;
+    s.open();
+    s.receive(joined);
+    vi.advanceTimersByTime(15_000);
+    skew = LATE_TIMER_MS + 1; // the timer runs long after its time (iOS background)
+    vi.advanceTimersByTime(10_000);
+    expect(conn.state.kind).toBe("connected");
+    expect(s.frames.filter((f) => f["type"] === "ping")).toHaveLength(2);
+    // The new ping gets a fresh timeout; on time and unanswered, it is dead.
+    vi.advanceTimersByTime(9_999);
+    expect(conn.state.kind).toBe("connected");
+    vi.advanceTimersByTime(1);
+    expect(conn.state).toMatchObject({ kind: "disconnected", dead: true });
+  });
+
+  it("a timer late by no more than LATE_TIMER_MS still declares the link dead", () => {
+    let skew = 0;
+    make({ now: () => Date.now() + skew });
+    conn.connect({ code: CODE });
+    MockSocket.last.open();
+    MockSocket.last.receive(joined);
+    vi.advanceTimersByTime(15_000);
+    skew = LATE_TIMER_MS;
+    vi.advanceTimersByTime(10_000);
+    expect(conn.state).toMatchObject({ kind: "disconnected", dead: true });
+  });
+
+  it("checkAlive pings at once and expects a pong within the timeout; only while connected", () => {
+    const s = connected();
+    vi.advanceTimersByTime(5_000);
+    conn.checkAlive();
+    const pings = s.frames.filter((f) => f["type"] === "ping");
+    expect(pings).toHaveLength(1);
+    expect(validateMessage(pings[0]!).ok).toBe(true);
+    vi.advanceTimersByTime(9_999);
+    expect(conn.state.kind).toBe("connected");
+    vi.advanceTimersByTime(1);
+    expect(conn.state).toMatchObject({ kind: "disconnected", dead: true });
+    const before = s.sent.length;
+    conn.checkAlive();
+    expect(s.sent.length).toBe(before);
+    make();
+    conn.connect({ code: CODE });
+    MockSocket.last.open(); // joining, not yet joined
+    conn.checkAlive();
+    expect(MockSocket.last.frames.filter((f) => f["type"] === "ping")).toHaveLength(0);
+  });
+
+  it("checkAlive keeps the deadline of a ping that is already unanswered", () => {
+    const s = connected();
+    vi.advanceTimersByTime(15_000); // the interval ping, due at 25 s
+    vi.advanceTimersByTime(7_000);
+    conn.checkAlive(); // back in view at 22 s
+    expect(s.frames.filter((f) => f["type"] === "ping")).toHaveLength(1);
+    vi.advanceTimersByTime(3_000);
+    expect(conn.state).toMatchObject({ kind: "disconnected", dead: true });
+  });
+
+  it("checkAlive answered in time keeps the connection", () => {
+    const s = connected();
+    conn.checkAlive();
+    s.receive({ type: "pong", replyTo: s.frames.at(-1)!["id"] });
+    vi.advanceTimersByTime(14_999);
+    expect(conn.state.kind).toBe("connected");
+  });
+});
+
+describe("opening (WEB-14)", () => {
+  it("a socket that has not opened within OPEN_TIMEOUT_MS is given up as a drop", () => {
+    make();
+    conn.connect({ code: CODE });
+    const s = MockSocket.last; // never opens (black-holed route)
+    vi.advanceTimersByTime(OPEN_TIMEOUT_MS - 1);
+    expect(conn.state.kind).toBe("connecting");
+    vi.advanceTimersByTime(1);
+    expect(conn.state).toMatchObject({ kind: "disconnected", closeCode: 1006, dead: false });
+    expect(s.closedWith?.code).toBe(1000);
+    s.onclose?.({ code: 1006 }); // a late close event changes nothing
+    expect(states.filter((x) => x.kind === "disconnected")).toHaveLength(1);
+  });
+
+  it("a socket that opened in time is not timed out (the heartbeat watches it from then on)", () => {
+    make();
+    conn.connect({ code: CODE });
+    vi.advanceTimersByTime(OPEN_TIMEOUT_MS - 1);
+    MockSocket.last.open();
+    vi.advanceTimersByTime(5_000);
+    expect(conn.state.kind).toBe("connecting");
+  });
+});
+
+describe("session.closed / session.expired (§4.5)", () => {
+  function connected(): MockSocket {
+    make();
+    conn.connect({ code: CODE });
+    MockSocket.last.open();
+    MockSocket.last.receive(joined);
+    return MockSocket.last;
+  }
+
+  it.each(["session.closed", "session.expired"])(
+    "%s then a bare drop ends the session (no retry state)",
+    (type) => {
+      const s = connected();
+      s.receive({ type, sessionId: joined.sessionId, reason: "PUBLISHER_CLOSED" });
+      s.serverClose(1006);
+      expect(conn.state).toMatchObject({
+        kind: "sessionEnded",
+        description: describeCode("SESSION_CLOSED", "en"),
+      });
+    },
+  );
+
+  it("session.closed then a dead heartbeat ends the session too", () => {
+    const s = connected();
+    s.receive({ type: "session.expired", sessionId: joined.sessionId, reason: "IDLE" });
+    vi.advanceTimersByTime(25_000);
+    expect(conn.state.kind).toBe("sessionEnded");
+    expect(s.closedWith?.code).toBe(1000);
+  });
+
+  it("the close code still wins when it comes", () => {
+    const s = connected();
+    s.receive({ type: "session.closed", sessionId: joined.sessionId, reason: "PUBLISHER_CLOSED" });
+    s.serverClose(4002);
+    expect(conn.state).toMatchObject({ kind: "sessionEnded", closeCode: 4002 });
   });
 });
 
@@ -437,6 +575,25 @@ describe("send and leave", () => {
     expect(conn.state.kind).toBe("idle");
     s.onclose?.({ code: 1000 });
     expect(conn.state.kind).toBe("idle");
+  });
+
+  it("leave without a socket goes idle from a disconnected or an end state (WEB-22), once", () => {
+    make();
+    conn.connect({ code: CODE });
+    MockSocket.last.open();
+    MockSocket.last.receive(joined);
+    MockSocket.last.serverClose(1006);
+    expect(conn.state.kind).toBe("disconnected");
+    conn.leave();
+    expect(conn.state.kind).toBe("idle");
+    conn.connect({ code: CODE });
+    MockSocket.last.serverClose(4004);
+    expect(conn.state.kind).toBe("enterCode");
+    const states: string[] = [];
+    conn.on("state", (s) => states.push(s.kind));
+    conn.leave();
+    conn.leave();
+    expect(states).toEqual(["idle"]); // nothing to close, and no second `idle`
   });
 
   it("a new connect() discards the previous socket", () => {

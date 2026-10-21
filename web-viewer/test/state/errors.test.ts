@@ -5,6 +5,7 @@ import {
   ERROR_CODES,
   describe as describeCode,
   describeState,
+  localize,
 } from "../../src/state/errors";
 import type { Action, AppState } from "../../src/state/errors";
 
@@ -97,6 +98,7 @@ describe("app state catalogue", () => {
     { kind: "snapshotInvalid" },
     { kind: "snapshotFailed" },
     { kind: "snapshotUpdateFailed" },
+    { kind: "linkInvalid" },
   ];
 
   it.each(LANGS.flatMap((lang) => states.map((s) => [lang, s] as const)))(
@@ -135,5 +137,27 @@ describe("app state catalogue", () => {
       action: "retry",
       fatal: false,
     });
+  });
+});
+
+describe("localize (WEB-21)", () => {
+  it("gives a protocol message or a state again in the other language, parameters included", () => {
+    expect(localize(describeCode("INVALID_CODE", "en"), "pl")).toEqual(
+      describeCode("INVALID_CODE", "pl"),
+    );
+    expect(localize(describeCode(4011, "pl"), "en")).toEqual(describeCode(4011, "en"));
+    expect(localize(describeCode("SOMETHING_NEW", "en"), "pl").title).toBe(
+      describeCode("SOMETHING_NEW", "pl").title,
+    );
+    const downloading = describeState({ kind: "downloading", progress: 0.42 }, "en");
+    expect(localize(downloading, "pl")).toEqual(
+      describeState({ kind: "downloading", progress: 0.42 }, "pl"),
+    );
+    expect(localize(downloading, "pl").body).toContain("42");
+  });
+
+  it("leaves a description without a subject as it is", () => {
+    const made = { title: "T", body: "B", action: "none", actionLabel: "", fatal: false } as const;
+    expect(localize(made, "pl")).toBe(made);
   });
 });

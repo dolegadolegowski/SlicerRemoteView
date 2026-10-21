@@ -10,6 +10,11 @@ describe("i18n strings", () => {
     }
   });
 
+  it("has every Polish string translated: none equals its English one (FR-51, WEB-21)", () => {
+    for (const [key, text] of Object.entries(STRINGS.en))
+      expect(STRINGS.pl[key as keyof typeof STRINGS.en], key).not.toBe(text);
+  });
+
   it("contains no raw protocol code anywhere (NFR-31)", () => {
     for (const lang of ["en", "pl"] as const) {
       for (const text of Object.values(STRINGS[lang])) {

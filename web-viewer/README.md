@@ -73,7 +73,7 @@ connection layer is wired through `onJoin` in `src/main.ts`. Unit tests:
 
 ### Connection client (WEB-04)
 
-`src/protocol/connection.ts` is one WebSocket's lifetime (no DOM, no three.js); reconnect with backoff is WEB-14.
+`src/protocol/connection.ts` is one WebSocket's lifetime (no DOM, no three.js); reconnecting is `reconnect.ts` (WEB-14).
 
 ```ts
 const connection = createConnection(); // wss://<location.host>/ws, or ws:// on localhost only (T5)
@@ -242,3 +242,175 @@ npm run e2e -w web-viewer -- join-and-view   # builds shared/ and tools/fake-sli
 A snapshot download that gives up (`loader` `failed`) shows a notice over the scene if one is shown (the previous
 scene stays), otherwise it leaves "Joining…" with the code still typed so **Join** tries again
 (`screens.failSnapshot`; ignored unless connected, so a late failure cannot cancel a new join).
+
+### Deep link (WEB-11)
+
+`src/ui/deep-link.ts`: the QR opens `/j#<CODE>`; `main.ts` first calls `takeDeepLink()`, which replaces the URL with
+`/j` (`history.replaceState`, no reload, no history entry) before anything reaches the network, then joins with the
+code as if it had been typed (it is in the cells, so Join retries). An invalid fragment shows the code entry with its
+hint and joins nothing; a link opened again in the same tab (`hashchange`) is taken the same way, but an invalid one
+during a session leaves the joined code in the cells. Only `/j` takes a code (protocol §10). `replaceState` cleans the
+address bar and the tab's Back/Forward entries; the browser's own History list keeps the opened link (no web API can
+remove it), so the code's expiry is the limit there.
+
+```bash
+npm test -w web-viewer -- deep-link && npm run e2e -w web-viewer -- deep-link
+```
+
+### Live updates (WEB-12)
+
+`src/protocol/scene-versions.ts` orders `scene.update`, `scene.nodeRemoved`, `scene.nodeAdded` and `scene.state` by
+version (§8.3): applied only when `baseVersion` matches what is shown, queued while their snapshot is still loading,
+one `scene.request{GAP}` after a gap. `src/render/apply-update.ts` applies them to the model (`visible`, `color`,
+`opacity`, `matrix` on `T`, removals); a property changes only when the presenter's value changes, so a replayed
+state keeps what the user hid locally, while a new presenter change of `visible` replaces it (FR-40).
+
+```bash
+npm test -w web-viewer -- scene-versions apply-update
+npm run e2e -w web-viewer -- live-updates   # fake-slicer scripts through the relay stub
+```
+
+### Opacity and presenter overrides (WEB-13)
+
+Every node-panel row has an opacity slider (0..1 in 1 % steps, local to this device, 44 px thumb; a vertical swipe
+that starts on it scrolls the list and leaves the value as it was). A presenter change of
+`visible` or `opacity` replaces the local choice; the viewer then says `The presenter changed <name>` for 3 s in its
+status line (`screens.presenterChanged`). A presenter `color` change keeps a local hide.
+
+```bash
+npm test -w web-viewer -- node-panel apply-update screens && npm run e2e -w web-viewer -- opacity
+```
+
+### Reconnect and rejoin (WEB-14)
+
+`src/protocol/reconnect.ts` (`createReconnect(connection)`) owns the session's code and viewer token, in memory only,
+and decides after every closed socket whether to connect again (FR-43, NFR-19, NFR-20):
+
+- Only a joined session retries without the user; a first join that fails is reported on the code entry.
+- Rejoin with `sessionId` + `viewerToken` (§5.1); backoff 0.5 s → 30 s with jitter (`[d/2, d]`), reset only after a
+  rejoin held 10 s; `4008` after 0–3 s; the relay's `retryAfterS` honoured; `enterCode` / `sessionEnded` / `stopped`
+  / `idle` stop it.
+- `SESSION_NOT_FOUND` (relay restarted): join by the code on a new socket, first after a 4–6 s head start for the
+  presenter, then `INVALID_CODE` retried at ≈ 15, 35 and 60 s only (each failure counts against the room's IP, §12);
+  then "Presentation ended" on the code entry. A closed state it retries keeps the scene, the token and the versions
+  (`ends` passed to the model lifecycle, the loader and `bindSceneVersions`).
+- `visibilitychange → visible`: a `ping` at once while connected (`connection.checkAlive()`), or the backoff wait is
+  skipped; `pagehide` sends `viewer.leave` + `1000`; a page restored from the bfcache joins by the code again.
+- `connection.ts`: a pong timer that fires more than 2 s late (frozen page) pings again instead of declaring the link
+  dead; a socket that has not opened within 15 s counts as a drop; after `session.closed` / `session.expired` any
+  close ends the session.
+
+The screens keep the scene while reconnecting ("Reconnecting…", then "Connected" — in the status bar since WEB-15),
+say "Presenter is offline" (`session.publisherState`, `viewer.joined.publisherOnline`) and, joined without a scene,
+"Waiting for the presenter" or — while a stream or download really runs (`downloading()`) — "Loading the scene…"
+under Join. Both status lines stay in the accessibility tree, empty when silent; the notice and the status line stack
+at the top of the viewer.
+
+```bash
+npm test -w web-viewer -- reconnect connection screens code-entry viewer && npm run e2e -w web-viewer -- reconnect
+```
+
+### Status bar and device profile (WEB-15)
+
+`src/platform.ts` turns `navigator.userAgent` into `clientInfo.platform` (`web` or `quest-browser`) and the
+informational `profile` (`mobile`, `quest2`, `quest3`) — rule and sources in `docs/research/web-quest-user-agent.md`;
+only those two values are sent. `snapshotLimit(profile)` sets `capabilities.maxSnapshotBytes` (64 MiB for `quest3`,
+32 MiB otherwise) for the stream and the download too. `src/ui/status-bar.ts` is the first line over the scene: the connection
+(`Connected`, `Reconnecting…`, `Presenter is offline` — its only live region), `Viewers: n` (`viewer.count`) and
+`Scene v<n>`.
+
+```bash
+npm test -w web-viewer -- platform status-bar screens && npm run e2e -w web-viewer -- status
+```
+
+### Memory, lost context and wake lock (WEB-16)
+
+The viewer stops drawing on `webglcontextlost` and says "3D view paused"; three.js re-uploads the scene on
+`webglcontextrestored` and the viewer draws again. `src/ui/wake-lock.ts` keeps the screen on during a session
+(`navigator.wakeLock`, re-requested when the page is visible again, and on the next tap after a refusal — Safari
+wants a user gesture; let go after 2 min offline). `window.__rv.rendererInfo()` returns
+`renderer.info.memory` counts for tests; development builds also show them in a small overlay.
+
+```bash
+npm test -w web-viewer -- viewer wake-lock dev-overlay && npm run e2e -w web-viewer -- memory
+```
+
+### Add to Home Screen (WEB-17)
+
+`public/manifest.webmanifest` and `public/icons/` (copied to `dist/`) make the viewer installable: `start_url` and
+`scope` `/`, `display: standalone`, 192/512 px icons (the 512 px one also maskable) and a 180 px
+`apple-touch-icon`; `index.html` has the Apple web-app tags. There is no service worker. `e2e/pwa.spec.ts` also runs
+axe-core's `color-contrast` rule (dev dependency `axe-core`, injected into the page) on the code entry, the status
+bar and the node panel.
+
+```bash
+npm test -w web-viewer -- pwa && npm run e2e -w web-viewer -- pwa
+```
+
+### Bundle size (WEB-18)
+
+`npm run build` ends with `scripts/check-bundle.mjs`: the gzipped size of the JS and CSS that `index.html` loads at
+start, failing above 1 MiB (NFR-09) or when `index.html` names no module script (nothing measured). `e2e/network.spec.ts` asserts that the page talks only to its own origin.
+
+| Initial asset (2026-10-21, three 0.186.1, Vite 8.3.4) | Size | gzip (level 9) |
+|---|---|---|
+| `assets/index-*.js` (app + three.js + GLTFLoader + OrbitControls) | 752,511 B | 192,804 B |
+| `assets/index-*.css` | 9,774 B | 2,289 B |
+| **Total initial JS + CSS** | 762,285 B | **195,093 B** (19 % of 1,048,576 B) |
+| `assets/session-*.js` (WebXR, preloaded on Quest Browser only; not initial) | 17,361 B | 5,902 B |
+
+```bash
+npm run build -w web-viewer && npm test -w web-viewer -- bundle && npm run e2e -w web-viewer -- network
+```
+
+### Language (WEB-21)
+
+The UI speaks English or Polish: the browser's language picks at first (`navigator.languages`, English otherwise),
+and a switch — in the code entry's title row and in the status bar, named in the language it switches to
+("Polski" / "English") — changes every visible text at once, without a reload, so the session stays. The choice is kept in
+`localStorage` under `rv.lang` (the language only — never a code or token) and `<html lang>` follows it
+(`src/i18n/lang.ts`). Messages are rendered again from what they describe (`localize` in `src/state/errors.ts`), so
+one already on screen follows a switch.
+
+```bash
+npm test -w web-viewer -- i18n lang-toggle && npm run e2e -w web-viewer -- i18n
+```
+
+### WebXR on Meta Quest Browser (WEB-19)
+
+On Quest Browser (user agent, `src/platform.ts`) with `navigator.xr`, the viewer shows **View in AR** (passthrough,
+when `immersive-ar` is supported) or **View in VR**. The button requests the session in the tap itself
+(`src/xr/enter.ts`), then runs the XR module (`src/xr/session.ts`, a separate ≈ 6 kB gzip chunk, preloaded when
+the button is offered): `local-floor`
+space, the scene 1:1 in metres 1.3 m in front at eye height (`src/xr/placement.ts`), controller and hand models, and
+the 2D view restored when the session ends (it ends by itself when the presentation is over). In XR the scene is
+grabbed with a controller's trigger or a pinch — one hand moves and turns it, two hands turn it about the vertical and
+scale it between 0.1× and 5× (`src/xr/grab.ts`) — and the grip button or a double press of one hand puts it back
+where it was first placed (WEB-20); on a Quest 2 a scene above its budget, or not prepared with the `quest2` profile,
+gets a warning panel in the headset (`src/xr/budget.ts`, `src/xr/panel.ts`). Below the scene a status line repeats
+what the page would say (WEB-23, `screens.xrStatus`): "Reconnecting…", "Presenter is offline", the title of a message
+over the scene (a refused snapshot) and the notice line (a presenter change, "updating"), one line each, in the UI
+language; it stands under the warning while that is up. Test hooks: `window.__rv.xrStage()` (the stage matrix) and
+`window.__rv.xrPanels()` (how many panels are up) — numbers only. The input profiles are copied at build time from
+`@webxr-input-profiles/assets` (dev dependency, pinned) into `dist/assets/xr-profiles-<version>/`
+(`scripts/copy-xr-profiles.mjs`, also run by `npm run dev`; not committed) — never the jsDelivr default. Facts and
+sources: `docs/research/web-xr.md`. `e2e/xr.spec.ts` emulates a Quest 3 with Meta's IWER (dev dependency `iwer`) and
+serves the page with the relay's CSP.
+
+```bash
+npm test -w web-viewer -- xr && npm run e2e -w web-viewer -- xr
+```
+
+### Leave (WEB-22)
+
+**Leave** ends the session for this viewer — `viewer.leave` and close `1000` when a socket is open, else the pending
+retry is cancelled — drops the scene and brings back an empty code entry. It is in the status bar over the scene
+(drawn small, with a 44 × 44 px target) and on the code entry while it is busy (joining, waiting for the presenter or
+the first download, reconnecting). The installed app needs it: it has no address bar, reload or (iOS) back button.
+`connection.leave()` now ends in `idle` from every state, so a scheduled code join after a relay restart is
+cancelled too.
+
+```bash
+npm test -w web-viewer -- status-bar code-entry screens reconnect connection && npm run e2e -w web-viewer -- leave
+```
+

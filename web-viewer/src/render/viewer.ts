@@ -17,12 +17,14 @@ import {
   Vector3,
   WebGLRenderer,
 } from "three";
-import type { Camera, Object3D } from "three";
+import type { Camera, Matrix4, Object3D, Quaternion } from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import WebGL from "three/addons/capabilities/WebGL.js";
 import { detectLang, t } from "../i18n/strings";
 import type { Lang } from "../i18n/strings";
+import { describeState, localize } from "../state/errors";
 import type { Description } from "../state/errors";
+import { xrStagePosition } from "../xr/placement";
 import type { SceneModel } from "./scene-model";
 
 /** The part of `WebGLRenderer` the viewer uses; tests pass a mock. */
@@ -32,6 +34,8 @@ export interface RendererLike {
   setClearColor(color: Color | number, alpha?: number): void;
   render(scene: Object3D, camera: Camera): void;
   dispose(): void;
+  /** `WebGLRenderer.info` (replaced by three.js after a context restore, so read it each time). */
+  readonly info?: { readonly memory: { readonly geometries: number; readonly textures: number } };
 }
 
 /** The part of `window.visualViewport` the viewer uses. */
@@ -63,6 +67,8 @@ export interface ViewerOptions {
 export interface Viewer {
   /** `.viewer` element: canvas, notice and "Fit" button; CSS gives it the dynamic viewport. */
   readonly element: HTMLElement;
+  /** The stack at the top (notice, status line); the status bar is put first in it (WEB-15). */
+  readonly overlay: HTMLElement;
   readonly canvas: HTMLCanvasElement;
   readonly scene: Scene;
   readonly camera: PerspectiveCamera;
@@ -71,15 +77,57 @@ export interface Viewer {
   setModel(model: SceneModel | null): void;
   /** Frames the visible nodes; `resetDirection` also returns to the front view (on load). */
   fit(resetDirection?: boolean): void;
-  /** Requests one frame (e.g. after a live update changed the scene, WEB-12). */
+  /** Requests one frame. */
   invalidate(): void;
+  /** Live updates changed the scene (WEB-12): re-measures the model for the clip planes, draws a frame. */
+  contentChanged(): void;
   /** Re-reads the size, pixel ratio and visual viewport and renders at once (also on resize events). */
   resize(): void;
   /** A message over the scene (e.g. a refused snapshot while the old one stays visible); `null` hides it. */
   setNotice(notice: Description | null): void;
+  /**
+   * The message `setNotice` gave, in the UI language, until replaced or dismissed; `null` when there is none (the
+   * lost-context notice is the viewer's own and not included). The in-XR status line repeats its title (WEB-23).
+   */
+  readonly notice: Description | null;
+  /** GPU resources three.js holds now (`renderer.info.memory`), for tests and the dev overlay (WEB-16). */
+  rendererInfo(): { readonly geometries: number; readonly textures: number } | null;
+  /**
+   * A short, polite status line (e.g. "Updating the scene…" before a new snapshot, WEB-12; "Reconnecting…", WEB-14);
+   * `null` empties it. The element stays in the accessibility tree (an empty one is not drawn), so a change is announced.
+   */
+  setStatus(text: string | null): void;
   /** Moves keyboard / screen-reader focus to the canvas (its label describes the gestures). */
   focus(): void;
+  /** Re-renders the labels and the notice in `lang` (WEB-21); the status line is the caller's. */
+  setLang(lang: Lang): void;
+  /** The WebXR side (WEB-19); `null` when the renderer cannot present (a test stand-in without `xr`). */
+  readonly xr: XrHost | null;
   dispose(): void;
+}
+
+/**
+ * What a WebXR session needs from the viewer (WEB-19). Between `begin` and `end` WebXR draws (the session's animation
+ * loop): no 2D frame, control, resize or fit runs; the camera gets metric clip planes; the stage is in metres, placed
+ * by `place`; AR clears to transparent so the room shows through.
+ */
+export interface XrHost {
+  readonly renderer: WebGLRenderer;
+  readonly scene: Scene;
+  readonly camera: PerspectiveCamera;
+  begin(options: { readonly ar: boolean }): void;
+  /**
+   * Puts the centre of the whole model in front of the user at `eyeHeight` metres (`local-floor`, placement.ts), at
+   * real size and unturned: also the reset after grabbing (WEB-20).
+   */
+  place(eyeHeight: number): void;
+  /** The stage's transform in the room (metres), and setting it while the user holds the scene (WEB-20). */
+  stageMatrix(): Matrix4;
+  setStageMatrix(matrix: Matrix4): void;
+  /** The 2D view again, camera as it was (or fitted again when the model changed meanwhile). */
+  end(): void;
+  /** Ends the running session, if any (the scene went away: the 2D page says why); `end` follows from it. */
+  exit(): void;
 }
 
 export type CreateViewerResult =
@@ -109,6 +157,9 @@ const TAP_PX = 10;
 /** Patient faces −Z, the model root is turned 180° about Y (§7.1): the default view looks at the face from +Z. */
 const FRONT = new Vector3(0, 0, 1);
 const BACKGROUND = 0x0b0f14; // --bg in style.css
+/** Clip planes in XR, in metres: a hand-held model 2 cm from the eyes, the far wall of a large room. */
+const XR_NEAR_M = 0.02;
+const XR_FAR_M = 100;
 
 let webgl2: boolean | undefined;
 /** `WebGL.isWebGL2Available()`, evaluated once (each probe creates a context). */
@@ -133,7 +184,7 @@ function defaultObserveResize(element: HTMLElement, onResize: () => void): () =>
 
 export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
   const doc = options.document ?? document;
-  const lang = options.lang ?? detectLang();
+  let lang = options.lang ?? detectLang();
   if (!(options.isWebGL2Available ?? webGL2Available)())
     return { ok: false, reason: "webgl2Unavailable" };
 
@@ -144,7 +195,6 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
   canvas.className = "viewer__canvas";
   canvas.tabIndex = -1; // focusable from script (screen-reader announcement), not a tab stop
   canvas.setAttribute("role", "img");
-  canvas.setAttribute("aria-label", t(lang, "viewer.canvasLabel"));
   const notice = doc.createElement("div");
   notice.className = "viewer__notice";
   notice.setAttribute("role", "alert");
@@ -156,13 +206,17 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
   const noticeClose = doc.createElement("button");
   noticeClose.type = "button";
   noticeClose.className = "viewer__notice-close";
-  noticeClose.textContent = t(lang, "viewer.dismiss");
   notice.append(noticeTitle, noticeBody, noticeClose);
   const fitButton = doc.createElement("button");
   fitButton.type = "button";
   fitButton.className = "viewer__fit";
-  fitButton.textContent = t(lang, "viewer.fit");
-  element.append(canvas, notice, fitButton);
+  const status = doc.createElement("p");
+  status.className = "viewer__status";
+  status.setAttribute("role", "status"); // polite: announced without interrupting
+  const top = doc.createElement("div"); // the notice above the status line (style.css)
+  top.className = "viewer__top";
+  top.append(notice, status);
+  element.append(canvas, top, fitButton);
 
   let renderer: RendererLike;
   try {
@@ -210,18 +264,36 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
   const bounds = new Sphere(new Vector3(), radius);
   let frame: number | null = null;
   let disposed = false;
+  /** The WebGL context is lost (GPU reset, memory pressure): nothing is drawn until it is restored (WEB-16). */
+  let lost = false;
+  /** The notice set by the caller (in any language: it is shown in the viewer's, WEB-21). */
+  let given: Description | null = null;
+  let localized: Description | null = null; // `given` in the UI language
+  /** A WebXR session draws (WEB-19): the 2D camera as it was before, and what happened meanwhile. */
+  let presenting: {
+    readonly saved: {
+      readonly position: Vector3;
+      readonly quaternion: Quaternion;
+      readonly near: number;
+      readonly far: number;
+    };
+    eyeHeight: number | null;
+    refit: boolean;
+    /** Live updates changed the scene: its 2D bounds are measured again at the end, in millimetres. */
+    remeasure: boolean;
+  } | null = null;
   let hidden = doc.visibilityState === "hidden";
   let size = { width: 0, height: 0, ratio: 0 };
 
   /** Render-on-demand (three.js manual): at most one pending frame; damping re-requests through `change`. */
   function invalidate(): void {
-    if (frame !== null || disposed || hidden) return;
+    if (frame !== null || disposed || hidden || lost || presenting) return;
     frame = requestFrame(renderFrame);
   }
   function renderFrame(): void {
     if (frame !== null) cancelFrame(frame);
     frame = null;
-    if (disposed || hidden) return;
+    if (disposed || hidden || lost || presenting) return;
     controls.update(); // dispatches `change` (→ next frame) while the damped motion continues
     updateClipping();
     renderer.render(scene, camera);
@@ -265,7 +337,7 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
   }
 
   function resize(): void {
-    if (disposed) return;
+    if (disposed || presenting) return; // WebXR sizes the drawing buffer itself while it presents
     const zoom = followVisualViewport();
     const width = element.clientWidth;
     const height = element.clientHeight;
@@ -283,14 +355,30 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
     renderFrame(); // now, not on the next frame: a resized buffer is blank until drawn
   }
 
+  /** Camera distance at which a sphere of radius `r` fills the narrower field of view (with the margin). */
+  function fitDistance(r: number): number {
+    const vFov = (camera.fov * Math.PI) / 180;
+    const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
+    return (r / Math.sin(Math.min(vFov, hFov) / 2)) * FIT_MARGIN;
+  }
+
+  /** Bounding box of the whole model in stage units, hidden nodes included (empty without a model). */
+  function measureAll(): Box3 {
+    stage.updateMatrixWorld(true);
+    return model ? new Box3().setFromObject(model.root) : new Box3();
+  }
+
   function fit(resetDirection = false): void {
+    if (presenting) {
+      presenting.refit = true; // the 2D camera is fitted when the session ends
+      return;
+    }
     // Apply whatever damped motion is still settling now, so it cannot drift the new framing afterwards.
     controls.enableDamping = false;
     controls.update();
     controls.enableDamping = true;
     const box = new Box3();
-    stage.updateMatrixWorld(true);
-    const all = model ? new Box3().setFromObject(model.root) : new Box3();
+    const all = measureAll();
     // Frame what the user sees; fall back to everything when all nodes are hidden.
     model?.root.traverseVisible((o) => {
       if ((o as { isMesh?: boolean }).isMesh) box.expandByObject(o);
@@ -302,9 +390,6 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
     radius = Math.max(sphere.radius, 1);
     if (all.isEmpty()) bounds.copy(sphere);
     else all.getBoundingSphere(bounds);
-    const vFov = (camera.fov * Math.PI) / 180;
-    const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
-    const fitDistance = (r: number) => (r / Math.sin(Math.min(vFov, hFov) / 2)) * FIT_MARGIN;
     const distance = fitDistance(radius);
     const direction = resetDirection
       ? FRONT.clone()
@@ -320,6 +405,22 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
     invalidate();
   }
 
+  /**
+   * Live updates moved or removed nodes (WEB-12): the whole-model bounds behind the clip planes and the zoom-out
+   * limit follow, the camera stays where the user put it, and a frame is drawn.
+   */
+  function contentChanged(): void {
+    if (presenting) {
+      presenting.remeasure = true; // measured now, the bounds would be in metres at the XR position
+      return;
+    }
+    const all = measureAll();
+    if (!all.isEmpty()) all.getBoundingSphere(bounds);
+    controls.maxDistance = Math.max(controls.maxDistance, fitDistance(bounds.radius) * 10);
+    updateClipping();
+    invalidate();
+  }
+
   function setModel(next: SceneModel | null): void {
     if (model && model !== next) stage.remove(model.root);
     model = next;
@@ -327,12 +428,48 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
     element.dataset["model"] = model ? "loaded" : "none";
     resize(); // fit needs the current aspect (portrait phones need ≈ 2× the distance of a square view)
     fit(true);
+    // A new scene in XR stands where the first one was put (in front, real size, unturned), whatever was grabbed.
+    if (presenting?.eyeHeight != null) place(presenting.eyeHeight);
+  }
+
+  function place(eyeHeight: number): void {
+    if (!presenting) return;
+    presenting.eyeHeight = eyeHeight;
+    // Unturned and at real size first: the box of a turned model is not the turned box of the model.
+    stage.quaternion.identity();
+    stage.scale.setScalar(1);
+    // The centre of the whole model in stage coordinates (metres, the stage's own unit while presenting).
+    stage.updateMatrixWorld(true);
+    const box = model ? new Box3().setFromObject(model.root) : new Box3();
+    const centre = box.isEmpty() ? new Vector3() : stage.worldToLocal(box.getCenter(new Vector3()));
+    const at = xrStagePosition(centre, eyeHeight);
+    stage.position.set(at.x, at.y, at.z);
+  }
+
+  function paintNotice(): void {
+    // While the context is lost, no notice of the caller's (or one cleared, e.g. for a new scene) leaves why nothing
+    // is drawn.
+    localized = given && localize(given, lang);
+    const lostShown = given === null && lost;
+    const shown = lostShown ? describeState({ kind: "contextLost" }, lang) : localized;
+    notice.hidden = shown === null;
+    // The lost-context notice cannot be dismissed (it would come straight back), so it has no button.
+    noticeClose.hidden = lostShown;
+    // Unchanged text is left alone: the alert is not announced again.
+    if (noticeTitle.textContent !== (shown?.title ?? ""))
+      noticeTitle.textContent = shown?.title ?? "";
+    if (noticeBody.textContent !== (shown?.body ?? "")) noticeBody.textContent = shown?.body ?? "";
   }
 
   function setNotice(next: Description | null): void {
-    notice.hidden = next === null;
-    noticeTitle.textContent = next?.title ?? "";
-    noticeBody.textContent = next?.body ?? "";
+    given = next;
+    paintNotice();
+  }
+
+  function label(): void {
+    canvas.setAttribute("aria-label", t(lang, "viewer.canvasLabel"));
+    noticeClose.textContent = t(lang, "viewer.dismiss");
+    fitButton.textContent = t(lang, "viewer.fit");
   }
 
   // Double tap (touch) and double click (mouse) frame the scene again; a drag, a long press or a pinch is not a tap.
@@ -389,7 +526,23 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
   };
   const onFit = () => fit();
   const onDismiss = () => setNotice(null);
+  // three.js prevents the default (so the context can come back) and re-uploads the scene on restore; the viewer
+  // stops its frames meanwhile and says why (web.md §2.3).
+  const onContextLost = () => {
+    lost = true;
+    if (frame !== null) cancelFrame(frame);
+    frame = null;
+    element.dataset["context"] = "lost";
+    setNotice(null); // replaces any notice: why nothing is drawn matters most
+  };
+  const onContextRestored = () => {
+    lost = false;
+    delete element.dataset["context"];
+    paintNotice(); // the lost-context notice goes; one set meanwhile stays
+    renderFrame();
+  };
 
+  label();
   canvas.style.touchAction = "none"; // OrbitControls sets it too; the page itself keeps native zoom (WCAG)
   canvas.addEventListener("pointerdown", onPointerDown);
   canvas.addEventListener("pointerup", onPointerUp);
@@ -400,12 +553,90 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
   fitButton.addEventListener("click", onFit);
   noticeClose.addEventListener("click", onDismiss);
   doc.addEventListener("visibilitychange", onVisibility);
+  canvas.addEventListener("webglcontextlost", onContextLost);
+  canvas.addEventListener("webglcontextrestored", onContextRestored);
   visualViewport?.addEventListener("resize", resize);
   visualViewport?.addEventListener("scroll", resize);
   const stopObserving = (options.observeResize ?? defaultObserveResize)(element, resize);
 
+  const xrRenderer =
+    "xr" in renderer && "setAnimationLoop" in renderer
+      ? (renderer as unknown as WebGLRenderer)
+      : null;
+  const xr: XrHost | null = xrRenderer && {
+    renderer: xrRenderer,
+    scene,
+    camera,
+    begin({ ar }) {
+      if (presenting || disposed) return;
+      if (frame !== null) cancelFrame(frame);
+      frame = null;
+      presenting = {
+        saved: {
+          position: camera.position.clone(),
+          quaternion: camera.quaternion.clone(),
+          near: camera.near,
+          far: camera.far,
+        },
+        eyeHeight: null,
+        refit: false,
+        remeasure: false,
+      };
+      controls.enabled = false;
+      camera.near = XR_NEAR_M; // WebXR takes its depth range from the camera (research web-xr.md §1)
+      camera.far = XR_FAR_M;
+      camera.updateProjectionMatrix();
+      stage.scale.setScalar(1); // §7.1 metres: real size in the room
+      if (ar) {
+        scene.background = null; // passthrough shows behind the scene
+        renderer.setClearColor(BACKGROUND, 0);
+      }
+      element.dataset["xr"] = ar ? "ar" : "vr";
+    },
+    place,
+    stageMatrix() {
+      stage.updateMatrix();
+      return stage.matrix.clone();
+    },
+    setStageMatrix(matrix) {
+      if (presenting) matrix.decompose(stage.position, stage.quaternion, stage.scale);
+    },
+    end() {
+      if (!presenting) return;
+      const { saved, refit, remeasure } = presenting;
+      presenting = null;
+      stage.scale.setScalar(PRESENTATION_SCALE);
+      stage.position.set(0, 0, 0);
+      stage.quaternion.identity(); // grabbing may have turned it (WEB-20)
+      scene.background = new Color(BACKGROUND);
+      renderer.setClearColor(BACKGROUND, 1);
+      // WebXR moved the camera with the head and restores only its fov and zoom.
+      camera.position.copy(saved.position);
+      camera.quaternion.copy(saved.quaternion);
+      camera.scale.set(1, 1, 1);
+      camera.near = saved.near;
+      camera.far = saved.far;
+      camera.updateProjectionMatrix();
+      controls.enabled = true;
+      delete element.dataset["xr"];
+      if (disposed) return;
+      size = { width: 0, height: 0, ratio: 0 }; // WebXR set the buffer back; draw it again at once
+      resize();
+      if (refit) fit(true);
+      else if (remeasure) contentChanged();
+      else invalidate();
+    },
+    exit() {
+      void xrRenderer.xr
+        .getSession()
+        ?.end()
+        .catch(() => undefined);
+    },
+  };
+
   const viewer: Viewer = {
     element,
+    overlay: top,
     canvas,
     scene,
     camera,
@@ -413,9 +644,26 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
     setModel,
     fit,
     invalidate,
+    contentChanged,
     resize,
     setNotice,
+    get notice() {
+      return localized;
+    },
+    rendererInfo() {
+      const memory = renderer.info?.memory;
+      return memory ? { geometries: memory.geometries, textures: memory.textures } : null;
+    },
+    setStatus(text) {
+      if (status.textContent !== (text ?? "")) status.textContent = text ?? "";
+    },
     focus: () => canvas.focus({ preventScroll: true }),
+    setLang(next) {
+      lang = next;
+      label();
+      paintNotice();
+    },
+    xr,
     dispose() {
       if (disposed) return;
       disposed = true;
@@ -433,6 +681,8 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
       fitButton.removeEventListener("click", onFit);
       noticeClose.removeEventListener("click", onDismiss);
       doc.removeEventListener("visibilitychange", onVisibility);
+      canvas.removeEventListener("webglcontextlost", onContextLost);
+      canvas.removeEventListener("webglcontextrestored", onContextRestored);
       visualViewport?.removeEventListener("resize", resize);
       visualViewport?.removeEventListener("scroll", resize);
       if (model) stage.remove(model.root);

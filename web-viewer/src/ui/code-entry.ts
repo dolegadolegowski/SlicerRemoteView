@@ -8,12 +8,20 @@
 import { CODE_HINTS, CODE_LENGTH, normalizeCode } from "@slicerremoteview/shared";
 import { detectLang, t } from "../i18n/strings";
 import type { Lang, StringKey } from "../i18n/strings";
+import { localize } from "../state/errors";
 import type { Description } from "../state/errors";
 
 export interface CodeEntryOptions {
   /** Called with the canonical code (upper-case, validated) when the user presses Join. */
   readonly onJoin: (code: string) => void;
+  /**
+   * Leave pressed (WEB-22): shown while busy — joining, joined without a scene, reconnecting — so the installed app,
+   * which has no reload or (iOS) back button, can get out of a session; without it there is no Leave button.
+   */
+  readonly onLeave?: () => void;
   readonly lang?: Lang;
+  /** The language switch (WEB-21), in the title row after the title (it costs no height on a short screen). */
+  readonly languageToggle?: HTMLElement;
 }
 
 export interface CodeEntry {
@@ -22,10 +30,16 @@ export interface CodeEntry {
   setError(error: Description | null): void;
   /** While busy the inputs and the button are disabled and the button reads "Joining…". */
   setBusy(busy: boolean): void;
+  /** A polite line under Join while the session is joined without a scene or reconnects (WEB-14); `null` clears it. */
+  setStatus(text: string | null): void;
   /** Clears all cells, keeps the language. */
   reset(): void;
+  /** Puts `text` into the cells like a paste (deep link, WEB-11); the hint follows from what it contains. */
+  setCode(text: string): void;
   /** Focuses the first empty cell (the last cell when all are filled). */
   focus(): void;
+  /** Re-renders every text in `lang` (WEB-21), the error shown and the hint included; the status line is the caller's. */
+  setLang(lang: Lang): void;
 }
 
 /** Strips separators and upper-cases, exactly like `normalizeCode` but without validating. */
@@ -40,7 +54,7 @@ const HINT_KEYS = new Map<string, StringKey>([
 ]);
 
 export function createCodeEntry(options: CodeEntryOptions): CodeEntry {
-  const lang = options.lang ?? detectLang();
+  let lang = options.lang ?? detectLang();
   let busy = false;
   let overflow = false;
   let error: Description | null = null;
@@ -51,11 +65,9 @@ export function createCodeEntry(options: CodeEntryOptions): CodeEntry {
 
   const title = document.createElement("h1");
   title.id = "code-entry-title";
-  title.textContent = t(lang, "codeEntry.title");
 
   const lead = document.createElement("p");
   lead.className = "code-entry__lead";
-  lead.textContent = t(lang, "codeEntry.lead");
 
   const group = document.createElement("div");
   group.className = "code-entry__cells";
@@ -73,10 +85,6 @@ export function createCodeEntry(options: CodeEntryOptions): CodeEntry {
     cell.setAttribute("autocapitalize", "characters");
     cell.setAttribute("autocorrect", "off");
     cell.setAttribute("enterkeyhint", i === CODE_LENGTH - 1 ? "go" : "next");
-    cell.setAttribute(
-      "aria-label",
-      t(lang, "codeEntry.cellLabel", { n: i + 1, total: CODE_LENGTH }),
-    );
     cells.push(cell);
     group.append(cell);
   }
@@ -92,7 +100,39 @@ export function createCodeEntry(options: CodeEntryOptions): CodeEntry {
   join.type = "submit";
   join.className = "code-entry__join";
 
-  form.append(title, lead, group, message, join);
+  // Always in the accessibility tree, empty when there is nothing to say: a live region that appears together with
+  // its text is often not announced (VoiceOver).
+  const status = document.createElement("p");
+  status.className = "code-entry__status";
+  status.setAttribute("role", "status");
+
+  const leave = document.createElement("button");
+  leave.type = "button"; // never submits the form
+  leave.className = "code-entry__leave";
+  const onLeave = options.onLeave;
+  if (onLeave) leave.addEventListener("click", () => onLeave());
+
+  let head: HTMLElement = title;
+  if (options.languageToggle) {
+    head = document.createElement("div");
+    head.className = "code-entry__head";
+    head.append(title, options.languageToggle);
+  }
+  form.append(head, lead, group, message, join, status);
+  if (onLeave) form.append(leave);
+
+  /** The texts that do not depend on the state. */
+  function label(): void {
+    title.textContent = t(lang, "codeEntry.title");
+    lead.textContent = t(lang, "codeEntry.lead");
+    cells.forEach((cell, i) =>
+      cell.setAttribute(
+        "aria-label",
+        t(lang, "codeEntry.cellLabel", { n: i + 1, total: CODE_LENGTH }),
+      ),
+    );
+    leave.textContent = t(lang, "codeEntry.leave");
+  }
 
   const value = (): string => cells.map((c) => c.value).join("");
 
@@ -127,7 +167,8 @@ export function createCodeEntry(options: CodeEntryOptions): CodeEntry {
 
   function refresh(): void {
     const hint = hintText();
-    const text = hint ?? (error ? `${error.title}. ${error.body}` : null);
+    const shown = error && localize(error, lang); // the language of the screen, whoever made the message
+    const text = hint ?? (shown ? `${shown.title}. ${shown.body}` : null);
     message.hidden = text === null;
     message.textContent = text ?? "";
     message.classList.toggle("code-entry__message--error", hint !== null || error !== null);
@@ -138,6 +179,7 @@ export function createCodeEntry(options: CodeEntryOptions): CodeEntry {
     }
     join.disabled = busy || currentCode() === null;
     join.textContent = t(lang, busy ? "codeEntry.joining" : "codeEntry.join");
+    leave.hidden = !busy;
   }
 
   function focusCell(index: number): void {
@@ -198,6 +240,7 @@ export function createCodeEntry(options: CodeEntryOptions): CodeEntry {
     options.onJoin(code);
   });
 
+  label();
   refresh();
 
   return {
@@ -210,15 +253,30 @@ export function createCodeEntry(options: CodeEntryOptions): CodeEntry {
       busy = next;
       refresh();
     },
+    setStatus(text) {
+      if (status.textContent !== (text ?? "")) status.textContent = text ?? "";
+    },
     reset() {
       for (const cell of cells) cell.value = "";
       overflow = false;
       error = null;
       refresh();
     },
+    setCode(text) {
+      for (const cell of cells) cell.value = "";
+      overflow = false;
+      error = null;
+      fill(0, clean(text));
+      refresh();
+    },
     focus() {
       const empty = cells.findIndex((c) => c.value === "");
       focusCell(empty === -1 ? CODE_LENGTH - 1 : empty);
+    },
+    setLang(next) {
+      lang = next;
+      label();
+      refresh();
     },
   };
 }

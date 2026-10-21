@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Box3, BoxGeometry, Group, Mesh, TOUCH, Vector3 } from "three";
+import { Box3, BoxGeometry, Group, Matrix4, Mesh, TOUCH, Vector3 } from "three";
 import type { Object3D } from "three";
 import { parseSceneModel } from "../../src/render/scene-model";
 import type { SceneModel } from "../../src/render/scene-model";
@@ -15,7 +15,7 @@ import type {
   ViewerOptions,
   VisualViewportLike,
 } from "../../src/render/viewer";
-import { describe as describeCode } from "../../src/state/errors";
+import { describe as describeCode, describeState } from "../../src/state/errors";
 import { glb } from "./glb-fixtures";
 
 /** Gives an element a layout size (jsdom has no layout). */
@@ -367,6 +367,26 @@ describe("camera and clipping", () => {
     expect(farthest).toBeLessThan(viewer.camera.far);
   });
 
+  it("a node moved far away by a live update stays inside the far plane after contentChanged (WEB-12)", () => {
+    const { viewer, flush, r } = harness();
+    const part = new Mesh(new BoxGeometry(0.05, 0.05, 0.05));
+    const root = new Group();
+    root.add(part);
+    viewer.setModel({ root } as unknown as SceneModel);
+    flush();
+    part.position.set(0, 0, -2); // 2 m behind, like a new T.matrix
+    r.render.mockClear();
+    viewer.contentChanged();
+    flush();
+    expect(r.render).toHaveBeenCalled();
+    viewer.camera.updateMatrixWorld(true);
+    root.updateWorldMatrix(true, true);
+    const box = new Box3().setFromObject(part);
+    const depth = -box.min.clone().applyMatrix4(viewer.camera.matrixWorldInverse).z;
+    expect(depth).toBeLessThan(viewer.camera.far);
+    expect(viewer.controls.target.length()).toBeLessThan(1e-6); // the camera was not refitted
+  });
+
   it("zooming out after a fit on a tiny visible part still takes in the whole model", () => {
     const { viewer, flush } = harness();
     // A 2 mm part and a 200 mm part (metres, like §7.1 data): the large one hidden, then shown again.
@@ -547,6 +567,35 @@ describe("scene graph, notices and page behaviour", () => {
     expect(notice.hidden).toBe(true);
   });
 
+  it("notice: the message given, in the UI language, until dismissed; never the lost-context one (WEB-23)", () => {
+    const { viewer } = harness();
+    expect(viewer.notice).toBeNull();
+    viewer.setNotice(describeCode("PAYLOAD_TOO_LARGE", "en"));
+    expect(viewer.notice?.title).toBe(describeCode("PAYLOAD_TOO_LARGE", "en").title);
+    viewer.setLang("pl");
+    expect(viewer.notice?.title).toBe(describeCode("PAYLOAD_TOO_LARGE", "pl").title);
+    viewer.element.querySelector<HTMLButtonElement>(".viewer__notice-close")!.click();
+    expect(viewer.notice).toBeNull();
+    viewer.canvas.dispatchEvent(new Event("webglcontextlost"));
+    expect(viewer.notice).toBeNull();
+  });
+
+  it("shows and empties a polite status line that stays in the accessibility tree (WEB-12, WEB-14)", () => {
+    const { viewer } = harness();
+    const status = viewer.element.querySelector<HTMLElement>(".viewer__status")!;
+    expect(status.getAttribute("role")).toBe("status");
+    expect(status.hidden).toBe(false); // a live region that appears with its text is often not announced
+    expect(status.textContent).toBe("");
+    viewer.setStatus("Updating the scene…");
+    expect(status.textContent).toBe("Updating the scene…");
+    const text = status.firstChild;
+    viewer.setStatus("Updating the scene…"); // the same text again: not announced twice
+    expect(status.firstChild).toBe(text);
+    viewer.setStatus(null);
+    expect(status.textContent).toBe("");
+    expect(status.hidden).toBe(false);
+  });
+
   it("focus() moves focus to the labelled canvas (not a tab stop)", () => {
     const { viewer } = harness();
     viewer.focus();
@@ -572,6 +621,24 @@ describe("scene graph, notices and page behaviour", () => {
     expect(viewer.element.querySelector(".viewer__fit")!.textContent).toBe("Fit view");
   });
 
+  it("setLang re-renders the labels and the notice shown, whatever language it was made in (WEB-21)", () => {
+    const { viewer } = harness();
+    const notice = viewer.element.querySelector<HTMLElement>(".viewer__notice")!;
+    viewer.setNotice(describeCode("PAYLOAD_TOO_LARGE", "en"));
+    viewer.setLang("pl");
+    expect(viewer.canvas.getAttribute("aria-label")).toMatch(/^Scena 3D/);
+    expect(viewer.element.querySelector(".viewer__fit")!.textContent).toBe("Dopasuj widok");
+    expect(viewer.element.querySelector(".viewer__notice-close")!.textContent).toBe("Zamknij");
+    expect(notice.textContent).toContain(describeCode("PAYLOAD_TOO_LARGE", "pl").title);
+    viewer.setNotice(describeCode("INTERNAL", "en")); // made by a module that still speaks English
+    expect(notice.textContent).toContain(describeCode("INTERNAL", "pl").title);
+    viewer.canvas.dispatchEvent(new Event("webglcontextlost"));
+    viewer.setLang("en");
+    expect(notice.textContent).toContain(describeState({ kind: "contextLost" }, "en").title);
+    viewer.setLang("pl");
+    expect(notice.textContent).toContain(describeState({ kind: "contextLost" }, "pl").title);
+  });
+
   it("dispose stops rendering, releases the renderer and detaches", async () => {
     const vv = Object.assign(new EventTarget(), {
       scale: 1,
@@ -593,5 +660,244 @@ describe("scene graph, notices and page behaviour", () => {
     expect(r.setSize).toHaveBeenCalledTimes(1);
     viewer.dispose(); // idempotent
     expect(r.dispose).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("WebGL context loss (WEB-16, web.md §2.3)", () => {
+  it("a lost context shows the message and stops drawing; a restored one hides it and draws again", () => {
+    const { viewer, r, frames, flush } = harness();
+    flush();
+    r.render.mockClear();
+    const notice = viewer.element.querySelector<HTMLElement>(".viewer__notice")!;
+    viewer.canvas.dispatchEvent(new Event("webglcontextlost"));
+    expect(notice.hidden).toBe(false);
+    expect(notice.textContent).toContain(describeState({ kind: "contextLost" }, "en").title);
+    expect(viewer.element.dataset["context"]).toBe("lost");
+    viewer.invalidate();
+    viewer.fit();
+    expect(frames.size).toBe(0); // no frame is even requested
+    flush();
+    expect(r.render).not.toHaveBeenCalled();
+    viewer.canvas.dispatchEvent(new Event("webglcontextrestored"));
+    expect(notice.hidden).toBe(true);
+    expect(viewer.element.dataset["context"]).toBeUndefined();
+    expect(r.render).toHaveBeenCalledTimes(1); // drawn at once
+    viewer.invalidate();
+    expect(flush()).toBeGreaterThan(0);
+  });
+
+  it("a restore keeps a notice that is not its own (e.g. a refused snapshot shown meanwhile)", () => {
+    const { viewer } = harness();
+    viewer.canvas.dispatchEvent(new Event("webglcontextlost"));
+    const other = describeState({ kind: "snapshotTooLarge" }, "en");
+    viewer.setNotice(other);
+    viewer.canvas.dispatchEvent(new Event("webglcontextrestored"));
+    const notice = viewer.element.querySelector<HTMLElement>(".viewer__notice")!;
+    expect(notice.hidden).toBe(false);
+    expect(notice.textContent).toContain(other.title);
+  });
+
+  it("while lost, clearing the notice (a new scene) keeps saying why nothing is drawn", () => {
+    const { viewer } = harness();
+    viewer.canvas.dispatchEvent(new Event("webglcontextlost"));
+    viewer.setNotice(null);
+    const notice = viewer.element.querySelector<HTMLElement>(".viewer__notice")!;
+    expect(notice.hidden).toBe(false);
+    expect(notice.textContent).toContain(describeState({ kind: "contextLost" }, "en").title);
+    viewer.canvas.dispatchEvent(new Event("webglcontextrestored"));
+    expect(notice.hidden).toBe(true);
+  });
+
+  it("the lost-context notice has no Dismiss button (it could not go away); other notices keep theirs", () => {
+    const { viewer } = harness();
+    const close = viewer.element.querySelector<HTMLButtonElement>(".viewer__notice-close")!;
+    viewer.canvas.dispatchEvent(new Event("webglcontextlost"));
+    expect(close.hidden).toBe(true);
+    const title = viewer.element.querySelector(".viewer__notice-title")!.firstChild;
+    viewer.setNotice(null); // a new scene meanwhile: the same alert, not announced again
+    expect(viewer.element.querySelector(".viewer__notice-title")!.firstChild).toBe(title);
+    viewer.setNotice(describeState({ kind: "snapshotTooLarge" }, "en"));
+    expect(close.hidden).toBe(false);
+    viewer.canvas.dispatchEvent(new Event("webglcontextrestored"));
+    expect(close.hidden).toBe(false);
+  });
+
+  it("dispose removes the context listeners", () => {
+    const { viewer } = harness();
+    viewer.dispose();
+    viewer.canvas.dispatchEvent(new Event("webglcontextlost"));
+    expect(viewer.element.dataset["context"]).toBeUndefined();
+  });
+});
+
+describe("rendererInfo (WEB-16 test hook)", () => {
+  it("reads renderer.info.memory at the time of the call, null without it", () => {
+    const memory = { geometries: 2, textures: 0 };
+    const { viewer } = harness({ createRenderer: () => ({ ...renderer(), info: { memory } }) });
+    expect(viewer.rendererInfo()).toEqual({ geometries: 2, textures: 0 });
+    memory.geometries = 5;
+    expect(viewer.rendererInfo()).toEqual({ geometries: 5, textures: 0 });
+    expect(harness().viewer.rendererInfo()).toBeNull();
+  });
+});
+
+describe("WebXR host (WEB-19)", () => {
+  /** A harness whose renderer can present (it has `xr` and `setAnimationLoop`). */
+  function xrHarness() {
+    const session = { end: vi.fn(async () => {}) };
+    const r = Object.assign(renderer(), {
+      xr: { getSession: vi.fn<() => typeof session | null>(() => null) },
+      setAnimationLoop: vi.fn(),
+    });
+    return { ...harness({ createRenderer: () => r }), r, session };
+  }
+  /** World-space centre, with the stage's current transform (setFromObject alone does not update parents). */
+  const centreInWorld = (m: SceneModel) => {
+    m.root.updateWorldMatrix(true, true);
+    return new Box3().setFromObject(m.root).getCenter(new Vector3());
+  };
+
+  it("exists only when the renderer can present", () => {
+    expect(harness().viewer.xr).toBeNull();
+    expect(xrHarness().viewer.xr).not.toBeNull();
+  });
+
+  it("while presenting: no 2D frames or resizes, metric clip planes, controls off; AR clears to transparent", async () => {
+    const { viewer, r, frames, flush } = xrHarness();
+    const m = await model();
+    viewer.setModel(m);
+    flush();
+    r.render.mockClear();
+    r.setSize.mockClear();
+    viewer.invalidate(); // a frame is pending when the session starts
+    const xr = viewer.xr!;
+    xr.begin({ ar: true });
+    expect(frames.size).toBe(0);
+    expect(viewer.element.dataset["xr"]).toBe("ar");
+    expect(viewer.camera.near).toBe(0.02);
+    expect(viewer.camera.far).toBe(100);
+    expect(viewer.controls.enabled).toBe(false);
+    expect(viewer.scene.background).toBeNull();
+    expect(r.setClearColor).toHaveBeenLastCalledWith(expect.anything(), 0);
+    viewer.invalidate();
+    viewer.resize();
+    viewer.fit();
+    viewer.contentChanged();
+    expect(frames.size).toBe(0);
+    flush();
+    expect(r.render).not.toHaveBeenCalled();
+    expect(r.setSize).not.toHaveBeenCalled();
+    expect(viewer.camera.near).toBe(0.02); // contentChanged did not move the clip planes
+  });
+
+  it("place() puts the centre of the model 1.3 m ahead at the eye height, at real size", async () => {
+    const { viewer } = xrHarness();
+    const m = await model();
+    viewer.setModel(m);
+    m.root.updateWorldMatrix(true, true);
+    const before = new Box3().setFromObject(m.root).getSize(new Vector3());
+    viewer.xr!.begin({ ar: false });
+    viewer.xr!.place(1.6);
+    const centre = centreInWorld(m);
+    expect(centre.x).toBeCloseTo(0, 6);
+    expect(centre.y).toBeCloseTo(1.6, 6);
+    expect(centre.z).toBeCloseTo(-1.3, 6);
+    const size = new Box3().setFromObject(m.root).getSize(new Vector3());
+    expect(size.x).toBeCloseTo(before.x / PRESENTATION_SCALE, 9); // metres, 1:1
+    expect(viewer.scene.background).not.toBeNull(); // VR keeps the dark room
+  });
+
+  it("a new scene while presenting stands where the old one did; the 2D view is fitted to it afterwards", async () => {
+    const { viewer, flush } = xrHarness();
+    viewer.setModel(await model());
+    viewer.xr!.begin({ ar: false });
+    viewer.xr!.place(1.5);
+    const next = await model("quantized-1node.glb");
+    viewer.setModel(next);
+    const centre = centreInWorld(next);
+    expect(centre.y).toBeCloseTo(1.5, 6);
+    expect(centre.z).toBeCloseTo(-1.3, 6);
+    viewer.xr!.end();
+    flush();
+    // Fitted from the front to the new model (in millimetres again).
+    expect(viewer.controls.target.distanceTo(centreInWorld(next))).toBeLessThan(1e-6);
+  });
+
+  it("end() brings back the 2D camera, clip planes, stage, background and controls, and draws", async () => {
+    const { viewer, r, frames } = xrHarness();
+    const m = await model();
+    viewer.setModel(m);
+    const position = viewer.camera.position.clone();
+    const quaternion = viewer.camera.quaternion.clone();
+    const [near, far] = [viewer.camera.near, viewer.camera.far];
+    const centre = centreInWorld(m);
+    viewer.xr!.begin({ ar: true });
+    viewer.xr!.place(1.4);
+    viewer.camera.position.set(0, 1.4, 0); // WebXR moves the camera with the head
+    viewer.camera.quaternion.set(0, 0.7071, 0, 0.7071);
+    r.render.mockClear();
+    viewer.xr!.end();
+    expect(viewer.element.dataset["xr"]).toBeUndefined();
+    expect(viewer.camera.position.distanceTo(position)).toBeLessThan(1e-9);
+    expect(viewer.camera.quaternion.angleTo(quaternion)).toBeLessThan(1e-9);
+    expect([viewer.camera.near, viewer.camera.far]).toEqual([near, far]);
+    expect(centreInWorld(m).distanceTo(centre)).toBeLessThan(1e-6);
+    expect(viewer.scene.background).not.toBeNull();
+    expect(r.setClearColor).toHaveBeenLastCalledWith(expect.anything(), 1);
+    expect(viewer.controls.enabled).toBe(true);
+    expect(r.render).toHaveBeenCalled(); // drawn at once (the buffer was resized back)
+    viewer.invalidate();
+    expect(frames.size).toBe(1);
+  });
+
+  it("exit() ends the running session, and does nothing without one", () => {
+    const { viewer, r, session } = xrHarness();
+    viewer.xr!.exit(); // no session
+    r.xr.getSession.mockReturnValue(session);
+    viewer.xr!.exit();
+    expect(session.end).toHaveBeenCalledTimes(1);
+  });
+
+  it("live changes during XR leave the 2D bounds alone; they are measured again, in millimetres, at the end", async () => {
+    const { viewer } = xrHarness();
+    viewer.setModel(await model());
+    const far2d = viewer.camera.far;
+    viewer.xr!.begin({ ar: false });
+    viewer.xr!.place(1.4);
+    viewer.contentChanged(); // a presenter change while in XR
+    expect(viewer.camera.far).toBe(100); // still the XR range
+    viewer.xr!.end();
+    expect(viewer.camera.far).toBeCloseTo(far2d, 6); // measured with the stage back in millimetres
+  });
+
+  it("setStageMatrix moves the scene while presenting; place() puts it back unturned at real size (WEB-20)", async () => {
+    const { viewer } = xrHarness();
+    const m = await model();
+    // A small structure off to one side: the box of the turned model is then not the turned box of the model.
+    const side = new Mesh(new BoxGeometry(0.02, 0.02, 0.02));
+    side.position.set(0.15, 0.05, 0);
+    m.root.add(side);
+    viewer.setModel(m);
+    const xr = viewer.xr!;
+    xr.setStageMatrix(new Matrix4().makeTranslation(1, 1, 1)); // not presenting: ignored
+    expect(xr.stageMatrix().elements[0]).toBe(PRESENTATION_SCALE);
+    xr.begin({ ar: false });
+    xr.place(1.5);
+    const first = centreInWorld(m);
+    const grabbed = new Matrix4()
+      .makeTranslation(0.3, 1.2, -0.7)
+      .multiply(new Matrix4().makeRotationAxis(new Vector3(0.7, 1.1, 0.3).normalize(), 2))
+      .multiply(new Matrix4().makeScale(3, 3, 3));
+    xr.setStageMatrix(grabbed);
+    xr.stageMatrix().elements.forEach((v, i) => expect(v).toBeCloseTo(grabbed.elements[i]!, 12));
+    xr.place(1.5);
+    expect(new Vector3().setFromMatrixScale(xr.stageMatrix()).x).toBeCloseTo(1, 9);
+    // Back exactly where it was first placed (measured unturned, not as the turned model's box).
+    expect(centreInWorld(m).distanceTo(first)).toBeLessThan(1e-9);
+    expect(first.distanceTo(new Vector3(0, 1.5, -1.3))).toBeLessThan(1e-6);
+    side.removeFromParent();
+    xr.setStageMatrix(grabbed);
+    xr.end(); // the 2D stage is unturned again
+    expect(xr.stageMatrix().equals(new Matrix4().makeScale(1000, 1000, 1000))).toBe(true);
   });
 });

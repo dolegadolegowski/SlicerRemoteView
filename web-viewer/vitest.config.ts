@@ -26,7 +26,7 @@ export default mergeConfig(
           test: {
             name: "dom",
             environment: "jsdom",
-            include: ["test/ui/**/*.test.ts", "test/render/**/*.test.ts"],
+            include: ["test/ui/**/*.test.ts", "test/render/**/*.test.ts", "test/xr/**/*.test.ts"],
           },
         },
       ],

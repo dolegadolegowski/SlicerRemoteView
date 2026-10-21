@@ -5,3 +5,5 @@ playwright-report/
 test-results/
 # Markdown follows .editorconfig (110 cols, hand-formatted tables), not Prettier.
 *.md
+# Copied from @webxr-input-profiles/assets (WEB-19)
+public/assets/

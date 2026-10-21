@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { validateMessage } from "@slicerremoteview/shared";
-import { createConnection } from "../../src/protocol/connection";
+import { createConnection, endsSession } from "../../src/protocol/connection";
 import type { Connection } from "../../src/protocol/connection";
 import type { FetchLike } from "../../src/protocol/scene-http";
 import { bindStreamToLoader, createSceneLoader } from "../../src/protocol/scene-loader";
@@ -408,6 +408,16 @@ describe("createSceneLoader", () => {
     socket.receive(joined());
     await vi.advanceTimersByTimeAsync(10);
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("a terminal state that `ends` says is retried keeps the token and the loaded version (WEB-14)", async () => {
+    const fetch = serving(SMALL);
+    make(fetch, { ends: (s) => endsSession(s) && s.kind !== "enterCode" });
+    socket.receive(joined());
+    await vi.waitFor(() => expect(events.ready).toHaveLength(1));
+    socket.serverClose(4004);
+    expect(loader.viewerToken).not.toBeNull();
+    expect(loader.loadedVersion).toBe(1);
   });
 
   it("leaving the session drops the token", () => {

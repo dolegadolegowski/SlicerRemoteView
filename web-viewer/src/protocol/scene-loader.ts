@@ -13,7 +13,7 @@ import { detectLang } from "../i18n/strings";
 import { describe } from "../state/errors";
 import type { Description } from "../state/errors";
 import { endsSession } from "./connection";
-import type { Connection, LogFn } from "./connection";
+import type { Connection, ConnectionState, LogFn } from "./connection";
 import { fetchScene } from "./scene-http";
 import type { FailureReason, FetchSceneOptions, SceneTarget } from "./scene-http";
 import type { SnapshotStream } from "./snapshot-stream";
@@ -28,6 +28,8 @@ export interface SceneLoaderOptions extends Omit<
   readonly maxAttempts?: number;
   /** Last scene version the viewer applied (`scene.request.haveSceneVersion`); WEB-12 supplies it. */
   readonly haveSceneVersion?: () => number;
+  /** When the session is over for this viewer; default `endsSession`. WEB-14 keeps states it will retry. */
+  readonly ends?: (state: ConnectionState) => boolean;
   readonly lang?: Lang;
   readonly log?: LogFn;
 }
@@ -89,6 +91,7 @@ export function createSceneLoader(
   const lang = options.lang ?? detectLang();
   const log = options.log ?? defaultLog;
   const maxAttempts = Math.max(1, options.maxAttempts ?? 3);
+  const ends = options.ends ?? endsSession;
   const handlers = new Map<keyof SceneLoaderEvents, Set<(payload: never) => void>>();
   let token: string | null = null;
   let sessionId: string | null = null;
@@ -264,7 +267,7 @@ export function createSceneLoader(
     }),
     connection.onMessage("scene.snapshot.ready", (m) => load(m)),
     connection.on("state", (s) => {
-      if (endsSession(s)) return forget();
+      if (ends(s)) return forget();
       // 4008: the relay instance restarts and its tokens die with it (§9.3); a retry would only get 401.
       if (s.kind === "disconnected" && s.immediate) cancel();
     }),

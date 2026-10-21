@@ -56,6 +56,13 @@ export interface SceneModel {
   /** Manifest order = GLB order (§7.3); iteration order of the map. */
   readonly nodes: ReadonlyMap<string, SceneNode>;
   readonly info: RootInfo;
+  /** `sceneVersion` of the snapshot this model was parsed from (`scene.snapshot.*`, §6), `null` when unknown. */
+  readonly snapshotVersion: number | null;
+  /**
+   * Takes a node out of the scene and disposes its geometry and material (`scene.nodeRemoved`, §8.2). Returns
+   * `false` for an unknown `nodeId`.
+   */
+  removeNode(nodeId: string): boolean;
   /** Disposes every geometry and material once and detaches the model; idempotent. */
   dispose(): void;
 }
@@ -212,6 +219,8 @@ function exactBuffer(bytes: Uint8Array): ArrayBuffer {
 
 export interface ParseSceneOptions {
   readonly parse?: ParseGlb;
+  /** The version the snapshot was announced with; becomes `SceneModel.snapshotVersion`. */
+  readonly snapshotVersion?: number;
 }
 
 /** Validates (§7.1), parses and maps (§7.2) one GLB. Never throws; a refused snapshot keeps no scene. */
@@ -245,13 +254,23 @@ export async function parseSceneModel(
   root.rotation.y = Math.PI;
   root.add(content);
   let disposed = false;
+  const nodes = built.nodes;
   return {
     ok: true,
     model: {
       root,
       content,
-      nodes: built.nodes,
+      nodes,
       info: built.info,
+      snapshotVersion: options.snapshotVersion ?? null,
+      removeNode(nodeId) {
+        const node = nodes.get(nodeId);
+        if (!node) return false;
+        nodes.delete(nodeId);
+        node.T.removeFromParent();
+        disposeObject(node.T);
+        return true;
+      },
       dispose() {
         if (disposed) return;
         disposed = true;
@@ -268,10 +287,11 @@ export type StoreLoadResult =
 
 export interface SceneModelStore {
   /**
-   * Parses `bytes`; on success the new model becomes `current` and the previous one is disposed. On failure the
-   * previous model stays (a broken snapshot does not blank the screen). Only the latest call can win.
+   * Parses `bytes` of snapshot `snapshotVersion`; on success the new model becomes `current` and the previous one
+   * is disposed. On failure the previous model stays (a broken snapshot does not blank the screen). Only the
+   * latest call can win.
    */
-  load(bytes: Uint8Array): Promise<StoreLoadResult>;
+  load(bytes: Uint8Array, snapshotVersion?: number): Promise<StoreLoadResult>;
   readonly current: SceneModel | null;
   /** Disposes the current model and cancels loads in flight (session ended, WEB-16). */
   clear(): void;
@@ -300,9 +320,12 @@ export function createSceneModelStore(options: SceneModelStoreOptions = {}): Sce
     }
   };
   return {
-    async load(bytes) {
+    async load(bytes, snapshotVersion) {
       const mine = ++generation;
-      const result = await parseSceneModel(bytes, options);
+      const result = await parseSceneModel(bytes, {
+        ...options,
+        ...(snapshotVersion !== undefined ? { snapshotVersion } : {}),
+      });
       if (mine !== generation) {
         if (result.ok) result.model.dispose();
         return { ok: false, reason: "superseded" };

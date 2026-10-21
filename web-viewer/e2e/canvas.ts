@@ -3,7 +3,7 @@
 import type { Page } from "@playwright/test";
 
 /** The scene only: controls over the canvas would count as model pixels (not `mask`: its colour counts too). */
-const SCENE_ONLY = ".viewer__fit, .viewer__notice, .node-panel { visibility: hidden !important; }";
+const SCENE_ONLY = ".viewer__fit, .viewer__top, .node-panel { visibility: hidden !important; }";
 
 /** Waits until the canvas stops changing (damping settled; render on demand stops). */
 export async function settled(page: Page): Promise<Buffer> {
