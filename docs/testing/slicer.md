@@ -206,19 +206,22 @@ Steps:
 
     ```python
     import vtk
-    def big(n):  # a sphere of 2·n² triangles: n=370 is about 6.5 MB of scene, n=520 about 13 MB
-        source = vtk.vtkSphereSource()
-        source.SetRadius(40)
-        source.SetThetaResolution(n)
-        source.SetPhiResolution(n)
-        source.Update()
-        slicer.modules.models.logic().AddModel(source.GetOutput())
-    big(370)
+    def spheres(count=5, n=220):  # each 95,920 triangles; five are about 5.8 MB of (quantised) scene
+        for i in range(count):
+            source = vtk.vtkSphereSource()
+            source.SetRadius(40)
+            source.SetCenter(100 * i, 0, 0)
+            source.SetThetaResolution(n)
+            source.SetPhiResolution(n)
+            source.Update()
+            slicer.modules.models.logic().AddModel(source.GetOutput())
+    spheres()
     ```
 
-    click *Start session*, join with the viewer and wait. Then click *Stop session*, clear the scene
-    (`slicer.mrmlScene.Clear()`), run `big(520)`, start again, join, and click *Stop session* about 20 s into the upload.
-    Repeat once more and quit Slicer (*File → Exit*) about 20 s into the upload instead.
+    (five spheres stay within the `mobile` budget — 500k triangles, 100k per model — so nothing is decimated), click
+    *Start session*, join with the viewer and wait. Then click *Stop session*, start again, join, and click *Stop
+    session* about 20 s into the upload. Repeat once more and quit Slicer (*File → Exit*) about 20 s into the upload
+    instead.
 
 Expected results:
 
@@ -255,12 +258,13 @@ Expected results:
 - Step 15: both show the same picture — red (R+100) on the patient's right, i.e. the left of the screen when looking
   from the front, blue (S+100) at the top, green (A+100) nearest to the camera. A mirror image or a swapped pair is an
   axis error (protocol §7.1, ADR 0005): report it with a screenshot of both.
-- Step 16, `big(370)`: the status stays "Sending the scene · …" for about 50 s (6.5 MB at 1 Mbit/s), then "Live";
-  the viewer then shows the sphere; the panel never shows "Relay unreachable" or "Session ended" on the way, the console
-  shows no reconnect, and the proxy passed about 6.5 MB. With the old fixed 10 s deadline the first `ping` (at 15 s)
+- Step 16, first upload: the status stays "Sending the scene · …" for about 46 s (5.8 MB at 1 Mbit/s; snapshots are
+  quantised, `KHR_mesh_quantization` — SLC-12), then "Live"; the viewer then shows the five spheres; the panel never
+  shows "Relay unreachable" or "Session ended" on the way, the console shows no reconnect, and the proxy passed about
+  5.8 MB. With the old fixed 10 s deadline the first `ping` (at 15 s)
   would have been late and the connection cut about 25 s in ("Relay unreachable"). A relay that closes the connection on its own
   WebSocket ping (SRV-14, report `2026-10-20-slicer-7`) would show as a reconnect here: note it.
-- Step 16, stop during `big(520)`: the panel leaves "Sending the scene". The stop message waits behind the bytes already
+- Step 16, stop during the upload: the panel leaves "Sending the scene". The stop message waits behind the bytes already
   written (several MB at 1 Mbit/s), so after 2 s the connection is aborted and the panel says the relay keeps the
   session for up to 2 minutes; the viewer shows the frozen scene as offline until the relay expires it. Quitting Slicer
   behaves the same and Slicer exits within 3 s. Expected, not a defect (`docs/research/slicer-heartbeat.md`).

@@ -8,7 +8,13 @@ Pure function from exported entities to the bytes of one glTF 2.0 binary contain
 - Per entity a transform node ``T`` (name, §7.3 extras, ``matrix`` in glTF space — omitted when identity) with
   exactly one child mesh node ``M`` owning one mesh → one ``TRIANGLES`` primitive → one material (§7.2, §7.4).
 - ``POSITION`` (float32, with ``min``/``max``), ``NORMAL`` (float32), indices ``UNSIGNED_SHORT`` when the mesh has
-  ≤ 65,535 vertices, else ``UNSIGNED_INT``. Quantization (``KHR_mesh_quantization``) is SLC-12.
+  ≤ 65,535 vertices, else ``UNSIGNED_INT``.
+- ``quantize=True`` (SLC-12, FR-09, §7.2, ``KHR_mesh_quantization``): ``POSITION`` as non-normalised ``SHORT`` around
+  the mesh's bounding-box centre with one uniform step for all three axes, ``NORMAL`` as normalised ``BYTE``; each
+  attribute is padded to a 4-byte vertex stride (glTF 2.0 §3.6.2.4: 8 and 4 bytes). The dequantisation —
+  ``uniform scale ⊕ offset`` — is ``M.matrix``, so a ``scene.update`` that replaces ``T.matrix`` keeps it. A uniform
+  step keeps normals right (a non-uniform scale on ``M`` would tilt them). Positions are off by at most half a step
+  (bounding box / 65,534 / 2: 4.6 µm for a 0.6 m model), normals by under half a degree.
 - An empty scene (no entities, e.g. after the user closed the scene — §7.3 still requires a new snapshot) is the
   root node alone with a 4-byte zero BIN chunk, so the "exactly one buffer" rule of §7.1 still holds.
 - Display names (possibly PHI, threat T7) appear only where §7.2–7.3 require them: ``T.name`` and
@@ -25,7 +31,7 @@ import json
 import re
 import struct
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -42,6 +48,8 @@ CHUNK_BIN = 0x004E4942  # "BIN\0"
 
 # glTF enums (glTF 2.0 §5.1.3, §3.7.2.1, §3.11)
 FLOAT = 5126
+BYTE = 5120
+SHORT = 5122
 UNSIGNED_SHORT = 5123
 UNSIGNED_INT = 5125
 ARRAY_BUFFER = 34962
@@ -50,6 +58,12 @@ TRIANGLES = 4
 
 #: Largest vertex count indexed with ``UNSIGNED_SHORT`` (65,535 itself is the reserved restart value).
 MAX_UINT16_VERTICES = 65_535
+#: The only compression extension of protocol v1 (§6.2, FR-09).
+QUANTIZATION = "KHR_mesh_quantization"
+#: Quantised positions span -32,767…32,767: a bounding box is 65,534 steps wide.
+POSITION_STEPS = 65_534
+#: Smallest step: a mesh whose bounding box is (almost) a point still gets an invertible ``M.matrix`` in float32.
+MIN_POSITION_STEP = 1e-9
 #: §7.4: the publisher may tune 0.4–0.9.
 ROUGHNESS = 0.6
 ROOT_NAME = "SlicerRemoteView"
@@ -141,7 +155,8 @@ def _check_unit_float(value: Any, what: str) -> float:
 
 def _validated_arrays(
     e: Entity,
-) -> tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.uint32]]:
+) -> tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.uint32], NDArray[np.float64]]:
+    """``(positions, normals, indices)`` as written, plus the positions in float64 (what quantisation starts from)."""
     try:
         positions = np.asarray(e.positions)
         normals = np.asarray(e.normals)
@@ -172,7 +187,8 @@ def _validated_arrays(
         raise GlbWriteError(f"{e.node_id}: positions/normals must be finite float32 values")
     if not np.allclose(np.linalg.norm(n32.astype(np.float64), axis=1), 1.0, rtol=0, atol=1e-4):
         raise GlbWriteError(f"{e.node_id}: normals must have unit length (§7.4)")
-    return p32, n32, indices.astype("<u4")
+    exact = np.asarray(positions, dtype=np.float64)  # no copy when the input is already float64
+    return p32, n32, indices.astype("<u4"), exact
 
 
 def _valid_id(value: Any) -> bool:
@@ -285,6 +301,88 @@ def _validate_root(root: RootExtras) -> None:
             raise GlbWriteError(f"{what} must be a short plain string")
 
 
+def _quantized_positions(
+    p: NDArray[np.float64],
+) -> tuple[NDArray[np.int16], float, NDArray[np.float64]]:
+    """``(q, step, offset)`` with ``p ≈ q * step + offset``: ``q`` int16 around the bounding-box centre, one ``step``
+    for all axes (see the module docstring). ``p`` is the input in float64, not its float32 rounding."""
+    lo, hi = p.min(axis=0), p.max(axis=0)
+    offset = (lo + hi) / 2.0
+    step = max(float((hi - lo).max()) / POSITION_STEPS, MIN_POSITION_STEP)
+    q = np.clip(np.rint((p - offset) / step), -32_767, 32_767).astype("<i2")
+    return q, step, offset
+
+
+def _quantized_normals(normals: NDArray[np.float32]) -> NDArray[np.int8]:
+    """Unit normals as normalised ``BYTE`` (glTF: ``value / 127``, clamped at -1)."""
+    return np.clip(np.rint(normals.astype(np.float64) * 127.0), -127, 127).astype("i1")
+
+
+def _padded(values: NDArray[Any], width: int) -> bytes:
+    """``(n, 3)`` values as ``(n, width)`` rows, the extra columns zero: a vertex stride that is a multiple of 4."""
+    rows = np.zeros((values.shape[0], width), dtype=values.dtype)
+    rows[:, :3] = values
+    return rows.tobytes()
+
+
+def _vertex_attributes(  # noqa: PLR0913 — one mesh's arrays, keyword-only switches and callbacks
+    positions: NDArray[np.float32],
+    exact: NDArray[np.float64],
+    normals: NDArray[np.float32],
+    *,
+    quantize: bool,
+    add_view: Callable[..., int],
+    add_accessor: Callable[[dict[str, Any]], int],
+) -> tuple[int, int, list[float] | None]:
+    """The ``POSITION`` and ``NORMAL`` accessors of one mesh, and the ``M.matrix`` that dequantises them (``None``
+    when not quantised)."""
+    count = positions.shape[0]
+    if not quantize:
+        position = add_accessor(
+            {
+                "bufferView": add_view(positions.tobytes(), ARRAY_BUFFER),
+                "componentType": FLOAT,
+                "count": count,
+                "type": "VEC3",
+                "min": [float(v) for v in positions.min(axis=0)],
+                "max": [float(v) for v in positions.max(axis=0)],
+            }
+        )
+        normal = add_accessor(
+            {
+                "bufferView": add_view(normals.tobytes(), ARRAY_BUFFER),
+                "componentType": FLOAT,
+                "count": count,
+                "type": "VEC3",
+            }
+        )
+        return position, normal, None
+    q, step, offset = _quantized_positions(exact)
+    position = add_accessor(
+        {
+            "bufferView": add_view(_padded(q, 4), ARRAY_BUFFER, stride=8),
+            "componentType": SHORT,
+            "count": count,
+            "type": "VEC3",
+            "min": [int(v) for v in q.min(axis=0)],
+            "max": [int(v) for v in q.max(axis=0)],
+        }
+    )
+    normal = add_accessor(
+        {
+            "bufferView": add_view(_padded(_quantized_normals(normals), 4), ARRAY_BUFFER, stride=4),
+            "componentType": BYTE,
+            "normalized": True,
+            "count": count,
+            "type": "VEC3",
+        }
+    )
+    # a uniform scale, then the offset (written column-major like T.matrix)
+    dequantize = np.diag([step, step, step, 1.0])
+    dequantize[:3, 3] = offset
+    return position, normal, gltf_matrix_column_major(dequantize)
+
+
 class _Bin:
     """BIN chunk builder: every appended block starts on a 4-byte boundary (zero padding). Blocks are kept as a
     list and joined once when the container is packed (snapshots reach tens of MiB)."""
@@ -312,8 +410,11 @@ class _Bin:
         return self.parts
 
 
-def write_glb(entities: Sequence[Entity], root_extras: RootExtras) -> bytes:
-    """Serialise ``entities`` into one GLB (§7). Raises :class:`GlbWriteError` on invalid input."""
+def write_glb(
+    entities: Sequence[Entity], root_extras: RootExtras, *, quantize: bool = False
+) -> bytes:
+    """Serialise ``entities`` into one GLB (§7), quantised with ``KHR_mesh_quantization`` when ``quantize`` (see the
+    module docstring). Raises :class:`GlbWriteError` on invalid input."""
     entities = tuple(entities)  # validated and written from the same snapshot of the input
     _validate_root(root_extras)
     seen: set[str] = set()
@@ -332,11 +433,11 @@ def write_glb(entities: Sequence[Entity], root_extras: RootExtras) -> bytes:
     root["extras"] = root_extras.to_json()
     nodes: list[dict[str, Any]] = [root]
 
-    def add_view(block: bytes, target: int) -> int:
+    def add_view(block: bytes, target: int, stride: int | None = None) -> int:
         offset = bin_chunk.append(block)
-        buffer_views.append(
-            {"buffer": 0, "byteOffset": offset, "byteLength": len(block), "target": target}
-        )
+        strided = {} if stride is None else {"byteStride": stride}
+        view = {"buffer": 0, "byteOffset": offset, "byteLength": len(block), **strided}
+        buffer_views.append({**view, "target": target})
         return len(buffer_views) - 1
 
     def add_accessor(accessor: dict[str, Any]) -> int:
@@ -344,25 +445,15 @@ def write_glb(entities: Sequence[Entity], root_extras: RootExtras) -> bytes:
         return len(accessors) - 1
 
     for e in entities:
-        positions, normals, indices = _validated_arrays(e)
+        positions, normals, indices, exact = _validated_arrays(e)
         vertex_count = positions.shape[0]
-        position_accessor = add_accessor(
-            {
-                "bufferView": add_view(positions.tobytes(), ARRAY_BUFFER),
-                "componentType": FLOAT,
-                "count": vertex_count,
-                "type": "VEC3",
-                "min": [float(v) for v in positions.min(axis=0)],
-                "max": [float(v) for v in positions.max(axis=0)],
-            }
-        )
-        normal_accessor = add_accessor(
-            {
-                "bufferView": add_view(normals.tobytes(), ARRAY_BUFFER),
-                "componentType": FLOAT,
-                "count": vertex_count,
-                "type": "VEC3",
-            }
+        position_accessor, normal_accessor, dequantize = _vertex_attributes(
+            positions,
+            exact,
+            normals,
+            quantize=quantize,
+            add_view=add_view,
+            add_accessor=add_accessor,
         )
         wide = vertex_count > MAX_UINT16_VERTICES
         index_block = indices.reshape(-1).astype("<u4" if wide else "<u2").tobytes()
@@ -418,7 +509,10 @@ def write_glb(entities: Sequence[Entity], root_extras: RootExtras) -> bytes:
             t_node["matrix"] = gltf_matrix_column_major(e.matrix)
         t_node["extras"] = extras
         nodes.append(t_node)
-        nodes.append({"mesh": len(meshes) - 1})
+        # §7.2: M carries the dequantisation, if any, and nothing else
+        nodes.append(
+            {"mesh": len(meshes) - 1} | ({} if dequantize is None else {"matrix": dequantize})
+        )
 
     bin_parts = bin_chunk.finish()
     document: dict[str, Any] = {
@@ -431,8 +525,49 @@ def write_glb(entities: Sequence[Entity], root_extras: RootExtras) -> bytes:
         document.update(
             meshes=meshes, materials=materials, accessors=accessors, bufferViews=buffer_views
         )
+        if quantize:  # declared only where it is used: an empty scene has no attributes to quantise
+            document.update(extensionsUsed=[QUANTIZATION], extensionsRequired=[QUANTIZATION])
     document["buffers"] = [{"byteLength": bin_chunk.length}]
     return _pack(document, bin_parts, bin_chunk.length)
+
+
+@dataclass(frozen=True)
+class SizeReport:
+    """Where the bytes of a GLB go (SLC-12): the container, its JSON chunk and the vertex and index data."""
+
+    total: int
+    json: int
+    positions: int
+    normals: int
+    indices: int
+
+    @property
+    def vertex_data(self) -> int:
+        return self.positions + self.normals
+
+
+def size_report(glb: bytes) -> SizeReport:
+    """The :class:`SizeReport` of a GLB written by :func:`write_glb` (one buffer; each view counted once)."""
+    json_length = struct.unpack_from("<I", glb, 12)[0]
+    document = json.loads(glb[20 : 20 + json_length])
+    accessors, views = document.get("accessors", []), document.get("bufferViews", [])
+    used: dict[str, set[int]] = {"POSITION": set(), "NORMAL": set(), "indices": set()}
+    for mesh in document.get("meshes", []):
+        for primitive in mesh["primitives"]:
+            for semantic in ("POSITION", "NORMAL"):
+                used[semantic].add(accessors[primitive["attributes"][semantic]]["bufferView"])
+            used["indices"].add(accessors[primitive["indices"]]["bufferView"])
+
+    def size(semantic: str) -> int:
+        return sum(views[i]["byteLength"] for i in used[semantic])
+
+    return SizeReport(
+        total=len(glb),
+        json=json_length,
+        positions=size("POSITION"),
+        normals=size("NORMAL"),
+        indices=size("indices"),
+    )
 
 
 def _pack(document: dict[str, Any], bin_parts: list[bytes], bin_length: int) -> bytes:

@@ -6,6 +6,8 @@
 relay's limits from ``session.created``). Nothing is sent here: the caller hands :meth:`Snapshot.frames` to the
 transport in order.
 
+- The GLB is quantised (``KHR_mesh_quantization``, FR-09, SLC-12): about half the vertex data; ``begin`` declares the
+  extension because the client reads it from the file.
 - An empty scene is a snapshot too (no nodes): viewers then show an empty scene instead of an old one.
 - A GLB over the relay's ``maxSnapshotBytes`` raises :class:`SnapshotTooLargeError` before any version is used.
 - Nodes that cannot be exported are reported in :attr:`Snapshot.skipped`, never sent.
@@ -74,8 +76,10 @@ def build_snapshot(
     *,
     slicer_version: str,
     anonymize_names: bool = False,
+    quantize: bool = True,
 ) -> Snapshot:
-    """Collect ``scene_api`` and build the next snapshot of ``client``'s session (see the module docstring)."""
+    """Collect ``scene_api`` and build the next snapshot of ``client``'s session (see the module docstring). The GLB
+    is quantised (``KHR_mesh_quantization``, FR-09) unless ``quantize`` is false."""
     limits = client.limits
     if (
         client.state not in (SessionState.CREATED, SessionState.ACTIVE)
@@ -91,7 +95,7 @@ def build_snapshot(
         slicer_version=slicer_version,
         anonymized_names=collected.anonymized_names,
     )
-    glb = write_glb(list(collected.entities), root)
+    glb = write_glb(list(collected.entities), root, quantize=quantize)
     if len(glb) > limits["maxSnapshotBytes"]:
         raise SnapshotTooLargeError(len(glb), limits["maxSnapshotBytes"])
     triangles = sum(entity.triangle_count for entity in collected.entities)

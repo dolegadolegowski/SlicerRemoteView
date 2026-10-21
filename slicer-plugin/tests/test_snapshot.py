@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import queue
+import struct
 import sys
 import time
 
@@ -83,6 +85,21 @@ def test_snapshot_of_a_sphere_scene_matches_its_begin():
         RuntimeError
     ):  # the chunks were taken: begin + end alone would be a broken snapshot
         snapshot.frames()
+
+
+def test_snapshot_is_quantized_and_its_begin_says_so():
+    """FR-09, SLC-12: the GLB uses KHR_mesh_quantization, and begin declares exactly what the file requires."""
+    scene = FakeScene({"id": "vtkMRMLModelNode4", "mesh": sphere(32)})
+    quantized = build_snapshot(scene, live_client(), slicer_version="5.12.4")
+    begin, glb, _ = reassemble(list(quantized.frames()))
+    assert begin["extensionsUsed"] == begin["extensionsRequired"] == ["KHR_mesh_quantization"]
+    document = json.loads(glb[20 : 20 + struct.unpack_from("<I", glb, 12)[0]])
+    assert document["extensionsRequired"] == ["KHR_mesh_quantization"]
+    assert "matrix" in document["nodes"][2]  # M dequantises (§7.2)
+    plain = build_snapshot(scene, live_client(), slicer_version="5.12.4", quantize=False)
+    begin_plain, glb_plain, _ = reassemble(list(plain.frames()))
+    assert begin_plain["extensionsUsed"] == begin_plain["extensionsRequired"] == []
+    assert len(glb) < 0.8 * len(glb_plain)
 
 
 def test_snapshot_versions_follow_the_client():
@@ -222,7 +239,7 @@ def test_snapshot_end_to_end_with_the_relay_stub():
     stub = start_relay_stub()
     try:
         # 64 KiB chunks: the reassembly checks order and sizes, not just one frame
-        scene = FakeScene({"id": "vtkMRMLModelNode4", "mesh": sphere(64)})
+        scene = FakeScene({"id": "vtkMRMLModelNode4", "mesh": sphere(96)})  # ≈ 220 kB quantised
         snapshot, drops = upload(stub.address, scene, max_chunk=65_536)
         assert drops == [] and snapshot.byte_length > 2 * 65_536
     finally:
@@ -240,11 +257,12 @@ def test_snapshot_heartbeat_survives_a_throttled_uplink():
     try:
         proxy = start_throttle_proxy(stub, rate=400_000)
         try:
-            scene = FakeScene({"id": "vtkMRMLModelNode4", "mesh": sphere(200)})
+            # ≈ 1.07 MB quantised (SLC-12)
+            scene = FakeScene({"id": "vtkMRMLModelNode4", "mesh": sphere(212)})
             snapshot, drops = upload(
                 f"ws://{proxy.address}/ws", scene, timeout=20, ping_interval=0.3, pong_timeout=0.5
             )
-            # more than 3 s at 400 KB/s: several pings are due while the chunks are on their way
+            # about 2.7 s at 400 KB/s: several pings (every 0.3 s) are due while the chunks are on their way
             assert snapshot.byte_length > 1_000_000
             assert drops == [], f"the upload was cut: {drops[0].error}"
         finally:
