@@ -4,9 +4,13 @@ import {
   Group,
   Matrix4,
   Mesh,
+  MeshBasicMaterial,
   PerspectiveCamera,
+  PlaneGeometry,
   Scene,
+  Texture,
   TextureLoader,
+  Vector3,
 } from "three";
 import { XRControllerModelFactory } from "three/addons/webxr/XRControllerModelFactory.js";
 import { XRHandModelFactory } from "three/addons/webxr/XRHandModelFactory.js";
@@ -19,6 +23,7 @@ import {
   WARNING_MS,
   XR_PROFILES_PATH,
 } from "../../src/xr/session";
+import { XR_PANEL_DISTANCE_M, XR_PANEL_DROP_M } from "../../src/xr/placement";
 
 type Loop = ((time: number, frame?: XRFrame) => void) | null;
 
@@ -91,7 +96,7 @@ describe("an XR session (WEB-19)", () => {
     expect(fake.begin).toHaveBeenCalledWith({ ar: true });
     expect(xr.setSession).toHaveBeenCalledWith(session);
     expect(renderer.setAnimationLoop).toHaveBeenCalledWith(expect.any(Function));
-    expect(fake.scene.children).toHaveLength(4); // two grips, two hands
+    expect(fake.scene.children).toHaveLength(5); // two grips, two hands, the text panels' column
     // Self-hosted models only (never the jsDelivr default).
     expect(controllerPath).toHaveBeenCalledWith(XR_PROFILES_PATH);
     expect(handPath).toHaveBeenCalledWith(`${XR_PROFILES_PATH}/generic-hand/`);
@@ -266,12 +271,29 @@ describe("an XR session (WEB-19)", () => {
     });
   });
 
-  it("a warning stands below the scene once it is placed, for WARNING_MS (the Quest 2 budget, WEB-20)", async () => {
+  /** Panels of `height` metres, recorded with their text; `freed` once its geometry, texture and material are. */
+  const panels = (height = 0.1) => {
+    const made: { text: string; mesh: Mesh; freed: () => boolean }[] = [];
+    const make = vi.fn((text: string) => {
+      const material = new MeshBasicMaterial({ map: new Texture() });
+      const mesh = new Mesh(new PlaneGeometry(0.6, height), material);
+      const spies = [
+        vi.spyOn(mesh.geometry, "dispose"),
+        vi.spyOn(material, "dispose"),
+        vi.spyOn(material.map!, "dispose"),
+      ];
+      made.push({ text, mesh, freed: () => spies.every((spy) => spy.mock.calls.length === 1) });
+      return mesh;
+    });
+    return { make, made };
+  };
+  const world = (mesh: Mesh) => mesh.getWorldPosition(new Vector3());
+
+  it("a warning stands below the scene once it is placed, facing the eyes, for WARNING_MS (the Quest 2 budget, WEB-20)", async () => {
     vi.useFakeTimers();
     try {
       const { host, fake, frame } = fakeHost();
-      const panel = new Mesh();
-      const make = vi.fn(() => panel);
+      const { make, made } = panels(0.2);
       await runXrSession(host, fakeSession() as unknown as XRSession, "immersive-vr", {
         warning: "Above the Quest 2 budget",
         panel: make,
@@ -280,14 +302,105 @@ describe("an XR session (WEB-19)", () => {
       expect(make).not.toHaveBeenCalled(); // not before the scene has its place
       frame(frameAt(1.6));
       expect(make).toHaveBeenCalledWith("Above the Quest 2 budget");
-      expect(panel.parent).toBe(fake.scene);
-      expect(panel.position.y).toBeCloseTo(1.15, 9); // below the eyes, in front
-      expect(panel.position.z).toBeLessThan(0);
+      const panel = made[0]!.mesh;
+      expect(panel.parent?.parent).toBe(fake.scene);
+      // Its top edge 0.3 m below the eyes, 0.9 m ahead; its centre half its height down the tilted column.
+      const tilt = Math.atan2(XR_PANEL_DROP_M, XR_PANEL_DISTANCE_M);
+      const at = world(panel);
+      expect(at.y).toBeCloseTo(1.6 - XR_PANEL_DROP_M - 0.1 * Math.cos(tilt), 9);
+      expect(at.z).toBeCloseTo(-XR_PANEL_DISTANCE_M + 0.1 * Math.sin(tilt), 9);
+      // The column faces the eyes of the user where they stood, its panels with it.
+      const facing = new Vector3(0, 0, 1).transformDirection(panel.matrixWorld);
+      const toEyes = new Vector3(0, 1.6, 0)
+        .sub(panel.parent!.getWorldPosition(new Vector3()))
+        .normalize();
+      expect(facing.dot(toEyes)).toBeGreaterThan(0.999);
       vi.advanceTimersByTime(WARNING_MS);
       expect(panel.parent).toBeNull();
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  describe("status line (WEB-23)", () => {
+    it("follows `status` once the scene is placed: drawn anew only when it changes, gone when nothing is to say", async () => {
+      const { host, frame } = fakeHost();
+      const { make, made } = panels();
+      let said: string | null = "Reconnecting…";
+      await runXrSession(host, fakeSession() as unknown as XRSession, "immersive-vr", {
+        panel: make,
+        status: () => said,
+      });
+      frame(frameAt(null));
+      expect(make).not.toHaveBeenCalled(); // not before the scene has its place
+      frame(frameAt(1.6));
+      frame(frameAt(1.6));
+      expect(made.map((m) => m.text)).toEqual(["Reconnecting…"]); // once, not every frame
+      const first = made[0]!.mesh;
+      expect(first.parent).not.toBeNull();
+      said = "Reconnecting…\nUpdating the scene…";
+      frame(frameAt(1.6));
+      expect(first.parent).toBeNull(); // replaced
+      expect(made.at(-1)!.text).toBe("Reconnecting…\nUpdating the scene…");
+      // Freed a frame later, once the new panel has been drawn (three keeps the shader program for it).
+      expect(made[0]!.freed()).toBe(false);
+      frame(frameAt(1.6));
+      expect(made[0]!.freed()).toBe(true);
+      said = null;
+      frame(frameAt(1.6));
+      expect(made.at(-1)!.mesh.parent).toBeNull();
+      frame(frameAt(1.6));
+      expect(made.at(-1)!.freed()).toBe(true);
+      expect(make).toHaveBeenCalledTimes(2);
+    });
+
+    it("stands under the warning while it is up and takes its place after; a reset brings it back below the scene", async () => {
+      vi.useFakeTimers();
+      try {
+        const { host, groups, frame } = fakeHost();
+        const { make, made } = panels(0.1);
+        await runXrSession(host, fakeSession() as unknown as XRSession, "immersive-vr", {
+          warning: "Not prepared for Quest 2",
+          panel: make,
+          status: () => "Presenter is offline",
+        });
+        frame(frameAt(1.6));
+        const [warning, status] = made.map((m) => m.mesh) as [Mesh, Mesh];
+        expect(warning.position.y).toBeCloseTo(-0.05, 9); // in the column: its top at the top
+        expect(status.position.y).toBeCloseTo(-0.17, 9); // under it, 2 cm apart
+        vi.advanceTimersByTime(WARNING_MS);
+        frame(frameAt(1.6));
+        expect(status.position.y).toBeCloseTo(-0.05, 9);
+        const before = world(status);
+        frame(frameAt(1.8)); // the user stood up: the panels stay where they were put
+        expect(world(status).distanceTo(before)).toBeLessThan(1e-9);
+        groups.get("ray0")!.dispatchEvent({ type: "squeezestart" } as never); // reset
+        expect(world(status).y - before.y).toBeCloseTo(0.2, 2); // in front of the eyes again
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("the end of the session takes the panels away and frees them, a replaced one too", async () => {
+      const { host, fake, frame, sessionEnd } = fakeHost();
+      const { make, made } = panels();
+      let said = "Reconnecting…";
+      await runXrSession(host, fakeSession() as unknown as XRSession, "immersive-vr", {
+        warning: "Not prepared for Quest 2",
+        panel: make,
+        status: () => said,
+      });
+      frame(frameAt(1.6));
+      said = "Presenter is offline";
+      frame(frameAt(1.6)); // the first status panel waits to be freed
+      sessionEnd();
+      expect(made).toHaveLength(3);
+      for (const { mesh, freed } of made) {
+        expect(mesh.parent).toBeNull();
+        expect(freed()).toBe(true);
+      }
+      expect(fake.scene.children).toHaveLength(0);
+    });
   });
 
   it("no warning, no panel", async () => {

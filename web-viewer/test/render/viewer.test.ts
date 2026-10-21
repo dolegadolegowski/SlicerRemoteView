@@ -567,6 +567,19 @@ describe("scene graph, notices and page behaviour", () => {
     expect(notice.hidden).toBe(true);
   });
 
+  it("notice: the message given, in the UI language, until dismissed; never the lost-context one (WEB-23)", () => {
+    const { viewer } = harness();
+    expect(viewer.notice).toBeNull();
+    viewer.setNotice(describeCode("PAYLOAD_TOO_LARGE", "en"));
+    expect(viewer.notice?.title).toBe(describeCode("PAYLOAD_TOO_LARGE", "en").title);
+    viewer.setLang("pl");
+    expect(viewer.notice?.title).toBe(describeCode("PAYLOAD_TOO_LARGE", "pl").title);
+    viewer.element.querySelector<HTMLButtonElement>(".viewer__notice-close")!.click();
+    expect(viewer.notice).toBeNull();
+    viewer.canvas.dispatchEvent(new Event("webglcontextlost"));
+    expect(viewer.notice).toBeNull();
+  });
+
   it("shows and empties a polite status line that stays in the accessibility tree (WEB-12, WEB-14)", () => {
     const { viewer } = harness();
     const status = viewer.element.querySelector<HTMLElement>(".viewer__status")!;

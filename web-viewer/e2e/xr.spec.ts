@@ -56,15 +56,23 @@ async function quest3(
   });
 }
 
-/** The newest socket of a relay stand-in that joins and streams the 2-node fixture as snapshot 1. */
-async function relayWithSocket(page: Page): Promise<() => WebSocketRoute> {
+/**
+ * The newest socket of a relay stand-in that joins and streams the 2-node fixture as snapshot 1; a join after the first
+ * (a rejoin) is answered once `rejoin` resolves.
+ */
+async function relayWithSocket(
+  page: Page,
+  rejoin: Promise<void> = Promise.resolve(),
+): Promise<() => WebSocketRoute> {
   let latest: WebSocketRoute | null = null;
+  let joins = 0;
   await page.routeWebSocket(/\/ws$/, (ws) => {
     latest = ws;
-    ws.onMessage((frame) => {
+    ws.onMessage(async (frame) => {
       const message = JSON.parse(String(frame)) as { type: string; id?: string };
       if (message.type === "ping") sendJson(ws, { type: "pong", replyTo: message.id });
       if (message.type !== "viewer.join") return;
+      if (joins++ > 0) await rejoin;
       sendJson(ws, {
         type: "viewer.joined",
         replyTo: message.id,
@@ -398,4 +406,31 @@ test("on a Quest 3 the same scene gets no warning", async ({ page }) => {
   await expect(page.locator(".viewer")).toHaveAttribute("data-xr", "ar");
   await expect.poll(async () => (await stage(page)).z).toBeLessThan(-0.5); // placed: a warning would be up now
   expect(await drawn()).not.toContain("Quest 2");
+});
+
+/** How many text panels the headset shows (test hook, WEB-23). */
+const panels = (page: Page) =>
+  page.evaluate(() => (window as unknown as { __rv: { xrPanels(): number } }).__rv.xrPanels());
+
+test("the headset's status line says 'Reconnecting…' while the link is down; the rejoin clears it (WEB-23)", async ({
+  page,
+}) => {
+  await quest3(page);
+  const drawn = await recordCanvasText(page);
+  let rejoin = () => {};
+  const socket = await relayWithSocket(page, new Promise<void>((resolve) => (rejoin = resolve)));
+  await page.goto("/");
+  await join(page);
+  await page.locator(".viewer__xr").click();
+  await expect(page.locator(".viewer")).toHaveAttribute("data-xr", "ar");
+  await expect.poll(async () => (await stage(page)).z).toBeLessThan(-0.5); // placed: a panel would be up now
+  expect(await panels(page)).toBe(0); // all is well: nothing to say
+  await socket().close(); // the network drops
+  await expect(page.locator(".status-bar__connection")).toHaveText("Reconnecting…");
+  await expect.poll(drawn).toContain("Reconnecting…");
+  expect(await panels(page)).toBe(1);
+  rejoin();
+  await expect(page.locator(".status-bar__connection")).toHaveText("Connected");
+  await expect.poll(() => panels(page)).toBe(0);
+  await expect(page.locator(".viewer")).toHaveAttribute("data-xr", "ar"); // in XR all along
 });

@@ -26,6 +26,7 @@ import { bindWakeLock } from "./ui/wake-lock";
 import { t } from "./i18n/strings";
 import { quest2Concern } from "./xr/budget";
 import { enterXr, preloadXr } from "./xr/enter";
+import { XR_PANEL_NAME } from "./xr/placement";
 import { browserXr, xrMode } from "./xr/support";
 
 // First of all: a `/j#CODE` link leaves the address bar before anything can reach the network (WEB-11, T6).
@@ -158,15 +159,20 @@ if (app) {
       if (!concern) return null;
       return t(langs.lang, concern === "triangles" ? "xr.quest2Budget" : "xr.quest2Profile");
     };
+    // The status lines, which the page shows, are repeated in the headset (WEB-23).
+    const status = () => screens.xrStatus;
     screens.offerXr(mode, (host, ended) =>
-      enterXr(host, xr, mode, { onEnd: ended, warning: warning() }),
+      enterXr(host, xr, mode, { onEnd: ended, warning: warning(), status }),
     );
   });
   // Test hook (WEB-16): GPU resource counts only — no scene content, names or credentials.
   const rendererInfo = () => screens.viewer?.rendererInfo() ?? null;
   // Test hook (WEB-20): where the scene stands in XR — numbers only.
   const xrStage = () => screens.viewer?.xr?.stageMatrix().toArray() ?? null;
-  (window as unknown as { __rv: object }).__rv = { rendererInfo, xrStage };
+  // Test hook (WEB-23): how many text panels the headset shows — a count, not their text.
+  const xrPanels = () =>
+    screens.viewer?.xr?.scene.getObjectsByProperty("name", XR_PANEL_NAME).length ?? 0;
+  (window as unknown as { __rv: object }).__rv = { rendererInfo, xrStage, xrPanels };
   if (import.meta.env.DEV) startDevOverlay(rendererInfo);
 
   app.append(entry.element);

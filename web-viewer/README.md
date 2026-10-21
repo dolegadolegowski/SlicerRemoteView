@@ -354,10 +354,10 @@ start, failing above 1 MiB (NFR-09) or when `index.html` names no module script 
 
 | Initial asset (2026-10-21, three 0.186.1, Vite 8.3.4) | Size | gzip (level 9) |
 |---|---|---|
-| `assets/index-*.js` (app + three.js + GLTFLoader + OrbitControls) | 752,106 B | 192,647 B |
+| `assets/index-*.js` (app + three.js + GLTFLoader + OrbitControls) | 752,511 B | 192,804 B |
 | `assets/index-*.css` | 9,774 B | 2,289 B |
-| **Total initial JS + CSS** | 761,880 B | **194,936 B** (19 % of 1,048,576 B) |
-| `assets/session-*.js` (WebXR, preloaded on Quest Browser only; not initial) | 16,803 B | 5,678 B |
+| **Total initial JS + CSS** | 762,285 B | **195,093 B** (19 % of 1,048,576 B) |
+| `assets/session-*.js` (WebXR, preloaded on Quest Browser only; not initial) | 17,361 B | 5,902 B |
 
 ```bash
 npm run build -w web-viewer && npm test -w web-viewer -- bundle && npm run e2e -w web-viewer -- network
@@ -387,7 +387,11 @@ the 2D view restored when the session ends (it ends by itself when the presentat
 grabbed with a controller's trigger or a pinch — one hand moves and turns it, two hands turn it about the vertical and
 scale it between 0.1× and 5× (`src/xr/grab.ts`) — and the grip button or a double press of one hand puts it back
 where it was first placed (WEB-20); on a Quest 2 a scene above its budget, or not prepared with the `quest2` profile,
-gets a warning panel in the headset (`src/xr/budget.ts`, `src/xr/panel.ts`). The input profiles are copied at build time from
+gets a warning panel in the headset (`src/xr/budget.ts`, `src/xr/panel.ts`). Below the scene a status line repeats
+what the page would say (WEB-23, `screens.xrStatus`): "Reconnecting…", "Presenter is offline", the title of a message
+over the scene (a refused snapshot) and the notice line (a presenter change, "updating"), one line each, in the UI
+language; it stands under the warning while that is up. Test hooks: `window.__rv.xrStage()` (the stage matrix) and
+`window.__rv.xrPanels()` (how many panels are up) — numbers only. The input profiles are copied at build time from
 `@webxr-input-profiles/assets` (dev dependency, pinned) into `dist/assets/xr-profiles-<version>/`
 (`scripts/copy-xr-profiles.mjs`, also run by `npm run dev`; not committed) — never the jsDelivr default. Facts and
 sources: `docs/research/web-xr.md`. `e2e/xr.spec.ts` emulates a Quest 3 with Meta's IWER (dev dependency `iwer`) and

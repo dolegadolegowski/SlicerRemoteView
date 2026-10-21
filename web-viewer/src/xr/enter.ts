@@ -22,7 +22,7 @@ export async function enterXr(
   host: XrHost,
   xr: XrSystemLike,
   mode: XrMode,
-  options: Pick<XrSessionOptions, "onEnd" | "warning"> = {},
+  options: Pick<XrSessionOptions, "onEnd" | "warning" | "status"> = {},
 ): Promise<boolean> {
   let session: XRSession;
   try {

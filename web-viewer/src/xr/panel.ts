@@ -1,7 +1,8 @@
-// A short text shown in XR (WEB-20: the Quest 2 budget warning), where the 2D page cannot be seen: drawn on a canvas,
-// shown on a small plane in the scene. `null` where the browser cannot draw text on a canvas.
+// A short text shown in XR (WEB-20: the Quest 2 budget warning; WEB-23: the status line), where the 2D page cannot be
+// seen: drawn on a canvas, shown on a small plane in the scene. `null` where the browser cannot draw text on a canvas.
 
 import { CanvasTexture, Mesh, MeshBasicMaterial, PlaneGeometry, SRGBColorSpace } from "three";
+import { XR_PANEL_NAME } from "./placement";
 
 /** Panel size in metres (readable at about 1 m) and canvas pixels per metre. */
 const WIDTH_M = 0.6;
@@ -9,11 +10,29 @@ const PX_PER_M = 1600;
 const FONT_PX = 44;
 const PAD_PX = 40;
 
+/** `word` cut into pieces no wider than `width` pixels: a long node name has no space to break at. */
+function cut(context: CanvasRenderingContext2D, word: string, width: number): string[] {
+  const pieces: string[] = [];
+  let piece = "";
+  for (const char of word) {
+    if (piece && context.measureText(piece + char).width > width) {
+      pieces.push(piece);
+      piece = char;
+    } else piece += char;
+  }
+  return piece ? [...pieces, piece] : pieces;
+}
+
 /** Splits `text` into lines no wider than `width` pixels in the context's current font. */
 function wrap(context: CanvasRenderingContext2D, text: string, width: number): string[] {
   const lines: string[] = [];
   let line = "";
-  for (const word of text.split(/\s+/)) {
+  const words = text
+    .split(/\s+/)
+    .flatMap((word) =>
+      context.measureText(word).width > width ? cut(context, word, width) : [word],
+    );
+  for (const word of words) {
     const next = line ? `${line} ${word}` : word;
     if (line && context.measureText(next).width > width) {
       lines.push(line);
@@ -24,13 +43,14 @@ function wrap(context: CanvasRenderingContext2D, text: string, width: number): s
   return lines;
 }
 
+/** `text` on a plane `WIDTH_M` wide; each `\n` starts a new line. */
 export function createTextPanel(text: string, doc: Document = document): Mesh | null {
   const canvas = doc.createElement("canvas");
   canvas.width = WIDTH_M * PX_PER_M;
   const measure = canvas.getContext("2d");
   if (!measure) return null;
   measure.font = `${FONT_PX}px system-ui, sans-serif`;
-  const lines = wrap(measure, text, canvas.width - 2 * PAD_PX);
+  const lines = text.split("\n").flatMap((part) => wrap(measure, part, canvas.width - 2 * PAD_PX));
   canvas.height = lines.length * FONT_PX * 1.3 + 2 * PAD_PX; // resizing clears the context's state
   const context = canvas.getContext("2d")!;
   context.fillStyle = "rgba(21, 27, 35, 0.92)"; // --surface
@@ -47,7 +67,7 @@ export function createTextPanel(text: string, doc: Document = document): Mesh | 
     new PlaneGeometry(WIDTH_M, canvas.height / PX_PER_M),
     new MeshBasicMaterial({ map: texture, transparent: true }),
   );
-  panel.name = "SlicerRemoteView XR panel";
+  panel.name = XR_PANEL_NAME;
   return panel;
 }
 

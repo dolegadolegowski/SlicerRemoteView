@@ -4,7 +4,8 @@
 // viewers, scene version) and a short notice line (presenter changes, "updating"); on the code entry one line
 // (reconnecting, presenter offline, waiting for or loading the scene, WEB-14). Leave (WEB-22) is in the status bar and
 // on the busy code entry; the language switch (WEB-21) is in the status bar, and a switch re-renders every screen.
-// On Meta Quest Browser the viewer also offers XR (WEB-19).
+// On Meta Quest Browser the viewer also offers XR (WEB-19), where the page cannot be seen: the status lines are
+// repeated there (WEB-23, `xrStatus`).
 // Kept out of `main.ts` so every transition is unit-tested.
 
 import type { LangStore } from "../i18n/lang";
@@ -80,6 +81,12 @@ export interface Screens {
    * whether it started (else a notice says it could not) and calls `ended` when a started session is over.
    */
   offerXr(mode: XrMode, enter: XrEnter): void;
+  /**
+   * What the in-XR status line says (WEB-23), one line each, in the UI language: the status bar's connection when it
+   * is not "Connected" (reconnecting, presenter offline), the title of the message over the scene and the notice line
+   * (a presenter change, "updating"); `null` when none of them has anything to say.
+   */
+  readonly xrStatus: string | null;
   readonly viewer: Viewer | null;
   readonly nodePanel: NodePanel | null;
   /** Joining, joined or reconnecting: the code entry's cells hold the code of this session. */
@@ -117,6 +124,9 @@ export function bindScreens(options: ScreensOptions): Screens {
   /** The notice line's text in a given language: it follows a language switch while shown. */
   let notice: ((lang: Lang) => string) | null = null;
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+  // What the status bar's connection and the notice line say, kept for the in-XR status line.
+  let urgentText: string | null = null;
+  let lineText: string | null = null;
 
   function paintStatus(): void {
     const lang = currentLang();
@@ -128,7 +138,9 @@ export function bindScreens(options: ScreensOptions): Screens {
     bar?.setConnection(
       reconnecting ? "reconnecting" : presenterOffline ? "presenterOffline" : "connected",
     );
-    viewer?.setStatus(notice?.(lang) ?? (hint ? t(lang, "viewer.updating") : null));
+    urgentText = urgent;
+    lineText = notice?.(lang) ?? (hint ? t(lang, "viewer.updating") : null);
+    viewer?.setStatus(lineText);
     const waiting = loading ? "state.downloading.title" : "state.waitingForScene.title";
     entry.setStatus(urgent ?? (joined ? t(lang, waiting) : null));
   }
@@ -414,6 +426,12 @@ export function bindScreens(options: ScreensOptions): Screens {
     offerXr(mode, enter) {
       xrOffer = { mode, enter };
       attachXr();
+    },
+    get xrStatus() {
+      const lines = [urgentText, viewer?.notice?.title ?? null, lineText].filter(
+        (line): line is string => line !== null,
+      );
+      return lines.length > 0 ? lines.join("\n") : null;
     },
     get live() {
       return isLive();

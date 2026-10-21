@@ -32,6 +32,25 @@ describe("XR text panel (WEB-20)", () => {
     disposeTextPanel(panel);
   });
 
+  it("starts a new line at each line break (the status line's lines, WEB-23)", () => {
+    const c = context();
+    createTextPanel("Reconnecting…\nUpdating the scene…", documentWith(c));
+    expect(c.fillText.mock.calls.map((call) => call[0])).toEqual([
+      "Reconnecting…",
+      "Updating the scene…",
+    ]);
+  });
+
+  it("cuts a word wider than the panel (a long node name) into pieces that fit", () => {
+    const c = context();
+    const name = "Segmentation_LeftKidney_LowerPole_Tumor_20240101";
+    createTextPanel(`The presenter changed ${name}`, documentWith(c));
+    const lines = c.fillText.mock.calls.map((call) => call[0] as string);
+    for (const line of lines) expect(line.length * 20).toBeLessThanOrEqual(960 - 80);
+    expect(lines.join("")).toBe(`The presenter changed${name}`);
+    expect(lines.at(-1)).not.toBe("");
+  });
+
   it("is null where the browser cannot draw text on a canvas", () => {
     expect(createTextPanel("x", documentWith(null))).toBeNull();
   });

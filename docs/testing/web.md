@@ -268,7 +268,8 @@ differences:
 
 ## Quest Browser
 
-WebXR entry (WEB-19) below; grabbing, scaling and the Quest 2 budget warning follow with WEB-20 (NFR-27).
+WebXR entry (WEB-19) below; grabbing, scaling and the Quest 2 budget warning follow with WEB-20, the in-XR status
+line with WEB-23 (NFR-27).
 
 ### Device profile (WEB-15)
 
@@ -336,6 +337,17 @@ its corner at the origin, and the edge between them ≈ 141 mm (`shared/fixtures
     shared with the `mobile` profile: "This scene was not prepared for Quest 2 …". On Quest 3 neither shows a panel.
 13. Performance HUD with `asymmetric-2nodes.glb` and with the `quest2` budget fixture on Quest 2, while grabbing:
     **Expect:** 72 Hz sustained (NFR-07); record the values in **Results**.
+14. Status line (WEB-23): enter XR on Quest 3, then cut the network for at least 30 s (switch the router's Wi-Fi off,
+    or stop the relay) and bring it back. **Expect:** a small panel below the scene, tilted towards you, says
+    "Reconnecting…" (Polish: "Ponowne łączenie…") once the viewer notices the drop — at once if the socket is
+    closed, else within about 25 s (heartbeat) — and goes once the 2D status bar would say "Connected" again; you
+    stay in XR. Let the presenter go offline (close Slicer's connection): "Presenter is offline". Before entering XR,
+    hide a structure (or move its opacity slider) in the node panel; in XR let the presenter show it again (or change
+    its opacity): "The presenter changed <name>" for about 3 s — a long name wraps inside the panel. Let the presenter
+    share a scene the headset refuses (above its size limit): the message's title stays in the panel until a new scene
+    comes or you leave XR (it can only be dismissed on the page). **Expect:** readable at arm's length without
+    leaning in; it does not cover the scene, and grabbing the scene leaves it where it is; a reset (grip button) puts
+    it back below the scene. On Quest 2 with the budget warning up, the status line stands under the warning.
 
 ## Results
 

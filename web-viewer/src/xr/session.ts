@@ -4,10 +4,11 @@
 // self-hosted `/assets/xr-profiles-<version>/` (never the jsDelivr default), and their GLBs' textures load as images,
 // which the relay's CSP allows (`img-src blob:`), not with `fetch(blob:)`, which it does not (`connect-src 'self' wss:`).
 // The user grabs the scene with a controller's trigger or a pinch (WEB-20, grab.ts) and puts it back in front of them
-// with a controller's grip button (squeeze) or two quick presses.
+// with a controller's grip button (squeeze) or two quick presses. Below the scene a status line says what the 2D
+// status bar and notice line would (WEB-23), since the page cannot be seen in XR.
 
-import { TextureLoader } from "three";
-import type { Matrix4, Mesh, Object3D } from "three";
+import { Group, TextureLoader } from "three";
+import type { Matrix4, Mesh, Object3D, PlaneGeometry } from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { XRControllerModelFactory } from "three/addons/webxr/XRControllerModelFactory.js";
 import { XRHandModelFactory } from "three/addons/webxr/XRHandModelFactory.js";
@@ -15,6 +16,7 @@ import { version as profilesVersion } from "@webxr-input-profiles/assets/package
 import type { XrHost } from "../render/viewer";
 import { createGrab } from "./grab";
 import { createTextPanel, disposeTextPanel } from "./panel";
+import { XR_PANEL_DISTANCE_M, XR_PANEL_DROP_M, xrEyeHeight } from "./placement";
 import type { XrMode } from "./support";
 
 /**
@@ -24,6 +26,8 @@ import type { XrMode } from "./support";
 export const DOUBLE_PRESS_MS = 400;
 /** How long the Quest 2 budget warning stays (WEB-20). */
 export const WARNING_MS = 10_000;
+/** Space between two text panels of the column below the scene, in metres. */
+const PANEL_GAP_M = 0.02;
 
 /** Where `scripts/copy-xr-profiles.mjs` puts the input profiles (`dist/assets/`, served by the relay as is). */
 export const XR_PROFILES_PATH = `/assets/xr-profiles-${profilesVersion}`;
@@ -72,6 +76,11 @@ export interface XrSessionOptions {
   readonly onEnd?: () => void;
   /** A warning shown in front of the user for `WARNING_MS` when the session starts (the Quest 2 budget, WEB-20). */
   readonly warning?: string | null;
+  /**
+   * What the status line says now (WEB-23), read every frame; `null` (or no function) when there is nothing to say.
+   * A change draws the panel anew, so the text should change only when the status does.
+   */
+  readonly status?: () => string | null;
   /** Draws a text panel (default `createTextPanel`); `null` when it cannot. */
   readonly panel?: (text: string) => Mesh | null;
 }
@@ -94,7 +103,61 @@ export async function runXrSession(
   host.begin({ ar: mode === "immersive-ar" });
 
   const added = inputs(host, path);
-  scene.add(...added);
+  // The text panels (WEB-20, WEB-23) stand in a column below the scene, facing where the user stood, and stay there
+  // while the scene is grabbed; a reset puts them back with it.
+  const column = new Group();
+  scene.add(...added, column);
+  let eyeHeight = Number.NaN;
+
+  // Once the scene is placed: the Quest 2 budget warning on top for `WARNING_MS`, and the status line whenever there is
+  // something to say.
+  const makePanel = options.panel ?? createTextPanel;
+  let warning: Mesh | null = null;
+  let warningTimer: ReturnType<typeof setTimeout> | undefined;
+  let status: Mesh | null = null;
+  let said: string | null = null; // the status line's text
+  // Status panels taken down, freed a frame later: the new one has been drawn by then, so three keeps their shader
+  // program instead of compiling it again inside an XR frame.
+  const retired: Mesh[] = [];
+  const freeRetired = () => retired.splice(0).forEach(disposeTextPanel);
+  /** Stacks the panels from the column's top down. */
+  const layout = () => {
+    let top = 0;
+    for (const panel of [warning, status]) {
+      if (!panel) continue;
+      const height = (panel.geometry as Partial<PlaneGeometry>).parameters?.height ?? 0;
+      panel.position.set(0, top - height / 2, 0);
+      top -= height + PANEL_GAP_M;
+    }
+  };
+  const placeColumn = () => {
+    const eye = xrEyeHeight(eyeHeight);
+    column.position.set(0, eye - XR_PANEL_DROP_M, -XR_PANEL_DISTANCE_M);
+    column.lookAt(0, eye, 0); // tilted up to the eyes, like a lectern
+  };
+  const showWarning = () => {
+    warning = options.warning ? makePanel(options.warning) : null;
+    if (!warning) return;
+    column.add(warning);
+    layout();
+    warningTimer = setTimeout(hideWarning, WARNING_MS);
+  };
+  const hideWarning = () => {
+    clearTimeout(warningTimer);
+    if (warning) disposeTextPanel(warning);
+    warning = null;
+    layout();
+  };
+  /** The status line shows `text`, drawn anew only when it changes; `null` takes it away. */
+  const say = (text: string | null) => {
+    freeRetired();
+    if (text === said) return;
+    said = text;
+    if (status) retired.push(status.removeFromParent() as Mesh);
+    status = text ? makePanel(text) : null;
+    if (status) column.add(status);
+    layout();
+  };
 
   // Grabbing (WEB-20). A press is `selectstart` on an input's target-ray space: a controller's trigger or a hand's
   // pinch. The pose that drags the scene must be rigid to the hand: a controller's target ray is (Touch controllers),
@@ -118,12 +181,12 @@ export async function runXrSession(
         return m ? [[i, m]] : [];
       }),
     );
-  let eyeHeight = Number.NaN;
   const lastPress = [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY];
   const reset = () => {
     grab.release(0, host.stageMatrix());
     grab.release(1, host.stageMatrix());
     host.place(eyeHeight);
+    placeColumn();
   };
   const listeners = rays.flatMap((ray, i) => {
     const onConnected = (event: { data?: XRInputSource }) =>
@@ -153,23 +216,6 @@ export async function runXrSession(
     );
   });
 
-  // The Quest 2 budget warning, below the scene, once the scene is placed.
-  const text = options.warning;
-  let warning: Mesh | null = null;
-  let warningTimer: ReturnType<typeof setTimeout> | undefined;
-  const showWarning = () => {
-    warning = text ? (options.panel ?? createTextPanel)(text) : null;
-    if (!warning) return;
-    warning.position.set(0, (Number.isFinite(eyeHeight) ? eyeHeight : 1.4) - 0.45, -0.9);
-    scene.add(warning);
-    warningTimer = setTimeout(hideWarning, WARNING_MS);
-  };
-  const hideWarning = () => {
-    clearTimeout(warningTimer);
-    if (warning) disposeTextPanel(warning);
-    warning = null;
-  };
-
   let placed = false;
   renderer.setAnimationLoop((_time, frame) => {
     const space = renderer.xr.getReferenceSpace();
@@ -179,8 +225,12 @@ export async function runXrSession(
       // Until the headset reports a pose the default eye height holds; the first pose places the scene for good.
       host.place(eyeHeight);
       placed = Boolean(pose);
-      if (placed) showWarning();
+      if (placed) {
+        placeColumn();
+        showWarning();
+      }
     }
+    if (placed) say(options.status?.() ?? null);
     const held = grab.update(poses());
     if (held) host.setStageMatrix(held);
     renderer.render(scene, camera);
@@ -194,7 +244,9 @@ export async function runXrSession(
     renderer.setAnimationLoop(null); // after the renderer's own handler, which restarts its window loop
     for (const off of listeners) off();
     hideWarning();
-    scene.remove(...added); // kept with their models for the next session
+    say(null);
+    freeRetired();
+    scene.remove(...added, column); // the inputs are kept with their models for the next session
     renderer.xr.enabled = false;
     host.end();
     options.onEnd?.();

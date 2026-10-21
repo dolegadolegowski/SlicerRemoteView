@@ -85,6 +85,11 @@ export interface Viewer {
   resize(): void;
   /** A message over the scene (e.g. a refused snapshot while the old one stays visible); `null` hides it. */
   setNotice(notice: Description | null): void;
+  /**
+   * The message `setNotice` gave, in the UI language, until replaced or dismissed; `null` when there is none (the
+   * lost-context notice is the viewer's own and not included). The in-XR status line repeats its title (WEB-23).
+   */
+  readonly notice: Description | null;
   /** GPU resources three.js holds now (`renderer.info.memory`), for tests and the dev overlay (WEB-16). */
   rendererInfo(): { readonly geometries: number; readonly textures: number } | null;
   /**
@@ -263,6 +268,7 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
   let lost = false;
   /** The notice set by the caller (in any language: it is shown in the viewer's, WEB-21). */
   let given: Description | null = null;
+  let localized: Description | null = null; // `given` in the UI language
   /** A WebXR session draws (WEB-19): the 2D camera as it was before, and what happened meanwhile. */
   let presenting: {
     readonly saved: {
@@ -443,10 +449,9 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
   function paintNotice(): void {
     // While the context is lost, no notice of the caller's (or one cleared, e.g. for a new scene) leaves why nothing
     // is drawn.
+    localized = given && localize(given, lang);
     const lostShown = given === null && lost;
-    const shown = lostShown
-      ? describeState({ kind: "contextLost" }, lang)
-      : given && localize(given, lang);
+    const shown = lostShown ? describeState({ kind: "contextLost" }, lang) : localized;
     notice.hidden = shown === null;
     // The lost-context notice cannot be dismissed (it would come straight back), so it has no button.
     noticeClose.hidden = lostShown;
@@ -642,6 +647,9 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
     contentChanged,
     resize,
     setNotice,
+    get notice() {
+      return localized;
+    },
     rendererInfo() {
       const memory = renderer.info?.memory;
       return memory ? { geometries: memory.geometries, textures: memory.textures } : null;

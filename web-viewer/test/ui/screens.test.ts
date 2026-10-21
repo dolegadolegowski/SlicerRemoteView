@@ -8,6 +8,7 @@ import { createReconnect } from "../../src/protocol/reconnect";
 import type { SceneModel, SceneModelStore, SceneNode } from "../../src/render/scene-model";
 import type { CreateViewerResult, Viewer, XrHost } from "../../src/render/viewer";
 import { describe as describeCode, describeState } from "../../src/state/errors";
+import type { Description } from "../../src/state/errors";
 import { createCodeEntry } from "../../src/ui/code-entry";
 import type { CodeEntry } from "../../src/ui/code-entry";
 import { bindScreens, PRESENTER_NOTICE_MS, UPDATING_HINT_MS } from "../../src/ui/screens";
@@ -20,7 +21,7 @@ function fakeViewer() {
   element.className = "viewer";
   const overlay = document.createElement("div");
   element.append(overlay);
-  return {
+  const viewer = {
     element,
     overlay,
     canvas: document.createElement("canvas"),
@@ -32,7 +33,8 @@ function fakeViewer() {
     invalidate: vi.fn<Viewer["invalidate"]>(),
     contentChanged: vi.fn<Viewer["contentChanged"]>(),
     resize: vi.fn<Viewer["resize"]>(),
-    setNotice: vi.fn<Viewer["setNotice"]>(),
+    setNotice: vi.fn<Viewer["setNotice"]>((notice) => void (viewer.notice = notice)),
+    notice: null as Description | null,
     rendererInfo: vi.fn<Viewer["rendererInfo"]>(() => null),
     setStatus: vi.fn<Viewer["setStatus"]>(),
     focus: vi.fn<Viewer["focus"]>(),
@@ -40,6 +42,7 @@ function fakeViewer() {
     xr: null as XrHost | null,
     dispose: vi.fn<Viewer["dispose"]>(),
   } satisfies Viewer;
+  return viewer;
 }
 
 function fakeStore() {
@@ -862,6 +865,63 @@ describe("language switch (WEB-21)", () => {
     join();
     models.emit(modelA);
     expect(viewer.element.querySelector(".status-bar__lang")).toBeNull();
+  });
+});
+
+describe("in-XR status line (WEB-23)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("says nothing while all is well; 'Reconnecting…' while the link is down, nothing again once rejoined", () => {
+    const socket = join();
+    models.emit(modelA);
+    expect(screens.xrStatus).toBeNull();
+    socket.serverClose(1006);
+    expect(screens.xrStatus).toBe("Reconnecting…");
+    vi.advanceTimersByTime(500);
+    rejoin();
+    expect(screens.xrStatus).toBeNull();
+  });
+
+  it("one line each for the connection and the notice line, in the order of the page", () => {
+    const socket = join(undefined, { publisherOnline: false });
+    models.emit(modelA);
+    expect(screens.xrStatus).toBe("Presenter is offline");
+    screens.updating(true);
+    expect(screens.xrStatus).toBe("Presenter is offline\nUpdating the scene…");
+    screens.presenterChanged(["vtkMRMLModelNode2"]); // over the hint, for 3 s
+    expect(screens.xrStatus).toBe("Presenter is offline\nThe presenter changed Tumor");
+    vi.advanceTimersByTime(PRESENTER_NOTICE_MS);
+    expect(screens.xrStatus).toBe("Presenter is offline\nUpdating the scene…");
+    socket.receive({ type: "session.publisherState", online: true });
+    expect(screens.xrStatus).toBe("Updating the scene…");
+    models.emit(modelB); // the new scene: the hint has done its job
+    expect(screens.xrStatus).toBeNull();
+  });
+
+  it("the message over the scene (a refused snapshot) gives its title until it goes, between the two", () => {
+    const socket = join();
+    models.emit(modelA);
+    screens.failSnapshot();
+    const title = describeState({ kind: "snapshotUpdateFailed" }, "en").title;
+    expect(screens.xrStatus).toBe(title);
+    socket.serverClose(1006);
+    screens.updating(true);
+    expect(screens.xrStatus).toBe(`Reconnecting…\n${title}\nUpdating the scene…`);
+    viewer.setNotice(null); // dismissed on the page
+    expect(screens.xrStatus).toBe("Reconnecting…\nUpdating the scene…");
+  });
+
+  it("follows the language", () => {
+    const store = createLangStore({ languages: "en" });
+    setup({ lang: store });
+    join();
+    models.emit(modelA);
+    MockSocket.last.serverClose(1006);
+    screens.presenterChanged(["vtkMRMLModelNode1"]);
+    expect(screens.xrStatus).toBe("Reconnecting…\nThe presenter changed Liver");
+    store.set("pl");
+    expect(screens.xrStatus).toBe("Ponowne łączenie…\nPrezenter zmienił: Liver");
   });
 });
 
