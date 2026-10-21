@@ -354,9 +354,10 @@ start, failing above 1 MiB (NFR-09) or when `index.html` names no module script 
 
 | Initial asset (2026-10-21, three 0.186.1, Vite 8.3.4) | Size | gzip (level 9) |
 |---|---|---|
-| `assets/index-*.js` (app + three.js + GLTFLoader + OrbitControls) | 744,657 B | 189,962 B |
-| `assets/index-*.css` | 9,047 B | 2,187 B |
-| **Total initial JS + CSS** | 753,704 B | **192,149 B** (18 % of 1,048,576 B) |
+| `assets/index-*.js` (app + three.js + GLTFLoader + OrbitControls) | 750,740 B | 192,249 B |
+| `assets/index-*.css` | 9,774 B | 2,289 B |
+| **Total initial JS + CSS** | 760,514 B | **194,538 B** (19 % of 1,048,576 B) |
+| `assets/session-*.js` (WebXR, preloaded on Quest Browser only; not initial) | 13,387 B | 4,176 B |
 
 ```bash
 npm run build -w web-viewer && npm test -w web-viewer -- bundle && npm run e2e -w web-viewer -- network
@@ -373,6 +374,23 @@ one already on screen follows a switch.
 
 ```bash
 npm test -w web-viewer -- i18n lang-toggle && npm run e2e -w web-viewer -- i18n
+```
+
+### WebXR on Meta Quest Browser (WEB-19)
+
+On Quest Browser (user agent, `src/platform.ts`) with `navigator.xr`, the viewer shows **View in AR** (passthrough,
+when `immersive-ar` is supported) or **View in VR**. The button requests the session in the tap itself
+(`src/xr/enter.ts`), then runs the XR module (`src/xr/session.ts`, a separate ≈ 4 kB gzip chunk, preloaded when
+the button is offered): `local-floor`
+space, the scene 1:1 in metres 1.3 m in front at eye height (`src/xr/placement.ts`), controller and hand models, and
+the 2D view restored when the session ends (it ends by itself when the presentation is over). The input profiles are copied at build time from
+`@webxr-input-profiles/assets` (dev dependency, pinned) into `dist/assets/xr-profiles-<version>/`
+(`scripts/copy-xr-profiles.mjs`, also run by `npm run dev`; not committed) — never the jsDelivr default. Facts and
+sources: `docs/research/web-xr.md`. `e2e/xr.spec.ts` emulates a Quest 3 with Meta's IWER (dev dependency `iwer`) and
+serves the page with the relay's CSP.
+
+```bash
+npm test -w web-viewer -- xr && npm run e2e -w web-viewer -- xr
 ```
 
 ### Leave (WEB-22)

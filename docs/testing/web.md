@@ -268,7 +268,7 @@ differences:
 
 ## Quest Browser
 
-Filled in by WEB-19 / WEB-20 (WebXR entry, hands and controllers, 72 Hz; NFR-27).
+WebXR entry (WEB-19) below; grabbing, scaling and the Quest 2 budget warning follow with WEB-20 (NFR-27).
 
 ### Device profile (WEB-15)
 
@@ -289,6 +289,38 @@ Quest Browser has no developer tools on the headset: connect it over USB (develo
    SLC-18 exist.)
 3. On a Quest 3, load a scene close to 64 MiB (`[TODO verify]`: Quest Browser tab memory, NFR-03). **Expect:** it
    loads and stays responsive; if the tab is killed, record it — the limit for `quest3` goes back to 32 MiB.
+
+### WebXR (WEB-19)
+
+On Quest 2 and Quest 3 (3S if available), current Meta Quest Browser, the viewer deployed behind the relay (its CSP
+matters: the controller models' textures must load under it). Bring a tape measure. Reference size in
+`asymmetric-2nodes.glb`: the opaque tetrahedron has vertices at glTF (+0.1, 0, 0) and (0, 0, −0.1) m — each 100 mm from
+its corner at the origin, and the edge between them ≈ 141 mm (`shared/fixtures/glb/manifest.json`, protocol §7.1).
+
+1. Join a session. **Expect:** **View in AR** at the bottom centre on Quest 3 (passthrough); on Quest 2 **View in
+   AR** too if Quest Browser offers `immersive-ar` there (greyscale passthrough), else **View in VR** — record which
+   (`[TODO verify]` ADR 0003). Switch the language: **Zobacz w AR/VR**.
+2. Press it. **Expect:** the immersive view starts without a prompt about anything but the headset's own; the scene
+   stands about 1.3 m in front of you at eye height, at real size (measure the tetrahedron's ≈ 141 mm edge: 1 mm in
+   Slicer = 1 mm in the room); AR shows the room behind it, VR a dark background.
+3. Look at your controllers, then put them down and show your hands. **Expect:** the matching controller models
+   (Quest 3: Touch Plus; Quest 2: Touch) with their textures, then hand meshes following your fingers. In
+   `chrome://inspect` → Network: every request goes to the relay's origin, the models under
+   `/assets/xr-profiles-1.0.20/`; no `cdn.jsdelivr.net`; Console: no "Couldn't load texture".
+4. While in XR, let the presenter hide a structure (`toggle-visibility`). **Expect:** it disappears in the headset
+   within 0.5 s (NFR-02).
+5. Walk around the scene and look at it from behind and from below. **Expect:** it stays where it was put; no
+   clipping when your head is 5 cm from a surface.
+6. Leave XR with the Meta button → **Exit**. **Expect:** the 2D page as it was before (same camera view, node
+   panel, status bar); pinch, rotate and Fit work. Enter again and let the presenter share the scene again
+   (snapshot v2) while you are in XR, then exit. **Expect:** the 2D view framed from the front as after any new scene
+   (not zoomed in).
+7. Enter XR and let the presenter end the session. **Expect:** the immersive view closes by itself and the code
+   entry says "Presentation ended".
+8. Enter XR again, then take the headset off for 10 s and put it back on. **Expect:** the session resumes or ends
+   cleanly; either way the 2D page works afterwards.
+9. Quest Browser performance HUD (developer settings) during step 2 with `asymmetric-2nodes.glb`: record the frame
+   rate (72 Hz expected, NFR-07; budgets are WEB-20's).
 
 ## Results
 

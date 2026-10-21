@@ -356,6 +356,46 @@ body {
   outline-offset: 2px;
 }
 
+/* Enter XR (WEB-19, Quest Browser only): bottom centre, between the node panel and Fit. */
+.viewer__xr {
+  position: absolute;
+  bottom: max(12px, var(--safe-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  min-width: var(--target);
+  min-height: var(--target);
+  padding: 10px 18px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--accent);
+  color: #04121f;
+  font: inherit;
+  font-size: 1rem;
+  font-weight: 600;
+  touch-action: manipulation;
+}
+
+/* A narrow window (a small Quest Browser window, page zoom): above Fit at the right, clear of the node panel's toggle
+   and of Fit (the XR button's text is wider than the gap between them). */
+@media (max-width: 30rem) {
+  .viewer__xr {
+    left: auto;
+    right: max(12px, var(--safe-right));
+    bottom: calc(max(12px, var(--safe-bottom)) + var(--target) + 8px);
+    transform: none;
+  }
+}
+
+.viewer__xr:disabled {
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+
+.viewer__xr:focus-visible {
+  outline: 3px solid var(--text);
+  outline-offset: 2px;
+}
+
 /* A message over the scene (refused snapshot while the previous one stays visible). */
 .viewer__notice {
   width: 100%;

@@ -1,7 +1,7 @@
 // Entry point: wires the modules. Joining by code (WEB-03/04) or `/j#CODE` (WEB-11), snapshots over the WebSocket
 // stream (WEB-05) or HTTP (WEB-06), the scene model (WEB-07), the viewer (WEB-08), live updates (WEB-12),
 // reconnecting (WEB-14), the status bar (WEB-15), the wake lock and the renderer test hook (WEB-16), the language
-// switch (WEB-21), Leave (WEB-22);
+// switch (WEB-21), Leave (WEB-22), WebXR on Meta Quest Browser (WEB-19);
 // `ui/screens.ts` decides which screen is visible.
 import { browserStorage, createLangStore } from "./i18n/lang";
 import { createConnection, endsSession } from "./protocol/connection";
@@ -23,6 +23,8 @@ import { startDevOverlay } from "./ui/dev-overlay";
 import { createLangToggle } from "./ui/lang-toggle";
 import { bindScreens } from "./ui/screens";
 import { bindWakeLock } from "./ui/wake-lock";
+import { enterXr, preloadXr } from "./xr/enter";
+import { browserXr, xrMode } from "./xr/support";
 
 // First of all: a `/j#CODE` link leaves the address bar before anything can reach the network (WEB-11, T6).
 const link = takeDeepLink();
@@ -142,6 +144,13 @@ if (app) {
   loader.on("sessionEnded", ({ description }) => stop(description));
 
   bindWakeLock(connection, { ends }); // the screen stays on during the session (WEB-16, FR-46)
+  // Quest Browser with WebXR: the viewer offers AR (passthrough) or VR (WEB-19, FR-47).
+  const xr = browserXr();
+  void xrMode(xr, device.platform).then((mode) => {
+    if (!mode || !xr) return;
+    preloadXr();
+    screens.offerXr(mode, (host, ended) => enterXr(host, xr, mode, ended));
+  });
   // Test hook (WEB-16): GPU resource counts only — no scene content, names or credentials.
   const rendererInfo = () => screens.viewer?.rendererInfo() ?? null;
   (window as unknown as { __rv: { rendererInfo: typeof rendererInfo } }).__rv = { rendererInfo };

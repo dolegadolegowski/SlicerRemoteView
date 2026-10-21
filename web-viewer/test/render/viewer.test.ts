@@ -727,3 +727,133 @@ describe("rendererInfo (WEB-16 test hook)", () => {
     expect(harness().viewer.rendererInfo()).toBeNull();
   });
 });
+
+describe("WebXR host (WEB-19)", () => {
+  /** A harness whose renderer can present (it has `xr` and `setAnimationLoop`). */
+  function xrHarness() {
+    const session = { end: vi.fn(async () => {}) };
+    const r = Object.assign(renderer(), {
+      xr: { getSession: vi.fn<() => typeof session | null>(() => null) },
+      setAnimationLoop: vi.fn(),
+    });
+    return { ...harness({ createRenderer: () => r }), r, session };
+  }
+  /** World-space centre, with the stage's current transform (setFromObject alone does not update parents). */
+  const centreInWorld = (m: SceneModel) => {
+    m.root.updateWorldMatrix(true, true);
+    return new Box3().setFromObject(m.root).getCenter(new Vector3());
+  };
+
+  it("exists only when the renderer can present", () => {
+    expect(harness().viewer.xr).toBeNull();
+    expect(xrHarness().viewer.xr).not.toBeNull();
+  });
+
+  it("while presenting: no 2D frames or resizes, metric clip planes, controls off; AR clears to transparent", async () => {
+    const { viewer, r, frames, flush } = xrHarness();
+    const m = await model();
+    viewer.setModel(m);
+    flush();
+    r.render.mockClear();
+    r.setSize.mockClear();
+    viewer.invalidate(); // a frame is pending when the session starts
+    const xr = viewer.xr!;
+    xr.begin({ ar: true });
+    expect(frames.size).toBe(0);
+    expect(viewer.element.dataset["xr"]).toBe("ar");
+    expect(viewer.camera.near).toBe(0.02);
+    expect(viewer.camera.far).toBe(100);
+    expect(viewer.controls.enabled).toBe(false);
+    expect(viewer.scene.background).toBeNull();
+    expect(r.setClearColor).toHaveBeenLastCalledWith(expect.anything(), 0);
+    viewer.invalidate();
+    viewer.resize();
+    viewer.fit();
+    viewer.contentChanged();
+    expect(frames.size).toBe(0);
+    flush();
+    expect(r.render).not.toHaveBeenCalled();
+    expect(r.setSize).not.toHaveBeenCalled();
+    expect(viewer.camera.near).toBe(0.02); // contentChanged did not move the clip planes
+  });
+
+  it("place() puts the centre of the model 1.3 m ahead at the eye height, at real size", async () => {
+    const { viewer } = xrHarness();
+    const m = await model();
+    viewer.setModel(m);
+    m.root.updateWorldMatrix(true, true);
+    const before = new Box3().setFromObject(m.root).getSize(new Vector3());
+    viewer.xr!.begin({ ar: false });
+    viewer.xr!.place(1.6);
+    const centre = centreInWorld(m);
+    expect(centre.x).toBeCloseTo(0, 6);
+    expect(centre.y).toBeCloseTo(1.6, 6);
+    expect(centre.z).toBeCloseTo(-1.3, 6);
+    const size = new Box3().setFromObject(m.root).getSize(new Vector3());
+    expect(size.x).toBeCloseTo(before.x / PRESENTATION_SCALE, 9); // metres, 1:1
+    expect(viewer.scene.background).not.toBeNull(); // VR keeps the dark room
+  });
+
+  it("a new scene while presenting stands where the old one did; the 2D view is fitted to it afterwards", async () => {
+    const { viewer, flush } = xrHarness();
+    viewer.setModel(await model());
+    viewer.xr!.begin({ ar: false });
+    viewer.xr!.place(1.5);
+    const next = await model("quantized-1node.glb");
+    viewer.setModel(next);
+    const centre = centreInWorld(next);
+    expect(centre.y).toBeCloseTo(1.5, 6);
+    expect(centre.z).toBeCloseTo(-1.3, 6);
+    viewer.xr!.end();
+    flush();
+    // Fitted from the front to the new model (in millimetres again).
+    expect(viewer.controls.target.distanceTo(centreInWorld(next))).toBeLessThan(1e-6);
+  });
+
+  it("end() brings back the 2D camera, clip planes, stage, background and controls, and draws", async () => {
+    const { viewer, r, frames } = xrHarness();
+    const m = await model();
+    viewer.setModel(m);
+    const position = viewer.camera.position.clone();
+    const quaternion = viewer.camera.quaternion.clone();
+    const [near, far] = [viewer.camera.near, viewer.camera.far];
+    const centre = centreInWorld(m);
+    viewer.xr!.begin({ ar: true });
+    viewer.xr!.place(1.4);
+    viewer.camera.position.set(0, 1.4, 0); // WebXR moves the camera with the head
+    viewer.camera.quaternion.set(0, 0.7071, 0, 0.7071);
+    r.render.mockClear();
+    viewer.xr!.end();
+    expect(viewer.element.dataset["xr"]).toBeUndefined();
+    expect(viewer.camera.position.distanceTo(position)).toBeLessThan(1e-9);
+    expect(viewer.camera.quaternion.angleTo(quaternion)).toBeLessThan(1e-9);
+    expect([viewer.camera.near, viewer.camera.far]).toEqual([near, far]);
+    expect(centreInWorld(m).distanceTo(centre)).toBeLessThan(1e-6);
+    expect(viewer.scene.background).not.toBeNull();
+    expect(r.setClearColor).toHaveBeenLastCalledWith(expect.anything(), 1);
+    expect(viewer.controls.enabled).toBe(true);
+    expect(r.render).toHaveBeenCalled(); // drawn at once (the buffer was resized back)
+    viewer.invalidate();
+    expect(frames.size).toBe(1);
+  });
+
+  it("exit() ends the running session, and does nothing without one", () => {
+    const { viewer, r, session } = xrHarness();
+    viewer.xr!.exit(); // no session
+    r.xr.getSession.mockReturnValue(session);
+    viewer.xr!.exit();
+    expect(session.end).toHaveBeenCalledTimes(1);
+  });
+
+  it("live changes during XR leave the 2D bounds alone; they are measured again, in millimetres, at the end", async () => {
+    const { viewer } = xrHarness();
+    viewer.setModel(await model());
+    const far2d = viewer.camera.far;
+    viewer.xr!.begin({ ar: false });
+    viewer.xr!.place(1.4);
+    viewer.contentChanged(); // a presenter change while in XR
+    expect(viewer.camera.far).toBe(100); // still the XR range
+    viewer.xr!.end();
+    expect(viewer.camera.far).toBeCloseTo(far2d, 6); // measured with the stage back in millimetres
+  });
+});

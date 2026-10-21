@@ -6,7 +6,7 @@ import { createConnection } from "../../src/protocol/connection";
 import type { Connection } from "../../src/protocol/connection";
 import { createReconnect } from "../../src/protocol/reconnect";
 import type { SceneModel, SceneModelStore, SceneNode } from "../../src/render/scene-model";
-import type { CreateViewerResult, Viewer } from "../../src/render/viewer";
+import type { CreateViewerResult, Viewer, XrHost } from "../../src/render/viewer";
 import { describe as describeCode, describeState } from "../../src/state/errors";
 import { createCodeEntry } from "../../src/ui/code-entry";
 import type { CodeEntry } from "../../src/ui/code-entry";
@@ -37,6 +37,7 @@ function fakeViewer() {
     setStatus: vi.fn<Viewer["setStatus"]>(),
     focus: vi.fn<Viewer["focus"]>(),
     setLang: vi.fn<Viewer["setLang"]>(),
+    xr: null as XrHost | null,
     dispose: vi.fn<Viewer["dispose"]>(),
   } satisfies Viewer;
 }
@@ -861,5 +862,87 @@ describe("language switch (WEB-21)", () => {
     join();
     models.emit(modelA);
     expect(viewer.element.querySelector(".status-bar__lang")).toBeNull();
+  });
+});
+
+describe("XR offer (WEB-19)", () => {
+  const xrHost = { exit: vi.fn() } as unknown as XrHost & { exit: ReturnType<typeof vi.fn> };
+  const withXr = () => Object.assign(viewer, { xr: xrHost });
+  const button = () => viewer.element.querySelector<HTMLButtonElement>(".viewer__xr");
+
+  it("an offer made before the scene shows its button once the viewer exists", () => {
+    withXr();
+    const enter = vi.fn(async () => true);
+    screens.offerXr("immersive-ar", enter);
+    expect(button()).toBeNull();
+    join();
+    models.emit(modelA);
+    expect(button()!.textContent).toBe("View in AR");
+  });
+
+  it("a click enters with the viewer's XR side; a failed start says so over the scene", async () => {
+    withXr();
+    join();
+    models.emit(modelA);
+    let started!: (ok: boolean) => void;
+    const enter = vi.fn(
+      (_host: XrHost, _ended: () => void) => new Promise<boolean>((resolve) => (started = resolve)),
+    );
+    screens.offerXr("immersive-vr", enter);
+    button()!.click();
+    expect(enter).toHaveBeenCalledWith(xrHost, expect.any(Function));
+    expect(button()!.disabled).toBe(true); // no second request while the first starts
+    started(false);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(button()!.disabled).toBe(false);
+    expect(viewer.setNotice).toHaveBeenLastCalledWith(describeState({ kind: "xrFailed" }));
+    // The next attempt clears that notice; a started session keeps the button disabled until it is over.
+    button()!.click();
+    expect(viewer.setNotice).toHaveBeenLastCalledWith(null);
+    started(true);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(button()!.disabled).toBe(true);
+    const ended = enter.mock.calls.at(-1)![1];
+    ended();
+    expect(button()!.disabled).toBe(false);
+  });
+
+  it("a session that ends while in XR takes the user out of XR, to the message", () => {
+    withXr();
+    const socket = join();
+    models.emit(modelA);
+    screens.offerXr("immersive-ar", vi.fn());
+    xrHost.exit.mockClear();
+    socket.serverClose(4001); // the presenter ended the session
+    expect(xrHost.exit).toHaveBeenCalled();
+    expect(message()).toContain(describeCode(4001, "en").title);
+  });
+
+  it("the button sits before the node panel (the open list stays on top where they meet)", () => {
+    withXr();
+    join();
+    models.emit(modelA);
+    screens.offerXr("immersive-ar", vi.fn());
+    expect(button()!.nextElementSibling?.className).toBe("node-panel");
+  });
+
+  it("a viewer that cannot present gets no button", () => {
+    join();
+    models.emit(modelA); // the fake viewer's `xr` is null
+    screens.offerXr("immersive-ar", vi.fn());
+    expect(button()).toBeNull();
+  });
+
+  it("the button follows a language switch", () => {
+    const store = createLangStore({ languages: "en" });
+    setup({ lang: store });
+    withXr();
+    join();
+    models.emit(modelA);
+    screens.offerXr("immersive-ar", vi.fn());
+    store.set("pl");
+    expect(button()!.textContent).toBe("Zobacz w AR");
   });
 });

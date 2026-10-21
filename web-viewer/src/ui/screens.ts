@@ -4,6 +4,7 @@
 // viewers, scene version) and a short notice line (presenter changes, "updating"); on the code entry one line
 // (reconnecting, presenter offline, waiting for or loading the scene, WEB-14). Leave (WEB-22) is in the status bar and
 // on the busy code entry; the language switch (WEB-21) is in the status bar, and a switch re-renders every screen.
+// On Meta Quest Browser the viewer also offers XR (WEB-19).
 // Kept out of `main.ts` so every transition is unit-tested.
 
 import type { LangStore } from "../i18n/lang";
@@ -14,7 +15,7 @@ import type { Reconnect } from "../protocol/reconnect";
 import type { Applied } from "../render/apply-update";
 import type { SceneModel, SceneModelStore } from "../render/scene-model";
 import { createViewer, webGL2Available } from "../render/viewer";
-import type { CreateViewerResult, Viewer } from "../render/viewer";
+import type { CreateViewerResult, Viewer, XrHost } from "../render/viewer";
 import { describeState } from "../state/errors";
 import type { Description } from "../state/errors";
 import type { CodeEntry } from "./code-entry";
@@ -23,6 +24,9 @@ import { createNodePanel } from "./node-panel";
 import type { NodePanel } from "./node-panel";
 import { createStatusBar } from "./status-bar";
 import type { StatusBar } from "./status-bar";
+import { createXrButton } from "./xr-button";
+import type { XrButton } from "./xr-button";
+import type { XrMode } from "../xr/support";
 
 export interface ScreensOptions {
   readonly app: HTMLElement;
@@ -38,6 +42,9 @@ export interface ScreensOptions {
   /** The UI language (WEB-21); without it the browser's, and the status bar has no language switch. */
   readonly lang?: Pick<LangStore, "lang" | "set" | "onChange">;
 }
+
+/** Starts a WebXR session on `host`; `true` once it runs, then `ended()` when it is over (WEB-19). */
+export type XrEnter = (host: XrHost, ended: () => void) => Promise<boolean>;
 
 export interface Screens {
   /** Join from the code entry: refused at once without WebGL 2 (no join slot, no download spent on it). */
@@ -68,6 +75,11 @@ export interface Screens {
   presenterChanged(nodeIds: readonly string[]): void;
   /** The scene version shown (§8.4), for the status bar; `null` when there is none. */
   sceneVersion(version: number | null): void;
+  /**
+   * WebXR is available (WEB-19): the viewer shows a button for `mode`; `enter` starts the session on the viewer, says
+   * whether it started (else a notice says it could not) and calls `ended` when a started session is over.
+   */
+  offerXr(mode: XrMode, enter: XrEnter): void;
   readonly viewer: Viewer | null;
   readonly nodePanel: NodePanel | null;
   /** Joining, joined or reconnecting: the code entry's cells hold the code of this session. */
@@ -88,6 +100,9 @@ export function bindScreens(options: ScreensOptions): Screens {
   let viewer: Viewer | null = null;
   let panel: NodePanel | null = null;
   let bar: StatusBar | null = null;
+  let xrOffer: { mode: XrMode; enter: XrEnter } | null = null;
+  let xrButton: XrButton | null = null;
+  let xrNotice = false; // the notice over the scene is "AR/VR could not start"
   let shown: SceneModel | null = null;
   let viewerCount: number | null = null;
   let version: number | null = null;
@@ -116,6 +131,35 @@ export function bindScreens(options: ScreensOptions): Screens {
     viewer?.setStatus(notice?.(lang) ?? (hint ? t(lang, "viewer.updating") : null));
     const waiting = loading ? "state.downloading.title" : "state.waitingForScene.title";
     entry.setStatus(urgent ?? (joined ? t(lang, waiting) : null));
+  }
+
+  /** The XR button, once both the viewer and an offer exist. */
+  function attachXr(): void {
+    const offer = xrOffer;
+    const shown = viewer;
+    const host = shown?.xr;
+    if (!offer || !shown || !host || xrButton) return;
+    const button = createXrButton({
+      mode: offer.mode,
+      lang: currentLang(),
+      onClick: () => {
+        if (xrNotice) shown.setNotice(null); // a new attempt: the last failure is old news
+        xrNotice = false;
+        // Disabled until the session is over: a second request while one runs would be refused.
+        button.setBusy(true);
+        void offer
+          .enter(host, () => button.setBusy(false))
+          .then((started) => {
+            if (started) return;
+            button.setBusy(false);
+            shown.setNotice(describeState({ kind: "xrFailed" }));
+            xrNotice = true;
+          });
+      },
+    });
+    xrButton = button;
+    // Before the node panel: where they meet on a narrow window, the open list stays on top.
+    shown.element.insertBefore(button.element, panel?.element ?? null);
   }
 
   /** The session is over for this viewer (or not yet joined): no status of it is left. */
@@ -159,6 +203,7 @@ export function bindScreens(options: ScreensOptions): Screens {
   const viewerVisible = () => viewer !== null && !viewer.element.hidden;
 
   function showEntry(focus: boolean): void {
+    viewer?.xr?.exit(); // the scene is gone or the session over: out of XR, where the 2D page says why
     if (viewer) viewer.element.hidden = true;
     entry.element.hidden = false;
     if (focus) entry.focus();
@@ -189,12 +234,14 @@ export function bindScreens(options: ScreensOptions): Screens {
       bar.setSceneVersion(version);
       viewer.element.hidden = true;
       app.append(viewer.element);
+      attachXr();
     }
     const appearing = !viewerVisible();
     entry.element.hidden = true;
     viewer.element.hidden = false;
     if (model !== shown) {
       viewer.setNotice(null);
+      xrNotice = false;
       loading = false;
       clearStatus(); // the notice and the hint talk about the previous scene
       viewer.setModel(model); // a new model is fitted from the front
@@ -265,6 +312,7 @@ export function bindScreens(options: ScreensOptions): Screens {
     viewer?.setLang(lang);
     panel?.setLang(lang);
     bar?.setLang(lang);
+    xrButton?.setLang(lang);
     paintStatus();
   });
 
@@ -305,11 +353,13 @@ export function bindScreens(options: ScreensOptions): Screens {
     },
     leave,
     report(description) {
+      xrNotice = false;
       if (viewerVisible()) viewer?.setNotice(description);
       else entry.setError(description);
     },
     failSnapshot() {
       if (connection.state.kind !== "connected") return;
+      xrNotice = false;
       if (viewerVisible())
         return viewer?.setNotice(describeState({ kind: "snapshotUpdateFailed" }));
       connection.leave(); // out of "Joining…": the code entry is usable again
@@ -360,6 +410,10 @@ export function bindScreens(options: ScreensOptions): Screens {
     sceneVersion(next) {
       version = next;
       bar?.setSceneVersion(next);
+    },
+    offerXr(mode, enter) {
+      xrOffer = { mode, enter };
+      attachXr();
     },
     get live() {
       return isLive();

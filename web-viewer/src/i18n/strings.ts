@@ -85,6 +85,9 @@ const en = {
   "state.contextLost.title": "3D view paused",
   "state.contextLost.body":
     "The device needed its graphics memory back. The scene returns by itself in a moment; if it does not, reload the page.",
+  "state.xrFailed.title": "AR/VR could not start",
+  "state.xrFailed.body":
+    "The headset did not open the immersive view. Try again, or keep using the 2D view.",
   "state.webgl2Unavailable.title": "3D is not available",
   "state.webgl2Unavailable.body":
     "This browser or device cannot run WebGL 2, which the viewer needs. Try a current Safari or Chrome.",
@@ -114,6 +117,8 @@ const en = {
   // The language's own name, shown on the switch to it (WEB-21): each table names its own language.
   "lang.name": "English",
   "viewer.fit": "Fit view",
+  "xr.enterAr": "View in AR",
+  "xr.enterVr": "View in VR",
   "viewer.dismiss": "Dismiss",
   "viewer.canvasLabel":
     "3D scene. Drag with one finger to rotate, pinch with two fingers to zoom and move, double-tap to fit.",
@@ -215,6 +220,9 @@ const pl: Record<StringKey, string> = {
   "state.contextLost.title": "Widok 3D wstrzymany",
   "state.contextLost.body":
     "Urządzenie odebrało pamięć grafiki. Scena wróci sama za chwilę; jeśli nie wróci, odśwież stronę.",
+  "state.xrFailed.title": "Nie udało się uruchomić AR/VR",
+  "state.xrFailed.body":
+    "Gogle nie otworzyły widoku immersyjnego. Spróbuj ponownie lub korzystaj z widoku 2D.",
   "state.webgl2Unavailable.title": "Grafika 3D jest niedostępna",
   "state.webgl2Unavailable.body":
     "Ta przeglądarka lub urządzenie nie obsługuje WebGL 2, którego wymaga podgląd. Spróbuj w aktualnym Safari lub Chrome.",
@@ -243,6 +251,8 @@ const pl: Record<StringKey, string> = {
   "statusBar.leave": "Wyjdź",
   "lang.name": "Polski",
   "viewer.fit": "Dopasuj widok",
+  "xr.enterAr": "Zobacz w AR",
+  "xr.enterVr": "Zobacz w VR",
   "viewer.dismiss": "Zamknij",
   "viewer.canvasLabel":
     "Scena 3D. Przeciągnij jednym palcem, aby obrócić, rozsuń dwa palce, aby przybliżyć i przesunąć, stuknij dwukrotnie, aby dopasować.",

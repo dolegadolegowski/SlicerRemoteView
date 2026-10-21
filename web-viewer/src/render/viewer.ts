@@ -17,13 +17,14 @@ import {
   Vector3,
   WebGLRenderer,
 } from "three";
-import type { Camera, Object3D } from "three";
+import type { Camera, Object3D, Quaternion } from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import WebGL from "three/addons/capabilities/WebGL.js";
 import { detectLang, t } from "../i18n/strings";
 import type { Lang } from "../i18n/strings";
 import { describeState, localize } from "../state/errors";
 import type { Description } from "../state/errors";
+import { xrStagePosition } from "../xr/placement";
 import type { SceneModel } from "./scene-model";
 
 /** The part of `WebGLRenderer` the viewer uses; tests pass a mock. */
@@ -95,7 +96,27 @@ export interface Viewer {
   focus(): void;
   /** Re-renders the labels and the notice in `lang` (WEB-21); the status line is the caller's. */
   setLang(lang: Lang): void;
+  /** The WebXR side (WEB-19); `null` when the renderer cannot present (a test stand-in without `xr`). */
+  readonly xr: XrHost | null;
   dispose(): void;
+}
+
+/**
+ * What a WebXR session needs from the viewer (WEB-19). Between `begin` and `end` WebXR draws (the session's animation
+ * loop): no 2D frame, control, resize or fit runs; the camera gets metric clip planes; the stage is in metres, placed
+ * by `place`; AR clears to transparent so the room shows through.
+ */
+export interface XrHost {
+  readonly renderer: WebGLRenderer;
+  readonly scene: Scene;
+  readonly camera: PerspectiveCamera;
+  begin(options: { readonly ar: boolean }): void;
+  /** Puts the centre of the whole model in front of the user at `eyeHeight` metres (`local-floor`, placement.ts). */
+  place(eyeHeight: number): void;
+  /** The 2D view again, camera as it was (or fitted again when the model changed meanwhile). */
+  end(): void;
+  /** Ends the running session, if any (the scene went away: the 2D page says why); `end` follows from it. */
+  exit(): void;
 }
 
 export type CreateViewerResult =
@@ -125,6 +146,9 @@ const TAP_PX = 10;
 /** Patient faces −Z, the model root is turned 180° about Y (§7.1): the default view looks at the face from +Z. */
 const FRONT = new Vector3(0, 0, 1);
 const BACKGROUND = 0x0b0f14; // --bg in style.css
+/** Clip planes in XR, in metres: a hand-held model 2 cm from the eyes, the far wall of a large room. */
+const XR_NEAR_M = 0.02;
+const XR_FAR_M = 100;
 
 let webgl2: boolean | undefined;
 /** `WebGL.isWebGL2Available()`, evaluated once (each probe creates a context). */
@@ -233,18 +257,31 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
   let lost = false;
   /** The notice set by the caller (in any language: it is shown in the viewer's, WEB-21). */
   let given: Description | null = null;
+  /** A WebXR session draws (WEB-19): the 2D camera as it was before, and what happened meanwhile. */
+  let presenting: {
+    readonly saved: {
+      readonly position: Vector3;
+      readonly quaternion: Quaternion;
+      readonly near: number;
+      readonly far: number;
+    };
+    eyeHeight: number | null;
+    refit: boolean;
+    /** Live updates changed the scene: its 2D bounds are measured again at the end, in millimetres. */
+    remeasure: boolean;
+  } | null = null;
   let hidden = doc.visibilityState === "hidden";
   let size = { width: 0, height: 0, ratio: 0 };
 
   /** Render-on-demand (three.js manual): at most one pending frame; damping re-requests through `change`. */
   function invalidate(): void {
-    if (frame !== null || disposed || hidden || lost) return;
+    if (frame !== null || disposed || hidden || lost || presenting) return;
     frame = requestFrame(renderFrame);
   }
   function renderFrame(): void {
     if (frame !== null) cancelFrame(frame);
     frame = null;
-    if (disposed || hidden || lost) return;
+    if (disposed || hidden || lost || presenting) return;
     controls.update(); // dispatches `change` (→ next frame) while the damped motion continues
     updateClipping();
     renderer.render(scene, camera);
@@ -288,7 +325,7 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
   }
 
   function resize(): void {
-    if (disposed) return;
+    if (disposed || presenting) return; // WebXR sizes the drawing buffer itself while it presents
     const zoom = followVisualViewport();
     const width = element.clientWidth;
     const height = element.clientHeight;
@@ -320,6 +357,10 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
   }
 
   function fit(resetDirection = false): void {
+    if (presenting) {
+      presenting.refit = true; // the 2D camera is fitted when the session ends
+      return;
+    }
     // Apply whatever damped motion is still settling now, so it cannot drift the new framing afterwards.
     controls.enableDamping = false;
     controls.update();
@@ -357,6 +398,10 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
    * limit follow, the camera stays where the user put it, and a frame is drawn.
    */
   function contentChanged(): void {
+    if (presenting) {
+      presenting.remeasure = true; // measured now, the bounds would be in metres at the XR position
+      return;
+    }
     const all = measureAll();
     if (!all.isEmpty()) all.getBoundingSphere(bounds);
     controls.maxDistance = Math.max(controls.maxDistance, fitDistance(bounds.radius) * 10);
@@ -371,6 +416,18 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
     element.dataset["model"] = model ? "loaded" : "none";
     resize(); // fit needs the current aspect (portrait phones need ≈ 2× the distance of a square view)
     fit(true);
+    if (presenting?.eyeHeight != null) place(presenting.eyeHeight); // a new scene in XR stands where the old one did
+  }
+
+  function place(eyeHeight: number): void {
+    if (!presenting) return;
+    presenting.eyeHeight = eyeHeight;
+    // The centre of the whole model in stage coordinates (metres, the stage's own unit while presenting).
+    stage.updateMatrixWorld(true);
+    const box = model ? new Box3().setFromObject(model.root) : new Box3();
+    const centre = box.isEmpty() ? new Vector3() : stage.worldToLocal(box.getCenter(new Vector3()));
+    const at = xrStagePosition(centre, eyeHeight);
+    stage.position.set(at.x, at.y, at.z);
   }
 
   function paintNotice(): void {
@@ -487,6 +544,73 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
   visualViewport?.addEventListener("scroll", resize);
   const stopObserving = (options.observeResize ?? defaultObserveResize)(element, resize);
 
+  const xrRenderer =
+    "xr" in renderer && "setAnimationLoop" in renderer
+      ? (renderer as unknown as WebGLRenderer)
+      : null;
+  const xr: XrHost | null = xrRenderer && {
+    renderer: xrRenderer,
+    scene,
+    camera,
+    begin({ ar }) {
+      if (presenting || disposed) return;
+      if (frame !== null) cancelFrame(frame);
+      frame = null;
+      presenting = {
+        saved: {
+          position: camera.position.clone(),
+          quaternion: camera.quaternion.clone(),
+          near: camera.near,
+          far: camera.far,
+        },
+        eyeHeight: null,
+        refit: false,
+        remeasure: false,
+      };
+      controls.enabled = false;
+      camera.near = XR_NEAR_M; // WebXR takes its depth range from the camera (research web-xr.md §1)
+      camera.far = XR_FAR_M;
+      camera.updateProjectionMatrix();
+      stage.scale.setScalar(1); // §7.1 metres: real size in the room
+      if (ar) {
+        scene.background = null; // passthrough shows behind the scene
+        renderer.setClearColor(BACKGROUND, 0);
+      }
+      element.dataset["xr"] = ar ? "ar" : "vr";
+    },
+    place,
+    end() {
+      if (!presenting) return;
+      const { saved, refit, remeasure } = presenting;
+      presenting = null;
+      stage.scale.setScalar(PRESENTATION_SCALE);
+      stage.position.set(0, 0, 0);
+      scene.background = new Color(BACKGROUND);
+      renderer.setClearColor(BACKGROUND, 1);
+      // WebXR moved the camera with the head and restores only its fov and zoom.
+      camera.position.copy(saved.position);
+      camera.quaternion.copy(saved.quaternion);
+      camera.scale.set(1, 1, 1);
+      camera.near = saved.near;
+      camera.far = saved.far;
+      camera.updateProjectionMatrix();
+      controls.enabled = true;
+      delete element.dataset["xr"];
+      if (disposed) return;
+      size = { width: 0, height: 0, ratio: 0 }; // WebXR set the buffer back; draw it again at once
+      resize();
+      if (refit) fit(true);
+      else if (remeasure) contentChanged();
+      else invalidate();
+    },
+    exit() {
+      void xrRenderer.xr
+        .getSession()
+        ?.end()
+        .catch(() => undefined);
+    },
+  };
+
   const viewer: Viewer = {
     element,
     overlay: top,
@@ -513,6 +637,7 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
       label();
       paintNotice();
     },
+    xr,
     dispose() {
       if (disposed) return;
       disposed = true;
