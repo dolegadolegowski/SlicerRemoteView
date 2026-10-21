@@ -2,7 +2,7 @@ import type { AddressInfo } from "node:net";
 import type { FastifyInstance } from "fastify";
 import { WebSocket } from "ws";
 import type { RawData } from "ws";
-import { buildApp } from "../../src/app.js";
+import { buildApp, listenTextResolver } from "../../src/app.js";
 import type { AppOptions } from "../../src/app.js";
 import { loadConfig } from "../../src/config.js";
 import { createLogger } from "../../src/logger.js";
@@ -42,8 +42,18 @@ export async function startRelay(
   const limiter =
     options.limiter ??
     new RateLimiter({ clock, logger: options.logger ?? createLogger({ level: "silent" }) });
-  const app = await buildApp({ ...options, config, clock, registry, limiter });
-  await app.listen({ port: 0, host: "127.0.0.1" });
+  // The heartbeat only where a test asks for it: advancing the manual clock by minutes would tick
+  // it many times before any real pong could arrive.
+  const app = await buildApp({
+    ...options,
+    config,
+    clock,
+    registry,
+    limiter,
+    heartbeat: options.heartbeat ?? false,
+  });
+  // As `src/index.ts`: Fastify's own line would carry the bound address.
+  await app.listen({ port: 0, host: "127.0.0.1", listenTextResolver });
   const { port } = app.server.address() as AddressInfo;
   return {
     app,
@@ -73,8 +83,10 @@ export interface TestClient {
 export function connectClient(
   url: string,
   headers: Record<string, string> = {},
+  /** E.g. `{ autoPong: false }` for a client that ignores WebSocket pings. */
+  options: { autoPong?: boolean } = {},
 ): Promise<TestClient> {
-  const ws = new WebSocket(url, { headers });
+  const ws = new WebSocket(url, { headers, ...options });
   const received: Received[] = [];
   const waiting: ((message: Received) => void)[] = [];
   let taken = 0;

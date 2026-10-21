@@ -93,7 +93,6 @@ describe("client IP behind the Railway edge (TRUST_PROXY, T1, T3)", () => {
 
 describe("unknown paths (SRV-01, §10)", () => {
   it.each([
-    "/", // the SPA arrives with SRV-16 (static hosting); until then `/` is unknown too
     "/nope",
     "/7KQ4X",
     "/j/7KQ4X",
@@ -227,10 +226,12 @@ describe("src/index.ts (npm run dev entry)", () => {
     });
     let stderr = "";
     child.stderr!.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+    const startup: string[] = [];
     const port = await new Promise<number>((resolve, reject) => {
       const lines = createInterface({ input: child!.stdout! });
       lines.on("line", (line) => {
         try {
+          startup.push(line);
           const entry = JSON.parse(line) as { message?: string; port?: number; level?: string };
           if (typeof entry.level !== "string") throw new Error("log line without level");
           if (entry.message === "relay listening" && entry.port) resolve(entry.port);
@@ -243,6 +244,15 @@ describe("src/index.ts (npm run dev entry)", () => {
       );
     });
     expect(port).toBe(wanted);
+    // The real entry binds 0.0.0.0: Fastify's own listen lines would name every interface (SRV-18).
+    for (const line of startup) expect(line).not.toMatch(/127\.0\.0\.1|0\.0\.0\.0|http:\/\//);
+    const messages = startup.map((l) => (JSON.parse(l) as { message?: string }).message);
+    expect(messages.filter((m) => m === "relay starting")).toHaveLength(1);
+    expect(messages).toContain("http server listening");
+    expect(messages.indexOf("relay starting")).toBeLessThan(messages.indexOf("relay listening"));
+    expect(JSON.parse(startup[messages.indexOf("relay starting")]!)).toMatchObject({
+      heapSizeLimit: expect.any(Number) as number,
+    });
     await (await fetch(`http://127.0.0.1:${port}/healthz`)).arrayBuffer(); // warm up the client
     const started = performance.now();
     const res = await fetch(`http://127.0.0.1:${port}/healthz`);

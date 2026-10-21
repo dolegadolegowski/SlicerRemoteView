@@ -51,6 +51,10 @@ export interface FrameHandlers {
   binary(connection: Connection, frame: Buffer): void | Promise<void>;
   /** The socket closed, by either side. */
   closed(connection: Connection, closeCode: number): void | Promise<void>;
+  /** The upgrade is done (the heartbeat starts watching, SRV-14). */
+  opened?(connection: Connection): void;
+  /** The peer sent a WebSocket-level pong (§9.1), with its payload. */
+  pong?(connection: Connection, data: Buffer): void;
 }
 
 export interface WsEndpointOptions {
@@ -86,6 +90,7 @@ export async function registerWsEndpoint(
   const allowed = new Set(options.allowedOrigins);
   /** The limiter key of each upgrade request, computed once in `checkUpgrade`. */
   const clientKeys = new WeakMap<object, string>();
+  let firstUpgrade = true;
 
   await app.register(websocket, {
     options: {
@@ -130,6 +135,22 @@ export async function registerWsEndpoint(
     }
     // `request.ip` is undefined once the client has gone; that request is counted as "unknown".
     const clientKey = limiter.clientKey(request.ip as string | undefined);
+    // For the deploy checklist (DEP-06): whether the edge sends `X-Forwarded-For` and how many hops it
+    // lists (with `TRUST_PROXY=true` but no header, or more than one internal hop, clients share one
+    // limiter key), with the HMAC'd key of this client — once, never an address.
+    if (firstUpgrade) {
+      firstUpgrade = false;
+      const header = request.headers["x-forwarded-for"];
+      const forwarded = Array.isArray(header) ? header.join(",") : header;
+      logger.info(
+        {
+          xff: forwarded === undefined ? "absent" : "present",
+          ...(forwarded !== undefined && { xffEntries: forwarded.split(",").length }),
+          clientKey,
+        },
+        "first websocket upgrade",
+      );
+    }
     clientKeys.set(request.raw, clientKey);
     const verdict = limiter.upgrade(clientKey);
     if (!verdict.ok) {
@@ -157,9 +178,15 @@ export async function registerWsEndpoint(
       connection.close(CLOSE_CODES.HANDSHAKE_TIMEOUT),
     );
 
+    guarded(connection, "open", () => handlers.opened?.(connection));
+
     socket.on("message", (data: RawData, isBinary: boolean) => {
       guarded(connection, "frame", () => onFrame(connection, asBuffer(data), isBinary));
     });
+
+    socket.on("pong", (data: Buffer) =>
+      guarded(connection, "pong", () => handlers.pong?.(connection, data)),
+    );
 
     socket.on("close", (closeCode: number) => {
       connection.markClosed();
@@ -177,7 +204,7 @@ export async function registerWsEndpoint(
    */
   function guarded(
     connection: Connection,
-    stage: "frame" | "close",
+    stage: "open" | "frame" | "pong" | "close",
     run: () => void | Promise<void>,
     replyTo?: string,
   ): void {
