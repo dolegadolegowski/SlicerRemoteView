@@ -87,7 +87,7 @@ class Entity:
 
     ``positions``/``normals`` are ``(n, 3)`` real arrays and ``indices`` an ``(m, 3)`` integer array; ``matrix`` is
     the world transform in glTF space (``C · M_world · C⁻¹``, TRS-decomposable) or ``None`` for identity (omitted
-    in the file); ``baked`` entities have their non-linear transform applied to the vertices and no matrix.
+    in the file); ``baked`` entities have their non-linear or non-TRS transform applied to the vertices and no matrix.
     ``triangle_count`` (§7.3 ``triangleCount``) is derived from ``indices``.
     """
 
