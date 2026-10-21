@@ -120,6 +120,23 @@ class _StubQFont:
     PercentageSpacing = 0  # QFont::PercentageSpacing
 
 
+def _pip_ensure_signature(  # noqa: PLR0913, PLR0917 — mirrors Slicer's
+    requirements,
+    constraints=None,
+    skip_packages=None,
+    prompt_install=True,
+    prompt_restart=True,
+    requester=None,
+    skip_in_testing=True,
+    show_progress=True,
+):
+    """``slicer.packaging.pip_ensure`` in Slicer 5.12 (the body is Slicer's; only the signature matters here)."""
+
+
+def _confirm_ok_cancel_display_signature(text, windowTitle=None, parent=None, **kwargs):
+    """``slicer.util.confirmOkCancelDisplay`` in Slicer 5.12 (the extra keywords reach the message box)."""
+
+
 def ui_widget_names(path) -> list[str]:
     """``objectName`` of every widget, layout-free, in a Qt Designer ``.ui`` file."""
     root = ET.parse(path).getroot()  # noqa: S314 — the module's own .ui file, not external input
@@ -176,6 +193,12 @@ def _make_stub_modules() -> dict[str, types.ModuleType]:
     settings_class = _make_settings_class()
     util = types.ModuleType("slicer.util")
     util.pip_install = mock.MagicMock(name="slicer.util.pip_install")
+    # the user's answer to a confirmation dialog: yes unless a test says otherwise
+    util.confirmOkCancelDisplay = mock.create_autospec(
+        _confirm_ok_cancel_display_signature,
+        name="slicer.util.confirmOkCancelDisplay",
+        return_value=True,
+    )
     util.loadUI = _load_ui
     util.childWidgetVariables = _child_widget_variables
 
@@ -198,7 +221,10 @@ def _make_stub_modules() -> dict[str, types.ModuleType]:
 
     packaging = types.ModuleType("slicer.packaging")
     packaging.pip_install = mock.MagicMock(name="slicer.packaging.pip_install")
-    packaging.pip_ensure = mock.MagicMock(name="slicer.packaging.pip_ensure")
+    # the signature of Slicer 5.12.0-5.12.4 (Base/Python/slicer/packaging.py): a misspelt keyword fails the test
+    packaging.pip_ensure = mock.create_autospec(
+        _pip_ensure_signature, name="slicer.packaging.pip_ensure"
+    )
     slicer.packaging = packaging
 
     slm = types.ModuleType("slicer.ScriptedLoadableModule")
@@ -238,6 +264,18 @@ def slicer_stubs(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, types.Mo
     monkeypatch.delitem(sys.modules, "RemoteView", raising=False)
     yield stubs
     sys.modules.pop("RemoteView", None)
+
+
+@pytest.fixture
+def packages_installed(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """The distributions ``remoteview_core.deps`` sees as installed (name → version), at the pinned versions; a
+    test edits the dict to model missing or other versions. Nothing is loaded in the session (no restart needed)."""
+    from remoteview_core import deps  # noqa: PLC0415 — needs the module directory on sys.path (set above)
+
+    versions = {p.name: p.version for p in deps.PACKAGES}
+    monkeypatch.setattr(deps, "installed_version", versions.get)
+    monkeypatch.setattr(deps, "loaded_version", lambda _name: None)
+    return versions
 
 
 @pytest.fixture

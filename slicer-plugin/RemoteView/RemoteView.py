@@ -134,16 +134,36 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
                 slicer_version=slicer.app.applicationVersion,
                 platform=sys.platform,
                 scene=self.logic.sceneApi,
+                ensure_deps=self.ensureDependencies,
             )
         url = self.ui.relayUrlLineEdit.text.strip()
         caFile = self.ui.extraCaPathLineEdit.currentPath.strip()
-        view = self.controller.start(url, extra_ca_file=caFile or None)
+        # the installation below runs Qt's event loop (dialogs, pip's progress window): no second click meanwhile
+        self.ui.startButton.enabled = False
+        try:
+            view = self.controller.start(url, extra_ca_file=caFile or None)
+        except Exception:
+            # an error in a dialog or the installer must not leave Start disabled
+            self.render(self.controller.view)
+            raise
         if self.controller.active:  # the address and the CA file were accepted
             settings = qt.QSettings()
             settings.setValue(RELAY_URL_SETTING, url)
             settings.setValue(EXTRA_CA_SETTING, caFile)
             self.pumpTimer.start()
         self.render(view)
+
+    def ensureDependencies(self):
+        """Install the packages the session needs, after the user agrees (SLC-10, FR-16): the controller calls this
+        once the relay address is accepted and before the transport starts."""
+        from remoteview_core import deps  # noqa: PLC0415 — standard library only
+
+        return deps.ensure_runtime_deps(self.logic.installPackages, self.confirmInstall)
+
+    def confirmInstall(self, message: str, details: str) -> bool:
+        from remoteview_core.deps import CONFIRM_TITLE  # noqa: PLC0415
+
+        return slicer.util.confirmOkCancelDisplay(message, CONFIRM_TITLE, detailedText=details)
 
     def onStopClicked(self, _checked: bool = False) -> None:
         if self.controller is not None:
@@ -179,6 +199,18 @@ class RemoteViewLogic(ScriptedLoadableModuleLogic):
 
     def __init__(self) -> None:
         ScriptedLoadableModuleLogic.__init__(self)
+
+    @staticmethod
+    def installPackages(requirements) -> None:
+        """Install exact ``requirements`` (``["websockets==17.2", …]``) with Slicer's pip support, which shows its own
+        progress window and error dialog, and raise when pip fails. The user agreed in our dialog, so Slicer's generic
+        one is off; our own result text covers a package that was loaded before (``prompt_restart=False``). Slicer
+        5.12 (NFR-24) has ``slicer.packaging``; anything older fails with the fixed text of ``remoteview_core.deps``."""
+        from slicer import packaging  # noqa: PLC0415 — Slicer's own module, imported at the first Start
+
+        packaging.pip_ensure(
+            requirements, prompt_install=False, prompt_restart=False, requester="RemoteView"
+        )
 
     @staticmethod
     def sceneApi():

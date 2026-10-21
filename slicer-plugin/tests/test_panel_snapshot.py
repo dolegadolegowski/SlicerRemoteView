@@ -294,7 +294,7 @@ def test_panel_snapshot_any_failure_while_preparing_is_contained(fake, failure):
 
 
 def test_panel_snapshot_adapter_sends_the_mrml_scene(
-    import_remote_view, slicer_stubs, monkeypatch, fake
+    import_remote_view, slicer_stubs, monkeypatch, fake, packages_installed
 ):
     model = FakeModel("vtkMRMLModelNode4", displays=[FakeDisplay()], polydata=sphere(8))
     nodes = {"vtkMRMLModelNode": [model], "vtkMRMLViewNode": [FakeView("vtkMRMLViewNode1")]}

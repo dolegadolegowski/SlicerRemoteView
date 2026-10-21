@@ -16,7 +16,7 @@ opt-in rule, FR-02). Design: `docs/architecture.md` §6, ADR 0005; tasks: `docs/
 |---|---|
 | `CMakeLists.txt` | extension (`project(SlicerRemoteView)`, category `Remote`) — Slicer 5.12.4 extension template |
 | `RemoteView/CMakeLists.txt` | `slicerMacroBuildScriptedModule(... WITH_GENERIC_TESTS)`; **every** file under `RemoteView/` is listed (`.py` in `MODULE_PYTHON_SCRIPTS`, everything else in `MODULE_PYTHON_RESOURCES`) — `tests/test_skeleton.py` enforces it |
-| `RemoteView/RemoteView.py` | thin Slicer adapter: `RemoteView`, `RemoteViewWidget` (loads `Resources/UI/RemoteView.ui`, remembers the relay address and CA path in `QSettings`, shows the consent statement of `remoteview_core.consent` for the address being typed, starts sessions with `RemoteViewLogic.sceneApi` as the scene, renders `remoteview_core.panel` views, 50 ms `QTimer` pump, closes a running session on unload), `RemoteViewLogic` (`sceneApi()`: `remoteview_core.mrml_scene` over Slicer's `getNodesByClass` and folder display node), `RemoteViewTest`; import-light: no network, subprocess, pip or runtime-dependency import at import or construction — the session code of `remoteview_core` is imported only when *Start session* is clicked |
+| `RemoteView/RemoteView.py` | thin Slicer adapter: `RemoteView`, `RemoteViewWidget` (loads `Resources/UI/RemoteView.ui`, remembers the relay address and CA path in `QSettings`, shows the consent statement of `remoteview_core.consent` for the address being typed, starts sessions with `RemoteViewLogic.sceneApi` as the scene, renders `remoteview_core.panel` views, 50 ms `QTimer` pump, closes a running session on unload), `RemoteViewLogic` (`sceneApi()`: `remoteview_core.mrml_scene` over Slicer's `getNodesByClass` and folder display node; `installPackages()`: `slicer.packaging.pip_ensure`, SLC-10), the dependency dialog (`ensureDependencies`/`confirmInstall`, asked at the first *Start session* — SLC-10), `RemoteViewTest`; import-light: no network, subprocess, pip or runtime-dependency import at import or construction — the session code of `remoteview_core` is imported only when *Start session* is clicked |
 | `RemoteView/remoteview_core/` | pure-Python core (Python 3.12 + numpy, `vtk` for geometry filters only); never imports `slicer`/`qt`/`ctk` — `tests/test_core_purity.py` enforces it; `__version__` lives in `__init__.py` |
 | `RemoteView/remoteview_core/collect.py` | MRML collection (architecture §6.4): `collect_scene(scene_api)` → `Entity` per model node via an injectable `SceneApi` (the Slicer one is `mrml_scene.py`); VTK pipeline on a geometry-only deep copy whose cells are checked first (integer IDs in range — the filters do not bounds-check) (`vtkTriangleFilter` → triangles repeating a vertex dropped → `vtkPolyDataNormals`, `vtkmodules` imports), linear world matrix → `T.matrix`, names from `names.py`; nodes without triangles or with a non-linear/sheared transform are skipped and reported, never abort the snapshot; main thread only |
 | `RemoteView/remoteview_core/consent.py` | the consent statement shown before *Start session* (SLC-22; R-06, NFR-16): what is sent to which relay host and who can see it; names only the host of the typed address (no user info, port, path or query), says when `ws://` is unencrypted and names a `ws://` host only on this computer (Start refuses others); standard library only |
@@ -24,9 +24,10 @@ opt-in rule, FR-02). Design: `docs/architecture.md` §6, ADR 0005; tasks: `docs/
 | `RemoteView/remoteview_core/glb_writer.py` | `write_glb(entities, RootExtras) -> bytes` (and `is_exportable_matrix`, its rule for `T.matrix`): one GLB per snapshot (protocol §7): root `SlicerRemoteView` with §7.1 extras, per entity `T` (extras §7.3, TRS `matrix`) + one mesh child `M`, float32 `POSITION`/`NORMAL`, uint16/uint32 indices, one PBR material; deterministic bytes; strict input validation (`GlbWriteError`) |
 | `RemoteView/remoteview_core/mrml_scene.py` | the Slicer `SceneApi` (SLC-22, `docs/research/slicer-scene.md`): `MrmlSceneApi(nodes_by_class, folder_display)` exports a model only if a 3D view shows it (exact class `vtkMRMLModelNode`, not hidden from editors, a non-slice model display node that is visible in 3D, in a view and in visible folders), colour/opacity like the 3D view ("apply to branch" folders, folder opacity), linear world matrix or `None`; no `slicer` import (Slicer's functions are passed in); main thread only |
 | `RemoteView/remoteview_core/names.py` | display names (protocol §7.3): `sanitize_name` (forbidden Unicode categories removed, whitespace collapsed, ≤ 64 UTF-16 units — always accepted by the writer), `NameAssigner` with the *Hide node names* substitutes `Model <n>`/`Segment <n>` |
-| `RemoteView/remoteview_core/panel.py` | session panel logic (SLC-09): `PanelController` — Start/Stop, the transport events and the `ProtocolClient` → immutable `PanelView` (fixed texts, never relay free text; plain-text labels); one transport per session; with a `scene` factory the first `session.created` sends the scene (`snapshot.py`) and the status goes "Sending the scene" → "Live" on `scene.snapshot.ack` (a refused or too-large scene keeps the session with a fixed reason); a `session.create` the relay leaves unanswered for 15 s ends the attempt; no resume yet (SLC-17); main thread only |
+| `RemoteView/remoteview_core/panel.py` | session panel logic (SLC-09; SLC-10: the `ensure_deps` hook installs the Python packages after the address is accepted, asking first, with the panel locked meanwhile): `PanelController` — Start/Stop, the transport events and the `ProtocolClient` → immutable `PanelView` (fixed texts, never relay free text; plain-text labels); one transport per session; with a `scene` factory the first `session.created` sends the scene (`snapshot.py`) and the status goes "Sending the scene" → "Live" on `scene.snapshot.ack` (a refused or too-large scene keeps the session with a fixed reason); a `session.create` the relay leaves unanswered for 15 s ends the attempt; no resume yet (SLC-17); main thread only |
 | `RemoteView/remoteview_core/protocol_client.py` | publisher protocol core (protocol §4, §6, §8.4, §9): `ProtocolClient` session state machine fed by parsed inbound messages, builders for `session.create`/`renew`/`close`, `ping` and the snapshot messages (`build_snapshot_messages`: `begin` + lazily encoded 12-byte-header chunk frames + `end`), `SceneVersionCounter`; stdlib-only inbound checks; the `publisherToken` lives in a redacting `Secret` and neither it nor the session code is ever logged. No sockets or threads (those are `transport.py`); main thread only |
 | `RemoteView/remoteview_core/snapshot.py` | the snapshot of a live session (SLC-24, protocol §6, §7): `build_snapshot(scene_api, client, slicer_version=…)` → `collect_scene` → `write_glb` with root extras naming the `sceneVersion`/`profile` of the `begin` (`ProtocolClient.next_scene_version`) → `begin_snapshot` (1 MiB chunks); returns a `Snapshot` whose `frames()` the caller sends in order, plus the skipped nodes; `SnapshotTooLargeError` above the relay's `maxSnapshotBytes` before any version is used; an empty scene is an empty snapshot; main thread only |
+| `RemoteView/remoteview_core/deps.py` | runtime packages on first use (SLC-10, FR-16, T12): `PACKAGES` = `websockets==17.2`, `segno==1.6.6` (exact pins); `ensure_runtime_deps(install, confirm)` decides what is missing (another installed release counts as missing; `17.2.0` is `17.2`), asks the user first, installs through the injected callable (`RemoteView.py` passes `slicer.packaging.pip_ensure(…, prompt_install=False, prompt_restart=False)`; Slicer 5.12 only — an older build ends with the fixed "could not be installed" text), checks again, and reports a module already loaded in another release as *restart needed*; fixed failure texts, never pip's messages; no `slicer`, `websockets` or `segno` import — `docs/research/slicer-deps.md` |
 | `RemoteView/remoteview_core/transport.py` | the publisher's WebSocket to the relay (ADR 0009, protocol §3, §9.1, §9.3): `RelayTransport` runs the `websockets` asyncio client on a private event loop in one daemon thread; the main thread calls `start()`/`send(frame, connection=…)`/`stop(final)` and drains a `queue.Queue` of `Connected`/`Received`/`Disconnected` events; TLS always verified (optional extra CA added, no key log for the relay connection, no redirects), application heartbeat (the pong deadline grows with the bytes written since the last answered ping, at 1 Mbit/s and at most 8 MiB — a snapshot on a slow uplink is not a dead connection; `docs/research/slicer-heartbeat.md`), `discard_queued(connection=…)` for the rest of a refused snapshot, backoff 0.5–30 s, errors classified by type with guidance text; imports `websockets` (17.2) only when used (`start()`, `classify()`) |
 | `RemoteView/remoteview_core/vendored.py` | the only entry to the protocol package: registers `RemoteView/_vendor/remoteview_protocol` from its file location without running its `__init__` (no `jsonschema` needed — FR-16), never touches `sys.path`, refuses any `remoteview_protocol` module loaded from elsewhere; exports `chunk_header` and `alphabet` |
 | `RemoteView/_vendor/remoteview_protocol/` | **generated** copy of `shared/py/remoteview_protocol` with `VENDORED.json` (sha256 per file) — never edit; refresh with `scripts/vendor_shared.py` (ADR 0007 §3) |
@@ -51,6 +52,52 @@ Requires 3D Slicer **5.12.x** (Python 3.12).
    *Reload and Test* buttons in the module panel.
 
 The manual checks are in `docs/testing/slicer.md` (§1 module loads).
+
+## Offline installation of the Python packages
+
+On the first *Start session* the module asks before it installs `websockets==17.2` and `segno==1.6.6` from PyPI
+(`remoteview_core/deps.py`). On a computer that cannot reach `pypi.org` and `files.pythonhosted.org` (a hospital
+network), download the two wheels elsewhere — for Slicer 5.12 (Python 3.12) pick the platform of the Slicer computer:
+
+```
+python -m pip download websockets==17.2 segno==1.6.6 --only-binary :all: --python-version 3.12 \
+    --platform win_amd64 --dest wheels
+```
+
+(`--platform`: `win_amd64`, `macosx_11_0_arm64`, `macosx_10_13_x86_64` or `manylinux2014_x86_64`), copy the `wheels` folder
+to the Slicer computer and run in Slicer's Python console
+
+```python
+slicer.util.pip_install(
+    [
+        "--no-index",
+        "--find-links",
+        r"C:\path\to\wheels",
+        "--only-binary",
+        ":all:",
+        "websockets==17.2",
+        "segno==1.6.6",
+    ]
+)
+```
+
+then click *Start session*; no dialog follows because both packages are in place. Use the **list** form shown: Slicer
+splits a plain string like a shell command line, which swallows the backslashes of a Windows path (`C:\Users\me\wheels`
+becomes `C:Usersmewheels`) and breaks at spaces. On macOS and Linux the path is written as usual (`"/Users/me/wheels"`).
+The wheels are carried between computers, so check them: in Slicer's Python console on the Slicer computer print the
+SHA-256 of each file and compare it with the digest on the file's pypi.org page (*Download files*) for websockets 17.2
+and segno 1.6.6 (a console works the same on every OS; `python -m pip hash <file>` or `certutil -hashfile <file>
+SHA256` give the same digest):
+
+```python
+import hashlib, pathlib
+
+for f in sorted(pathlib.Path(r"C:\path\to\wheels").glob("*.whl")):
+    print(f.name, hashlib.sha256(f.read_bytes()).hexdigest())
+```
+
+A proxy for the normal installation is read from pip's usual settings (`HTTPS_PROXY`, `pip.conf`); Slicer prints pip's
+output to its Python console.
 
 ## Vendored protocol package
 

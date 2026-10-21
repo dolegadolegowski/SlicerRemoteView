@@ -591,7 +591,7 @@ def test_panel_ui_properties():
 
 
 @pytest.fixture
-def widget(import_remote_view, monkeypatch, fake):
+def widget(import_remote_view, monkeypatch, fake, packages_installed):
     module = import_remote_view()
     monkeypatch.setattr(panel, "RelayTransport", FakeTransport)
     instance = module.RemoteViewWidget(parent=parent_widget())

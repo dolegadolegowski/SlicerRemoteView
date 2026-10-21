@@ -12,6 +12,7 @@ set(MODULE_PYTHON_SCRIPTS
   remoteview_core/collect.py
   remoteview_core/consent.py
   remoteview_core/coords.py
+  remoteview_core/deps.py
   remoteview_core/glb_writer.py
   remoteview_core/mrml_scene.py
   remoteview_core/names.py

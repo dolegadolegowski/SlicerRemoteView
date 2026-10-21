@@ -110,8 +110,8 @@ Expected: `1 () [ 0.1  -0.02 -0.03]` (RAS (100, 30, −20) mm → glTF metres, +
 untouched), `b'glTF'`; no traceback (in particular no `DeprecationWarning`/`ImportError` from `vtkmodules`) and no
 network connection beyond the baseline.
 
-Re-run after SLC-08 (transport: Slicer's own Python `ssl`/OpenSSL 1.1.1; Windows, macOS **and** Linux). Until SLC-10
-installs it after consent, install the pinned client by hand in a **test** Slicer only: `slicer.util.pip_install(
+Re-run after SLC-08 (transport: Slicer's own Python `ssl`/OpenSSL 1.1.1; Windows, macOS **and** Linux). Install the pinned
+client first, by a first *Start session* (§3) or by hand in a **test** Slicer only: `slicer.util.pip_install(
 "websockets==17.2")`. With internet access, paste into the Python console:
 
 ```python
@@ -141,8 +141,8 @@ or the application log. Behind a TLS-inspecting proxy note the code shown on eac
 
 ## §2 Session panel: Start, code, scene, Stop (SLC-09, SLC-25; US-01, US-03, FR-03, FR-05, FR-08, FR-13)
 
-Preconditions: a **test** Slicer 5.12.x with the module path of §1; until SLC-10 installs it after consent, install the
-pinned client once in that Slicer's Python console: `slicer.util.pip_install("websockets==17.2")`. Relays: (a) the
+Preconditions: a **test** Slicer 5.12.x with the module path of §1; the first *Start session* asks before installing the
+pinned client (§3); or install it once in that Slicer's Python console: `slicer.util.pip_install("websockets==17.2 segno==1.6.6")`. Relays: (a) the
 relay stub of `tools/fake-slicer` on the same machine — once, from the repository root (Node 22): `npm ci` and
 `npm run build -w shared -w tools/fake-slicer`; then, in a terminal kept open next to Slicer,
 `node slicer-plugin/tests/relay_stub.mjs --port 8787`, which prints `ws://127.0.0.1:8787/ws` and, when you end its
@@ -265,6 +265,66 @@ Expected results:
   session for up to 2 minutes; the viewer shows the frozen scene as offline until the relay expires it. Quitting Slicer
   behaves the same and Slicer exits within 3 s. Expected, not a defect (`docs/research/slicer-heartbeat.md`).
 - Throughout: no traceback in the Python console, no session code or token in the console or the application log.
+
+| Date | Slicer version | OS | Result | Tester |
+|---|---|---|---|---|
+| | | | | |
+
+## §3 Dependencies on first use (SLC-10; FR-16, FR-02, US-01, NFR-31)
+
+Preconditions: a 3D Slicer 5.12.x profile in which neither package is installed — a fresh installation, or in the
+Python console `slicer.util.pip_uninstall("websockets segno")` and a restart. The module path of §1, relay (a) of §2
+(any relay works), and the network monitor of §1 step 1 running on `SlicerApp-real`. Check the starting point in the
+console: `import importlib.metadata as m; m.version("websockets")` raises `PackageNotFoundError`.
+
+Steps:
+
+1. Open *RemoteView*. Type `wss://user:secret@relay.example.org/ws` and click *Start session*.
+2. Type the relay address of the preconditions and click *Start session*. Read the dialog, then click *Cancel*.
+3. Click *Start session* again and click *OK*. Wait for Slicer's installation window to close.
+4. Click *Stop session*, then *Start session* once more. Restart Slicer, open *RemoteView*, click *Start session*.
+5. Replace case: *Stop session* and quit Slicer; start it again and, **before** opening *RemoteView* (nothing has
+   imported `websockets` yet), run `slicer.util.pip_install("websockets==16.0")` in the console and restart Slicer; open
+   *RemoteView*, click *Start session*, read the dialog, click *OK*. Repeat with `websockets==17.3` (a newer release).
+6. Restart case: quit Slicer; start it, run `slicer.util.pip_install("websockets==16.0")` before opening *RemoteView*
+   and restart; then run `import websockets; print(websockets.__version__)` in the console (16.0 is now loaded), open
+   *RemoteView*, click *Start session*, click *OK*. Then restart Slicer and click *Start session* again.
+7. Offline case: uninstall as in the preconditions, restart, disconnect the computer from the network, click *Start
+   session*, click *OK*. Repeat with the network *dropping* packets (a firewall rule for `pypi.org` and
+   `files.pythonhosted.org`) instead of refusing. Reconnect, follow the README section *Offline installation* on a
+   second computer (download the wheels, copy them over, run the `slicer.util.pip_install([...])` line with the real
+   path — on Windows one with a space in it too), then click *Start session*.
+8. While the dialog of step 2 or Slicer's installation window is open, click the greyed-out *Start session* button and
+   try to edit the relay address.
+
+Expected results:
+
+- Step 1: "Cannot start the session." with the URL message of §2 step 2; **no** dialog, no pip, no network traffic.
+- Step 2: the dialog "RemoteView — install Python packages" names *websockets 17.2* (the secure connection to the relay)
+  and *segno 1.6.6* (the QR code of the join link), says they come from PyPI or the package index configured for pip
+  and that the server sees the computer's address and the Python/OS versions, nothing from the scene; *Details* shows
+  `websockets==17.2` and `segno==1.6.6`. After *Cancel*: "Cannot start the session." and "Nothing was installed or
+  changed. …"; the monitor shows no connection at all (neither PyPI nor the relay) and the console has no traceback.
+- Step 3: Slicer's installation window runs and closes, and the panel goes on as in §2 step 3 (code within 3 s). The
+  monitor shows pip's connections to PyPI/`files.pythonhosted.org` first and the relay connection only after the
+  installation.
+- Step 4: no dialog either time (FR-16); the session starts as in §2.
+- Step 5: the dialog lists only *websockets 17.2* under "Installed now" as "websockets 16.0 will be replaced by 17.2"
+  (second run: "websockets 17.3 will be downgraded to 17.2"); afterwards the session starts without a restart, and
+  `m.version("websockets")` is 17.2.
+- Step 6: after *OK* Slicer shows **no** restart question of its own (`prompt_restart=False`); the panel says "Cannot
+  start the session." and "The Python packages are in place, but this Slicer session already loaded another version of
+  websockets. Restart Slicer, then click Start session again."; after the restart the session starts. On Windows the installer may be unable to replace a
+  loaded `websockets` extension file: then the panel shows the fixed "could not be installed" text, `websockets`
+  stays at 16.0 (no half-installed package) and the restart-and-retry works — note which of the two happened.
+- Step 7: Slicer's own error window shows pip's log (and the console and application log hold it too — pip's output is
+  Slicer's, it may include a proxy address); the panel says "The Python packages could not be installed. Check the
+  network connection and the proxy settings …" and holds no pip text; the application log gains one RemoteView line,
+  `deps: installation failed (CalledProcessError)`; the monitor shows no connection to the relay. With dropped packets the
+  window keeps spinning until pip's own timeouts and retries end (note the wait). After the offline installation the
+  session starts; a path with a space and a Windows backslash path work in the list form.
+- Step 8: the button stays greyed out and the address field cannot be edited until the dialog and the window are gone.
+- Throughout: no traceback, no session code or token in the console or the application log.
 
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|

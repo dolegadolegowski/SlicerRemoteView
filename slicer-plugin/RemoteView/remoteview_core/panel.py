@@ -7,6 +7,8 @@
 
 - Nothing leaves the computer before *Start session* (FR-02); the relay URL and the CA file are checked before any
   thread starts, and their error messages are fixed texts that never echo the input.
+- The Python packages the session needs are installed only then (SLC-10): ``ensure_deps`` runs after the address is
+  accepted and before the transport starts, asks the user first, and a "no" or a failure ends the attempt with its text.
 - Texts are fixed English strings (localised in SLC-21). Relay free text (``error.message``, §9.2) is never shown;
   close reasons and error codes are mapped to texts, and an unknown code is shown only as its validated enum value.
   The adapter's labels are plain text (no rich text from anywhere).
@@ -30,11 +32,12 @@ import math
 import queue
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 from urllib.parse import urlsplit
 
 from remoteview_core.collect import SceneApi
+from remoteview_core.deps import DepsResult, Outcome
 from remoteview_core.protocol_client import ProtocolClient, SessionState, envelope, make_client_info
 from remoteview_core.snapshot import SnapshotTooLargeError, build_snapshot
 from remoteview_core.transport import Connected, Disconnected, Event, Received, RelayTransport
@@ -56,8 +59,9 @@ CANNOT_START = "Cannot start the session."
 STOPPING = "Stopping…"
 WAITING = "Waiting for the relay…"
 WEBSOCKETS_MISSING = (
-    "RemoteView needs the Python package websockets 17.2, which is not installed. Automatic installation arrives "
-    "in a later version."
+    "The Python package websockets 17.2 could not be loaded. Restart Slicer; if this repeats, install it as "
+    "described in slicer-plugin/README.md on the RemoteView project page (section Offline installation of the "
+    "Python packages)."
 )
 CA_FILE_UNREADABLE = "The additional CA certificate file cannot be read."
 NO_ANSWER = "The relay did not answer. Check the relay address or try again later."
@@ -176,7 +180,9 @@ class PanelController:
 
     ``transport_factory`` is called as ``factory(url, events, extra_ca_file=...)`` and defaults to
     :class:`~remoteview_core.transport.RelayTransport` (looked up at Start, so tests can replace it). ``clock``
-    (seconds, monotonic) times the wait for ``session.created``.
+    (seconds, monotonic) times the wait for ``session.created``. ``ensure_deps`` (SLC-10) is called once the address is
+    accepted and before the transport starts; it returns a :class:`~remoteview_core.deps.DepsResult` (it may show
+    dialogs and block while pip runs). Without it nothing is installed or checked.
     """
 
     def __init__(  # noqa: PLR0913 — keyword-only collaborators, defaults for the application
@@ -188,6 +194,7 @@ class PanelController:
         transport_factory: Callable[..., Any] | None = None,
         clock: Callable[[], float] = time.monotonic,
         scene: Callable[[], SceneApi] | None = None,
+        ensure_deps: Callable[[], DepsResult] | None = None,
     ) -> None:
         self._slicer_version = slicer_version
         self._platform = platform
@@ -195,6 +202,9 @@ class PanelController:
         self._factory = transport_factory
         self._clock = clock
         self._scene_factory = scene
+        self._ensure_deps = ensure_deps
+        # ensure_deps blocks inside Qt's event loop (dialogs, pip's progress window): a second click must not start over
+        self._preparing = False
         self.phase = Phase.IDLE
         self.view = PanelView(NOT_CONNECTED)
         self._events: queue.Queue[Event] = queue.Queue()
@@ -223,7 +233,7 @@ class PanelController:
 
     def start(self, url: str, *, extra_ca_file: str | None = None) -> PanelView:
         """*Start session*: check the inputs, start the transport; ``session.create`` follows on ``Connected``."""
-        if self.phase is not Phase.IDLE:
+        if self.phase is not Phase.IDLE or self._preparing:
             return self.view
         try:
             # auto_renew=False: see the module docstring (branch-audit follow-up, NFR-11)
@@ -240,10 +250,9 @@ class PanelController:
             return self._idle(CANNOT_START, str(exc))
         except OSError:
             return self._idle(CANNOT_START, CA_FILE_UNREADABLE)
-        try:
-            transport.start()
-        except ImportError:
-            return self._idle(CANNOT_START, WEBSOCKETS_MISSING)
+        problem = self._prepare(transport)
+        if problem:
+            return self._idle(CANNOT_START, problem)
         self._transport, self._events, self._client = transport, events, client
         self._connection, self._end_detail, self._create_deadline = None, "", None
         self._user_stopped = self._sent_final = self._was_live = self._relay_ended = False
@@ -253,6 +262,26 @@ class PanelController:
         # an extra trust anchor stays visible while it is in use (T5); ws:// to loopback uses no TLS
         self._ca_note = EXTRA_CA_IN_USE if extra_ca_file and address.scheme == "wss" else ""
         return self._show(f"Connecting to {address.hostname or ''}…")
+
+    def _prepare(self, transport: Any) -> str:
+        """Install the missing packages (asking first), then start ``transport``; the text of what went wrong, or ""."""
+        if self._ensure_deps is not None:
+            before = self.view
+            self._preparing = True
+            # Qt's event loop runs inside the installation: a second click renders this view, so it says "not now"
+            self.view = replace(before, start_enabled=False, settings_enabled=False)
+            try:
+                deps = self._ensure_deps()
+            finally:
+                self._preparing = False
+                self.view = before  # an error leaves the panel as it was; every other way out shows a new view
+            if deps.outcome is not Outcome.READY:
+                return deps.detail
+        try:
+            transport.start()
+        except ImportError:
+            return WEBSOCKETS_MISSING
+        return ""
 
     def stop(self) -> PanelView:
         """*Stop session*: ``session.close`` if a session exists, then the transport ends (never blocks)."""

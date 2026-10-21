@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import _socket
 import ast
+import importlib.metadata
 import os
 import re
 import socket
@@ -12,6 +13,7 @@ import sys
 import threading
 import urllib.request
 from pathlib import Path
+from typing import NoReturn
 from unittest import mock
 
 import pytest
@@ -73,6 +75,10 @@ def _forbid(what: str):
     return _raise
 
 
+def _not_installed(name: str) -> NoReturn:
+    raise importlib.metadata.PackageNotFoundError(name)
+
+
 @pytest.fixture
 def no_side_effects(monkeypatch: pytest.MonkeyPatch, slicer_stubs):
     """Make every network, DNS, process and pip entry point raise and record the call."""
@@ -88,6 +94,13 @@ def no_side_effects(monkeypatch: pytest.MonkeyPatch, slicer_stubs):
     monkeypatch.setattr(slicer.util, "pip_install", _forbid("slicer.util.pip_install"))
     monkeypatch.setattr(slicer.packaging, "pip_install", _forbid("slicer.packaging.pip_install"))
     monkeypatch.setattr(slicer.packaging, "pip_ensure", _forbid("slicer.packaging.pip_ensure"))
+    # asking the user anything (the install consent included) waits for Start session
+    monkeypatch.setattr(
+        slicer.util, "confirmOkCancelDisplay", _forbid("slicer.util.confirmOkCancelDisplay")
+    )
+    # a fresh Slicer: the runtime packages are not installed, whatever the development environment has — a panel
+    # that ran the dependency sequence while opening would then reach the forbidden calls above
+    monkeypatch.setattr(importlib.metadata, "version", _not_installed)
     # Forget runtime dependencies and the project's own modules, so whatever RemoteView.py pulls in at import
     # (also transitively through remoteview_core) is imported afresh inside the guard; restored afterwards.
     watched = (*LAZY_MODULES, *PROJECT_PACKAGES)
@@ -158,6 +171,11 @@ def test_skeleton_side_effect_guard_detects_calls(no_side_effects, slicer_stubs)
         os.system("true")  # noqa: S605 — guarded: the patched os.system raises
     with pytest.raises(ForbiddenSideEffectError):
         sys.modules["slicer"].util.pip_install("websockets")
+    # the install consent is a call the opened panel must not make, and the fixture reports a fresh Slicer
+    with pytest.raises(ForbiddenSideEffectError):
+        sys.modules["slicer"].util.confirmOkCancelDisplay("Install?")
+    with pytest.raises(importlib.metadata.PackageNotFoundError):
+        importlib.metadata.version("websockets")
     try:  # a swallowed call is still recorded
         sys.modules["slicer"].packaging.pip_ensure(["segno"])
     except Exception:  # noqa: BLE001, S110 — `except Exception` cannot catch the guard
