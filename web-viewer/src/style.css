@@ -50,6 +50,10 @@ body {
 #app {
   height: 100vh; /* fallback for browsers without dynamic viewport units */
   height: 100dvh;
+  /* A phone on its side can be shorter than the busy code entry: it scrolls rather than hiding Leave (WEB-21 review).
+     The viewer is fixed and the only thing shown while a scene is, so it never scrolls. */
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
   display: flex;
   flex-direction: column;
@@ -140,6 +144,33 @@ body {
 
 .code-entry__join:focus-visible {
   outline: 3px solid var(--text);
+  outline-offset: 2px;
+}
+
+/* The title row: the title and the language switch (WEB-21) at the right edge, no extra height. */
+.code-entry__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+
+.code-entry__lang {
+  min-width: var(--target);
+  min-height: var(--target);
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.9375rem;
+  touch-action: manipulation;
+}
+
+.code-entry__lang:focus-visible {
+  outline: 3px solid var(--accent);
   outline-offset: 2px;
 }
 
@@ -259,8 +290,16 @@ body {
   background: var(--warn);
 }
 
-/* Leave (WEB-22): drawn as small as the bar's text, but its target is 44 × 44 px (NFR-32) — the invisible ::after
-   reaches 11 px above and below the button, which stays within the bar's top margin and the stack's 8 px gap. */
+/* The bar's controls stay together on one line (a wrapped bar never puts one button's target over the other). */
+.status-bar__actions {
+  display: inline-flex;
+  gap: 8px;
+}
+
+/* The language switch (WEB-21) and Leave (WEB-22): drawn as small as the bar's text, but each target is 44 × 44 px
+   (NFR-32) — the invisible ::after reaches 11 px above and below the button, which stays within the bar's top margin
+   and the stack's 8 px gap. */
+.status-bar__lang,
 .status-bar__leave {
   position: relative;
   min-width: var(--target);
@@ -276,6 +315,7 @@ body {
   touch-action: manipulation;
 }
 
+.status-bar__lang::after,
 .status-bar__leave::after {
   content: "";
   position: absolute;
@@ -286,6 +326,7 @@ body {
   transform: translate(-50%, -50%);
 }
 
+.status-bar__lang:focus-visible,
 .status-bar__leave:focus-visible {
   outline: 3px solid var(--accent);
   outline-offset: 2px;

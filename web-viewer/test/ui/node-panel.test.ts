@@ -393,6 +393,34 @@ describe("collapsible", () => {
     expect(body().hidden).toBe(true);
   });
 
+  it("setLang re-renders the labels; presenter names stay, placeholders follow (WEB-21)", async () => {
+    const blank = await load(
+      withJson(glb("asymmetric-2nodes.glb"), (j) => {
+        const liver = (j["nodes"] as Json[]).find(
+          (n) => (n["extras"] as Json | undefined)?.["nodeId"] === LIVER,
+        )!;
+        (liver["extras"] as Json)["name"] = "";
+      }),
+    );
+    setup(blank);
+    const sliders = () => [...panel.element.querySelectorAll(".node-panel__opacity")];
+    panel.setLang("pl");
+    expect(panel.element.getAttribute("aria-label")).toBe("Struktury");
+    expect(toggle().textContent).toBe("Struktury (2)");
+    expect(showAll().textContent).toBe("Pokaż wszystkie");
+    expect(rows().map((r) => r.textContent)).toEqual(["Bez nazwy 1", "Tumor"]);
+    expect(sliders().map((s) => s.getAttribute("aria-label"))).toEqual([
+      "Krycie: Bez nazwy 1",
+      "Krycie: Tumor",
+    ]);
+    expect(toggle().getAttribute("aria-expanded")).toBe("true"); // still open
+    panel.setModel(null);
+    expect(panel.element.querySelector(".node-panel__empty")!.textContent).toBe(
+      "Ta scena nie zawiera struktur.",
+    );
+    blank.dispose();
+  });
+
   it("two panels have distinct list ids", () => {
     const a = createNodePanel({ lang: "en" });
     const b = createNodePanel({ lang: "en" });

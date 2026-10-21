@@ -274,6 +274,34 @@ describe("code entry", () => {
     expect(message().classList.contains("code-entry__message--error")).toBe(true);
   });
 
+  it("re-renders its texts, the hint and the error in the other language without losing input (WEB-21)", () => {
+    type("7kq0x"); // a hint
+    entry.setLang("pl");
+    expect(entry.element.querySelector("h1")!.textContent).toBe("Dołącz do sesji");
+    expect(cells()[0]!.getAttribute("aria-label")).toBe("Znak kodu 1 z 5");
+    expect(join().textContent).toBe("Dołącz");
+    expect(message().textContent).toContain("0 ani O");
+    expect(values()).toBe("7KQ0X");
+    entry.reset();
+    entry.setError(describeCode("INVALID_CODE", "en")); // made in another language
+    expect(message().textContent).toContain(describeCode("INVALID_CODE", "pl").title);
+    entry.setLang("en");
+    expect(message().textContent).toContain("Code not recognised");
+    entry.setBusy(true);
+    entry.setLang("pl");
+    expect(join().textContent).toBe("Dołączanie…");
+  });
+
+  it("puts the language switch in the title row, after the title (WEB-21)", () => {
+    const toggle = document.createElement("button");
+    const withToggle = createCodeEntry({ onJoin, lang: "en", languageToggle: toggle });
+    const head = withToggle.element.firstElementChild!;
+    expect(head.className).toBe("code-entry__head");
+    expect([...head.children].map((c) => c.tagName)).toEqual(["H1", "BUTTON"]);
+    expect(head.lastElementChild).toBe(toggle);
+    expect(entry.element.firstElementChild!.tagName).toBe("H1"); // no switch, no row
+  });
+
   it("localises to Polish", () => {
     entry.element.remove();
     entry = createCodeEntry({ onJoin, lang: "pl" });

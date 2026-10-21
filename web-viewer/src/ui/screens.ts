@@ -3,9 +3,12 @@
 // WebGL 2, moves focus with the screen and keeps the status lines: over the scene the status bar (WEB-15: connection,
 // viewers, scene version) and a short notice line (presenter changes, "updating"); on the code entry one line
 // (reconnecting, presenter offline, waiting for or loading the scene, WEB-14). Leave (WEB-22) is in the status bar and
-// on the busy code entry. Kept out of `main.ts` so every transition is unit-tested.
+// on the busy code entry; the language switch (WEB-21) is in the status bar, and a switch re-renders every screen.
+// Kept out of `main.ts` so every transition is unit-tested.
 
+import type { LangStore } from "../i18n/lang";
 import { detectLang, t } from "../i18n/strings";
+import type { Lang } from "../i18n/strings";
 import type { Connection } from "../protocol/connection";
 import type { Reconnect } from "../protocol/reconnect";
 import type { Applied } from "../render/apply-update";
@@ -15,6 +18,7 @@ import type { CreateViewerResult, Viewer } from "../render/viewer";
 import { describeState } from "../state/errors";
 import type { Description } from "../state/errors";
 import type { CodeEntry } from "./code-entry";
+import { createLangToggle } from "./lang-toggle";
 import { createNodePanel } from "./node-panel";
 import type { NodePanel } from "./node-panel";
 import { createStatusBar } from "./status-bar";
@@ -31,6 +35,8 @@ export interface ScreensOptions {
   readonly webGL2Available?: () => boolean;
   /** A snapshot is being received right now (stream or HTTP), so "Loading the scene…" is true; default never. */
   readonly downloading?: () => boolean;
+  /** The UI language (WEB-21); without it the browser's, and the status bar has no language switch. */
+  readonly lang?: Pick<LangStore, "lang" | "set" | "onChange">;
 }
 
 export interface Screens {
@@ -75,7 +81,8 @@ export const PRESENTER_NOTICE_MS = 3_000;
 
 export function bindScreens(options: ScreensOptions): Screens {
   const { app, connection, models, entry, session } = options;
-  const create = options.createViewer ?? (() => createViewer());
+  const currentLang = (): Lang => options.lang?.lang ?? detectLang();
+  const create = options.createViewer ?? (() => createViewer({ lang: currentLang() }));
   const canRender = options.webGL2Available ?? webGL2Available;
   const downloading = options.downloading ?? (() => false);
   let viewer: Viewer | null = null;
@@ -92,11 +99,12 @@ export function bindScreens(options: ScreensOptions): Screens {
   let loading = false; // joined without a scene shown: a snapshot is being received
   let hint = false;
   let hintTimer: ReturnType<typeof setTimeout> | undefined;
-  let notice: string | null = null;
+  /** The notice line's text in a given language: it follows a language switch while shown. */
+  let notice: ((lang: Lang) => string) | null = null;
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
 
   function paintStatus(): void {
-    const lang = detectLang();
+    const lang = currentLang();
     const urgent = reconnecting
       ? t(lang, "state.reconnecting.title")
       : presenterOffline
@@ -105,7 +113,7 @@ export function bindScreens(options: ScreensOptions): Screens {
     bar?.setConnection(
       reconnecting ? "reconnecting" : presenterOffline ? "presenterOffline" : "connected",
     );
-    viewer?.setStatus(notice ?? (hint ? t(lang, "viewer.updating") : null));
+    viewer?.setStatus(notice?.(lang) ?? (hint ? t(lang, "viewer.updating") : null));
     const waiting = loading ? "state.downloading.title" : "state.waitingForScene.title";
     entry.setStatus(urgent ?? (joined ? t(lang, waiting) : null));
   }
@@ -132,7 +140,7 @@ export function bindScreens(options: ScreensOptions): Screens {
   }
 
   /** A short notice in the notice line (WEB-13), for `PRESENTER_NOTICE_MS`. */
-  function flash(text: string): void {
+  function flash(text: (lang: Lang) => string): void {
     notice = text;
     clearTimeout(noticeTimer);
     noticeTimer = setTimeout(() => {
@@ -167,9 +175,15 @@ export function bindScreens(options: ScreensOptions): Screens {
       }
       const shownViewer = created.viewer;
       viewer = shownViewer;
-      panel = createNodePanel({ onChange: () => shownViewer.invalidate() });
+      panel = createNodePanel({ lang: currentLang(), onChange: () => shownViewer.invalidate() });
       viewer.element.append(panel.element);
-      bar = createStatusBar({ onLeave: () => leave() });
+      bar = createStatusBar({
+        lang: currentLang(),
+        onLeave: () => leave(),
+        ...(options.lang && {
+          languageToggle: createLangToggle(options.lang, { className: "status-bar__lang" }).element,
+        }),
+      });
       viewer.overlay.prepend(bar.element); // above the notice and the notice line
       bar.setViewers(viewerCount);
       bar.setSceneVersion(version);
@@ -244,6 +258,15 @@ export function bindScreens(options: ScreensOptions): Screens {
     entry.reset(); // first: the `idle` state below focuses the first empty cell
     session.leave(); // the state becomes `idle`: the model goes, the code entry comes back
   }
+
+  // A language switch (WEB-21): every text on every screen, the status lines included, in the new language.
+  options.lang?.onChange((lang) => {
+    entry.setLang(lang);
+    viewer?.setLang(lang);
+    panel?.setLang(lang);
+    bar?.setLang(lang);
+    paintStatus();
+  });
 
   connection.on("state", (state) => {
     switch (state.kind) {
@@ -324,14 +347,13 @@ export function bindScreens(options: ScreensOptions): Screens {
       // A node removed in the same `scene.state` is not named or counted.
       const nodeIds = model ? changed.filter((id) => model.nodes.has(id)) : [];
       if (!model || nodeIds.length === 0) return;
-      const lang = detectLang();
       const node = model.nodes.get(nodeIds[0]!);
       // Names are shown, never logged (PHI, §7.3).
-      const name =
+      const name = (lang: Lang) =>
         node && (node.manifest.name.trim() || t(lang, "nodePanel.unnamed", { n: node.order + 1 }));
-      flash(
-        nodeIds.length === 1 && name
-          ? t(lang, "viewer.presenterChanged", { name })
+      flash((lang) =>
+        nodeIds.length === 1 && node
+          ? t(lang, "viewer.presenterChanged", { name: name(lang)! })
           : t(lang, "viewer.presenterChangedMany", { count: nodeIds.length }),
       );
     },

@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Object3D } from "three";
+import { createLangStore } from "../../src/i18n/lang";
+import type { LangStore } from "../../src/i18n/lang";
 import { createConnection } from "../../src/protocol/connection";
 import type { Connection } from "../../src/protocol/connection";
 import { createReconnect } from "../../src/protocol/reconnect";
@@ -34,6 +36,7 @@ function fakeViewer() {
     rendererInfo: vi.fn<Viewer["rendererInfo"]>(() => null),
     setStatus: vi.fn<Viewer["setStatus"]>(),
     focus: vi.fn<Viewer["focus"]>(),
+    setLang: vi.fn<Viewer["setLang"]>(),
     dispose: vi.fn<Viewer["dispose"]>(),
   } satisfies Viewer;
 }
@@ -97,7 +100,7 @@ let screens: Screens;
 /** What `downloading()` answers: a stream or an HTTP download is running. */
 let receiving = false;
 
-function setup(options: { webgl?: boolean; viewerFails?: boolean } = {}): void {
+function setup(options: { webgl?: boolean; viewerFails?: boolean; lang?: LangStore } = {}): void {
   MockSocket.reset();
   app = document.createElement("div");
   document.body.replaceChildren(app);
@@ -133,6 +136,7 @@ function setup(options: { webgl?: boolean; viewerFails?: boolean } = {}): void {
     createViewer: create,
     webGL2Available: () => options.webgl ?? true,
     downloading: () => receiving,
+    ...(options.lang && { lang: options.lang }),
   });
   app.append(entry.element);
 }
@@ -796,5 +800,66 @@ describe("Leave (WEB-22)", () => {
     screens.leave();
     expect(message()).toContain(describeCode(4001, "en").title);
     expect(typed()).toBe("7KQ4X");
+  });
+});
+
+describe("language switch (WEB-21)", () => {
+  let store: LangStore;
+  beforeEach(() => {
+    store = createLangStore({ languages: "en" });
+    setup({ lang: store });
+  });
+  const barToggle = () => viewer.element.querySelector<HTMLButtonElement>(".status-bar__lang")!;
+
+  it("the status bar has the switch; a switch over the scene re-renders every screen and the notice line", () => {
+    vi.useFakeTimers();
+    try {
+      join();
+      models.emit(modelA);
+      expect(barToggle().textContent).toBe("Polski");
+      screens.presenterChanged(["vtkMRMLModelNode2"]);
+      expect(viewer.setStatus).toHaveBeenLastCalledWith("The presenter changed Tumor");
+      barToggle().click();
+      expect(store.lang).toBe("pl");
+      expect(viewer.setLang).toHaveBeenLastCalledWith("pl");
+      expect(barConnection()).toBe("Połączono");
+      expect(barText("viewers")).toBe("Widzowie: 1");
+      expect(viewer.element.querySelector(".node-panel__toggle")!.textContent).toBe(
+        "Struktury (2)",
+      );
+      expect(entry.element.querySelector("h1")!.textContent).toBe("Dołącz do sesji"); // hidden, ready
+      expect(viewer.setStatus).toHaveBeenLastCalledWith("Prezenter zmienił: Tumor");
+      expect(barToggle().textContent).toBe("English");
+      vi.advanceTimersByTime(PRESENTER_NOTICE_MS);
+      expect(viewer.setStatus).toHaveBeenLastCalledWith(null);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("on the code entry: the status line and the message follow the switch", () => {
+    join();
+    expect(entryStatus()).toBe("Waiting for the presenter");
+    store.set("pl");
+    expect(entryStatus()).toBe("Czekamy na prezentera");
+    MockSocket.last.serverClose(4001); // the presenter ended the session
+    expect(message()).toContain("Prezentacja zakończona");
+    store.set("en");
+    expect(message()).toContain("Presentation ended");
+  });
+
+  it("a viewer, panel and bar made after a switch start in the chosen language", () => {
+    store.set("pl");
+    join();
+    models.emit(modelA);
+    expect(barConnection()).toBe("Połączono");
+    expect(viewer.element.querySelector(".node-panel__toggle")!.textContent).toBe("Struktury (2)");
+  });
+
+  it("without a store the bar has no switch", () => {
+    setup();
+    join();
+    models.emit(modelA);
+    expect(viewer.element.querySelector(".status-bar__lang")).toBeNull();
   });
 });

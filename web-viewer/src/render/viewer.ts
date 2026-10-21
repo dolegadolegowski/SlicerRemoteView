@@ -22,7 +22,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import WebGL from "three/addons/capabilities/WebGL.js";
 import { detectLang, t } from "../i18n/strings";
 import type { Lang } from "../i18n/strings";
-import { describeState } from "../state/errors";
+import { describeState, localize } from "../state/errors";
 import type { Description } from "../state/errors";
 import type { SceneModel } from "./scene-model";
 
@@ -93,6 +93,8 @@ export interface Viewer {
   setStatus(text: string | null): void;
   /** Moves keyboard / screen-reader focus to the canvas (its label describes the gestures). */
   focus(): void;
+  /** Re-renders the labels and the notice in `lang` (WEB-21); the status line is the caller's. */
+  setLang(lang: Lang): void;
   dispose(): void;
 }
 
@@ -147,7 +149,7 @@ function defaultObserveResize(element: HTMLElement, onResize: () => void): () =>
 
 export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
   const doc = options.document ?? document;
-  const lang = options.lang ?? detectLang();
+  let lang = options.lang ?? detectLang();
   if (!(options.isWebGL2Available ?? webGL2Available)())
     return { ok: false, reason: "webgl2Unavailable" };
 
@@ -158,7 +160,6 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
   canvas.className = "viewer__canvas";
   canvas.tabIndex = -1; // focusable from script (screen-reader announcement), not a tab stop
   canvas.setAttribute("role", "img");
-  canvas.setAttribute("aria-label", t(lang, "viewer.canvasLabel"));
   const notice = doc.createElement("div");
   notice.className = "viewer__notice";
   notice.setAttribute("role", "alert");
@@ -170,12 +171,10 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
   const noticeClose = doc.createElement("button");
   noticeClose.type = "button";
   noticeClose.className = "viewer__notice-close";
-  noticeClose.textContent = t(lang, "viewer.dismiss");
   notice.append(noticeTitle, noticeBody, noticeClose);
   const fitButton = doc.createElement("button");
   fitButton.type = "button";
   fitButton.className = "viewer__fit";
-  fitButton.textContent = t(lang, "viewer.fit");
   const status = doc.createElement("p");
   status.className = "viewer__status";
   status.setAttribute("role", "status"); // polite: announced without interrupting
@@ -232,7 +231,8 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
   let disposed = false;
   /** The WebGL context is lost (GPU reset, memory pressure): nothing is drawn until it is restored (WEB-16). */
   let lost = false;
-  let lostNotice: Description | null = null;
+  /** The notice set by the caller (in any language: it is shown in the viewer's, WEB-21). */
+  let given: Description | null = null;
   let hidden = doc.visibilityState === "hidden";
   let size = { width: 0, height: 0, ratio: 0 };
 
@@ -373,16 +373,31 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
     fit(true);
   }
 
-  function setNotice(next: Description | null): void {
-    // While the context is lost, clearing a notice (e.g. for a new scene) brings back why nothing is drawn.
-    const shown = next ?? (lost ? lostNotice : null);
+  function paintNotice(): void {
+    // While the context is lost, no notice of the caller's (or one cleared, e.g. for a new scene) leaves why nothing
+    // is drawn.
+    const lostShown = given === null && lost;
+    const shown = lostShown
+      ? describeState({ kind: "contextLost" }, lang)
+      : given && localize(given, lang);
     notice.hidden = shown === null;
     // The lost-context notice cannot be dismissed (it would come straight back), so it has no button.
-    noticeClose.hidden = shown !== null && shown === lostNotice;
+    noticeClose.hidden = lostShown;
     // Unchanged text is left alone: the alert is not announced again.
     if (noticeTitle.textContent !== (shown?.title ?? ""))
       noticeTitle.textContent = shown?.title ?? "";
     if (noticeBody.textContent !== (shown?.body ?? "")) noticeBody.textContent = shown?.body ?? "";
+  }
+
+  function setNotice(next: Description | null): void {
+    given = next;
+    paintNotice();
+  }
+
+  function label(): void {
+    canvas.setAttribute("aria-label", t(lang, "viewer.canvasLabel"));
+    noticeClose.textContent = t(lang, "viewer.dismiss");
+    fitButton.textContent = t(lang, "viewer.fit");
   }
 
   // Double tap (touch) and double click (mouse) frame the scene again; a drag, a long press or a pinch is not a tap.
@@ -446,17 +461,16 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
     if (frame !== null) cancelFrame(frame);
     frame = null;
     element.dataset["context"] = "lost";
-    lostNotice = describeState({ kind: "contextLost" }, lang);
-    setNotice(lostNotice);
+    setNotice(null); // replaces any notice: why nothing is drawn matters most
   };
   const onContextRestored = () => {
     lost = false;
     delete element.dataset["context"];
-    if (lostNotice !== null && noticeTitle.textContent === lostNotice.title) setNotice(null);
-    lostNotice = null;
+    paintNotice(); // the lost-context notice goes; one set meanwhile stays
     renderFrame();
   };
 
+  label();
   canvas.style.touchAction = "none"; // OrbitControls sets it too; the page itself keeps native zoom (WCAG)
   canvas.addEventListener("pointerdown", onPointerDown);
   canvas.addEventListener("pointerup", onPointerUp);
@@ -494,6 +508,11 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
       if (status.textContent !== (text ?? "")) status.textContent = text ?? "";
     },
     focus: () => canvas.focus({ preventScroll: true }),
+    setLang(next) {
+      lang = next;
+      label();
+      paintNotice();
+    },
     dispose() {
       if (disposed) return;
       disposed = true;

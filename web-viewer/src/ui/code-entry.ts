@@ -8,6 +8,7 @@
 import { CODE_HINTS, CODE_LENGTH, normalizeCode } from "@slicerremoteview/shared";
 import { detectLang, t } from "../i18n/strings";
 import type { Lang, StringKey } from "../i18n/strings";
+import { localize } from "../state/errors";
 import type { Description } from "../state/errors";
 
 export interface CodeEntryOptions {
@@ -19,6 +20,8 @@ export interface CodeEntryOptions {
    */
   readonly onLeave?: () => void;
   readonly lang?: Lang;
+  /** The language switch (WEB-21), in the title row after the title (it costs no height on a short screen). */
+  readonly languageToggle?: HTMLElement;
 }
 
 export interface CodeEntry {
@@ -35,6 +38,8 @@ export interface CodeEntry {
   setCode(text: string): void;
   /** Focuses the first empty cell (the last cell when all are filled). */
   focus(): void;
+  /** Re-renders every text in `lang` (WEB-21), the error shown and the hint included; the status line is the caller's. */
+  setLang(lang: Lang): void;
 }
 
 /** Strips separators and upper-cases, exactly like `normalizeCode` but without validating. */
@@ -49,7 +54,7 @@ const HINT_KEYS = new Map<string, StringKey>([
 ]);
 
 export function createCodeEntry(options: CodeEntryOptions): CodeEntry {
-  const lang = options.lang ?? detectLang();
+  let lang = options.lang ?? detectLang();
   let busy = false;
   let overflow = false;
   let error: Description | null = null;
@@ -60,11 +65,9 @@ export function createCodeEntry(options: CodeEntryOptions): CodeEntry {
 
   const title = document.createElement("h1");
   title.id = "code-entry-title";
-  title.textContent = t(lang, "codeEntry.title");
 
   const lead = document.createElement("p");
   lead.className = "code-entry__lead";
-  lead.textContent = t(lang, "codeEntry.lead");
 
   const group = document.createElement("div");
   group.className = "code-entry__cells";
@@ -82,10 +85,6 @@ export function createCodeEntry(options: CodeEntryOptions): CodeEntry {
     cell.setAttribute("autocapitalize", "characters");
     cell.setAttribute("autocorrect", "off");
     cell.setAttribute("enterkeyhint", i === CODE_LENGTH - 1 ? "go" : "next");
-    cell.setAttribute(
-      "aria-label",
-      t(lang, "codeEntry.cellLabel", { n: i + 1, total: CODE_LENGTH }),
-    );
     cells.push(cell);
     group.append(cell);
   }
@@ -110,12 +109,30 @@ export function createCodeEntry(options: CodeEntryOptions): CodeEntry {
   const leave = document.createElement("button");
   leave.type = "button"; // never submits the form
   leave.className = "code-entry__leave";
-  leave.textContent = t(lang, "codeEntry.leave");
   const onLeave = options.onLeave;
   if (onLeave) leave.addEventListener("click", () => onLeave());
 
-  form.append(title, lead, group, message, join, status);
+  let head: HTMLElement = title;
+  if (options.languageToggle) {
+    head = document.createElement("div");
+    head.className = "code-entry__head";
+    head.append(title, options.languageToggle);
+  }
+  form.append(head, lead, group, message, join, status);
   if (onLeave) form.append(leave);
+
+  /** The texts that do not depend on the state. */
+  function label(): void {
+    title.textContent = t(lang, "codeEntry.title");
+    lead.textContent = t(lang, "codeEntry.lead");
+    cells.forEach((cell, i) =>
+      cell.setAttribute(
+        "aria-label",
+        t(lang, "codeEntry.cellLabel", { n: i + 1, total: CODE_LENGTH }),
+      ),
+    );
+    leave.textContent = t(lang, "codeEntry.leave");
+  }
 
   const value = (): string => cells.map((c) => c.value).join("");
 
@@ -150,7 +167,8 @@ export function createCodeEntry(options: CodeEntryOptions): CodeEntry {
 
   function refresh(): void {
     const hint = hintText();
-    const text = hint ?? (error ? `${error.title}. ${error.body}` : null);
+    const shown = error && localize(error, lang); // the language of the screen, whoever made the message
+    const text = hint ?? (shown ? `${shown.title}. ${shown.body}` : null);
     message.hidden = text === null;
     message.textContent = text ?? "";
     message.classList.toggle("code-entry__message--error", hint !== null || error !== null);
@@ -222,6 +240,7 @@ export function createCodeEntry(options: CodeEntryOptions): CodeEntry {
     options.onJoin(code);
   });
 
+  label();
   refresh();
 
   return {
@@ -253,6 +272,11 @@ export function createCodeEntry(options: CodeEntryOptions): CodeEntry {
     focus() {
       const empty = cells.findIndex((c) => c.value === "");
       focusCell(empty === -1 ? CODE_LENGTH - 1 : empty);
+    },
+    setLang(next) {
+      lang = next;
+      label();
+      refresh();
     },
   };
 }

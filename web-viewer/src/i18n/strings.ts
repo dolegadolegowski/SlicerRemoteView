@@ -111,6 +111,8 @@ const en = {
   "statusBar.viewers": "Viewers: {count}",
   "statusBar.scene": "Scene v{version}",
   "statusBar.leave": "Leave",
+  // The language's own name, shown on the switch to it (WEB-21): each table names its own language.
+  "lang.name": "English",
   "viewer.fit": "Fit view",
   "viewer.dismiss": "Dismiss",
   "viewer.canvasLabel":
@@ -239,6 +241,7 @@ const pl: Record<StringKey, string> = {
   "statusBar.viewers": "Widzowie: {count}",
   "statusBar.scene": "Scena v{version}",
   "statusBar.leave": "Wyjdź",
+  "lang.name": "Polski",
   "viewer.fit": "Dopasuj widok",
   "viewer.dismiss": "Zamknij",
   "viewer.canvasLabel":

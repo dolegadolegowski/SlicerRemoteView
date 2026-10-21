@@ -3,7 +3,7 @@
 // node panel (axe, WCAG 2 AA: 4.5:1).
 
 import { expect, test } from "@playwright/test";
-import { contrast } from "./axe";
+import { contrast } from "./a11y";
 import { joinAndView } from "./fake-relay";
 
 test("the manifest and its icons are served, and the page links them", async ({

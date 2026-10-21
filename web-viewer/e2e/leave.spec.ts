@@ -4,7 +4,7 @@
 
 import { expect, test } from "@playwright/test";
 import type { Page, WebSocketRoute } from "@playwright/test";
-import { contrast } from "./axe";
+import { contrast, expectTargetOf44 } from "./a11y";
 import { fixture, sendJson, streamSnapshot } from "./fake-relay";
 
 interface Socket {
@@ -61,40 +61,14 @@ async function backOnEmptyEntry(page: Page): Promise<void> {
   await expect(page.locator(".code-entry__status")).toHaveText("");
 }
 
-/**
- * The button's touch target (NFR-32): its box, or the invisible `::after` around it when that is larger, and whether
- * points 21 px from its centre still hit the button — nothing covers the target (1 px short of the edge: hit testing
- * rounds the point).
- */
-async function target(
-  page: Page,
-  selector: string,
-): Promise<{ width: number; height: number; hits: boolean }> {
-  return page.evaluate((s) => {
-    const button = document.querySelector<HTMLElement>(s)!;
-    const r = button.getBoundingClientRect();
-    const after = getComputedStyle(button, "::after");
-    const [x, y] = [r.left + r.width / 2, r.top + r.height / 2];
-    const d = 21;
-    return {
-      width: Math.max(r.width, parseFloat(after.width) || 0),
-      height: Math.max(r.height, parseFloat(after.height) || 0),
-      hits: [
-        [x, y - d],
-        [x, y + d],
-        [x - d, y],
-        [x + d, y],
-      ].every(([px, py]) => document.elementFromPoint(px!, py!) === button),
-    };
+/** The element is wholly inside the viewport and a tap at its centre reaches it. */
+const onScreen = (page: Page, selector: string) =>
+  page.evaluate((s) => {
+    const element = document.querySelector(s)!;
+    const r = element.getBoundingClientRect();
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return r.top >= 0 && r.bottom <= window.innerHeight && hit === element;
   }, selector);
-}
-
-async function expectTargetOf44(page: Page, selector: string): Promise<void> {
-  const { width, height, hits } = await target(page, selector);
-  expect(width, selector).toBeGreaterThanOrEqual(44);
-  expect(height, selector).toBeGreaterThanOrEqual(44);
-  expect(hits, selector).toBe(true);
-}
 
 const geometries = (page: Page) =>
   page.evaluate(
@@ -145,6 +119,28 @@ test("Leave on the code entry while waiting for the presenter (installed app: no
   await backOnEmptyEntry(page);
   await expect.poll(() => sockets[0]!.closeCode).toBe(1000);
   expect(sockets[0]!.types.at(-1)).toBe("viewer.leave");
+});
+
+test("on a phone on its side the busy code entry keeps Join and Leave session on screen, or scrolls to them", async ({
+  page,
+}) => {
+  const sockets = await relay(page, false);
+  await page.setViewportSize({ width: 844, height: 340 }); // iPhone landscape with Safari's bars
+  await page.goto("/");
+  await typeAndJoin(page);
+  await expect(page.locator(".code-entry__status")).toHaveText("Waiting for the presenter");
+  for (const selector of [".code-entry__join", ".code-entry__leave"])
+    expect(await onScreen(page, selector), selector).toBe(true);
+  // Shorter than the form: a user scroll (not Playwright's scrollIntoView, which moves even `overflow: hidden`
+  // boxes) brings Leave session into view.
+  await page.setViewportSize({ width: 640, height: 240 });
+  expect(await onScreen(page, ".code-entry__leave")).toBe(false);
+  await page.mouse.move(320, 120);
+  await page.mouse.wheel(0, 1_000);
+  await expect.poll(() => onScreen(page, ".code-entry__leave")).toBe(true);
+  await page.locator(".code-entry__leave").click();
+  await backOnEmptyEntry(page);
+  await expect.poll(() => sockets[0]!.closeCode).toBe(1000);
 });
 
 test("Leave while reconnecting cancels the pending retry: no socket opens afterwards", async ({

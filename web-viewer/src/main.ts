@@ -1,7 +1,9 @@
 // Entry point: wires the modules. Joining by code (WEB-03/04) or `/j#CODE` (WEB-11), snapshots over the WebSocket
 // stream (WEB-05) or HTTP (WEB-06), the scene model (WEB-07), the viewer (WEB-08), live updates (WEB-12),
-// reconnecting (WEB-14), the status bar (WEB-15), the wake lock and the renderer test hook (WEB-16), Leave (WEB-22);
+// reconnecting (WEB-14), the status bar (WEB-15), the wake lock and the renderer test hook (WEB-16), the language
+// switch (WEB-21), Leave (WEB-22);
 // `ui/screens.ts` decides which screen is visible.
+import { browserStorage, createLangStore } from "./i18n/lang";
 import { createConnection, endsSession } from "./protocol/connection";
 import type { ConnectionState } from "./protocol/connection";
 import { createReconnect } from "./protocol/reconnect";
@@ -18,6 +20,7 @@ import type { Description } from "./state/errors";
 import { createCodeEntry } from "./ui/code-entry";
 import { startFromDeepLink, takeDeepLink } from "./ui/deep-link";
 import { startDevOverlay } from "./ui/dev-overlay";
+import { createLangToggle } from "./ui/lang-toggle";
 import { bindScreens } from "./ui/screens";
 import { bindWakeLock } from "./ui/wake-lock";
 
@@ -25,6 +28,8 @@ import { bindWakeLock } from "./ui/wake-lock";
 const link = takeDeepLink();
 const app = document.getElementById("app");
 if (app) {
+  // The user's language choice, else the browser's; `<html lang>` follows it. Only the language is stored (WEB-21).
+  const langs = createLangStore({ storage: browserStorage(), root: document.documentElement });
   // `clientInfo.platform`/`profile` from the user agent (WEB-15); nothing else about the device is sent (§5.1). The
   // snapshot limit follows the profile and is the same for the announcement, the stream and the download.
   const device = currentDevice();
@@ -97,6 +102,8 @@ if (app) {
   const entry = createCodeEntry({
     onJoin: (code) => screens.join(code),
     onLeave: () => screens.leave(), // WEB-22
+    lang: langs.lang,
+    languageToggle: createLangToggle(langs, { className: "code-entry__lang" }).element,
   });
   const screens = bindScreens({
     app,
@@ -105,6 +112,7 @@ if (app) {
     models,
     entry,
     downloading: () => loader.pendingVersion !== null || stream.activeVersion !== null,
+    lang: langs,
   });
   // After the screens: a new model is on screen (with its node panel) before queued updates are applied to it.
   models.onChange((model) => {

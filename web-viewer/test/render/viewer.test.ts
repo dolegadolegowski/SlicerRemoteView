@@ -608,6 +608,24 @@ describe("scene graph, notices and page behaviour", () => {
     expect(viewer.element.querySelector(".viewer__fit")!.textContent).toBe("Fit view");
   });
 
+  it("setLang re-renders the labels and the notice shown, whatever language it was made in (WEB-21)", () => {
+    const { viewer } = harness();
+    const notice = viewer.element.querySelector<HTMLElement>(".viewer__notice")!;
+    viewer.setNotice(describeCode("PAYLOAD_TOO_LARGE", "en"));
+    viewer.setLang("pl");
+    expect(viewer.canvas.getAttribute("aria-label")).toMatch(/^Scena 3D/);
+    expect(viewer.element.querySelector(".viewer__fit")!.textContent).toBe("Dopasuj widok");
+    expect(viewer.element.querySelector(".viewer__notice-close")!.textContent).toBe("Zamknij");
+    expect(notice.textContent).toContain(describeCode("PAYLOAD_TOO_LARGE", "pl").title);
+    viewer.setNotice(describeCode("INTERNAL", "en")); // made by a module that still speaks English
+    expect(notice.textContent).toContain(describeCode("INTERNAL", "pl").title);
+    viewer.canvas.dispatchEvent(new Event("webglcontextlost"));
+    viewer.setLang("en");
+    expect(notice.textContent).toContain(describeState({ kind: "contextLost" }, "en").title);
+    viewer.setLang("pl");
+    expect(notice.textContent).toContain(describeState({ kind: "contextLost" }, "pl").title);
+  });
+
   it("dispose stops rendering, releases the renderer and detaches", async () => {
     const vv = Object.assign(new EventTarget(), {
       scale: 1,

@@ -1,7 +1,7 @@
 // Status bar (WEB-15): one line at the top of the viewer — the connection as the user should read it (connected,
 // reconnecting, presenter offline), the number of viewers in the session (`viewer.joined` / `viewer.count`, §5.3)
-// and the scene version shown (§8.4), then the Leave button (WEB-22: the installed app has no address bar, reload or,
-// on iOS, back button to get out of a session). DOM only; the screens feed it.
+// and the scene version shown (§8.4), then the controls: the language switch (WEB-21) and Leave (WEB-22: the installed
+// app has no address bar, reload or, on iOS, back button to get out of a session). DOM only; the screens feed it.
 //
 // Only the connection state is a live region: viewer counts change with every join and leave and would chatter.
 
@@ -17,6 +17,8 @@ export interface StatusBar {
   setViewers(count: number | null): void;
   /** `null` hides the version (no scene shown). */
   setSceneVersion(version: number | null): void;
+  /** Re-renders the texts in `lang` (WEB-21). */
+  setLang(lang: Lang): void;
 }
 
 export interface StatusBarOptions {
@@ -24,6 +26,8 @@ export interface StatusBarOptions {
   readonly document?: Document;
   /** Leave pressed (WEB-22); without it the bar has no Leave button. */
   readonly onLeave?: () => void;
+  /** The language switch (WEB-21), before Leave. */
+  readonly languageToggle?: HTMLElement;
 }
 
 const CONNECTION_KEYS = {
@@ -34,11 +38,13 @@ const CONNECTION_KEYS = {
 
 export function createStatusBar(options: StatusBarOptions = {}): StatusBar {
   const doc = options.document ?? document;
-  const lang = options.lang ?? detectLang();
+  let lang = options.lang ?? detectLang();
+  let state: ConnectionLabel = "connected";
+  let count: number | null = null;
+  let sceneVersion: number | null = null;
   const element = doc.createElement("div");
   element.className = "status-bar";
   element.setAttribute("role", "group");
-  element.setAttribute("aria-label", t(lang, "statusBar.label"));
   const connection = doc.createElement("span");
   connection.className = "status-bar__connection";
   connection.setAttribute("role", "status");
@@ -47,15 +53,20 @@ export function createStatusBar(options: StatusBarOptions = {}): StatusBar {
   const version = doc.createElement("span");
   version.className = "status-bar__version";
   element.append(connection, viewers, version);
+  // The controls stay together on one line when the bar wraps on a narrow phone: their 44 px targets never reach
+  // over each other.
+  const actions = doc.createElement("span");
+  actions.className = "status-bar__actions";
+  if (options.languageToggle) actions.append(options.languageToggle);
   const onLeave = options.onLeave;
+  const leave = doc.createElement("button");
+  leave.type = "button";
+  leave.className = "status-bar__leave";
   if (onLeave) {
-    const leave = doc.createElement("button");
-    leave.type = "button";
-    leave.className = "status-bar__leave";
-    leave.textContent = t(lang, "statusBar.leave");
     leave.addEventListener("click", () => onLeave());
-    element.append(leave);
+    actions.append(leave);
   }
+  if (actions.childElementCount > 0) element.append(actions);
 
   /** Sets text only when it changes: an unchanged live region is not announced again. */
   const write = (target: HTMLElement, text: string) => {
@@ -63,25 +74,37 @@ export function createStatusBar(options: StatusBarOptions = {}): StatusBar {
     target.hidden = text === "";
   };
 
-  const bar: StatusBar = {
+  function paint(): void {
+    element.setAttribute("aria-label", t(lang, "statusBar.label"));
+    element.dataset["connection"] = state;
+    if (connection.textContent !== t(lang, CONNECTION_KEYS[state]))
+      connection.textContent = t(lang, CONNECTION_KEYS[state]);
+    write(viewers, count === null ? "" : t(lang, "statusBar.viewers", { count }));
+    write(
+      version,
+      sceneVersion === null ? "" : t(lang, "statusBar.scene", { version: sceneVersion }),
+    );
+    leave.textContent = t(lang, "statusBar.leave");
+  }
+
+  paint();
+  return {
     element,
-    setConnection(state) {
-      element.dataset["connection"] = state;
-      if (connection.textContent !== t(lang, CONNECTION_KEYS[state]))
-        connection.textContent = t(lang, CONNECTION_KEYS[state]);
+    setConnection(next) {
+      state = next;
+      paint();
     },
-    setViewers(count) {
-      write(viewers, count === null ? "" : t(lang, "statusBar.viewers", { count }));
+    setViewers(next) {
+      count = next;
+      paint();
     },
-    setSceneVersion(sceneVersion) {
-      write(
-        version,
-        sceneVersion === null ? "" : t(lang, "statusBar.scene", { version: sceneVersion }),
-      );
+    setSceneVersion(next) {
+      sceneVersion = next;
+      paint();
+    },
+    setLang(next) {
+      lang = next;
+      paint();
     },
   };
-  bar.setConnection("connected");
-  bar.setViewers(null);
-  bar.setSceneVersion(null);
-  return bar;
 }

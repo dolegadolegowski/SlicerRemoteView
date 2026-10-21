@@ -352,14 +352,27 @@ npm test -w web-viewer -- pwa && npm run e2e -w web-viewer -- pwa
 `npm run build` ends with `scripts/check-bundle.mjs`: the gzipped size of the JS and CSS that `index.html` loads at
 start, failing above 1 MiB (NFR-09) or when `index.html` names no module script (nothing measured). `e2e/network.spec.ts` asserts that the page talks only to its own origin.
 
-| Initial asset (2026-10-20, three 0.186.1, Vite 8.3.4) | Size | gzip (level 9) |
+| Initial asset (2026-10-21, three 0.186.1, Vite 8.3.4) | Size | gzip (level 9) |
 |---|---|---|
-| `assets/index-*.js` (app + three.js + GLTFLoader + OrbitControls) | 742,274 B | 189,023 B |
-| `assets/index-*.css` | 7,776 B | 2,005 B |
-| **Total initial JS + CSS** | 750,050 B | **191,028 B** (18 % of 1,048,576 B) |
+| `assets/index-*.js` (app + three.js + GLTFLoader + OrbitControls) | 744,657 B | 189,962 B |
+| `assets/index-*.css` | 9,047 B | 2,187 B |
+| **Total initial JS + CSS** | 753,704 B | **192,149 B** (18 % of 1,048,576 B) |
 
 ```bash
 npm run build -w web-viewer && npm test -w web-viewer -- bundle && npm run e2e -w web-viewer -- network
+```
+
+### Language (WEB-21)
+
+The UI speaks English or Polish: the browser's language picks at first (`navigator.languages`, English otherwise),
+and a switch — in the code entry's title row and in the status bar, named in the language it switches to
+("Polski" / "English") — changes every visible text at once, without a reload, so the session stays. The choice is kept in
+`localStorage` under `rv.lang` (the language only — never a code or token) and `<html lang>` follows it
+(`src/i18n/lang.ts`). Messages are rendered again from what they describe (`localize` in `src/state/errors.ts`), so
+one already on screen follows a switch.
+
+```bash
+npm test -w web-viewer -- i18n lang-toggle && npm run e2e -w web-viewer -- i18n
 ```
 
 ### Leave (WEB-22)

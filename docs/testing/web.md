@@ -68,6 +68,21 @@ The publisher shows a QR of `https://<host>/j#<CODE>` (Slicer FR-04, or make one
 5. Type `O` or `1`. **Expect:** the cell is marked invalid with the ADR 0008 hint.
 6. Pinch-zoom the code entry page. **Expect:** the page zooms (it stays zoomable for low vision).
 
+### Language (WEB-21)
+
+1. With the iPhone set to English, open the viewer. **Expect:** English texts and a **Polski** button at the top
+   right of the code entry. Turn VoiceOver on and swipe to it. **Expect:** "Polski, button" read with Polish
+   pronunciation.
+2. Tap **Polski**. **Expect:** at once, without a reload: the title, the hint under the cells, Join and the button
+   (now **English**) in Polish; a shown error message follows too.
+3. Join, then tap **English** in the status bar and back to **Polski**. **Expect:** the bar, the node panel, the
+   notice line and the Fit button follow at once; the scene, the camera and the session stay (no rejoin, the viewer
+   count on the presenter does not change).
+4. Close the tab and open the viewer again. **Expect:** Polish from the start. Settings → Safari → Advanced →
+   Website Data (iOS 18: Settings → Apps → Safari → Advanced → Website Data) lists the site, and Web Inspector
+   (Mac) → Storage → Local Storage shows only the key `rv.lang`.
+5. Private Browsing tab: tap **Polski**. **Expect:** it switches (the choice may be forgotten when the tab closes).
+
 ### Viewer and controls (WEB-08)
 
 Join with a valid code (`asymmetric-2nodes.glb`).

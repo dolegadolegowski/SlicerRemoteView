@@ -171,7 +171,11 @@ describe("errors and close codes", () => {
     const state = conn.state;
     expect(state.kind).toBe("enterCode");
     if (state.kind !== "enterCode") return;
-    expect(state.description).toEqual(describeCode("INVALID_CODE", "en"));
+    // Close 4004 and the error INVALID_CODE describe the same thing: the same text (their `subject`s differ).
+    expect({ ...state.description, subject: null }).toEqual({
+      ...describeCode("INVALID_CODE", "en"),
+      subject: null,
+    });
     expect(state.description.action).toBe("enterCode");
     expect(state.description.body).not.toMatch(/INVALID_CODE|4004/);
   });

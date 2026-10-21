@@ -26,6 +26,8 @@ export interface NodePanel {
   refresh(): void;
   setOpen(open: boolean): void;
   readonly open: boolean;
+  /** Re-renders the labels in `lang` (WEB-21); names sent by the presenter stay as they are. */
+  setLang(lang: Lang): void;
   dispose(): void;
 }
 
@@ -33,6 +35,7 @@ interface Row {
   readonly node: SceneNode;
   readonly button: HTMLButtonElement;
   readonly swatch: HTMLElement;
+  readonly name: HTMLElement;
   readonly opacity: HTMLInputElement;
 }
 
@@ -77,7 +80,7 @@ function eyeIcon(doc: Document): SVGSVGElement {
 
 export function createNodePanel(options: NodePanelOptions = {}): NodePanel {
   const doc = options.document ?? document;
-  const lang = options.lang ?? detectLang();
+  let lang = options.lang ?? detectLang();
   const listId = `node-panel-list-${++instances}`;
   let rows: Row[] = [];
   let open = false;
@@ -93,19 +96,16 @@ export function createNodePanel(options: NodePanelOptions = {}): NodePanel {
 
   const element = doc.createElement("section");
   element.className = "node-panel";
-  element.setAttribute("aria-label", t(lang, "nodePanel.title"));
   const body = doc.createElement("div");
   body.className = "node-panel__body";
   body.id = listId;
   const showAll = doc.createElement("button");
   showAll.type = "button";
   showAll.className = "node-panel__show-all";
-  showAll.textContent = t(lang, "nodePanel.showAll");
   const list = doc.createElement("ul");
   list.className = "node-panel__list";
   const empty = doc.createElement("p");
   empty.className = "node-panel__empty";
-  empty.textContent = t(lang, "nodePanel.empty");
   body.append(showAll, list, empty);
   const toggle = doc.createElement("button");
   toggle.type = "button";
@@ -113,6 +113,22 @@ export function createNodePanel(options: NodePanelOptions = {}): NodePanel {
   toggle.setAttribute("aria-controls", listId);
   // The list opens above the toggle (bottom-left, within thumb reach); DOM order is the reading order.
   element.append(toggle, body);
+
+  /** The texts in the panel's language; a structure without a name gets "Unnamed n" (§7.3). */
+  function label(): void {
+    element.setAttribute("aria-label", t(lang, "nodePanel.title"));
+    showAll.textContent = t(lang, "nodePanel.showAll");
+    empty.textContent = t(lang, "nodePanel.empty");
+    for (const row of rows) {
+      // As sent: with "anonymise names" the publisher already replaced it ("Model 3", §7.3).
+      row.name.textContent =
+        row.node.manifest.name.trim() || t(lang, "nodePanel.unnamed", { n: row.node.order + 1 });
+      row.opacity.setAttribute(
+        "aria-label",
+        t(lang, "nodePanel.opacity", { name: row.name.textContent }),
+      );
+    }
+  }
 
   function paintToggle(): void {
     toggle.textContent = t(lang, "nodePanel.toggle", { count: rows.length });
@@ -216,9 +232,6 @@ export function createNodePanel(options: NodePanelOptions = {}): NodePanel {
       const name = doc.createElement("span");
       name.className = "node-panel__name";
       name.dir = "auto"; // a right-to-left name keeps its beginning when the ellipsis cuts it
-      // As sent: with "anonymise names" the publisher already replaced it ("Model 3", §7.3).
-      name.textContent =
-        node.manifest.name.trim() || t(lang, "nodePanel.unnamed", { n: node.order + 1 });
       button.append(swatch, name, eyeIcon(doc));
       const opacity = doc.createElement("input");
       opacity.type = "range";
@@ -227,14 +240,14 @@ export function createNodePanel(options: NodePanelOptions = {}): NodePanel {
       opacity.max = "1";
       opacity.step = String(OPACITY_STEP);
       opacity.dataset["nodeId"] = node.nodeId;
-      opacity.setAttribute("aria-label", t(lang, "nodePanel.opacity", { name: name.textContent }));
       const item = doc.createElement("li");
       item.className = "node-panel__item";
       item.append(button, opacity);
       items.push(item);
-      rows.push({ node, button, swatch, opacity });
+      rows.push({ node, button, swatch, name, opacity });
     }
     list.replaceChildren(...items);
+    label();
     empty.hidden = rows.length > 0;
     showAll.hidden = rows.length === 0;
     refresh();
@@ -254,6 +267,11 @@ export function createNodePanel(options: NodePanelOptions = {}): NodePanel {
     setModel,
     refresh,
     setOpen,
+    setLang(next) {
+      lang = next;
+      label();
+      paintToggle();
+    },
     get open() {
       return open;
     },
