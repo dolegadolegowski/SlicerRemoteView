@@ -130,7 +130,8 @@ export interface Connection {
   nextId(): string;
   /**
    * Sends `viewer.leave` and closes with `1000` (page unload, user leaves); the state becomes `idle`, also from a
-   * `disconnected` state without a socket (a retry the user no longer wants, WEB-14).
+   * closed state without a socket — a retry the user no longer wants (`disconnected`, WEB-14, or the code join after a
+   * relay restart, WEB-22) or a session that already ended.
    */
   leave(): void;
   /** While connected: sends a `ping` now and expects an answer within the pong timeout (back in view, WEB-14). */
@@ -484,7 +485,7 @@ export function createConnection(options: ConnectionOptions = {}): Connection {
     leave() {
       const s = socket;
       if (!s) {
-        if (state.kind === "disconnected") setState({ kind: "idle" });
+        if (state.kind !== "idle") setState({ kind: "idle" });
         return;
       }
       sendNow(s, { type: "viewer.leave" });

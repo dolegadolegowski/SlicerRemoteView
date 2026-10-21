@@ -1,6 +1,6 @@
 // Entry point: wires the modules. Joining by code (WEB-03/04) or `/j#CODE` (WEB-11), snapshots over the WebSocket
 // stream (WEB-05) or HTTP (WEB-06), the scene model (WEB-07), the viewer (WEB-08), live updates (WEB-12),
-// reconnecting (WEB-14), the status bar (WEB-15), the wake lock and the renderer test hook (WEB-16);
+// reconnecting (WEB-14), the status bar (WEB-15), the wake lock and the renderer test hook (WEB-16), Leave (WEB-22);
 // `ui/screens.ts` decides which screen is visible.
 import { createConnection, endsSession } from "./protocol/connection";
 import type { ConnectionState } from "./protocol/connection";
@@ -94,7 +94,10 @@ if (app) {
   connection.onMessage("scene.snapshot.abort", (m) => {
     if (m.reason !== "SUPERSEDED") screens.updating(false);
   });
-  const entry = createCodeEntry({ onJoin: (code) => screens.join(code) });
+  const entry = createCodeEntry({
+    onJoin: (code) => screens.join(code),
+    onLeave: () => screens.leave(), // WEB-22
+  });
   const screens = bindScreens({
     app,
     connection,

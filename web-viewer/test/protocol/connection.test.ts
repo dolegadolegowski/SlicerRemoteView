@@ -573,7 +573,7 @@ describe("send and leave", () => {
     expect(conn.state.kind).toBe("idle");
   });
 
-  it("leave from a disconnected state without a socket goes idle; from an end state it does nothing", () => {
+  it("leave without a socket goes idle from a disconnected or an end state (WEB-22), once", () => {
     make();
     conn.connect({ code: CODE });
     MockSocket.last.open();
@@ -584,8 +584,12 @@ describe("send and leave", () => {
     expect(conn.state.kind).toBe("idle");
     conn.connect({ code: CODE });
     MockSocket.last.serverClose(4004);
-    conn.leave();
     expect(conn.state.kind).toBe("enterCode");
+    const states: string[] = [];
+    conn.on("state", (s) => states.push(s.kind));
+    conn.leave();
+    conn.leave();
+    expect(states).toEqual(["idle"]); // nothing to close, and no second `idle`
   });
 
   it("a new connect() discards the previous socket", () => {

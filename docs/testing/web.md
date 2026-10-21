@@ -182,6 +182,14 @@ Joined with `toggle-visibility --loop` playing.
 3. Play `toggle-visibility`. **Expect:** the scene version goes up with every change.
 4. Airplane mode for 10 s. **Expect:** the dot turns amber and "Reconnecting…", then green "Connected" again;
    VoiceOver speaks both.
+5. Tap **Leave** at the end of the bar (WEB-22), also with a fingertip just above or below the pill. **Expect:** the
+   empty code entry with the keyboard on the first cell; the presenter's viewer count drops by one at once. Join
+   again with the same code: the scene comes back.
+6. Join `large-synthetic.glb` under Network Link Conditioner "3G" (as in §Download in the background) and tap
+   **Leave session** under Join while it says "Loading the scene…". **Expect:** as in step 5, and the download stops.
+   Repeat right after a relay restart while it says "Waiting for the presenter" (§Reconnect step 4), and before the
+   scene is shown during "Reconnecting…" (airplane mode on, tap, airplane mode off): no join happens by itself
+   afterwards.
 
 ### Memory and wake lock (WEB-16)
 
@@ -216,11 +224,12 @@ Joined with `toggle-visibility --loop` playing.
    `[TODO verify]` research web.md §2.6), the code is joined and the address bar (if any) shows `/j`.
 4. Android Chrome: menu → **Install app** (or **Add to Home screen**). **Expect:** the cube icon, shaped by the
    launcher (maskable), and the app opens without browser UI.
-5. In the installed app, during a session: there is no Leave control yet (WEB-22), no address bar and no reload; iOS
-   has no back button either. To join another code, close the app from the app switcher and open it again.
-   **Expect:** the code entry (the installed app always starts at `/`), and the presenter's viewer count drops by one
-   within 60 s (at once with `pagehide` → `viewer.leave`, §5.4; else the relay's WS-ping timeout, §9.1). Android:
-   also press the system Back during a session and record what happens (expected: the app closes, same result;
+5. In the installed app (no address bar, no reload; on iOS no back button): during a session tap **Leave** in the
+   status bar, and **Leave session** on the code entry while the scene is loading (as in §Status bar step 6)
+   (WEB-22). **Expect:** the empty code entry each time; a different code can be joined. Then close the app from the app switcher during a
+   session. **Expect:** next launch starts on the code entry (`start_url` `/`), and the presenter's viewer count
+   drops by one within 60 s (at once with `pagehide` → `viewer.leave`, §5.4; else the relay's WS-ping timeout, §9.1).
+   Android: also press the system Back during a session and record what happens (expected: the app closes;
    `[TODO verify]`).
 
 ### Download in the background (WEB-06 review, WEB-10)

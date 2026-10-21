@@ -362,3 +362,16 @@ start, failing above 1 MiB (NFR-09) or when `index.html` names no module script 
 npm run build -w web-viewer && npm test -w web-viewer -- bundle && npm run e2e -w web-viewer -- network
 ```
 
+### Leave (WEB-22)
+
+**Leave** ends the session for this viewer — `viewer.leave` and close `1000` when a socket is open, else the pending
+retry is cancelled — drops the scene and brings back an empty code entry. It is in the status bar over the scene
+(drawn small, with a 44 × 44 px target) and on the code entry while it is busy (joining, waiting for the presenter or
+the first download, reconnecting). The installed app needs it: it has no address bar, reload or (iOS) back button.
+`connection.leave()` now ends in `idle` from every state, so a scheduled code join after a relay restart is
+cancelled too.
+
+```bash
+npm test -w web-viewer -- status-bar code-entry screens reconnect connection && npm run e2e -w web-viewer -- leave
+```
+

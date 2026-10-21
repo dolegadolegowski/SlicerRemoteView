@@ -113,7 +113,11 @@ function setup(options: { webgl?: boolean; viewerFails?: boolean } = {}): void {
   create = vi.fn<() => CreateViewerResult>(() =>
     options.viewerFails ? { ok: false, reason: "webgl2Unavailable" } : { ok: true, viewer },
   );
-  entry = createCodeEntry({ lang: "en", onJoin: (code) => screens.join(code) });
+  entry = createCodeEntry({
+    lang: "en",
+    onJoin: (code) => screens.join(code),
+    onLeave: () => screens.leave(),
+  });
   screens = bindScreens({
     app,
     connection: conn,
@@ -673,5 +677,124 @@ describe("status bar (WEB-15)", () => {
     models.emit(modelA);
     socket.serverClose(4001);
     expect(barText("viewers")).toBeNull();
+  });
+});
+
+describe("Leave (WEB-22)", () => {
+  const cells = () => [...entry.element.querySelectorAll<HTMLInputElement>(".code-entry__cell")];
+  const typed = () =>
+    cells()
+      .map((c) => c.value)
+      .join("");
+  const barLeave = () => viewer.element.querySelector<HTMLButtonElement>(".status-bar__leave")!;
+  const entryLeave = () => entry.element.querySelector<HTMLButtonElement>(".code-entry__leave")!;
+
+  /** Joins with the code typed in the cells, as the user does. */
+  function joinTyped(): MockSocket {
+    entry.setCode("7KQ4X");
+    return join();
+  }
+
+  /** Back on an empty, usable, focused code entry, with nothing left of the session. */
+  function left(): void {
+    expect(conn.state.kind).toBe("idle");
+    expect(screens.live).toBe(false);
+    expect(entryVisible()).toBe(true);
+    expect(viewerVisible()).toBe(false);
+    expect(typed()).toBe("");
+    expect(cellsEnabled()).toBe(true);
+    expect(document.activeElement).toBe(cells()[0]);
+    expect(message()).toBe("");
+    expect(entryStatus()).toBe("");
+    expect(entryLeave().hidden).toBe(true);
+  }
+
+  it("from the status bar over the scene: viewer.leave and 1000, then the empty code entry", () => {
+    const socket = joinTyped();
+    models.emit(modelA);
+    expect(viewerVisible()).toBe(true);
+    barLeave().click();
+    expect(socket.frames.at(-1)).toMatchObject({ type: "viewer.leave" });
+    expect(socket.closedWith?.code).toBe(1000);
+    left();
+  });
+
+  it("from the code entry while waiting for the presenter; joining again works", () => {
+    const first = joinTyped();
+    expect(entryStatus()).toBe("Waiting for the presenter");
+    expect(entryLeave().hidden).toBe(false);
+    entryLeave().click();
+    expect(first.frames.at(-1)).toMatchObject({ type: "viewer.leave" });
+    expect(first.closedWith?.code).toBe(1000);
+    left();
+    join();
+    expect(conn.state.kind).toBe("connected");
+    expect(MockSocket.last).not.toBe(first);
+  });
+
+  it("while joining: the socket is closed before the join is answered", () => {
+    entry.setCode("7KQ4X");
+    screens.join("7KQ4X");
+    const socket = MockSocket.last;
+    expect(entryLeave().hidden).toBe(false);
+    entryLeave().click();
+    expect(socket.closedWith?.code).toBe(1000);
+    left();
+  });
+
+  it("while reconnecting before a scene: the pending retry is cancelled, no socket opens afterwards", () => {
+    vi.useFakeTimers();
+    try {
+      joinTyped().serverClose(1006);
+      expect(entryStatus()).toBe("Reconnecting…");
+      const sockets = MockSocket.instances.length;
+      entryLeave().click();
+      left();
+      vi.advanceTimersByTime(60_000);
+      expect(MockSocket.instances).toHaveLength(sockets);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("between the code joins after a relay restart (no socket left): cancelled too", () => {
+    vi.useFakeTimers();
+    try {
+      joinTyped();
+      MockSocket.last.serverClose(4008);
+      vi.advanceTimersByTime(3_000);
+      const tokenJoin = MockSocket.last;
+      tokenJoin.open();
+      tokenJoin.receive({
+        type: "error",
+        code: "SESSION_NOT_FOUND",
+        message: "x",
+        retryable: false,
+      });
+      vi.advanceTimersToNextTimer();
+      const s = MockSocket.last;
+      s.open();
+      s.receive({ type: "error", code: "INVALID_CODE", message: "x", retryable: false });
+      s.serverClose(4004);
+      expect(entryStatus()).toBe("Reconnecting…");
+      const sockets = MockSocket.instances.length;
+      entryLeave().click();
+      left();
+      vi.advanceTimersByTime(10 * 60_000);
+      expect(MockSocket.instances).toHaveLength(sockets);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("outside a live session it does nothing: the typed code and the last message stay", () => {
+    entry.setCode("7KQ4X");
+    screens.leave();
+    expect(typed()).toBe("7KQ4X");
+    join().serverClose(4001); // the presenter ended the session
+    expect(message()).toContain(describeCode(4001, "en").title);
+    screens.leave();
+    expect(message()).toContain(describeCode(4001, "en").title);
+    expect(typed()).toBe("7KQ4X");
   });
 });

@@ -2,14 +2,9 @@
 // "Add to Home Screen", that no service worker exists, and text contrast of the status line, the status bar and the
 // node panel (axe, WCAG 2 AA: 4.5:1).
 
-import { createRequire } from "node:module";
 import { expect, test } from "@playwright/test";
-import type { Page } from "@playwright/test";
-import type { AxeResults, RunOptions } from "axe-core";
+import { contrast } from "./axe";
 import { joinAndView } from "./fake-relay";
-
-// axe-core itself, injected into the page (no Playwright adapter: it would pull a second Playwright version).
-const AXE = createRequire(import.meta.url).resolve("axe-core/axe.min.js");
 
 test("the manifest and its icons are served, and the page links them", async ({
   page,
@@ -43,27 +38,6 @@ test("no service worker is registered, also after joining a session", async ({ p
     ),
   ).toBe(0);
 });
-
-/**
- * Contrast problems of the elements matched by `include` (WCAG 2 AA, NFR-32): violations, and also the nodes axe
- * could not decide (text over the canvas or an image would land there and pass silently). At least one node must
- * have been checked, so an empty or hidden selection fails too.
- */
-async function contrast(page: Page, include: string): Promise<string[]> {
-  await page.addScriptTag({ path: AXE });
-  return page.evaluate(async (selector) => {
-    const axe = (
-      window as unknown as { axe: { run(c: string, o: RunOptions): Promise<AxeResults> } }
-    ).axe;
-    const options: RunOptions = { runOnly: { type: "rule", values: ["color-contrast"] } };
-    const result = await axe.run(selector, options);
-    const problems = [...result.violations, ...result.incomplete].flatMap((v) =>
-      v.nodes.map((n) => `${n.target.join(" ")}: ${n.failureSummary ?? ""}`),
-    );
-    const checked = result.passes.reduce((sum, rule) => sum + rule.nodes.length, 0);
-    return checked > 0 || problems.length > 0 ? problems : [`${selector}: no text checked`];
-  }, include);
-}
 
 test("text on the code entry has at least 4.5:1 contrast, also with an error and a status shown", async ({
   page,

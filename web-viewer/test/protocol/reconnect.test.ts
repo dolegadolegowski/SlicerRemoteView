@@ -300,6 +300,26 @@ describe("relay restart: SESSION_NOT_FOUND → join by code (§13 step 9, US-11,
     expect(JSON.stringify(log.mock.calls)).not.toContain(TOKEN);
   });
 
+  it("leave() during the head start or between the code joins cancels them and goes idle (WEB-22)", () => {
+    const old = lostSession();
+    reconnect.leave(); // the old socket is still open: it gets viewer.leave + 1000
+    expect(old.closedWith?.code).toBe(1000);
+    expect(connection.state.kind).toBe("idle");
+    let sockets = MockSocket.instances.length;
+    vi.advanceTimersByTime(10 * 60_000);
+    expect(MockSocket.instances).toHaveLength(sockets); // no code join
+
+    lostSession();
+    vi.advanceTimersByTime(CODE_FALLBACK_AT_MS[0]!);
+    unknown(); // closed, no socket left: the next code join is only a timer
+    expect(reconnect.willRetry(connection.state)).toBe(true);
+    sockets = MockSocket.instances.length;
+    reconnect.leave();
+    expect(connection.state.kind).toBe("idle");
+    vi.advanceTimersByTime(10 * 60_000);
+    expect(MockSocket.instances).toHaveLength(sockets);
+  });
+
   it("the head start is jittered so a room does not join at the same moment", () => {
     random.mockReturnValue(0.5);
     lostSession();

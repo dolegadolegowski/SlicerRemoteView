@@ -1,6 +1,7 @@
 // Status bar (WEB-15): one line at the top of the viewer — the connection as the user should read it (connected,
 // reconnecting, presenter offline), the number of viewers in the session (`viewer.joined` / `viewer.count`, §5.3)
-// and the scene version shown (§8.4). DOM only; the screens feed it.
+// and the scene version shown (§8.4), then the Leave button (WEB-22: the installed app has no address bar, reload or,
+// on iOS, back button to get out of a session). DOM only; the screens feed it.
 //
 // Only the connection state is a live region: viewer counts change with every join and leave and would chatter.
 
@@ -21,6 +22,8 @@ export interface StatusBar {
 export interface StatusBarOptions {
   readonly lang?: Lang;
   readonly document?: Document;
+  /** Leave pressed (WEB-22); without it the bar has no Leave button. */
+  readonly onLeave?: () => void;
 }
 
 const CONNECTION_KEYS = {
@@ -44,6 +47,15 @@ export function createStatusBar(options: StatusBarOptions = {}): StatusBar {
   const version = doc.createElement("span");
   version.className = "status-bar__version";
   element.append(connection, viewers, version);
+  const onLeave = options.onLeave;
+  if (onLeave) {
+    const leave = doc.createElement("button");
+    leave.type = "button";
+    leave.className = "status-bar__leave";
+    leave.textContent = t(lang, "statusBar.leave");
+    leave.addEventListener("click", () => onLeave());
+    element.append(leave);
+  }
 
   /** Sets text only when it changes: an unchanged live region is not announced again. */
   const write = (target: HTMLElement, text: string) => {

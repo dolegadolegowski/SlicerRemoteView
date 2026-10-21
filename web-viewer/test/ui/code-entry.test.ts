@@ -199,6 +199,28 @@ describe("code entry", () => {
     expect(join().disabled).toBe(false);
   });
 
+  it("offers Leave only while busy, when it is given onLeave; Leave never submits (WEB-22)", () => {
+    expect(entry.element.querySelector(".code-entry__leave")).toBeNull(); // no onLeave
+    entry.element.remove();
+    const onLeave = vi.fn();
+    entry = createCodeEntry({ onJoin, onLeave, lang: "en" });
+    document.body.append(entry.element);
+    const leave = entry.element.querySelector<HTMLButtonElement>(".code-entry__leave")!;
+    expect(leave.type).toBe("button");
+    expect(leave.textContent).toBe("Leave session");
+    expect(leave.hidden).toBe(true);
+    entry.focus();
+    type("7kq4x");
+    entry.setBusy(true);
+    expect(leave.hidden).toBe(false);
+    expect(leave.disabled).toBe(false); // unlike the cells and Join
+    leave.click();
+    expect(onLeave).toHaveBeenCalledTimes(1);
+    expect(onJoin).not.toHaveBeenCalled();
+    entry.setBusy(false);
+    expect(leave.hidden).toBe(true);
+  });
+
   it("has a polite status line under Join that is always in the accessibility tree (WEB-14)", () => {
     const status = entry.element.querySelector<HTMLElement>(".code-entry__status")!;
     expect(status.getAttribute("role")).toBe("status");
@@ -257,6 +279,8 @@ describe("code entry", () => {
     entry = createCodeEntry({ onJoin, lang: "pl" });
     document.body.append(entry.element);
     expect(join().textContent).toBe("Dołącz");
+    const withLeave = createCodeEntry({ onJoin, onLeave: () => {}, lang: "pl" });
+    expect(withLeave.element.querySelector(".code-entry__leave")!.textContent).toBe("Opuść sesję");
     cells()[0]!.focus();
     type("7kq0x");
     expect(message().textContent).toContain("0 ani O");

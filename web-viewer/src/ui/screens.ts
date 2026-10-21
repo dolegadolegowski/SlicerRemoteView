@@ -2,8 +2,8 @@
 // session is live, the code entry otherwise. Also routes messages to the screen that is visible, gates Join on
 // WebGL 2, moves focus with the screen and keeps the status lines: over the scene the status bar (WEB-15: connection,
 // viewers, scene version) and a short notice line (presenter changes, "updating"); on the code entry one line
-// (reconnecting, presenter offline, waiting for or loading the scene, WEB-14). Kept out of `main.ts` so every
-// transition is unit-tested.
+// (reconnecting, presenter offline, waiting for or loading the scene, WEB-14). Leave (WEB-22) is in the status bar and
+// on the busy code entry. Kept out of `main.ts` so every transition is unit-tested.
 
 import { detectLang, t } from "../i18n/strings";
 import type { Connection } from "../protocol/connection";
@@ -23,8 +23,8 @@ import type { StatusBar } from "./status-bar";
 export interface ScreensOptions {
   readonly app: HTMLElement;
   readonly connection: Pick<Connection, "state" | "leave" | "on" | "onMessage">;
-  /** Joins by code and decides about retries (WEB-14). */
-  readonly session: Pick<Reconnect, "join" | "willRetry" | "explain">;
+  /** Joins by code, leaves and decides about retries (WEB-14). */
+  readonly session: Pick<Reconnect, "join" | "leave" | "willRetry" | "explain">;
   readonly models: SceneModelStore;
   readonly entry: CodeEntry;
   readonly createViewer?: () => CreateViewerResult;
@@ -36,6 +36,11 @@ export interface ScreensOptions {
 export interface Screens {
   /** Join from the code entry: refused at once without WebGL 2 (no join slot, no download spent on it). */
   join(code: string): void;
+  /**
+   * The user leaves the live session (WEB-22): `viewer.leave` + `1000`, or the pending retry is cancelled; the scene
+   * goes and the code entry comes back empty and focused. Nothing happens outside a live session.
+   */
+  leave(): void;
   /** Shows a message where the user is looking: over the scene while it is shown, else on the code entry. */
   report(description: Description): void;
   /**
@@ -164,7 +169,7 @@ export function bindScreens(options: ScreensOptions): Screens {
       viewer = shownViewer;
       panel = createNodePanel({ onChange: () => shownViewer.invalidate() });
       viewer.element.append(panel.element);
-      bar = createStatusBar();
+      bar = createStatusBar({ onLeave: () => leave() });
       viewer.overlay.prepend(bar.element); // above the notice and the notice line
       bar.setViewers(viewerCount);
       bar.setSceneVersion(version);
@@ -229,6 +234,17 @@ export function bindScreens(options: ScreensOptions): Screens {
     paintStatus();
   });
 
+  const isLive = () => {
+    const state = connection.state;
+    return state.kind === "connecting" || state.kind === "connected" || session.willRetry(state);
+  };
+
+  function leave(): void {
+    if (!isLive()) return;
+    entry.reset(); // first: the `idle` state below focuses the first empty cell
+    session.leave(); // the state becomes `idle`: the model goes, the code entry comes back
+  }
+
   connection.on("state", (state) => {
     switch (state.kind) {
       case "connecting":
@@ -264,6 +280,7 @@ export function bindScreens(options: ScreensOptions): Screens {
       // The code travels only in the body of `viewer.join`, never in the URL (NFR-15).
       session.join(code);
     },
+    leave,
     report(description) {
       if (viewerVisible()) viewer?.setNotice(description);
       else entry.setError(description);
@@ -323,8 +340,7 @@ export function bindScreens(options: ScreensOptions): Screens {
       bar?.setSceneVersion(next);
     },
     get live() {
-      const state = connection.state;
-      return state.kind === "connecting" || state.kind === "connected" || session.willRetry(state);
+      return isLive();
     },
   };
 }

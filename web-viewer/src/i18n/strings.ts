@@ -110,6 +110,7 @@ const en = {
   "statusBar.connected": "Connected",
   "statusBar.viewers": "Viewers: {count}",
   "statusBar.scene": "Scene v{version}",
+  "statusBar.leave": "Leave",
   "viewer.fit": "Fit view",
   "viewer.dismiss": "Dismiss",
   "viewer.canvasLabel":
@@ -125,6 +126,7 @@ const en = {
   "codeEntry.cellLabel": "Code character {n} of {total}",
   "codeEntry.join": "Join",
   "codeEntry.joining": "Joining…",
+  "codeEntry.leave": "Leave session",
   "codeEntry.hint.zeroOrO": "Codes never contain 0 or O — check that character.",
   "codeEntry.hint.oneIorL": "Codes never contain 1, I or L — check that character.",
   "codeEntry.hint.notInAlphabet":
@@ -236,6 +238,7 @@ const pl: Record<StringKey, string> = {
   "statusBar.connected": "Połączono",
   "statusBar.viewers": "Widzowie: {count}",
   "statusBar.scene": "Scena v{version}",
+  "statusBar.leave": "Wyjdź",
   "viewer.fit": "Dopasuj widok",
   "viewer.dismiss": "Zamknij",
   "viewer.canvasLabel":
@@ -251,6 +254,7 @@ const pl: Record<StringKey, string> = {
   "codeEntry.cellLabel": "Znak kodu {n} z {total}",
   "codeEntry.join": "Dołącz",
   "codeEntry.joining": "Dołączanie…",
+  "codeEntry.leave": "Opuść sesję",
   "codeEntry.hint.zeroOrO": "Kody nigdy nie zawierają 0 ani O — sprawdź ten znak.",
   "codeEntry.hint.oneIorL": "Kody nigdy nie zawierają 1, I ani L — sprawdź ten znak.",
   "codeEntry.hint.notInAlphabet": "Kody składają się z liter A–Z (bez I, L, O) i cyfr 2–9.",

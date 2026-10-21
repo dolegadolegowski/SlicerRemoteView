@@ -13,6 +13,11 @@ import type { Description } from "../state/errors";
 export interface CodeEntryOptions {
   /** Called with the canonical code (upper-case, validated) when the user presses Join. */
   readonly onJoin: (code: string) => void;
+  /**
+   * Leave pressed (WEB-22): shown while busy — joining, joined without a scene, reconnecting — so the installed app,
+   * which has no reload or (iOS) back button, can get out of a session; without it there is no Leave button.
+   */
+  readonly onLeave?: () => void;
   readonly lang?: Lang;
 }
 
@@ -102,7 +107,15 @@ export function createCodeEntry(options: CodeEntryOptions): CodeEntry {
   status.className = "code-entry__status";
   status.setAttribute("role", "status");
 
+  const leave = document.createElement("button");
+  leave.type = "button"; // never submits the form
+  leave.className = "code-entry__leave";
+  leave.textContent = t(lang, "codeEntry.leave");
+  const onLeave = options.onLeave;
+  if (onLeave) leave.addEventListener("click", () => onLeave());
+
   form.append(title, lead, group, message, join, status);
+  if (onLeave) form.append(leave);
 
   const value = (): string => cells.map((c) => c.value).join("");
 
@@ -148,6 +161,7 @@ export function createCodeEntry(options: CodeEntryOptions): CodeEntry {
     }
     join.disabled = busy || currentCode() === null;
     join.textContent = t(lang, busy ? "codeEntry.joining" : "codeEntry.join");
+    leave.hidden = !busy;
   }
 
   function focusCell(index: number): void {
