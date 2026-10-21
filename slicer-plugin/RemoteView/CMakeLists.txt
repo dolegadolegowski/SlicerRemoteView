@@ -14,6 +14,7 @@ set(MODULE_PYTHON_SCRIPTS
   remoteview_core/coords.py
   remoteview_core/deps.py
   remoteview_core/glb_writer.py
+  remoteview_core/links.py
   remoteview_core/mrml_scene.py
   remoteview_core/names.py
   remoteview_core/panel.py
@@ -32,6 +33,7 @@ set(MODULE_PYTHON_SCRIPTS
 set(MODULE_PYTHON_RESOURCES
   Resources/Icons/${MODULE_NAME}.png
   Resources/UI/${MODULE_NAME}.ui
+  Resources/UI/PresentationWindow.ui
   _vendor/remoteview_protocol/VENDORED.json
   _vendor/remoteview_protocol/py.typed
   _vendor/remoteview_protocol/schema/defs.schema.json

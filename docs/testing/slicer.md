@@ -330,6 +330,64 @@ Expected results:
 |---|---|---|---|---|
 | | | | | |
 
+## §4 QR code, Copy link and the Presentation window (SLC-11; FR-04, NFR-29, NFR-30, US-07, T6)
+
+Preconditions: §2's setup, `segno` installed (§3), a stock phone camera app (iPhone Camera, Android camera or Google
+Lens), a 24" monitor. **Relay (b)** (a deployed relay, `wss://<relay-host>/ws`) for every step in which a phone scans
+the code and opens it: the link is then `https://<relay-host>/j#<CODE>`. With relay (a) or (c) the address is
+`ws://127.0.0.1:8787/ws` and the link `http://127.0.0.1:8787/j#<CODE>` — on a phone that is the phone itself, so with
+them a scan only checks that the camera reads the link (the banner shows it); opening it cannot join. Joining from the
+link also needs the web viewer's deep link (WEB-11) and the relay serving the viewer at `/j` (ADR 0006); until both are
+deployed, step 4 checks the banner only.
+
+Steps:
+
+1. Start a session. Look at the panel.
+2. Click *Copy link* and paste into a text editor.
+3. Click *Presentation window*. Stand 2 m from the monitor and read the code aloud; scan the window's QR code.
+4. With the phone camera scan the QR code **in the panel** from about 1 m and open the link it offers.
+5. Switch Slicer to a dark theme (*Edit → Application Settings → Appearance*) and scan again.
+6. Click *Stop session*. Click *Start session* again and click *Presentation window* again.
+7. Paste into the editor again (the clipboard after step 6).
+8. Start a third session, open the Presentation window and quit Slicer (*File → Exit*) while it is open.
+9. Make the module panel as narrow as Slicer allows and the Presentation window as small as possible; scan both codes.
+10. Optional — only with a `wss://` relay reachable under a host name of more than 48 characters (relay (b) behind such a
+    DNS name, or a TLS proxy with a certificate for it and that certificate's CA under *Advanced*): start a session and
+    open the Presentation window. Without such a relay this case is covered by
+    `test_adapter_a_link_too_long_for_a_qr_code_still_offers_the_large_code` (`tests/test_links.py`).
+
+Expected results:
+
+- Step 1: under the code a QR code of at least 240 × 240 px (black on white, with a white margin) and the buttons *Copy
+  link* and *Presentation window*, both enabled only now.
+- Step 2: `https://<relay host>/j#<CODE>` (`http://127.0.0.1:8787/j#<CODE>` for a local relay), one line, ≤ 64
+  characters; the button says "Link copied" for a moment. Nothing else is on the clipboard.
+- Step 3: the code in large print (≥ 48 pt; 64 pt expected) is readable from 2 m, the QR code is larger than the
+  panel's and scans.
+- Step 4: the camera shows the link banner for the relay host (a link, not text or a search); opening it joins the
+  session (once the web viewer's deep link exists, WEB-11) within 10 s.
+- Step 5: the QR code is still dark modules on a white field and scans (the code is painted by RemoteView, not by the
+  theme).
+- Step 6: the QR code disappears and both buttons switch off when the session stops; the Presentation window hides and
+  holds no code; the second session shows its new code and a QR code of the new link in the same window.
+- Step 7: the clipboard still holds the old link (it stays until you copy something else — the *Copy link* tooltip says
+  so).
+- Step 8: Slicer exits without waiting more than 3 s and the Presentation window is gone.
+- Step 9: neither QR code is cropped (the panel or window scrolls or grows instead); both scan, also with a dark theme.
+- Step 10: no QR code and *Copy link* off; the panel says "No QR code for this relay address: the join link would be longer
+  than 64 characters, or the relay is not at /ws. Read the code to the viewers instead."; the Presentation window opens and
+  shows the code with the hint "Open the viewer and type the code."
+- Throughout: no traceback in the Python console; no session code, link or QR data in the console or the application log.
+- `[TODO verify]` in Slicer 5.12.4 (PythonQt): `qt.QPixmap(w, h)` + `qt.QPainter(pixmap)` + `painter.fillRect(x, y, w, h,
+  qt.QColor("black"))`, `qt.QApplication.clipboard().setText(...)`, `QLabel.pixmap = …`, `QLabel.setMinimumSize(w, h)`
+  and the `QFont` calls (`setStyleHint`, `setPointSize`, `setLetterSpacing`) as the adapter uses them; the Presentation
+  window as a parentless top-level widget from `slicer.util.loadUI` with `show()`, `raise_()` and `hide()`; the panel's
+  QR label hidden before the first session (the `.ui` property).
+
+| Date | Slicer version | OS | Result | Tester |
+|---|---|---|---|---|
+| | | | | |
+
 ## §12 Consent text and the scene adapter (SLC-22; R-06, NFR-16, FR-05)
 
 Preconditions: the test Slicer of §2; the *MRHead* sample (*Sample Data*) and two models made in the Python console:

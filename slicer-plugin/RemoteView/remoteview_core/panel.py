@@ -38,6 +38,7 @@ from urllib.parse import urlsplit
 
 from remoteview_core.collect import SceneApi
 from remoteview_core.deps import DepsResult, Outcome
+from remoteview_core.links import join_url
 from remoteview_core.protocol_client import ProtocolClient, SessionState, envelope, make_client_info
 from remoteview_core.snapshot import SnapshotTooLargeError, build_snapshot
 from remoteview_core.transport import Connected, Disconnected, Event, Received, RelayTransport
@@ -64,6 +65,10 @@ WEBSOCKETS_MISSING = (
     "Python packages)."
 )
 CA_FILE_UNREADABLE = "The additional CA certificate file cannot be read."
+NO_LINK = (
+    "No QR code for this relay address: the join link would be longer than 64 characters, or the relay is not at "
+    "/ws. Read the code to the viewers instead."
+)
 NO_ANSWER = "The relay did not answer. Check the relay address or try again later."
 VERSION_UNUSABLE = "This Slicer version string cannot be sent to the relay. Please report this."
 RESUME_LATER = (
@@ -111,8 +116,9 @@ class PanelView:
 
     status: str
     detail: str = ""
-    # the session code stays out of repr (logs, tracebacks)
+    # the session code and the join link (which holds it) stay out of repr (logs, tracebacks)
     code: str = field(default="", repr=False)
+    link: str = field(default="", repr=False)
     start_enabled: bool = True
     stop_enabled: bool = False
     settings_enabled: bool = True  # relay address and CA file
@@ -454,13 +460,25 @@ class PanelController:
             self._transport.stop(final if self._sent_final else None, timeout=0)
         self._show(STOPPING)
 
+    def _join_link(self, code: str) -> tuple[str, str]:
+        """``(link, note)`` for the live session: the viewer link on the relay's own host (SLC-11), or no link and a
+        note when there is none (too long for a QR code, or a relay that is not at ``/ws``)."""
+        if self._transport is None or not code:
+            return "", ""
+        try:
+            return join_url(self._transport.url, code), ""
+        except ValueError:
+            return "", NO_LINK
+
     def _show(self, status: str, *, detail: str = "", code: str = "") -> PanelView:
         phase = self.phase
         note = self._ca_note if phase in (Phase.CONNECTING, Phase.LIVE) else ""
+        link, link_note = self._join_link(code) if phase is Phase.LIVE else ("", "")
         self.view = PanelView(
             status=status,
-            detail=detail or note,
+            detail="\n".join(part for part in (detail or note, link_note) if part),
             code=code if phase is Phase.LIVE else "",
+            link=link,
             start_enabled=phase is Phase.IDLE,
             stop_enabled=phase in (Phase.CONNECTING, Phase.LIVE),
             settings_enabled=phase is Phase.IDLE,

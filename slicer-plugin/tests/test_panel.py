@@ -86,6 +86,7 @@ def test_panel_start_creates_the_session_and_shows_the_code(fake):
     assert view == PanelView(
         "Session running · no viewers yet.",
         code=CODE,
+        link=f"https://relay.example.org/j#{CODE}",
         start_enabled=False,
         stop_enabled=True,
         settings_enabled=False,

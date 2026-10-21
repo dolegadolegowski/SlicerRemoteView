@@ -103,6 +103,64 @@
        </widget>
       </item>
       <item>
+       <widget class="QLabel" name="qrLabel">
+        <property name="visible">
+         <bool>false</bool>
+        </property>
+        <property name="minimumSize">
+         <size>
+          <width>240</width>
+          <height>240</height>
+         </size>
+        </property>
+        <property name="toolTip">
+         <string>Scan with a phone camera to join. Shown while the session runs.</string>
+        </property>
+        <property name="accessibleName">
+         <string>QR code of the join link</string>
+        </property>
+        <property name="text">
+         <string/>
+        </property>
+        <property name="textFormat">
+         <enum>Qt::PlainText</enum>
+        </property>
+        <property name="alignment">
+         <set>Qt::AlignCenter</set>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="linkButtonsLayout">
+        <item>
+         <widget class="QPushButton" name="copyLinkButton">
+          <property name="enabled">
+           <bool>false</bool>
+          </property>
+          <property name="toolTip">
+           <string>Copy the link that opens the viewer with this session's code. It stays on the clipboard until you copy something else.</string>
+          </property>
+          <property name="text">
+           <string>Copy link</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="presentButton">
+          <property name="enabled">
+           <bool>false</bool>
+          </property>
+          <property name="toolTip">
+           <string>Open a window with the code and the QR code in large print, for a projector or a shared screen.</string>
+          </property>
+          <property name="text">
+           <string>Presentation window</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
        <widget class="QLabel" name="statusLabel">
         <property name="text">
          <string>Not connected.</string>

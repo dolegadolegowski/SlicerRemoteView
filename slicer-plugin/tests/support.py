@@ -185,13 +185,13 @@ class FakeTransport:
         return True
 
 
-def created(reply_to: str = "p-1", **limits: int) -> dict:
+def created(reply_to: str = "p-1", *, code: str = CODE, **limits: int) -> dict:
     """``session.created`` (protocol §4.2); ``limits`` override the announced ``limits``."""
     return envelope.make(
         "session.created",
         reply_to=reply_to,
         sessionId=SESSION_ID,
-        code=CODE,
+        code=code,
         publisherToken=TOKEN,
         viewerLimit=20,
         ttl={"graceS": 120, "idleS": 1800, "maxLifetimeS": 43200, "expiresAt": 1792281600120},

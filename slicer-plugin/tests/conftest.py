@@ -137,6 +137,71 @@ def _confirm_ok_cancel_display_signature(text, windowTitle=None, parent=None, **
     """``slicer.util.confirmOkCancelDisplay`` in Slicer 5.12 (the extra keywords reach the message box)."""
 
 
+class _StubQColor:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class _StubQPixmap:
+    """``qt.QPixmap(width, height)``: remembers its size, its fills and the rectangles painted on it."""
+
+    def __init__(self, width: int, height: int) -> None:
+        self.size = (width, height)
+        self.fills: list[str] = []
+        self.rects: list[tuple[int, int, int, int, str]] = []
+        self.painter: _StubQPainter | None = None
+
+    def fill(self, color: _StubQColor) -> None:
+        self.fills.append(color.name)
+
+    def width(self) -> int:
+        return self.size[0]
+
+    def height(self) -> int:
+        return self.size[1]
+
+    def dark_modules(self, scale: int) -> set[tuple[int, int]]:
+        """The (column, row) of every module painted dark, given the pixels per module."""
+        return {
+            (x // scale + i, y // scale)
+            for x, y, width, height, color in self.rects
+            if color == "black" and height == scale
+            for i in range(width // scale)
+        }
+
+
+class _StubQPainter:
+    def __init__(self, device: _StubQPixmap) -> None:
+        self.device = device
+        self.ended = False
+        device.painter = self
+
+    def fillRect(self, x: int, y: int, width: int, height: int, color: _StubQColor) -> None:
+        assert not self.ended, "painting after end()"
+        self.device.rects.append((x, y, width, height, color.name))
+
+    def end(self) -> None:
+        self.ended = True
+
+
+def _make_application_class() -> type:
+    class _StubClipboard:
+        def __init__(self) -> None:
+            self.text = ""
+
+        def setText(self, text: str) -> None:
+            self.text = text
+
+    clipboard = _StubClipboard()
+
+    class _StubQApplication:
+        @staticmethod
+        def clipboard() -> _StubClipboard:
+            return clipboard
+
+    return _StubQApplication
+
+
 def ui_widget_names(path) -> list[str]:
     """``objectName`` of every widget, layout-free, in a Qt Designer ``.ui`` file."""
     root = ET.parse(path).getroot()  # noqa: S314 — the module's own .ui file, not external input
@@ -240,6 +305,10 @@ def _make_stub_modules() -> dict[str, types.ModuleType]:
         QFont=_StubQFont,
         QSettings=settings_class,
         QTimer=_StubQTimer,
+        QPixmap=_StubQPixmap,
+        QPainter=_StubQPainter,
+        QColor=_StubQColor,
+        QApplication=_make_application_class(),
     )
     ctk = _strict_module("ctk")
     return {
