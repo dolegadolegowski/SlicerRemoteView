@@ -82,13 +82,19 @@ def ras_to_gltf_points(points: ArrayLike, dtype: DTypeLike = np.float32) -> NDAr
 
 
 def ras_to_gltf_normals(normals: ArrayLike, dtype: DTypeLike = np.float32) -> NDArray:
-    """Rotate ``(n, 3)`` RAS normals into glTF space (no scale) and renormalise to unit length.
+    """Rotate ``(n, 3)`` RAS normals into glTF space (no scale) and make them :func:`unit_normals`."""
+    return unit_normals(_as_vec3_array(normals, "normals") @ RAS_TO_GLTF_ROTATION.T, dtype)
 
-    An all-zero input normal (degenerate geometry) becomes glTF ``+Y`` so the ``NORMAL`` accessor stays unit
-    length as glTF requires (§7.4); non-finite input raises ``ValueError``.
+
+def unit_normals(normals: ArrayLike, dtype: DTypeLike = np.float32) -> NDArray:
+    """Renormalise ``(n, 3)`` glTF-space normals to unit length.
+
+    An all-zero normal (degenerate geometry, or normals that cancel out where two sheets lie back to back) becomes
+    glTF ``+Y`` so the ``NORMAL`` accessor stays unit length as glTF requires (§7.4); non-finite input raises
+    ``ValueError``.
     """
     out_dtype = _float_dtype(dtype)
-    arr = _as_vec3_array(normals, "normals") @ RAS_TO_GLTF_ROTATION.T
+    arr = _as_vec3_array(normals, "normals")
     # Scale each row by its largest component first, so huge or tiny inputs cannot overflow/underflow the norm.
     peak = np.max(np.abs(arr), axis=1)
     degenerate = peak == 0

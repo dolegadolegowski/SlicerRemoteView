@@ -27,6 +27,11 @@ from vtkmodules.vtkCommonCore import (
     vtkPoints,
 )
 from vtkmodules.vtkCommonDataModel import vtkCellArray, vtkPolyData, vtkUnstructuredGrid
+from vtkmodules.vtkCommonTransforms import (
+    vtkGeneralTransform,
+    vtkThinPlateSplineTransform,
+    vtkTransform,
+)
 from vtkmodules.vtkFiltersCore import vtkAppendPolyData, vtkStripper
 from vtkmodules.vtkFiltersSources import vtkCubeSource, vtkLineSource, vtkSphereSource
 
@@ -53,6 +58,7 @@ class FakeNode:
     opacity: Any = 1.0
     visible: Any = True
     world: Any = field(default_factory=lambda: np.eye(4))
+    transform: Any = None  # what world_transform hands over for baking a non-linear chain
 
 
 class FakeScene:
@@ -78,6 +84,9 @@ class FakeScene:
 
     def world_matrix(self, node):
         return node.world
+
+    def world_transform(self, node):
+        return node.transform
 
 
 def _sphere(center=(100.0, 30.0, -20.0), radius=10.0, resolution=16) -> vtkPolyData:
@@ -256,15 +265,7 @@ def test_collect_linear_world_matrix_becomes_t_matrix():
 @pytest.mark.parametrize(
     ("world", "reason"),
     [
-        (None, SkipReason.NON_LINEAR_TRANSFORM),
-        (
-            np.array([[1, 0.3, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1.0]]),
-            SkipReason.NON_TRS_TRANSFORM,
-        ),
-        (
-            np.diag([1e-50, 1e-50, 1e-50, 1.0]),
-            SkipReason.NON_TRS_TRANSFORM,
-        ),  # zero scale in float32
+        (None, SkipReason.NON_LINEAR_TRANSFORM),  # and the scene hands over no transform to bake
         (np.full((4, 4), np.nan), SkipReason.INVALID_TRANSFORM),
         (
             np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0.5, 1.0]]),
@@ -275,7 +276,8 @@ def test_collect_linear_world_matrix_becomes_t_matrix():
     ],
 )
 def test_collect_unusable_transforms_are_skipped(world, reason):
-    """Non-linear and sheared transforms are baked in SLC-13; until then the node is left out, not the scene."""
+    """A matrix that is not a finite affine 4×4, or a non-linear chain without a transform to bake: the node is left
+    out, not the scene."""
     scene = FakeScene(
         FakeNode("vtkMRMLModelNode1", _sphere(), world=world),
         FakeNode("vtkMRMLModelNode2", _cube()),
@@ -295,9 +297,8 @@ def test_collect_uses_the_writers_matrix_predicate():
         shear = np.eye(3) + np.triu(rng.normal(size=(3, 3)) * rng.choice([0.0, 1e-9, 1e-3]), 1)
         m[:3, :3] = rotation @ shear @ np.diag(rng.uniform(0.01, 100, size=3))
         m[:3, 3] = rng.normal(size=3) * 100
-        result = collect._gltf_matrix(m)
-        if isinstance(result, SkipReason):
-            assert result is SkipReason.NON_TRS_TRANSFORM
+        result = collect._placement(m)
+        if result is collect._BAKE:
             assert not is_exportable_matrix(collect.ras_matrix_to_gltf(m))
         else:
             kept += 1
@@ -339,6 +340,191 @@ def test_collect_names_are_sanitised_and_anonymised_without_gaps():
     assert b"Patient" not in glb and b"P\xef\xbf\xbduco" not in glb
 
 
+# --------------------------------------------------------------------------- baked transforms (SLC-13)
+
+SHEAR = np.array(
+    [[1.0, 0.3, 0.0, 5.0], [0.0, 1.0, 0.0, -7.0], [0.0, 0.0, 1.0, 2.0], [0.0, 0.0, 0.0, 1.0]]
+)
+MIRROR = np.diag([-1.0, 1.0, 1.0, 1.0])
+
+
+def _points(polydata: vtkPolyData) -> np.ndarray:
+    return vtk_to_numpy(polydata.GetPoints().GetData()).astype(np.float64)
+
+
+def _signed_volume(entity: Entity) -> float:
+    """Positive when the triangles of a closed mesh face outwards (their front faces, what a viewer culls by)."""
+    a, b, c = (entity.positions[entity.indices[:, i]] for i in range(3))
+    return float(np.einsum("ij,ij->i", a, np.cross(b, c)).sum() / 6)
+
+
+def _faces_agree_with_normals(entity: Entity) -> bool:
+    p, t = entity.positions, entity.indices
+    face = np.cross(p[t[:, 1]] - p[t[:, 0]], p[t[:, 2]] - p[t[:, 0]])
+    return bool(np.all(np.einsum("ij,ij->i", face, entity.normals[t].mean(axis=1)) > 0))
+
+
+def _tps(center=(100.0, 30.0, -20.0), bend=4.0) -> vtkThinPlateSplineTransform:
+    """A thin-plate spline that bends a 40 mm box around ``center``: S moves by ``bend`` × (R offset / 20 mm)²."""
+    source, target = vtkPoints(), vtkPoints()
+    for corner in itertools.product((-20.0, 20.0), repeat=3):
+        p = np.add(center, corner)
+        source.InsertNextPoint(*p)
+        target.InsertNextPoint(*np.add(p, [0.0, 0.0, bend * (corner[0] / 20.0) ** 2]))
+    source.InsertNextPoint(*center)
+    target.InsertNextPoint(*center)
+    tps = vtkThinPlateSplineTransform()
+    tps.SetBasisToR()
+    tps.SetSourceLandmarks(source)
+    tps.SetTargetLandmarks(target)
+    return tps
+
+
+def _linear(matrix) -> vtkTransform:
+    transform = vtkTransform()
+    transform.SetMatrix([float(v) for v in np.asarray(matrix).ravel()])
+    return transform
+
+
+@pytest.mark.parametrize("world", [SHEAR, SHEAR @ MIRROR], ids=["shear", "shear+mirror"])
+def test_collect_bakes_a_sheared_world_matrix(world):
+    """glTF node.matrix must be TRS (§7.2): a sheared world matrix is applied to the vertices instead (§7.3)."""
+    sphere = _sphere()
+    before = _snapshot(sphere)
+    scene = FakeScene(
+        FakeNode("vtkMRMLModelNode1", sphere, world=world),
+        FakeNode("vtkMRMLModelNode2", _cube()),
+    )
+    baked, plain = collect_entities(scene)
+    assert baked.baked and baked.matrix is None and not plain.baked
+    moved = _points(sphere) @ world[:3, :3].T + world[:3, 3]
+    np.testing.assert_allclose(baked.positions, _ras_to_gltf(moved), rtol=0, atol=1e-12)
+    np.testing.assert_allclose(np.linalg.norm(baked.normals, axis=1), 1.0, atol=1e-6)
+    assert _signed_volume(baked) > 0 and _faces_agree_with_normals(
+        baked
+    )  # front faces outside, mirror or not
+    assert _snapshot(sphere) == before  # the user's mesh is not moved
+    gltf = GLTF2.load_from_bytes(write_glb([baked, plain], _root()))
+    t_nodes = [gltf.nodes[i] for i in gltf.nodes[0].children]
+    assert [t.extras["baked"] for t in t_nodes] == [True, False]
+    assert t_nodes[0].matrix is None  # identity
+
+
+@pytest.mark.parametrize("mirrored", [False, True])
+def test_collect_bakes_a_non_linear_transform(mirrored):
+    """§7.3: a thin-plate spline parent → baked: true, identity T.matrix, vertices moved by the spline."""
+    sphere = _sphere()
+    warp = vtkGeneralTransform()
+    warp.PostMultiply()
+    warp.Concatenate(_tps())
+    if mirrored:
+        warp.Concatenate(_linear(MIRROR))
+    scene = FakeScene(
+        FakeNode("vtkMRMLModelNode1", sphere, world=None, transform=warp),
+        FakeNode("vtkMRMLModelNode2", _cube()),
+    )
+    collected = collect_scene(scene)
+    baked, plain = collected.entities
+    assert collected.skipped == () and baked.baked and baked.matrix is None and not plain.baked
+    moved = np.array([warp.TransformPoint(p) for p in _points(sphere)])
+    np.testing.assert_allclose(baked.positions, _ras_to_gltf(moved), rtol=0, atol=1e-12)
+    straight = collect_entities(FakeScene(FakeNode("vtkMRMLModelNode1", _sphere())))[0]
+    assert np.abs(baked.positions - straight.positions).max() > 1e-3  # really bent (> 1 mm)
+    assert _signed_volume(baked) > 0 and _faces_agree_with_normals(baked)
+    write_glb(collected.entities, _root())
+
+
+def test_collect_bakes_a_flattening_transform_and_drops_triangles_left_without_area():
+    """A zero scale is not TRS either: the cube's sides collapse to lines and are dropped; top and bottom stay."""
+    world = np.diag([1.0, 1.0, 0.0, 1.0])
+    assert not is_exportable_matrix(collect.ras_matrix_to_gltf(world))
+    [entity] = collect_entities(FakeScene(FakeNode("vtkMRMLModelNode1", _cube(), world=world)))
+    assert entity.baked and entity.triangle_count == 4
+    np.testing.assert_allclose(entity.positions[:, 1], 0.0)  # S = 0 → glTF y = 0
+    assert sorted(entity.normals[:, 1]) == [-1.0] * 4 + [1.0] * 4  # bottom faces −S, top +S
+    write_glb([entity], _root())
+
+
+@pytest.mark.parametrize(
+    "transform",
+    [None, "warp", vtkPolyData(), 7],
+    ids=["none", "str", "not-a-transform", "int"],
+)
+def test_collect_skips_a_non_linear_node_without_a_transform_to_bake(transform):
+    scene = FakeScene(
+        FakeNode("vtkMRMLModelNode1", _sphere(), world=None, transform=transform),
+        FakeNode("vtkMRMLModelNode2", _cube()),
+    )
+    collected = collect_scene(scene)
+    assert [e.node_id for e in collected.entities] == ["vtkMRMLModelNode2"]
+    assert collected.skipped == (SkippedNode("vtkMRMLModelNode1", SkipReason.NON_LINEAR_TRANSFORM),)
+
+
+def test_collect_world_transform_is_asked_only_for_a_non_linear_chain():
+    asked = []
+
+    class Spy(FakeScene):
+        def world_transform(self, node):
+            asked.append(node.node_id)
+            return super().world_transform(node)
+
+    scene = Spy(
+        FakeNode("vtkMRMLModelNode1", _sphere()),
+        FakeNode("vtkMRMLModelNode2", _sphere(), world=SHEAR),  # baked from the matrix itself
+        FakeNode("vtkMRMLModelNode3", _sphere(), world=None, transform=_tps()),
+    )
+    assert [e.baked for e in collect_entities(scene)] == [False, True, True]
+    assert asked == ["vtkMRMLModelNode3"]
+
+
+def test_collect_mirror_is_judged_where_the_mesh_is():
+    """A warp that mirrors around the mesh but not at the origin (its Jacobian: negative at the sphere, positive at
+    (0, 0, 0)): the front faces must stay outside, which needs the mirror to be judged at the mesh."""
+    center = np.array([100.0, 30.0, -20.0])
+    source, target = vtkPoints(), vtkPoints()
+    for corner in itertools.product((-20.0, 20.0), repeat=3):
+        inner = center + corner
+        source.InsertNextPoint(*inner)
+        target.InsertNextPoint(
+            2 * center[0] - inner[0], inner[1], inner[2]
+        )  # mirrored about R = 100
+    for corner in itertools.product((-300.0, 300.0), repeat=3):
+        source.InsertNextPoint(*(center + corner))
+        target.InsertNextPoint(*(center + corner))  # far away: unchanged
+    warp = vtkThinPlateSplineTransform()
+    warp.SetBasisToR()
+    warp.SetSourceLandmarks(source)
+    warp.SetTargetLandmarks(target)
+    warp.Update()
+    for at, sign in ((center, -1), (np.zeros(3), 1)):
+        jacobian = [[0.0] * 3 for _ in range(3)]
+        warp.InternalTransformDerivative([float(v) for v in at], [0.0] * 3, jacobian)
+        assert np.sign(np.linalg.det(jacobian)) == sign
+    # then far away along R: at the moved mesh the chain's Jacobian is positive, so the input point must be used
+    moved = vtkGeneralTransform()
+    moved.PostMultiply()
+    moved.Concatenate(warp)
+    moved.Concatenate(_linear([[1, 0, 0, -400.0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]))
+    for transform in (warp, moved):
+        sphere = _sphere(center, radius=10.0)
+        [entity] = collect_entities(
+            FakeScene(FakeNode("vtkMRMLModelNode1", sphere, world=None, transform=transform))
+        )
+        assert entity.baked and _signed_volume(entity) > 0 and _faces_agree_with_normals(entity)
+
+
+def test_collect_skips_a_baked_mesh_that_overflows_float32():
+    """A transform that moves the vertices beyond float32 (what the GLB stores): the node is left out."""
+    blow_up = _linear(np.diag([1e300, 1.0, 1.0, 1.0]))
+    scene = FakeScene(
+        FakeNode("vtkMRMLModelNode1", _sphere(), world=None, transform=blow_up),
+        FakeNode("vtkMRMLModelNode2", _cube()),
+    )
+    collected = collect_scene(scene)
+    assert [e.node_id for e in collected.entities] == ["vtkMRMLModelNode2"]
+    assert collected.skipped == (SkippedNode("vtkMRMLModelNode1", SkipReason.INVALID_GEOMETRY),)
+
+
 # --------------------------------------------------------------------------- skipped nodes (criterion 2)
 
 
@@ -356,7 +542,7 @@ def test_collect_skips_nodes_without_triangles_and_keeps_the_rest():
         FakeNode("vtkMRMLModelNode5", two_point_poly),
         FakeNode("vtkMRMLModelNode6", degenerate),
         FakeNode("vtkMRMLModelNode7", _sphere()),
-        FakeNode("vtkMRMLModelNode8", _sphere(), world=None),  # non-linear transform (SLC-13 bakes)
+        FakeNode("vtkMRMLModelNode8", _sphere(), world=None),  # non-linear, nothing to bake
     )
     collected = collect_scene(scene)
     assert [e.node_id for e in collected.entities] == ["vtkMRMLModelNode7"]
@@ -769,6 +955,72 @@ def test_collect_drops_degenerate_triangles_and_unused_points():
     np.testing.assert_allclose(np.linalg.norm(mesh.normals, axis=1), 1.0, atol=1e-6)
 
 
+def test_collect_drops_triangles_without_area():
+    """Collinear points: no area, no normal. Left in as the lowest-ID triangle, it seeded ConsistencyOn and turned the
+    real triangle over (its normal came out −S), and the point only it used got a zero normal."""
+    data = _polydata([[0, 0, 0], [1, 0, 0], [2, 0, 0], [0, 1, 0]], polys=[(0, 1, 2), (0, 1, 3)])
+    mesh = mesh_from_polydata(data)
+    np.testing.assert_array_equal(mesh.triangles, [[0, 1, 2]])  # (0, 1, 3) without point 2
+    np.testing.assert_allclose(
+        mesh.normals, np.tile([0.0, 0.0, 1.0], (3, 1)), atol=1e-6
+    )  # its own winding
+
+
+def test_collect_mesh_from_triangles_drops_triangles_that_are_not_there():
+    """The public helper (SLC-14 decimation output): IDs out of range or repeated are dropped, never read."""
+    positions = np.array([[0.0, 0, 0], [1, 0, 0], [0, 1, 0]])
+    mesh = collect.mesh_from_triangles(
+        positions, np.array([[0, 1, 2], [0, 1, 7], [-1, 0, 1], [1, 1, 2]])
+    )
+    np.testing.assert_array_equal(mesh.triangles, [[0, 1, 2]])
+    assert collect.mesh_from_triangles(positions, np.array([[0, 1, 9]])) is None
+    assert collect.mesh_from_triangles(positions, np.empty((0, 3))) is None
+
+
+def test_collect_exports_a_mesh_whose_normals_cancel_out():
+    """Two triangles folded flat onto each other, wound consistently: their normals cancel where they meet. The node is
+    exported — ``ras_to_gltf_normals`` makes a zero normal glTF +Y, so every normal written is a unit vector."""
+    folded = _polydata([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0.5, 1, 0]], polys=[(0, 1, 2), (1, 0, 3)])
+    mesh = mesh_from_polydata(folded)
+    np.testing.assert_allclose(np.linalg.norm(mesh.normals[:2], axis=1), 0.0)  # cancelled
+    collected = collect_scene(FakeScene(FakeNode("vtkMRMLModelNode1", folded)))
+    [entity] = collected.entities
+    assert collected.skipped == ()
+    np.testing.assert_allclose(np.linalg.norm(entity.normals, axis=1), 1.0, atol=1e-6)
+    np.testing.assert_allclose(entity.normals[:2], [[0.0, 1.0, 0.0]] * 2)
+    write_glb([entity], _root())
+
+
+@pytest.mark.parametrize(
+    ("points", "world", "transform"),
+    [
+        ([[0, 0, 0], [np.inf, 0, 0], [0, 1, 0]], np.eye(4), None),
+        ([[0, 0, 0], [-np.inf, 0, 0], [0, np.nan, 0]], SHEAR, None),
+        ([[0, 0, 0], [1e200, 0, 0], [0, 1e200, 0]], np.eye(4), None),
+        ([[0, 0, 0], [1, 0, 0], [0, 1, 0]], None, np.diag([1e300, 1e300, 1.0, 1.0])),
+        ([[0, 0, 0], [1, 0, 0], [0, 1, 0]], None, np.full((4, 4), np.nan)),
+    ],
+    ids=["inf", "-inf-and-nan-sheared", "1e200-mm", "overflow-on-two-axes", "nan-transform"],
+)
+def test_collect_untrusted_coordinates_skip_the_node_without_a_warning(points, world, transform):
+    """A crafted file or transform with inf, NaN or huge values: the node is skipped, nothing warns (the suite runs
+    with ``-W error``, so a RuntimeWarning would fail the whole snapshot here)."""
+    transform = None if transform is None else _linear(transform)
+    scene = FakeScene(
+        FakeNode(
+            "vtkMRMLModelNode1",
+            _polydata(points, polys=[(0, 1, 2)]),
+            world=world,
+            transform=transform,
+        ),
+        FakeNode("vtkMRMLModelNode2", _cube()),
+    )
+    collected = collect_scene(scene)
+    assert [e.node_id for e in collected.entities] == ["vtkMRMLModelNode2"]
+    assert [s.node_id for s in collected.skipped] == ["vtkMRMLModelNode1"]
+    assert collected.skipped[0].reason is SkipReason.INVALID_GEOMETRY
+
+
 def _faces_and_normals_outward(mesh) -> tuple[float, float]:
     """The smallest outward component of the face normals (from the winding) and of the point normals of a mesh
     centred at the origin."""
@@ -892,7 +1144,6 @@ def test_collect_result_types():
         "invalid-display",
         "invalid-transform",
         "non-linear-transform",
-        "non-trs-transform",
     }
 
 
@@ -919,8 +1170,30 @@ def test_collect_output_always_writes():
     rng = np.random.default_rng(2026)
     ids = ["vtkMRMLModelNode1", "vtkMRMLModelNode2", "root", "a/b", "Kowalski1", "x y", "", 7]
     names = ["Liver", "", None, b"P\xb3", 5, "Model 1", "x" * 90, "\x07"]
-    meshes = [_sphere, _cube, lambda: None, vtkPolyData]
-    worlds = [np.eye(4), None, np.diag([1.0, 2.0, 3.0, 1.0]), np.full((4, 4), np.nan), "x"]
+    meshes = [
+        _sphere,
+        _cube,
+        lambda: None,
+        vtkPolyData,
+        lambda: _polydata([[0, 0, 0], [np.inf, 0, 0], [0, 1e200, 0]], polys=[(0, 1, 2)]),
+    ]
+    worlds = [
+        np.eye(4),
+        None,
+        np.diag([1.0, 2.0, 3.0, 1.0]),
+        np.full((4, 4), np.nan),
+        "x",
+        SHEAR @ MIRROR,
+        np.diag([1.0, 0.0, 1.0, 1.0]),
+    ]
+    transforms = [
+        None,
+        _tps(),
+        _linear(MIRROR),
+        _linear(np.diag([1e300, 1.0, 1.0, 1.0])),
+        _linear(np.full((4, 4), np.nan)),
+        "x",
+    ]
     for _ in range(60):
         nodes = [
             FakeNode(
@@ -930,6 +1203,7 @@ def test_collect_output_always_writes():
                 color=tuple(rng.uniform(-0.5, 1.5, size=3)),
                 opacity=float(rng.uniform(-1, 2)),
                 world=worlds[rng.integers(len(worlds))],
+                transform=transforms[rng.integers(len(transforms))],
             )
             for _ in range(int(rng.integers(0, 5)))
         ]

@@ -15,6 +15,7 @@ from support import (
 from support import (
     FakeMrmlTransform as FakeTransform,
 )
+from vtkmodules.vtkCommonTransforms import vtkGeneralTransform, vtkTransform
 from vtkmodules.vtkFiltersSources import vtkSphereSource
 
 from remoteview_core.collect import collect_scene
@@ -147,6 +148,26 @@ def test_mrml_scene_world_matrix():
     assert warped.asked == 0  # Slicer logs errors when asked for a non-linear chain's matrix
 
 
+def _shift(x: float, y: float, z: float) -> vtkTransform:
+    transform = vtkTransform()
+    transform.Translate(x, y, z)
+    return transform
+
+
+def test_mrml_scene_world_transform_is_the_3d_views():
+    """GetTransformToWorld into an identity vtkGeneralTransform, as the model displayable manager does (SLC-13)."""
+    api, _ = scene([])
+    assert api.world_transform(FakeModel("a")) is None
+    general = api.world_transform(
+        FakeModel("b", transform=FakeTransform(None, warp=_shift(1, 2, 3)))
+    )
+    assert isinstance(general, vtkGeneralTransform)
+    assert general.TransformPoint(10.0, 20.0, 30.0) == pytest.approx((11.0, 22.0, 33.0))
+    assert api.world_transform(FakeModel("c", transform=FakeTransform(None))).TransformPoint(
+        1.0, 2.0, 3.0
+    ) == pytest.approx((1.0, 2.0, 3.0))  # starts from the identity
+
+
 # --------------------------------------------------------------------------- collect_scene over the adapter
 
 
@@ -160,12 +181,18 @@ def test_mrml_scene_feeds_collect_scene():
         polydata=sphere(),
     )
     hidden = FakeModel("vtkMRMLModelNode5", displays=[FakeDisplay(visible=0)], polydata=sphere())
+    warped = FakeModel(
+        "vtkMRMLModelNode7",
+        displays=[FakeDisplay()],
+        transform=FakeTransform(None, warp=_shift(0, 0, 50)),
+        polydata=sphere(),
+    )
     grid = FakeModel(
         "vtkMRMLModelNode6", displays=[FakeDisplay()], polydata=None
     )  # unstructured grid
-    api, _ = scene([liver, hidden, grid])
+    api, _ = scene([liver, hidden, grid, warped])
     collected = collect_scene(api)
-    [entity] = collected.entities
+    entity, baked = collected.entities
     assert (entity.node_id, entity.name, entity.color, entity.opacity, entity.visible) == (
         "vtkMRMLModelNode4",
         "Liver",
@@ -175,7 +202,10 @@ def test_mrml_scene_feeds_collect_scene():
     )
     # 100 mm along R → 0.1 m along glTF +X (protocol §7.2)
     assert entity.matrix is not None and entity.matrix[0][3] == pytest.approx(0.1)
-    assert len(entity.indices) > 0
+    assert len(entity.indices) > 0 and not entity.baked
+    # the non-linear chain is baked: 50 mm along S → 0.05 m along glTF +Y, no matrix (§7.3)
+    assert baked.baked and baked.matrix is None
+    assert baked.positions[:, 1].mean() == pytest.approx(0.003 + 0.05, abs=1e-6)
     # the hidden node never reaches collect; the grid model is reported as having no triangles
     assert [(s.node_id, s.reason.value) for s in collected.skipped] == [
         ("vtkMRMLModelNode6", "no-triangles")

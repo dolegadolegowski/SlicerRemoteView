@@ -6,18 +6,22 @@ Slicer adapter in ``RemoteView.py``, SLC-09/SLC-22; tests use a fake) and return
 
 - geometry: a **deep copy** of the node's points (same precision), polygons and strips only (the user's data is
   never touched — ADR 0005 §3; no attribute arrays, vertices or lines) → ``vtkTriangleFilter`` → triangles with a
-  repeated vertex dropped → ``vtkPolyDataNormals`` (``SplittingOff``, ``ConsistencyOn``) → owned numpy arrays without
-  the points no triangle uses; positions/normals converted with :mod:`remoteview_core.coords` (RAS mm → glTF m, +Y
-  up);
-- transform: a linear world matrix becomes ``T.matrix = C·M·C⁻¹`` (protocol §7.2), identity becomes no matrix;
+  repeated vertex dropped → the bake, if any (below) → triangles without area dropped → ``vtkPolyDataNormals``
+  (``SplittingOff``, ``ConsistencyOn``) → owned numpy arrays without the points no triangle uses; positions/normals
+  converted with :mod:`remoteview_core.coords` (RAS mm → glTF m, +Y up);
+- transform: a linear world matrix becomes ``T.matrix = C·M·C⁻¹`` (protocol §7.2), identity becomes no matrix; a
+  world transform that is not linear, or linear with shear (glTF ``node.matrix`` must be TRS), is **baked** into the
+  vertices instead (SLC-13, protocol §7.3 ``baked: true``, identity ``T.matrix``) — the 3D view applies it the same way,
+  as a ``vtkTransformFilter`` on the mesh; normals are computed after it, and a transform that mirrors (negative
+  Jacobian at the first triangle) gets the triangles reversed so that their front faces still point outwards;
 - appearance: display colour/opacity clamped to 0..1, visibility as a bool;
 - name: :class:`~remoteview_core.names.NameAssigner` (sanitised, or ``Model <n>`` with *Hide node names*).
 
 A node that cannot be exported never aborts the snapshot: it is left out and reported in
 :attr:`CollectedScene.skipped` with a :class:`SkipReason` — no triangles (empty, points or lines only), a non-linear
-or non-TRS world transform (baked into the vertices in SLC-13), invalid or duplicate IDs (with *Hide node names*
-also IDs not of the generated shape), non-finite data, cells that reference missing points or are not stored as
-integers (checked before any VTK filter runs: the filters do not bounds-check point IDs).
+world transform the scene cannot hand over for baking, invalid or duplicate IDs (with *Hide node names* also IDs not
+of the generated shape), non-finite data (also after a bake), cells that reference missing points or are not
+stored as integers (checked before any VTK filter runs: the filters do not bounds-check point IDs).
 
 Main thread only (VTK). No Slicer or Qt import: the VTK classes come from ``vtkmodules``, which Slicer 5.12 and the
 ``vtk`` wheel provide identically (``docs/research/slicer-collect.md``).
@@ -43,6 +47,7 @@ from vtkmodules.vtkCommonCore import (
     vtkPoints,
 )
 from vtkmodules.vtkCommonDataModel import vtkCellArray, vtkPolyData
+from vtkmodules.vtkCommonTransforms import vtkAbstractTransform, vtkTransform
 from vtkmodules.vtkFiltersCore import vtkPolyDataNormals, vtkTriangleFilter
 
 from remoteview_core.coords import ras_matrix_to_gltf, ras_to_gltf_normals, ras_to_gltf_points
@@ -78,6 +83,11 @@ class SceneApi(Protocol):
         transform chain is not linear."""
         ...
 
+    def world_transform(self, node: Any) -> vtkAbstractTransform | None:
+        """The whole node-to-world transform (RAS mm) as the 3D view applies it, for baking a chain that is not linear
+        into the vertices; ``None`` when it cannot be had. Asked only when :meth:`world_matrix` is ``None``."""
+        ...
+
 
 class SkipReason(enum.Enum):
     """Why a node is left out of the snapshot (shown in the panel's node list, SLC-18)."""
@@ -88,8 +98,9 @@ class SkipReason(enum.Enum):
     INVALID_GEOMETRY = "invalid-geometry"
     INVALID_DISPLAY = "invalid-display"
     INVALID_TRANSFORM = "invalid-transform"
+    #: a non-linear world transform that :meth:`SceneApi.world_transform` did not provide (a sheared or non-linear
+    #: transform is baked otherwise)
     NON_LINEAR_TRANSFORM = "non-linear-transform"
-    NON_TRS_TRANSFORM = "non-trs-transform"
 
 
 @dataclass(frozen=True)
@@ -114,8 +125,10 @@ class CollectedScene:
 
 @dataclass(frozen=True, eq=False)
 class Mesh:
-    """Triangle mesh in the node's RAS frame (mm): owned float64 ``positions``/``normals`` ``(n, 3)``, int64
-    ``triangles`` ``(m, 3)`` with every point used and no triangle repeating a vertex."""
+    """Triangle mesh in the frame of its input — a node's RAS frame (mm), world RAS when a transform was baked, glTF
+    metres for :func:`mesh_from_triangles` on an entity: owned float64
+    ``positions``/``normals`` ``(n, 3)``, int64 ``triangles`` ``(m, 3)`` with every point used and no triangle
+    repeating a vertex."""
 
     positions: NDArray[np.float64] = field(repr=False)
     normals: NDArray[np.float64] = field(repr=False)
@@ -226,12 +239,39 @@ def _geometry_copy(polydata: vtkPolyData) -> vtkPolyData:
     return copy
 
 
-def mesh_from_polydata(polydata: vtkPolyData | None) -> Mesh | None:
+def _baked(
+    points: vtkPoints, transform: vtkAbstractTransform, seed: NDArray[np.int64]
+) -> tuple[vtkPoints, bool]:
+    """``points`` moved by ``transform`` into double-precision points (the 3D view's ``vtkTransformFilter`` applies
+    the same transform), and whether the transform mirrors at the centre of the ``seed`` triangle (point IDs).
+
+    ``vtkPolyDataNormals(ConsistencyOn)`` orients each connected part like its lowest-ID triangle, so a mirror is
+    judged where that orientation comes from: the sign of the transform's Jacobian at the first triangle.
+    """
+    moved = vtkPoints()
+    moved.SetDataTypeToDouble()
+    transform.Update()
+    transform.TransformPoints(points, moved)
+    out = [0.0, 0.0, 0.0]
+    jacobian = [[0.0, 0.0, 0.0] for _ in range(3)]
+    # untrusted coordinates (inf, 1e300) give inf/NaN here: no warning; the node is skipped by _finite_geometry later
+    with np.errstate(all="ignore"):
+        centre = np.mean([points.GetPoint(int(i)) for i in seed], axis=0)
+        transform.InternalTransformDerivative([float(v) for v in centre], out, jacobian)
+        mirrored = bool(np.linalg.det(np.asarray(jacobian, dtype=np.float64)) < 0)
+    return moved, mirrored
+
+
+def mesh_from_polydata(
+    polydata: vtkPolyData | None, transform: vtkAbstractTransform | None = None
+) -> Mesh | None:
     """Triangulated mesh with point normals for ``polydata`` (unchanged), or ``None`` when it has no triangle.
 
     The pipeline runs on :func:`_geometry_copy` — points, polygons and strips only; anything that is not a
-    ``vtkPolyData`` counts as no mesh. Raises :class:`InvalidMeshError` — before any filter runs — when polygons or
-    strips reference missing points or are not stored as integers.
+    ``vtkPolyData`` counts as no mesh. With a ``transform`` the points are moved by it before the normals are computed
+    (baking, see the module docstring); the mesh is then in the transform's output frame. Raises
+    :class:`InvalidMeshError` — before any filter runs — when polygons or strips reference missing points or are not
+    stored as integers.
     """
     if (
         not isinstance(polydata, vtkPolyData)
@@ -253,10 +293,70 @@ def mesh_from_polydata(polydata: vtkPolyData | None) -> Mesh | None:
     # A triangle that repeats a vertex has no area and no normal, and it must go before ConsistencyOn: its edges
     # run both ways, so it would turn every triangle reached through it inside out (stitched strips make them).
     triangles = triangles[(a != b) & (b != c) & (a != c)]
-    if len(triangles) == 0 or triangulated.GetPoints() is None:
+    points = triangulated.GetPoints()
+    if len(triangles) == 0 or points is None:
+        return None
+    if transform is not None:
+        points, mirrored = _baked(points, transform, triangles[0])
+        if mirrored:  # a mirror turns the triangles inside out: reverse them, so the normals point outwards again
+            triangles = triangles[:, ::-1]
+    return _with_normals(points, triangles)
+
+
+def mesh_points_and_triangles(
+    polydata: vtkPolyData,
+) -> tuple[NDArray[np.float64], NDArray[np.int64]]:
+    """Owned float64 points ``(n, 3)`` and the 3-point polygons ``(m, 3)`` of a filter's output (e.g. a decimation)."""
+    points = polydata.GetPoints()
+    if points is None:
+        return np.empty((0, 3), dtype=np.float64), np.empty((0, 3), dtype=np.int64)
+    return _owned(points.GetData(), np.float64).reshape(-1, 3), _triangles(polydata.GetPolys())
+
+
+def polydata_from_triangles(
+    positions: NDArray[np.float64], triangles: NDArray[np.int64]
+) -> vtkPolyData:
+    """A new polydata with copies of ``positions`` (double) and ``triangles`` (point IDs, not checked)."""
+    points = vtkPoints()
+    points.SetData(numpy_to_vtk(np.asarray(positions, dtype=np.float64), deep=True))
+    data = vtkPolyData()
+    data.SetPoints(points)
+    data.SetPolys(_cell_array(np.asarray(triangles, dtype=np.int64)))
+    return data
+
+
+def mesh_from_triangles(
+    positions: NDArray[np.float64], triangles: NDArray[np.int64]
+) -> Mesh | None:
+    """The :class:`Mesh` of ``triangles`` over ``positions`` with point normals computed as for a collected node (same
+    frame as the input), or ``None`` when no triangle with an area is left. Triangles that repeat a vertex or reference
+    a missing point are dropped. A point normal can be zero (normals that cancel out): callers that write it directly
+    must check."""
+    triangles = np.asarray(triangles, dtype=np.int64).reshape(-1, 3)
+    positions = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
+    a, b, c = triangles.T
+    in_range = np.all((triangles >= 0) & (triangles < len(positions)), axis=1)
+    triangles = triangles[in_range & (a != b) & (b != c) & (a != c)]
+    if len(triangles) == 0:
+        return None
+    return _with_normals(polydata_from_triangles(positions, triangles).GetPoints(), triangles)
+
+
+def _with_normals(points: vtkPoints, triangles: NDArray[np.int64]) -> Mesh | None:
+    """The pipeline's last steps: drop triangles without area, compute the point normals, drop unused points."""
+    # A triangle without area (collinear points, or flattened by a baked transform) has no normal of its own: as the
+    # lowest-ID triangle it would seed ConsistencyOn with an arbitrary winding and turn the real ones over, and a
+    # point only it uses would get a zero normal. It is invisible, so it goes.
+    xyz = _owned(points.GetData(), np.float64)
+    first = xyz[triangles[:, 0]]
+    # non-finite or huge coordinates warn here; such a node is skipped later (invalid-geometry or no-triangles)
+    with np.errstate(all="ignore"):
+        area = np.cross(xyz[triangles[:, 1]] - first, xyz[triangles[:, 2]] - first)
+    triangles = triangles[np.any(area != 0, axis=1)]
+    if len(triangles) == 0:
         return None
     clean = vtkPolyData()
-    clean.SetPoints(triangulated.GetPoints())
+    clean.SetPoints(points)
     clean.SetPolys(_cell_array(triangles))
     normals = vtkPolyDataNormals()
     normals.SplittingOff()  # no duplicated points along feature edges (§7.4)
@@ -281,7 +381,8 @@ def mesh_from_polydata(polydata: vtkPolyData | None) -> Mesh | None:
 
 
 def _finite_geometry(mesh: Mesh) -> bool:
-    """Finite positions (also in metres as float32, what the GLB stores) and normals."""
+    """Finite positions (also in metres as float32, what the GLB stores) and normals. A zero normal (normals that
+    cancel out where two sheets lie back to back) is fine: ``coords.ras_to_gltf_normals`` makes it glTF +Y."""
     with np.errstate(over="ignore", invalid="ignore"):
         metres32 = (mesh.positions * 0.001).astype(np.float32)
     return bool(np.all(np.isfinite(metres32)) and np.all(np.isfinite(mesh.normals)))
@@ -301,17 +402,39 @@ def _display(props: Any) -> tuple[tuple[float, float, float], float, bool] | Non
     return (r, g, b), float(np.clip(alpha, 0.0, 1.0)), shown
 
 
-def _gltf_matrix(world: Any) -> NDArray[np.float64] | SkipReason | None:
-    """``T.matrix`` for a RAS world matrix: ``None`` for identity, else ``C·M·C⁻¹``; a skip reason if unusable."""
+class _Bake:
+    """What :func:`_placement` returns for a transform to bake into the vertices (the one instance :data:`_BAKE`)."""
+
+
+_BAKE = _Bake()
+
+
+def _placement(world: Any) -> NDArray[np.float64] | SkipReason | _Bake | None:
+    """How a node with RAS world matrix ``world`` is placed: ``None`` (identity) or ``C·M·C⁻¹`` as ``T.matrix``,
+    :data:`_BAKE` for a chain that is not linear (``None``) or is sheared (glTF ``node.matrix`` must be TRS, and the
+    writer's own predicate decides — ``is_exportable_matrix``), or a skip reason for a matrix that is not a finite
+    affine 4×4."""
     if world is None:
-        return SkipReason.NON_LINEAR_TRANSFORM
+        return _BAKE
     try:
         matrix = ras_matrix_to_gltf(world)
     except (TypeError, ValueError):  # not a finite affine 4×4
         return SkipReason.INVALID_TRANSFORM
-    if not is_exportable_matrix(matrix):  # sheared: glTF node.matrix must be TRS — baked in SLC-13
-        return SkipReason.NON_TRS_TRANSFORM
+    if not is_exportable_matrix(matrix):
+        return _BAKE
     return None if np.array_equal(matrix, np.eye(4)) else matrix
+
+
+def _world_transform(world: Any, scene_api: SceneApi, node: Any) -> vtkAbstractTransform | None:
+    """The transform to bake: a sheared linear world matrix as a ``vtkTransform`` (exact, no round trip through
+    Slicer), otherwise the scene's own non-linear transform."""
+    if world is not None:
+        linear = vtkTransform()
+        # row-major, like vtkMatrix4x4
+        linear.SetMatrix([float(v) for v in np.asarray(world, dtype=np.float64).ravel()])
+        return linear
+    transform = scene_api.world_transform(node)
+    return transform if isinstance(transform, vtkAbstractTransform) else None
 
 
 #: The IDs Slicer generates for model nodes (``vtkMRMLModelNode4``: class name + counter, research note §3). With
@@ -350,16 +473,23 @@ def collect_scene(scene_api: SceneApi, *, anonymize_names: bool = False) -> Coll
             skipped.append(SkippedNode(node_id, SkipReason.DUPLICATE_NODE_ID, index))
             continue
         seen.add(node_id)
-        matrix = _gltf_matrix(scene_api.world_matrix(node))
+        world = scene_api.world_matrix(node)
+        matrix = _placement(world)
         if isinstance(matrix, SkipReason):
             skipped.append(SkippedNode(node_id, matrix, index))
             continue
+        bake = None
+        if matrix is _BAKE:
+            bake, matrix = _world_transform(world, scene_api, node), None
+            if bake is None:
+                skipped.append(SkippedNode(node_id, SkipReason.NON_LINEAR_TRANSFORM, index))
+                continue
         display = _display(scene_api.display_props(node))
         if display is None:
             skipped.append(SkippedNode(node_id, SkipReason.INVALID_DISPLAY, index))
             continue
         try:
-            mesh = mesh_from_polydata(scene_api.polydata(node))
+            mesh = mesh_from_polydata(scene_api.polydata(node), bake)
         except InvalidMeshError:
             mesh = SkipReason.INVALID_GEOMETRY
         if mesh is None:
@@ -383,6 +513,7 @@ def collect_scene(scene_api: SceneApi, *, anonymize_names: bool = False) -> Coll
                 visible=visible,
                 mrml_id=node_id,
                 matrix=matrix,
+                baked=bake is not None,
             )
         )
     return CollectedScene(tuple(entities), tuple(skipped), names.anonymize)

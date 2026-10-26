@@ -264,6 +264,9 @@ class FakeScene:
     def world_matrix(self, node):
         return np.eye(4)
 
+    def world_transform(self, node):
+        return None
+
 
 MODEL_DISPLAY = ("vtkMRMLModelDisplayNode", "vtkMRMLDisplayNode", "vtkMRMLNode")
 SLICE_DISPLAY = ("vtkMRMLSliceDisplayNode", *MODEL_DISPLAY)
@@ -318,8 +321,9 @@ class FakeDisplay:
 
 
 class FakeMrmlTransform:
-    def __init__(self, matrix=None):
+    def __init__(self, matrix=None, warp=None):
         self.matrix = matrix  # None = non-linear chain
+        self.warp = warp  # the VTK transform of a non-linear chain
         self.asked = 0
 
     def IsTransformToWorldLinear(self):  # noqa: N802
@@ -329,6 +333,10 @@ class FakeMrmlTransform:
         self.asked += 1
         out.DeepCopy([v for row in self.matrix for v in row])
         return 1
+
+    def GetTransformToWorld(self, out):  # noqa: N802
+        if self.warp is not None:
+            out.Concatenate(self.warp)
 
 
 class FakeModel:

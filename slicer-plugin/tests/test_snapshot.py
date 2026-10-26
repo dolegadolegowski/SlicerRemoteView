@@ -23,6 +23,7 @@ from support import (
     validate_glb,
 )
 
+from remoteview_core import snapshot as snapshot_module
 from remoteview_core.protocol_client import (
     ProtocolClient,
     ProtocolStateError,
@@ -140,11 +141,36 @@ def test_snapshot_over_the_relay_limit_is_refused_before_anything_is_sent():
     # no version used, the session untouched
     assert client.next_scene_version == 1 and client.state is SessionState.CREATED
     assert client.snapshot_in_flight is None
-    client.limits["maxSnapshotBytes"] = raised.value.byte_length  # exactly the limit is allowed
-    assert (
-        build_snapshot(scene, client, slicer_version="5.12.4").byte_length
-        == raised.value.byte_length
-    )
+    # its binary chunk alone is over the limit: refused before the GLB is written, with the estimated size (SLC-14)
+    size = build_snapshot(scene, live_client(), slicer_version="5.12.4").byte_length
+    assert abs(raised.value.byte_length - size) <= 0.1 * size
+    client.limits["maxSnapshotBytes"] = size  # exactly the limit is allowed
+    assert build_snapshot(scene, client, slicer_version="5.12.4").byte_length == size
+
+
+def test_snapshot_just_over_the_relay_limit_is_refused_with_its_real_size():
+    """Binary chunk within the limit, the whole file one byte over: written, measured, refused (no estimate)."""
+    scene = FakeScene({"id": "vtkMRMLModelNode4", "mesh": sphere(32)})
+    size = build_snapshot(scene, live_client(), slicer_version="5.12.4").byte_length
+    client = live_client(maxSnapshotBytes=size - 1)
+    with pytest.raises(SnapshotTooLargeError) as raised:
+        build_snapshot(scene, client, slicer_version="5.12.4")
+    assert (raised.value.byte_length, raised.value.limit) == (size, size - 1)
+    assert client.next_scene_version == 1 and client.snapshot_in_flight is None
+
+
+def test_snapshot_far_over_the_limit_is_never_written(monkeypatch):
+    def no_write(*args, **kwargs):
+        raise AssertionError("written")
+
+    monkeypatch.setattr(snapshot_module, "write_glb", no_write)
+    client = live_client(maxSnapshotBytes=5_000)
+    with pytest.raises(SnapshotTooLargeError):
+        build_snapshot(
+            FakeScene({"id": "vtkMRMLModelNode4", "mesh": sphere(32)}),
+            client,
+            slicer_version="5.12.4",
+        )
 
 
 def _not_live(state: str) -> ProtocolClient:

@@ -18,6 +18,7 @@ from remoteview_core.coords import (
     ras_matrix_to_gltf,
     ras_to_gltf_normals,
     ras_to_gltf_points,
+    unit_normals,
     winding_preserved,
 )
 
@@ -192,6 +193,15 @@ def test_coords_match_shared_asymmetric_fixture():
     fixture = np.frombuffer(data, dtype="<f4").reshape(-1, 3)
     ras = np.array([[0, 0, 0], [100, 0, 0], [0, 0, 50], [0, 100, 0]], dtype=np.float64)
     np.testing.assert_array_equal(ras_to_gltf_points(ras), fixture)
+
+
+def test_coords_unit_normals_keep_the_frame_and_repair_zero():
+    """SLC-14: decimated meshes are already in glTF space, so only the renormalising (and the +Y rule) applies."""
+    out = unit_normals([[0.0, 0.0, 2.0], [0.0, 0.0, 0.0], [3.0, 4.0, 0.0]])
+    np.testing.assert_allclose(out, [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [0.6, 0.8, 0.0]], atol=1e-7)
+    assert out.dtype == np.float32
+    with pytest.raises(ValueError, match="non-finite"):
+        unit_normals([[np.nan, 0.0, 1.0]])
 
 
 def test_coords_normals_survive_extreme_magnitudes():
