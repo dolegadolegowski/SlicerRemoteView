@@ -274,7 +274,8 @@ def test_scene_updates_refuses_what_is_not_a_node_change(strict, bad, state):
         client.send_changes(bad)
     assert client.versions.last == last
     if state == "in-flight":
-        assert client.handle(ack(2)) == []  # the good change of the refused call was not kept either
+        # the good change of the refused call was not kept either
+        assert client.handle(ack(2)) == []
 
 
 @pytest.mark.parametrize("state", ["acked", "in-flight", "first"])
