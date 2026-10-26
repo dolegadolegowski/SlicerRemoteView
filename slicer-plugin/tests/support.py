@@ -128,10 +128,13 @@ def _started(process: NodeProcess, prefix: str, what: str) -> NodeProcess:
     return process
 
 
-def start_relay_stub() -> NodeProcess:
-    """The relay stub of tools/fake-slicer (``tests/relay_stub.mjs``); ``.address`` is its ``ws://`` URL."""
+def start_relay_stub(*options: str) -> NodeProcess:
+    """The relay stub of tools/fake-slicer (``tests/relay_stub.mjs``, with its ``options``); ``.address`` is its
+    ``ws://`` URL."""
     return _started(
-        NodeProcess("relay_stub.mjs", RELAY_STUB.as_uri()), "ws://127.0.0.1:", "the relay stub"
+        NodeProcess("relay_stub.mjs", *options, RELAY_STUB.as_uri()),
+        "ws://127.0.0.1:",
+        "the relay stub",
     )
 
 
