@@ -395,14 +395,14 @@ describe("viewer.joined (§5.2)", () => {
       .toBe(relay!.clock.now() + 1_800_000);
   });
 
-  it("rejoin with a token is SRV-15: until then SESSION_NOT_FOUND, socket kept open for a code join", async () => {
+  it("a rejoin with a token of no live entry: SESSION_NOT_FOUND, socket kept open for a code join (SRV-15)", async () => {
     const pub = await publisher();
     const { joined } = await viewer(pub.code);
     const client = await connectClient(relay!.url);
     const rejoin = joinMessage(pub.code, {
       id: "v-2",
       sessionId: joined.sessionId,
-      viewerToken: joined.viewerToken,
+      viewerToken: `vt_${"A".repeat(43)}`,
     });
     delete rejoin.code;
     client.sendRaw(JSON.stringify(rejoin));
@@ -507,6 +507,22 @@ describe("unit", () => {
     }
     expect(clock.pending).toBe(0); // answered at once: no jitter timer either way
     expect(session.viewers.size).toBe(0);
+  });
+
+  it("a rejoin too gets CAPACITY + 4006 while a global budget refuses viewers (SRV-15)", () => {
+    const clock = new ManualClock();
+    const deps = unitDeps(clock);
+    const { session } = deps.registry.createSession("mobile");
+    const { connection: first } = fakeConnection();
+    const { viewer, viewerToken } = deps.registry.addViewer(session, first, "web");
+    deps.registry.viewerDisconnected(session, viewer);
+    const { handlers } = viewerHandlers({ ...deps, overCapacity: () => true });
+    const { connection, sent } = fakeConnection();
+    const message = joinMessage(session.code, { sessionId: session.id, viewerToken });
+    delete message.code;
+    invoke(handlers["viewer.join"]!, connection, message);
+    expect(sent).toEqual([{ code: "CAPACITY", close: 4006 }]);
+    expect(viewer.peer).toBeUndefined();
   });
 
   it("fails closed: a join the normaliser did not see is refused, whatever its code says", () => {

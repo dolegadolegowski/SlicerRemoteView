@@ -391,6 +391,19 @@ export class Registry extends EventEmitter<RegistryEvents> {
   }
 
   /**
+   * A rejoin with the viewer's token (§5.1): `peer` becomes the entry's socket. An entry that was
+   * disconnected takes a slot again — `RegistryError("SESSION_FULL")` when `maxViewers` viewers are
+   * connected; one still connected (its old socket, which the caller closes `4011`, T8) keeps its
+   * slot. The caller checked that the session is live.
+   */
+  viewerReconnected(session: Session, viewer: Viewer, peer: Peer): void {
+    if (viewer.peer === undefined && session.connectedViewers >= this.#limits.maxViewers)
+      throw new RegistryError("SESSION_FULL", "MAX_VIEWERS reached");
+    viewer.peer = peer;
+    this.#countViewers(session);
+  }
+
+  /**
    * The viewer's socket is gone (`viewer.leave`, a drop, or the session ending): the entry stays for
    * rejoin until the session ends or, while disconnected, until `VIEWER_ENTRIES_PER_SLOT ×
    * maxViewers` newer entries exist (architecture §3). The only place `peer` is cleared, so

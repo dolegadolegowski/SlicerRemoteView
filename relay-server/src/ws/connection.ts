@@ -63,6 +63,7 @@ export class Connection implements Peer {
   #reading = true;
   #paused = false;
   #handshakeTimer: TimerHandle | undefined;
+  #handshake: { ms: number; onTimeout: () => void } | undefined;
 
   constructor(
     readonly socket: WebSocket,
@@ -216,11 +217,21 @@ export class Connection implements Peer {
 
   /** Runs `onTimeout` unless `completeHandshake()` is called within `ms` (§3.1, close `4012`). */
   armHandshakeTimer(ms: number, onTimeout: () => void): void {
+    this.#handshake = { ms, onTimeout };
     this.#clearHandshakeTimer();
     this.#handshakeTimer = this.clock.setTimeout(() => {
       this.#handshakeTimer = undefined;
       onTimeout();
     }, ms);
+  }
+
+  /**
+   * A full handshake window again, from now: after `SESSION_NOT_FOUND` the client may fall back to
+   * a create or a code join on this socket (§4.3, §9.2: "socket kept open 10 s for fallback").
+   */
+  restartHandshakeTimer(): void {
+    if (this.#handshake === undefined) return;
+    this.armHandshakeTimer(this.#handshake.ms, this.#handshake.onTimeout);
   }
 
   /** The socket is bound to a session (create, resume or join succeeded). */

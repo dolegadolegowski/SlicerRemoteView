@@ -167,7 +167,14 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   // Compile every protocol schema now, not on the first client message (≈ 250 ms of blocked loop).
   const validators = defaultSchemas();
   const limiter = options.limiter ?? new RateLimiter({ clock, logger });
-  const publisher = publisherHandlers({ registry, config, limiter, logger });
+  const publisher = publisherHandlers({
+    registry,
+    config,
+    limiter,
+    logger,
+    // A resume that replaces a still-open publisher socket ends its snapshot in flight (§4.3).
+    publisherReplaced: (session) => snapshot.publisherGone(session),
+  });
   const fan = fanout({ registry, config, logger, clock });
   const viewer = viewerHandlers({
     registry,
