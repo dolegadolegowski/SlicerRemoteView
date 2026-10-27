@@ -15,6 +15,7 @@ const ALLOWED_EXTENSIONS = ["KHR_mesh_quantization"];
 
 interface ManifestEntry {
   valid: boolean;
+  anonymizedNames?: boolean;
   byteLength: number;
   sha256: string;
   nodeIds: string[];
@@ -157,7 +158,13 @@ describe("GLB fixtures (PRO-08, §7)", () => {
       .sort();
     expect(Object.keys(manifest.files).sort()).toEqual(onDisk);
     expect(validFiles.map(([f]) => f).sort()).toEqual(
-      ["asymmetric-2nodes.glb", "quantized-1node.glb", "large-synthetic.glb"].sort(),
+      [
+        "asymmetric-2nodes.glb",
+        "quantized-1node.glb",
+        "large-synthetic.glb",
+        "aliased-segments.glb",
+        "anonymized-segments.glb",
+      ].sort(),
     );
     expect(brokenFiles.map(([f]) => f).sort()).toEqual(
       [
@@ -208,7 +215,7 @@ describe("GLB fixtures (PRO-08, §7)", () => {
         units: "m",
         upAxis: "+Y",
         rasToGltf: "x=R*0.001, y=S*0.001, z=-A*0.001",
-        anonymizedNames: false,
+        anonymizedNames: entry.anonymizedNames ?? false,
       });
       const nodeIds: string[] = [];
       let triangles = 0;
@@ -227,7 +234,11 @@ describe("GLB fixtures (PRO-08, §7)", () => {
           triangleCount: expect.any(Number),
           baked: false,
         });
-        if (t.extras!.kind === "segment") expect(t.extras!.segmentId).toEqual(expect.any(String));
+        if (t.extras!.kind === "segment") {
+          // §7.3: the raw segment ID is carried in extras, except under anonymizedNames (it may be name-derived)
+          if (entry.anonymizedNames) expect(t.extras!.segmentId, file).toBeUndefined();
+          else expect(t.extras!.segmentId).toEqual(expect.any(String));
+        }
         nodeIds.push(t.extras!.nodeId as string);
         const m = json.nodes![t.children![0]!]!;
         expect(m.children ?? []).toHaveLength(0);
@@ -319,6 +330,41 @@ describe("GLB fixtures (PRO-08, §7)", () => {
     }
   }, 30_000);
 
+  it("segment aliases (§7.3, protocol 1.1): non-conforming IDs and anonymised scenes get s_<n>, no raw ID leaks", () => {
+    const nodeIdsOf = (file: string) =>
+      parseGlb(bytes(file))
+        .json.nodes!.map((n) => n.extras?.["nodeId"] as string | undefined)
+        .filter((id): id is string => id !== undefined && id !== "root");
+    const aliased = parseGlb(bytes("aliased-segments.glb")).json;
+    const byId = new Map(
+      aliased
+        .nodes!.filter((n) => n.extras?.["kind"] === "segment")
+        .map((n) => [n.extras!["nodeId"], n.extras!]),
+    );
+    // the raw ID `left lung` is outside [A-Za-z0-9_./:-]: aliased nodeId, raw ID kept in extras
+    expect(byId.get("vtkMRMLSegmentationNode1/s_1")).toMatchObject({ segmentId: "left lung" });
+    // a conforming ID keeps the verbatim nodeId
+    expect(byId.get("vtkMRMLSegmentationNode1/Segment_2")).toMatchObject({
+      segmentId: "Segment_2",
+    });
+    expect(manifest.files["aliased-segments.glb"]!.anonymizedNames).toBeUndefined();
+
+    // anonymised: every segment is aliased, no segmentId, and no raw ID or real name appears anywhere
+    const entry = manifest.files["anonymized-segments.glb"]!;
+    expect(entry.anonymizedNames).toBe(true);
+    const doc = parseGlb(bytes("anonymized-segments.glb"));
+    const text = JSON.stringify(doc.json);
+    expect(text).not.toMatch(/segmentId|left lung|Left lung|Spleen|Segment_/);
+    const segments = doc.json.nodes!.filter((n) => n.extras?.["kind"] === "segment");
+    expect(segments.map((n) => n.extras!["nodeId"])).toEqual([
+      "vtkMRMLSegmentationNode1/s_1",
+      "vtkMRMLSegmentationNode1/s_2",
+    ]);
+    expect(segments.map((n) => n.extras!["name"])).toEqual(["Segment 1", "Segment 2"]);
+    for (const file of ["aliased-segments.glb", "anonymized-segments.glb"])
+      for (const id of nodeIdsOf(file)) expect(id, file).toMatch(/^[A-Za-z0-9_./:-]{1,128}$/);
+  });
+
   it("the scene.snapshot.begin fixtures derived from the manifest carry its byteLength, sha256 and chunkCount", () => {
     const begins = loadFixtures("scene.snapshot.begin")[0]!.valid;
     const derived = begins.filter(
@@ -326,6 +372,8 @@ describe("GLB fixtures (PRO-08, §7)", () => {
     );
     expect(derived.map((v) => v.file).sort()).toEqual(
       [
+        "valid-aliased-segments.json",
+        "valid-anonymized-segments.json",
         "valid-asymmetric-2nodes.json",
         "valid-quantized-1node.json",
         "valid-large-synthetic.json",

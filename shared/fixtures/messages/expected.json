@@ -665,6 +665,16 @@
       "instancePath": "/type"
     },
     {
+      "file": "scene.snapshot.begin/valid-aliased-segments.json",
+      "type": "scene.snapshot.begin",
+      "valid": true
+    },
+    {
+      "file": "scene.snapshot.begin/valid-anonymized-segments.json",
+      "type": "scene.snapshot.begin",
+      "valid": true
+    },
+    {
       "file": "scene.snapshot.begin/valid-asymmetric-2nodes.json",
       "type": "scene.snapshot.begin",
       "valid": true
