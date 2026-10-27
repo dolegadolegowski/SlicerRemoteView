@@ -1,0 +1,15 @@
+{
+  "$comment": "a snapshot version is a uint32 (§3.3, §8.3)",
+  "expect": {
+    "instancePath": "/haveSnapshotVersion",
+    "keyword": "maximum"
+  },
+  "message": {
+    "protocolVersion": "1.0",
+    "type": "scene.request",
+    "id": "v-12",
+    "haveSnapshotVersion": 4294967296,
+    "haveSceneVersion": 44,
+    "reason": "GAP"
+  }
+}

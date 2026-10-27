@@ -61,11 +61,11 @@ export type ErrorCode =
   | "CAPACITY"
   | "INTERNAL";
 /**
- * sceneVersion carried by scene.update, scene.nodeRemoved and scene.nodeAdded: never 0; the relay, not the schema, enforces sceneVersion > baseVersion (§8.1, §8.4).
+ * sceneVersion carried by scene.update, scene.nodeRemoved and scene.nodeAdded: a uint32, never 0; the relay, not the schema, enforces sceneVersion > baseVersion (§8.1, §8.4).
  */
 export type UpdateVersion = number;
 /**
- * Monotonic scene version; 0 = nothing published (§4.2, §8.4).
+ * Monotonic scene version, a uint32 (the chunk header carries it as uint32, §6.3); 0 = nothing published (§3.3, §4.2, §8.4).
  */
 export type SceneVersion = number;
 /**
@@ -81,7 +81,7 @@ export type NodeKind = "model" | "segment";
  */
 export type SceneRequestReason = "GAP" | "RECONNECT" | "CHECKSUM_MISMATCH" | "USER";
 /**
- * sceneVersion of a GLB snapshot; never 0, because 0 means nothing published (§4.2, §6.2, §8.4).
+ * sceneVersion of a GLB snapshot, a uint32; never 0, because 0 means nothing published (§3.3, §4.2, §6.2, §8.4).
  */
 export type SnapshotVersion = number;
 /**
@@ -89,9 +89,9 @@ export type SnapshotVersion = number;
  */
 export type SnapshotAbortReason = "SUPERSEDED" | "CHECKSUM_MISMATCH" | "BAD_SEQUENCE" | "PUBLISHER_GONE" | "TIMEOUT";
 /**
- * Size of a complete GLB snapshot in bytes, at most MAX_SNAPSHOT_BYTES = 64 MiB (§3.3, §6.2).
+ * byteLength as a publisher announces it in scene.snapshot.begin: deliberately without a maximum, so that a value above MAX_SNAPSHOT_BYTES reaches the relay's rule and is answered PAYLOAD_TOO_LARGE with details.maxSnapshotBytes instead of INVALID_MESSAGE (§3.3, §6.2, report 2026-10-20-server-2).
  */
-export type ByteLength = number;
+export type AnnouncedByteLength = number;
 /**
  * Container format of a snapshot; v1 knows only binary glTF (§6.2).
  */
@@ -112,6 +112,10 @@ export type GltfExtensions1 = GltfExtension[];
  * SHA-256 digest as 64 lowercase hex characters (§6.2, §6.4).
  */
 export type Sha256 = string;
+/**
+ * Size of a complete GLB snapshot in bytes, at most MAX_SNAPSHOT_BYTES = 64 MiB (§3.3, §6.2). Used where the relay reports a snapshot it holds (scene.snapshot.ready, viewer.joined.snapshot); a publisher's announcement uses announcedByteLength.
+ */
+export type ByteLength = number;
 /**
  * Visual properties of one scene node, addressed by its stable nodeId: at least one of visible, color, opacity, matrix (last-writer-wins per property, §8.1). Used by scene.update.changes and scene.state.nodes (§8.3). Never carries a name: the JSON protocol repeats no node names (§7, §8.3).
  */
@@ -366,7 +370,7 @@ export interface SceneRequest {
    */
   haveSnapshotVersion: number | null;
   /**
-   * Monotonic scene version; 0 = nothing published (§4.2, §8.4).
+   * Monotonic scene version, a uint32 (the chunk header carries it as uint32, §6.3); 0 = nothing published (§3.3, §4.2, §8.4).
    */
   haveSceneVersion: number;
   reason: SceneRequestReason;
@@ -415,10 +419,10 @@ export interface SceneSnapshotBegin {
   replyTo?: Id;
   ts?: TimestampMs;
   /**
-   * sceneVersion of a GLB snapshot; never 0, because 0 means nothing published (§4.2, §6.2, §8.4).
+   * sceneVersion of a GLB snapshot, a uint32; never 0, because 0 means nothing published (§3.3, §4.2, §6.2, §8.4).
    */
   sceneVersion: number;
-  byteLength: ByteLength;
+  byteLength: AnnouncedByteLength;
   /**
    * SHA-256 of the complete GLB, repeated in scene.snapshot.end (§6.2, §6.4).
    */
@@ -493,7 +497,7 @@ export interface SceneState {
   replyTo?: Id;
   ts?: TimestampMs;
   /**
-   * Monotonic scene version; 0 = nothing published (§4.2, §8.4).
+   * Monotonic scene version, a uint32 (the chunk header carries it as uint32, §6.3); 0 = nothing published (§3.3, §4.2, §8.4).
    */
   sceneVersion: number;
   /**
@@ -522,11 +526,11 @@ export interface SceneUpdate {
   replyTo?: Id;
   ts?: TimestampMs;
   /**
-   * sceneVersion carried by scene.update, scene.nodeRemoved and scene.nodeAdded: never 0; the relay, not the schema, enforces sceneVersion > baseVersion (§8.1, §8.4).
+   * sceneVersion carried by scene.update, scene.nodeRemoved and scene.nodeAdded: a uint32, never 0; the relay, not the schema, enforces sceneVersion > baseVersion (§8.1, §8.4).
    */
   sceneVersion: number;
   /**
-   * Monotonic scene version; 0 = nothing published (§4.2, §8.4).
+   * Monotonic scene version, a uint32 (the chunk header carries it as uint32, §6.3); 0 = nothing published (§3.3, §4.2, §8.4).
    */
   baseVersion: number;
   /**
@@ -729,7 +733,7 @@ export interface SessionResume {
   publisherToken: Token;
   clientInfo: ClientInfo;
   /**
-   * Monotonic scene version; 0 = nothing published (§4.2, §8.4).
+   * Monotonic scene version, a uint32 (the chunk header carries it as uint32, §6.3); 0 = nothing published (§3.3, §4.2, §8.4).
    */
   lastSceneVersion: number;
 }

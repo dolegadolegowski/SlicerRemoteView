@@ -83,7 +83,13 @@ describe("snapshot schemas + fixtures (PRO-05)", () => {
     expect(ok({ chunkSize: 1048576 })).toBe(true);
     expect(ok({ chunkSize: 1048577 })).toBe(false);
     expect(ok({ byteLength: 67108864, chunkCount: 64 })).toBe(true);
-    expect(ok({ byteLength: 67108865, chunkCount: 65 })).toBe(false);
+    // PRO-21: `begin.byteLength` has no maximum — the relay answers PAYLOAD_TOO_LARGE (§6.2, report 2026-10-20-server-2);
+    // the sizes the relay reports (`ready`, `viewer.joined.snapshot`) keep the 64 MiB maximum (see the next test).
+    expect(ok({ byteLength: 67108865, chunkCount: 65 })).toBe(true);
+    expect(ok({ byteLength: 1e12, chunkCount: 1024 })).toBe(true);
+    expect(ok({ byteLength: 0, chunkCount: 1 })).toBe(false);
+    expect(ok({ sceneVersion: 4294967295 })).toBe(true);
+    expect(ok({ sceneVersion: 4294967296 })).toBe(false);
     expect(ok({ chunkCount: 1024 })).toBe(true);
     expect(ok({ chunkCount: 1025 })).toBe(false);
     expect(ok({ chunkCount: 0 })).toBe(false);
@@ -99,6 +105,40 @@ describe("snapshot schemas + fixtures (PRO-05)", () => {
     expect(props.sha256?.$ref).toBe("defs.schema.json#/definitions/sha256");
     // The relay, not the schema, checks chunkCount == ceil(byteLength / chunkSize) (§6.2):
     expect(ok({ chunkCount: 17 })).toBe(true);
+  });
+
+  it("only a publisher's announcement lacks the 64 MiB maximum: ready and viewer.joined.snapshot keep it (PRO-21)", () => {
+    const defs = loadSchemas().get("defs.schema.json")!.definitions as Record<
+      string,
+      { maximum?: number }
+    >;
+    expect(defs.announcedByteLength).toBeDefined();
+    expect(defs.announcedByteLength!.maximum).toBeUndefined();
+    expect(defs.byteLength!.maximum).toBe(67108864);
+    const ready = compile(ajv, "scene.snapshot.ready.schema.json");
+    const base = fixtureSet("scene.snapshot.ready").valid[0]!.message;
+    expect(ready({ ...base, byteLength: 67108864 })).toBe(true);
+    expect(ready({ ...base, byteLength: 67108865 })).toBe(false);
+  });
+
+  it("every scene version in every schema is a uint32 (§3.3, §6.3)", () => {
+    const defs = loadSchemas().get("defs.schema.json")!.definitions as Record<
+      string,
+      { maximum?: number }
+    >;
+    for (const name of ["sceneVersion", "snapshotVersion", "updateVersion"])
+      expect(defs[name]!.maximum, name).toBe(4294967295);
+    for (const [file, schema] of loadSchemas()) {
+      const text = JSON.stringify(schema);
+      for (const match of text.matchAll(
+        /"(\w*(?:snapshotVersion|SnapshotVersion)\w*)":\{([^{}]*)\}/g,
+      ))
+        if (
+          match[2]!.includes('"type":["integer","null"]') ||
+          match[2]!.includes('"type":"integer"')
+        )
+          expect(match[2], `${file}: ${match[1]}`).toContain('"maximum":4294967295');
+    }
   });
 
   it("every valid begin fixture is self-consistent: chunkCount = ceil(byteLength / chunkSize), one at 64 KiB", () => {

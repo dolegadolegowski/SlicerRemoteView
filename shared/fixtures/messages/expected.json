@@ -322,6 +322,12 @@
       "instancePath": "/haveSceneVersion"
     },
     {
+      "file": "scene.request/invalid-haveSnapshotVersion-over-uint32.json",
+      "type": "scene.request",
+      "valid": false,
+      "instancePath": "/haveSnapshotVersion"
+    },
+    {
       "file": "scene.request/invalid-haveSnapshotVersion-zero.json",
       "type": "scene.request",
       "valid": false,
@@ -509,12 +515,6 @@
       "valid": true
     },
     {
-      "file": "scene.snapshot.begin/invalid-byteLength-over.json",
-      "type": "scene.snapshot.begin",
-      "valid": false,
-      "instancePath": "/byteLength"
-    },
-    {
       "file": "scene.snapshot.begin/invalid-byteLength-zero.json",
       "type": "scene.snapshot.begin",
       "valid": false,
@@ -635,6 +635,12 @@
       "instancePath": "/profile"
     },
     {
+      "file": "scene.snapshot.begin/invalid-sceneVersion-over-uint32.json",
+      "type": "scene.snapshot.begin",
+      "valid": false,
+      "instancePath": "/sceneVersion"
+    },
+    {
       "file": "scene.snapshot.begin/invalid-sceneVersion-zero.json",
       "type": "scene.snapshot.begin",
       "valid": false,
@@ -664,6 +670,11 @@
       "valid": true
     },
     {
+      "file": "scene.snapshot.begin/valid-byteLength-over-limit.json",
+      "type": "scene.snapshot.begin",
+      "valid": true
+    },
+    {
       "file": "scene.snapshot.begin/valid-chunk-64k.json",
       "type": "scene.snapshot.begin",
       "valid": true
@@ -675,6 +686,11 @@
     },
     {
       "file": "scene.snapshot.begin/valid-large-synthetic.json",
+      "type": "scene.snapshot.begin",
+      "valid": true
+    },
+    {
+      "file": "scene.snapshot.begin/valid-max-uint32-version.json",
       "type": "scene.snapshot.begin",
       "valid": true
     },
@@ -872,6 +888,12 @@
       "instancePath": "/sceneVersion"
     },
     {
+      "file": "scene.state/invalid-sceneVersion-over-uint32.json",
+      "type": "scene.state",
+      "valid": false,
+      "instancePath": "/sceneVersion"
+    },
+    {
       "file": "scene.state/invalid-snapshotVersion-string.json",
       "type": "scene.state",
       "valid": false,
@@ -903,6 +925,12 @@
       "file": "scene.state/valid-example.json",
       "type": "scene.state",
       "valid": true
+    },
+    {
+      "file": "scene.update/invalid-baseVersion-over-uint32.json",
+      "type": "scene.update",
+      "valid": false,
+      "instancePath": "/baseVersion"
     },
     {
       "file": "scene.update/invalid-baseVersion-string.json",
@@ -1001,6 +1029,12 @@
       "instancePath": ""
     },
     {
+      "file": "scene.update/invalid-sceneVersion-over-uint32.json",
+      "type": "scene.update",
+      "valid": false,
+      "instancePath": "/sceneVersion"
+    },
+    {
       "file": "scene.update/invalid-sceneVersion-zero.json",
       "type": "scene.update",
       "valid": false,
@@ -1019,6 +1053,11 @@
     },
     {
       "file": "scene.update/valid-example.json",
+      "type": "scene.update",
+      "valid": true
+    },
+    {
+      "file": "scene.update/valid-max-uint32-version.json",
       "type": "scene.update",
       "valid": true
     },
@@ -1506,6 +1545,12 @@
     },
     {
       "file": "session.resume/invalid-lastSceneVersion-negative.json",
+      "type": "session.resume",
+      "valid": false,
+      "instancePath": "/lastSceneVersion"
+    },
+    {
+      "file": "session.resume/invalid-lastSceneVersion-over-uint32.json",
       "type": "session.resume",
       "valid": false,
       "instancePath": "/lastSceneVersion"
