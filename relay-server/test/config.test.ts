@@ -216,15 +216,40 @@ describe(".env.example (SRV-02 criterion 3)", () => {
   });
 });
 
-describe("RELAY_TEST_FAST_TIMERS (test-only, SRV-21)", () => {
+describe("RELAY_TEST_FAST_TIMERS (test-only, SRV-21, SRV-29)", () => {
   it("is honoured under NODE_ENV=test", () => {
     expect(loadConfig({ NODE_ENV: "test", RELAY_TEST_FAST_TIMERS: "1" }).testFastTimers).toBe(true);
   });
 
-  it.each(["production", "development", undefined])("is ignored under NODE_ENV=%s", (nodeEnv) => {
-    const env: Record<string, string> = { RELAY_TEST_FAST_TIMERS: "1" };
-    if (nodeEnv !== undefined) env.NODE_ENV = nodeEnv;
-    expect(loadConfig(env).testFastTimers).toBe(false);
+  it.each(["production", "development", "TEST", " test", "test ", "", undefined])(
+    "is ignored under NODE_ENV=%j (exactly `test` only)",
+    (nodeEnv) => {
+      const env: Record<string, string> = { RELAY_TEST_FAST_TIMERS: "1" };
+      if (nodeEnv !== undefined) env.NODE_ENV = nodeEnv;
+      expect(loadConfig(env).testFastTimers).toBe(false);
+    },
+  );
+
+  it.each(["RAILWAY_PUBLIC_DOMAIN", "RAILWAY_REPLICA_ID"])(
+    "is refused with %s present, even empty",
+    (name) => {
+      for (const value of ["x", ""])
+        expect(() =>
+          loadConfig({ NODE_ENV: "test", RELAY_TEST_FAST_TIMERS: "1", [name]: value }),
+        ).toThrow(expect.objectContaining({ variable: "RELAY_TEST_FAST_TIMERS" }));
+    },
+  );
+
+  it("refuses to start on Railway (RAILWAY_PUBLIC_DOMAIN set), naming the flag", () => {
+    const railway = { RAILWAY_PUBLIC_DOMAIN: "relay.up.railway.app", RELAY_TEST_FAST_TIMERS: "1" };
+    expect(() => loadConfig({ ...railway, NODE_ENV: "test" })).toThrow(
+      expect.objectContaining({ name: "ConfigError", variable: "RELAY_TEST_FAST_TIMERS" }),
+    );
+    // Where it would change nothing, it stops nothing.
+    expect(loadConfig({ ...railway, NODE_ENV: "production" }).testFastTimers).toBe(false);
+    expect(loadConfig({ ...railway, NODE_ENV: "test", RELAY_TEST_FAST_TIMERS: "0" })).toMatchObject(
+      { testFastTimers: false },
+    );
   });
 });
 

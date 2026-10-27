@@ -2,7 +2,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ALPHABET, validateMessage } from "@slicerremoteview/shared";
 import { loadConfig } from "../src/config.js";
 import { createLogger } from "../src/logger.js";
-import { addressBucket, MAX_TRACKED_KEYS, RATE_LIMITS, RateLimiter } from "../src/ratelimit.js";
+import {
+  addressBucket,
+  FAST_TIMER_SCALE,
+  MAX_TRACKED_KEYS,
+  RATE_LIMITS,
+  RateLimiter,
+} from "../src/ratelimit.js";
 import { INVALID_CODE_JITTER_MS } from "../src/ws/viewer.js";
 import { fixture } from "./helpers/fixtures.js";
 import { ManualClock } from "./helpers/manual-clock.js";
@@ -11,7 +17,7 @@ import type { Received, TestClient, TestRelay } from "./helpers/ws-client.js";
 
 const MINUTE = 60_000;
 
-function setup(options: { maxKeys?: number } = {}) {
+function setup(options: { maxKeys?: number; timeScale?: number } = {}) {
   const clock = new ManualClock();
   const lines: string[] = [];
   const limiter = new RateLimiter({
@@ -21,6 +27,83 @@ function setup(options: { maxKeys?: number } = {}) {
   });
   return { clock, limiter, lines, key: limiter.clientKey("203.0.113.7") };
 }
+
+describe("RateLimiter with timeScale (RELAY_TEST_FAST_TIMERS, SRV-29)", () => {
+  it("divides every window, the ban, the alarm and the sweep by 60; the counts stay", () => {
+    const { clock, limiter, key, lines } = setup({ timeScale: FAST_TIMER_SCALE });
+    // 10 joins a second; the 11th may retry after a second.
+    for (let i = 0; i < RATE_LIMITS.joinsPerMinute; i++) expect(limiter.join(key).ok).toBe(true);
+    expect(limiter.join(key)).toEqual({ ok: false, retryAfterS: 1 });
+    clock.advance(1_000);
+    expect(limiter.join(key).ok).toBe(true);
+    // 30 upgrades and 5 creates a second.
+    for (let i = 0; i < RATE_LIMITS.upgradesPerMinute; i++)
+      expect(limiter.upgrade(key).ok).toBe(true);
+    expect(limiter.upgrade(key)).toEqual({ ok: false, retryAfterS: 1 });
+    for (let i = 0; i < RATE_LIMITS.createsPerMinute; i++)
+      expect(limiter.create(key).ok).toBe(true);
+    expect(limiter.create(key)).toEqual({ ok: false, retryAfterS: 1 });
+    clock.advance(1_000);
+    expect(limiter.upgrade(key).ok).toBe(true);
+    expect(limiter.create(key).ok).toBe(true);
+    // 20 failures over 11 s fall outside one 10 s window: no ban.
+    const slow = limiter.clientKey("198.51.100.1");
+    for (let i = 0; i < RATE_LIMITS.failuresBeforeBan; i++) {
+      limiter.joinFailed(slow);
+      clock.advance(550);
+    }
+    expect(limiter.checkBan(slow).ok).toBe(true);
+    // 20 within 10 s: banned for 10 s, logged so.
+    const fast = limiter.clientKey("198.51.100.2");
+    for (let i = 0; i < RATE_LIMITS.failuresBeforeBan; i++) {
+      limiter.joinFailed(fast);
+      clock.advance(400);
+    }
+    expect(limiter.join(fast)).toEqual({ ok: false, retryAfterS: 10 });
+    expect(lines.filter((l) => l.includes("client_banned")).map((l) => JSON.parse(l))).toEqual([
+      expect.objectContaining({ banS: 10 }),
+    ]);
+    clock.advance(10_000);
+    expect(limiter.join(fast).ok).toBe(true);
+    // More than 1,000 failures within a minute: the alarm, for a minute.
+    for (let i = 0; i <= RATE_LIMITS.alarmFailuresPerHour; i++)
+      limiter.joinFailed(limiter.clientKey(`10.9.${i >> 8}.${i & 255}`));
+    expect(limiter.alarmActive).toBe(true);
+    clock.advance(60_000);
+    expect(limiter.alarmActive).toBe(false);
+    // The sweep runs every second: 11 s after the last failure nothing is tracked.
+    limiter.start();
+    clock.advance(11_000);
+    expect([...limiter.keys()]).toEqual([]);
+    limiter.stop();
+  });
+
+  it("counts the alarm's hour in minute-long buckets: 1,001 failures spread over 61 s raise none", () => {
+    const { clock, limiter } = setup({ timeScale: FAST_TIMER_SCALE });
+    for (let i = 0; i < 600; i++)
+      limiter.joinFailed(limiter.clientKey(`10.4.${i >> 8}.${i & 255}`));
+    clock.advance(61_000);
+    for (let i = 0; i < 401; i++)
+      limiter.joinFailed(limiter.clientKey(`10.5.${i >> 8}.${i & 255}`));
+    expect(limiter.alarmActive).toBe(false);
+  });
+
+  it.each(["upgrade", "join", "create"] as const)(
+    "the sweep drops a %s-only key after a (scaled) minute",
+    (kind) => {
+      const { clock, limiter } = setup({ timeScale: FAST_TIMER_SCALE });
+      limiter[kind](limiter.clientKey("192.0.2.9"));
+      limiter.start();
+      clock.advance(1_500);
+      expect([...limiter.keys()]).toEqual([]);
+      limiter.stop();
+    },
+  );
+
+  it.each([0, -1, Number.NaN, 0.5])("refuses a timeScale of %s", (timeScale) => {
+    expect(() => setup({ timeScale })).toThrow(RangeError);
+  });
+});
 
 describe("RateLimiter (unit, §12)", () => {
   it("keys are HMACs of the address under a per-boot secret", () => {

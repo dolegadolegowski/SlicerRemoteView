@@ -25,8 +25,8 @@ import { registerSceneRoute, sceneDownloads } from "./http/scene.js";
 import { DEFAULT_STATIC_ROOT, registerStatic } from "./http/static.js";
 import { createLogger } from "./logger.js";
 import { Metrics, registerMetricsRoute } from "./metrics.js";
-import { RateLimiter } from "./ratelimit.js";
-import { Registry } from "./registry.js";
+import { FAST_TIMER_SCALE, RateLimiter } from "./ratelimit.js";
+import { FAST_SWEEP_INTERVAL_MS, Registry } from "./registry.js";
 import { PROTOCOL_VERSIONS, RELAY_NAME, RELAY_VERSION } from "./version.js";
 import type { Connection } from "./ws/connection.js";
 import { createDispatcher } from "./ws/dispatch.js";
@@ -198,7 +198,14 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   // Compile every protocol schema now, not on the first client message (≈ 250 ms of blocked loop).
   const validators = defaultSchemas();
   const metrics = options.metrics ?? new Metrics();
-  const limiter = options.limiter ?? new RateLimiter({ clock, logger, metrics });
+  const limiter =
+    options.limiter ??
+    new RateLimiter({
+      clock,
+      logger,
+      metrics,
+      ...(config.testFastTimers && { timeScale: FAST_TIMER_SCALE }),
+    });
   const publisher = publisherHandlers({
     registry,
     config,
@@ -333,10 +340,16 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
         maxTotalBufferedBytes: config.maxTotalBufferedBytes,
         maxTotalSnapshotBytes: config.maxTotalSnapshotBytes,
         trustProxy: config.trustProxy,
+        testFastTimers: config.testFastTimers,
       },
       "relay starting",
     );
-    registry.start();
+    if (config.testFastTimers)
+      logger.warn(
+        { event: "test_fast_timers", timeScale: FAST_TIMER_SCALE, sweepMs: FAST_SWEEP_INTERVAL_MS },
+        "RELAY_TEST_FAST_TIMERS is on: rate-limit windows, ban and alarm shortened (test only)",
+      );
+    registry.start(config.testFastTimers ? FAST_SWEEP_INTERVAL_MS : undefined);
     limiter.start();
     fan.start();
     if (options.heartbeat !== false) beat.start();

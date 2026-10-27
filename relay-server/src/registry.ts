@@ -199,6 +199,8 @@ export class RegistryError extends Error {
 
 /** How often `start()` runs the sweep (architecture §5). */
 export const SWEEP_INTERVAL_MS = 10_000;
+/** The sweep under the test-only `RELAY_TEST_FAST_TIMERS` (SRV-29). */
+export const FAST_SWEEP_INTERVAL_MS = 1_000;
 /** Lead time of the idle warning (§4.4). */
 export const EXPIRING_LEAD_MS = 60_000;
 

@@ -3,7 +3,13 @@ import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { hashToken, tokenMatches } from "../src/codes.js";
-import { EXPIRING_LEAD_MS, Registry, RegistryError, SWEEP_INTERVAL_MS } from "../src/registry.js";
+import {
+  EXPIRING_LEAD_MS,
+  FAST_SWEEP_INTERVAL_MS,
+  Registry,
+  RegistryError,
+  SWEEP_INTERVAL_MS,
+} from "../src/registry.js";
 import type { ExpiryReason, RegistryOptions, Session } from "../src/registry.js";
 import { ManualClock } from "./helpers/manual-clock.js";
 
@@ -212,6 +218,15 @@ describe("expiry follows the state diagram of architecture §3 (SRV-04 criterion
     expect(errors).toHaveLength(1);
     expect([first.phase, second.phase]).toEqual(["expired", "expired"]);
     expect(expired.map(([id]) => id)).toEqual([first.id, second.id]);
+  });
+
+  it("start(FAST_SWEEP_INTERVAL_MS) sweeps every second (RELAY_TEST_FAST_TIMERS, SRV-29)", () => {
+    const { clock, registry } = setup();
+    const sweep = vi.spyOn(registry, "sweep");
+    registry.start(FAST_SWEEP_INTERVAL_MS);
+    clock.advance(1_000);
+    expect(sweep).toHaveBeenCalledTimes(1);
+    registry.stop();
   });
 
   it("start() sweeps every 10 s on the injected clock until stop()", () => {

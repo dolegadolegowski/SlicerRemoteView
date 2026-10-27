@@ -55,8 +55,12 @@ defaults (a test keeps both in sync).
 | `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` | `30`                               | SIGTERM → SIGKILL window for the `4008` drain on redeploy                                                                                                                                                                        |
 
 The three session timers are protocol maximums (§3.3, §14): a relay may run shorter, never longer.
-`RELAY_TEST_FAST_TIMERS` is test-only: it is honoured only under `NODE_ENV=test` (SRV-21) and never set in
-deployments. `NODE_OPTIONS` (`--max-old-space-size-percentage=75`, architecture §9) is set by the Dockerfile
+`RELAY_TEST_FAST_TIMERS` is test-only: it is honoured only under exactly `NODE_ENV=test`, the relay refuses to
+start with it when `RAILWAY_PUBLIC_DOMAIN` or `RAILWAY_REPLICA_ID` is present (other Railway variables
+`[TODO verify]`), and it is never set in deployments (SRV-29). It divides the rate limiter's
+times by 60 — 10 joins, 30 upgrades and 5 creates a second, 20 failures within 10 s ban for 10 s, the global alarm
+counts a minute and lasts one — and sweeps the registry every second; the counts and every other timer stay.
+`relay starting` carries `testFastTimers`, and a `warn` line follows when it is on. `NODE_OPTIONS` (`--max-old-space-size-percentage=75`, architecture §9) is set by the Dockerfile
 (SRV-20) and read by Node, not by `config.ts`; `RAILWAY_PUBLIC_DOMAIN` is injected by Railway.
 
 ## HTTP endpoints
@@ -96,7 +100,7 @@ viewer ids, connection numbers, roles, sizes, durations, close and error codes a
 code, a token, a client address, a node name or scene bytes (`test/logs.test.ts` greps a whole session logged at
 `trace`); `src/logger.ts` redacts code and token keys as a second line of defence. Two lines are there for the deploy
 checklist (DEP-06): `relay starting` before the port is bound (`heapSizeLimit` from `v8.getHeapStatistics()`,
-`maxTotalBufferedBytes`, `maxTotalSnapshotBytes`, `trustProxy`) and `first websocket upgrade` once with
+`maxTotalBufferedBytes`, `maxTotalSnapshotBytes`, `trustProxy`, `testFastTimers` — must be `false`) and `first websocket upgrade` once with
 `xff: "present" | "absent"`, `xffEntries` (the entries of `X-Forwarded-For`, the client's own included: read it from
 a client that sends none, e.g. fake-slicer on a direct connection, as the first upgrade after a deploy) and the
 HMAC'd `clientKey` — never an address. Memory figures are not on `/healthz`; `/metrics` has them.
@@ -155,7 +159,7 @@ token nor an `Authorization` value reaches a log line (`test/metrics.test.ts`).
 
 ```bash
 npm test -w relay-server             # vitest (all relay tests)
-npm test -w relay-server -- app      # one file by name filter, e.g. `app`, `config`, `codes`, `viewer`, `snapshot`, `state`, `late-join`, `fanout`, `budget`, `resume`, `shutdown`, `load-smoke`, `dispatch`, `http-scene`, `heartbeat`, `static`, `logs`, `e2e-fake-slicer`, `metrics`, `docker-smoke`
+npm test -w relay-server -- app      # one file by name filter, e.g. `app`, `config`, `codes`, `viewer`, `snapshot`, `state`, `late-join`, `fanout`, `budget`, `resume`, `shutdown`, `load-smoke`, `fast-timers`, `dispatch`, `http-scene`, `heartbeat`, `static`, `logs`, `e2e-fake-slicer`, `metrics`, `docker-smoke`
 npm run lint -w relay-server         # eslint + prettier --check
 npm run typecheck -w relay-server
 npm run build -w relay-server        # tsc → relay-server/dist (needs `npm run build -w shared` first)
@@ -164,7 +168,8 @@ npm run build -w relay-server        # tsc → relay-server/dist (needs `npm run
 The root `npm test`, `npm run lint`, `npm run typecheck`, `npm run build` run every workspace.
 
 The per-address limits (`src/ratelimit.ts`) also apply to E2E and load tests: from one address, more than 30
-upgrades, 10 wrong codes or 5 sessions per minute are refused, and 20 wrong codes within 10 minutes ban it. Harnesses run the relay with `TRUST_PROXY=true`
+upgrades, 10 wrong codes or 5 sessions per minute are refused, and 20 wrong codes within 10 minutes ban it (a
+second and 10 s under `RELAY_TEST_FAST_TIMERS`, above). Harnesses run the relay with `TRUST_PROXY=true`
 and give each simulated client its own `X-Forwarded-For` address, as `test/ratelimit.test.ts` does — unless they
 stay under the limits from one address, as the load smoke does (below).
 
