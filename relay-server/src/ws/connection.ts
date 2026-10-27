@@ -63,6 +63,7 @@ export class Connection implements Peer {
   #reading = true;
   #paused = false;
   #handshakeTimer: TimerHandle | undefined;
+  #handshake: { ms: number; onTimeout: () => void } | undefined;
 
   constructor(
     readonly socket: WebSocket,
@@ -111,6 +112,11 @@ export class Connection implements Peer {
   /** A WebSocket-level ping (§9.1); the peer answers with a pong echoing `payload`. */
   ping(payload: Buffer): void {
     if (this.isOpen) this.socket.ping(payload);
+  }
+
+  /** Answers the peer's WebSocket ping with its `payload` (`autoPong` is off, `endpoint.ts`). */
+  pong(payload: Buffer): void {
+    if (this.isOpen) this.socket.pong(payload);
   }
 
   /** Sends `error` (§9.2); `message` is developer-facing English without client data. */
@@ -187,6 +193,15 @@ export class Connection implements Peer {
     this.socket.once("close", () => this.clock.clearTimeout(timer));
   }
 
+  /**
+   * Stops decoding a socket that is closing or waits to be closed while its peer floods: nothing it
+   * sends is read any more (also not its close frame), and the close timer ends it. Unlike
+   * `terminate()`, what was queued for the peer — the close code — still reaches it.
+   */
+  stopReading(): void {
+    this.socket.pause();
+  }
+
   /** Destroys the socket without a closing handshake (a peer that reads nothing cannot complete one). */
   terminate(): void {
     this.#closing = true;
@@ -202,11 +217,21 @@ export class Connection implements Peer {
 
   /** Runs `onTimeout` unless `completeHandshake()` is called within `ms` (§3.1, close `4012`). */
   armHandshakeTimer(ms: number, onTimeout: () => void): void {
+    this.#handshake = { ms, onTimeout };
     this.#clearHandshakeTimer();
     this.#handshakeTimer = this.clock.setTimeout(() => {
       this.#handshakeTimer = undefined;
       onTimeout();
     }, ms);
+  }
+
+  /**
+   * A full handshake window again, from now: after `SESSION_NOT_FOUND` the client may fall back to
+   * a create or a code join on this socket (§4.3, §9.2: "socket kept open 10 s for fallback").
+   */
+  restartHandshakeTimer(): void {
+    if (this.#handshake === undefined) return;
+    this.armHandshakeTimer(this.#handshake.ms, this.#handshake.onTimeout);
   }
 
   /** The socket is bound to a session (create, resume or join succeeded). */

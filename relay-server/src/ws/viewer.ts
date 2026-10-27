@@ -19,13 +19,18 @@
  *   `CAPACITY` + `4006` while a global budget refuses new viewers, decided before the code is looked
  *   up (the app passes the fan-out's: the viewers' send buffers hold `MAX_TOTAL_BUFFERED_BYTES`,
  *   `ws/fanout.ts`).
- * - Rejoin by `sessionId` + `viewerToken` is SRV-15; until then it answers `SESSION_NOT_FOUND`
- *   (socket kept open, so the client falls back to a code join, §9.2).
+ * - `viewer.join{sessionId, viewerToken}` rejoins the token's entry (§5.1, SRV-15): the same
+ *   `viewerId`, `viewer.joined` (echoing the token) and `scene.state` as above; no rate limit and no
+ *   ban apply (§12 "rejoins do not count"), `CAPACITY` and `SESSION_FULL` do. An entry still
+ *   connected keeps its slot and its older socket is closed `4011` (T8). A token that names no live
+ *   entry of that session (unknown, pruned, ended) → `error SESSION_NOT_FOUND`, the socket kept open
+ *   for a fresh 10 s window in which a code join may follow (§9.2); one rejoin per socket (a second
+ *   → `UNAUTHORIZED` + `1008`).
  * - `viewer.count` goes to the publisher and every connected viewer after each join and leave (§5.3);
  *   `platforms` only ever holds the documented platform names (unknown → `other`).
  * - `viewer.leave` (then close `1000`) and a dropped socket disconnect the viewer; its entry and
  *   token stay for rejoin until the session ends or, while disconnected, until 3 × `MAX_VIEWERS`
- *   newer entries exist (architecture §3; rejoin is SRV-15).
+ *   newer entries exist (architecture §3).
  * Log lines carry session and viewer ids, platforms and error codes — never the code or a token.
  */
 import { randomInt } from "node:crypto";
@@ -113,6 +118,8 @@ export function viewerHandlers({
   const pendingRefusals = new Set<TimerHandle>();
   /** When each viewer entry's last `scene.request` was answered (the entry outlives a rejoin). */
   const answeredAt = new WeakMap<Viewer, number>();
+  /** Sockets that sent their one rejoin (only a code join may follow its `SESSION_NOT_FOUND`). */
+  const rejoinTried = new WeakSet<Connection>();
 
   const normalizers: NormalizerTable = {
     "viewer.join": (value) => {
@@ -164,27 +171,136 @@ export function viewerHandlers({
     logger.info({ sessionId: session.id, viewerId: viewer.id }, "viewer left");
   }
 
+  /** `CAPACITY` + `4006` while a global budget refuses new viewers (§5.2); true when refused. */
+  function refusedAtCapacity(
+    connection: Connection,
+    replyTo: string | undefined,
+    logLine: string,
+  ): boolean {
+    if (!overCapacity()) return false;
+    connection.fail("CAPACITY", "the relay is at its capacity", CLOSE_CODES.RATE_LIMITED, {
+      replyTo,
+      retryable: true,
+    });
+    logger.info({ errorCode: "CAPACITY" }, logLine);
+    return true;
+  }
+
+  /** `SESSION_FULL{viewerLimit, retryAfterS}` + `4005` (§5.2, §9.3). */
+  function refuseFull(connection: Connection, session: Session, replyTo: string | undefined): void {
+    connection.fail(
+      "SESSION_FULL",
+      "the session has reached its viewer limit",
+      CLOSE_CODES.SESSION_FULL,
+      {
+        replyTo,
+        retryable: true,
+        details: {
+          viewerLimit: registry.limits.maxViewers,
+          retryAfterS: SESSION_FULL_RETRY_AFTER_S,
+        },
+      },
+    );
+    logger.info({ sessionId: session.id, errorCode: "SESSION_FULL" }, "viewer join refused");
+  }
+
+  /** Binds the socket to its entry: `viewer.joined`, then `scene.state` and the new count (§5.2). */
+  function welcome(
+    connection: Connection,
+    session: Session,
+    viewer: Viewer,
+    viewerToken: string,
+    replyTo: string | undefined,
+  ): void {
+    connection.session = session;
+    connection.viewer = viewer;
+    connection.completeHandshake();
+    const { snapshot } = session;
+    connection.send({
+      type: "viewer.joined",
+      ...(replyTo !== undefined && { replyTo }),
+      sessionId: session.id,
+      viewerId: viewer.id,
+      viewerToken,
+      sceneVersion: session.sceneVersion,
+      snapshotVersion: snapshot?.sceneVersion ?? null,
+      snapshotAvailable: snapshot !== undefined,
+      ...(snapshot !== undefined && {
+        snapshot: {
+          sceneVersion: snapshot.sceneVersion,
+          byteLength: snapshot.byteLength,
+          sha256: snapshot.sha256,
+          format: "glb",
+        },
+      }),
+      publisherOnline: session.publisher !== undefined,
+      viewerCount: session.connectedViewers,
+      viewerLimit: registry.limits.maxViewers,
+      profile: session.profile,
+    });
+    // Always right after viewer.joined, so clients have one code path (§5.2, §8.3).
+    deliver(session, viewer, [sceneState(session)]);
+    broadcastCount(session);
+  }
+
+  /** `viewer.join{sessionId, viewerToken}` (§5.1): the token's entry, without a rate limit (§12). */
+  function rejoin(
+    connection: Connection,
+    sessionId: string,
+    viewerToken: string,
+    replyTo: string | undefined,
+  ): void {
+    if (rejoinTried.has(connection)) {
+      connection.fail(
+        "UNAUTHORIZED",
+        "one rejoin per socket; only a code join may follow (§9.2)",
+        CLOSE_CODES.POLICY_VIOLATION,
+        { replyTo, retryable: false },
+      );
+      return;
+    }
+    rejoinTried.add(connection);
+    if (refusedAtCapacity(connection, replyTo, "viewer rejoin refused")) return;
+    const found = registry.viewerByToken(viewerToken);
+    if (found === undefined || found.session.id !== sessionId) {
+      // A token of an ended session, a pruned entry or none at all: the client joins by code.
+      connection.sendError("SESSION_NOT_FOUND", "no live session for this viewer token", {
+        replyTo,
+        retryable: false,
+      });
+      connection.restartHandshakeTimer();
+      logger.info({ errorCode: "SESSION_NOT_FOUND" }, "viewer rejoin refused");
+      return;
+    }
+    const { session, viewer } = found;
+    const older = viewer.peer;
+    try {
+      registry.viewerReconnected(session, viewer, connection);
+    } catch (error) {
+      if (!(error instanceof RegistryError) || error.code !== "SESSION_FULL") throw error;
+      refuseFull(connection, session, replyTo);
+      return;
+    }
+    // A second concurrent use of the token: the older socket goes (T8). `disconnect()` ignores its
+    // close: the entry's peer is now the new socket.
+    older?.close(CLOSE_CODES.REPLACED);
+    welcome(connection, session, viewer, viewerToken, replyTo);
+    logger.info(
+      { sessionId: session.id, viewerId: viewer.id, replaced: older !== undefined },
+      "viewer rejoined",
+    );
+  }
+
   const handlers: HandlerTable = {
     "viewer.join": (connection, message) => {
       const replyTo = message.id;
       if (message.code === undefined) {
-        // Rejoin with sessionId + viewerToken is SRV-15. Until then every token is unknown: the
-        // documented answer, after which clients fall back to a code join on this socket (§9.2).
-        connection.sendError("SESSION_NOT_FOUND", "no live session for this viewer token", {
-          replyTo,
-          retryable: false,
-        });
+        // Without a code the schema requires both (§5.1); `""` only satisfies the types.
+        rejoin(connection, message.sessionId ?? "", message.viewerToken ?? "", replyTo);
         return;
       }
       // Before the lookup: the answer must not depend on whether the code is live (§12, T1).
-      if (overCapacity()) {
-        connection.fail("CAPACITY", "the relay is at its capacity", CLOSE_CODES.RATE_LIMITED, {
-          replyTo,
-          retryable: true,
-        });
-        logger.info({ errorCode: "CAPACITY" }, "viewer join refused");
-        return;
-      }
+      if (refusedAtCapacity(connection, replyTo, "viewer join refused")) return;
       // Per-IP attempts and lockout, also before the lookup (§12, T1).
       const key = connection.clientKey;
       const allowed = limiter.join(key);
@@ -213,52 +329,11 @@ export function viewerHandlers({
         added = registry.addViewer(session, connection, platform);
       } catch (error) {
         if (!(error instanceof RegistryError) || error.code !== "SESSION_FULL") throw error;
-        connection.fail(
-          "SESSION_FULL",
-          "the session has reached its viewer limit",
-          CLOSE_CODES.SESSION_FULL,
-          {
-            replyTo,
-            retryable: true,
-            details: {
-              viewerLimit: registry.limits.maxViewers,
-              retryAfterS: SESSION_FULL_RETRY_AFTER_S,
-            },
-          },
-        );
-        logger.info({ sessionId: session.id, errorCode: "SESSION_FULL" }, "viewer join refused");
+        refuseFull(connection, session, replyTo);
         return;
       }
       const { viewer, viewerToken } = added;
-      connection.session = session;
-      connection.viewer = viewer;
-      connection.completeHandshake();
-      const { snapshot } = session;
-      connection.send({
-        type: "viewer.joined",
-        ...(replyTo !== undefined && { replyTo }),
-        sessionId: session.id,
-        viewerId: viewer.id,
-        viewerToken,
-        sceneVersion: session.sceneVersion,
-        snapshotVersion: snapshot?.sceneVersion ?? null,
-        snapshotAvailable: snapshot !== undefined,
-        ...(snapshot !== undefined && {
-          snapshot: {
-            sceneVersion: snapshot.sceneVersion,
-            byteLength: snapshot.byteLength,
-            sha256: snapshot.sha256,
-            format: "glb",
-          },
-        }),
-        publisherOnline: session.publisher !== undefined,
-        viewerCount: session.connectedViewers,
-        viewerLimit: registry.limits.maxViewers,
-        profile: session.profile,
-      });
-      // Always right after viewer.joined, so clients have one code path (§5.2, §8.3).
-      deliver(session, viewer, [sceneState(session)]);
-      broadcastCount(session);
+      welcome(connection, session, viewer, viewerToken, replyTo);
       logger.info({ sessionId: session.id, viewerId: viewer.id, platform }, "viewer joined");
     },
 

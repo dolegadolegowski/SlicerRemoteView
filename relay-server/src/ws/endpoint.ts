@@ -15,8 +15,23 @@
  * - Text limits per role: publisher 256 KiB, viewer 16 KiB → `error PAYLOAD_TOO_LARGE` + `1009`. The
  *   first message gets the limit of the role its type would fix (16 KiB if none). Binary frames
  *   from anyone but a publisher → `error UNAUTHORIZED` + `1008`.
+ * - While the relay drains for a restart (SRV-17) an upgrade that passes the Origin check gets HTTP
+ *   503 `RELAY_RESTARTING`, before the per-address limit (not spent); one that slipped in just before
+ *   the drain began is closed `4008` at once.
  * - Upgrade requests to any other route are refused with 404 before the upgrade (the plugin would
  *   otherwise accept them on every HTTP route and close them right after).
+ * - Every text frame, binary frame and WebSocket `ping`/`pong` that passes the role's size limit and
+ *   the binary-role check (both close the socket before parsing) is charged to the socket's message
+ *   budget before it is parsed or handled (`budget.ts`): a viewer's or an unbound socket's frame the
+ *   budget cannot pay is dropped — a pong too — with `error RATE_LIMITED{retryAfterS}` (sent again
+ *   if it is still limited once that time has passed); a publisher is closed `RATE_LIMITED` + `4006`
+ *   at once (a dropped `begin`, `end` or update would leave a snapshot or the versions half applied,
+ *   §6.2, §8.1); and any socket that sends on until it owes a second burst is closed `4006`. The
+ *   relay answers a client's `ping` itself (`autoPong` off), within that budget and the 8 MiB hard
+ *   watermark (§3.3): a client that pings without reading cannot make the relay queue pongs beyond
+ *   it, bound or not. A socket not bound yet is held to the same watermark at every frame (the
+ *   fan-out only watches bound ones). Frames of a closing socket are charged too (`unread`), and a
+ *   message has at most `MAX_FRAGMENTS` fragments (`1008` beyond).
  * - `message` listeners catch everything themselves (`@fastify/websocket` error handlers do not
  *   see them): an unexpected failure answers `error INTERNAL` + `1011` and logs only an error code.
  */
@@ -27,7 +42,10 @@ import { WebSocket } from "ws";
 import type { RawData } from "ws";
 import { CLOSE_CODES, LIMITS } from "@slicerremoteview/shared";
 import type { Clock } from "../clock.js";
+import { messageBudgets } from "./budget.js";
+import type { MessageBudgets } from "./budget.js";
 import { Connection, HANDSHAKE_ROLES } from "./connection.js";
+import { HARD_WATERMARK_BYTES } from "./fanout.js";
 import type { Role } from "./connection.js";
 import type { RateLimiter } from "../ratelimit.js";
 import { readFrame } from "./frame.js";
@@ -66,7 +84,25 @@ export interface WsEndpointOptions {
   handlers: FrameHandlers;
   /** Maps an error to a code that is safe to log (`systemErrorCode` of the app). */
   errorCode: (error: unknown) => string;
+  /** Per-socket message budgets (SRV-25); default `DEFAULT_MESSAGE_BUDGETS`. */
+  budgets?: MessageBudgets;
+  /** True while the relay drains for a restart (SRV-17): upgrades are refused `503`. */
+  draining?: () => boolean;
 }
+
+/** What the app needs of the endpoint to drain it (SRV-17). */
+export interface WsEndpoint {
+  /** Every socket from its upgrade until its `close` event, bound or not. */
+  readonly sockets: ReadonlySet<Connection>;
+  /** Resolves once no socket is left. */
+  emptied(): Promise<void>;
+}
+
+/** Fragments per message (`ws` closes `1008` beyond them). */
+export const MAX_FRAGMENTS = 64;
+
+/** The longest pong `ws` writes for a client's ping: a 125-byte payload and a 2-byte header. */
+const MAX_PONG_BYTES = 127;
 
 function textLimit(role: Role | undefined): number {
   return role === "publisher" ? LIMITS.MAX_TEXT_BYTES_PUBLISHER : LIMITS.MAX_TEXT_BYTES_VIEWER;
@@ -85,17 +121,32 @@ function asBuffer(data: RawData): Buffer {
 export async function registerWsEndpoint(
   app: FastifyInstance,
   options: WsEndpointOptions,
-): Promise<void> {
-  const { clock, logger, limiter, handlers, errorCode } = options;
+): Promise<WsEndpoint> {
+  const { clock, logger, limiter, handlers, errorCode, draining = () => false } = options;
+  const sockets = new Set<Connection>();
+  let waiters: (() => void)[] = [];
+  const budget = messageBudgets(clock, options.budgets);
   const allowed = new Set(options.allowedOrigins);
   /** The limiter key of each upgrade request, computed once in `checkUpgrade`. */
   const clientKeys = new WeakMap<object, string>();
   let firstUpgrade = true;
+  /** Sockets no longer read while closing (`unread`): they cannot complete a close at shutdown. */
+  const unreadSockets = new Set<Connection>();
+  app.addHook("preClose", async () => {
+    for (const connection of unreadSockets) connection.terminate();
+  });
 
   await app.register(websocket, {
     options: {
       maxPayload: LIMITS.WS_MAX_PAYLOAD_BYTES,
       perMessageDeflate: false,
+      // Pings are answered below, within the socket's budget and the hard watermark (SRV-25).
+      autoPong: false,
+      // Each fragment is decoded on its own but a message is charged once (SRV-25): clients send
+      // one frame per message (browsers, Python `websockets`, .NET; `[TODO verify]` for Chromium's
+      // largest messages), so 64 leaves room and a 16,384-fragment message (`ws`'s default) is
+      // refused `1008` instead of costing 16,384 frames for the price of one.
+      maxFragments: MAX_FRAGMENTS,
       // Never select a subprotocol (upgrades offering one are refused below; defence in depth).
       handleProtocols: () => false,
     },
@@ -128,6 +179,13 @@ export async function registerWsEndpoint(
       return;
     }
     if (!request.ws) return;
+    // A relay that drains for a restart takes no new sockets (architecture §5; the edge routes
+    // clients to the new instance once it is healthy).
+    if (draining()) {
+      logger.debug({ errorCode: "RELAY_RESTARTING" }, "websocket upgrade refused");
+      await reply.code(503).send({ error: "RELAY_RESTARTING" });
+      return;
+    }
     if (request.headers["sec-websocket-protocol"] !== undefined) {
       logger.debug({ errorCode: "SUBPROTOCOL_REFUSED" }, "websocket upgrade refused");
       await reply.code(400).send({ error: "BAD_REQUEST" });
@@ -174,6 +232,7 @@ export async function registerWsEndpoint(
 
   function accept(socket: WebSocket, clientKey: string): void {
     const connection = new Connection(socket, clock, clientKey);
+    sockets.add(connection);
     connection.armHandshakeTimer(HANDSHAKE_TIMEOUT_MS, () =>
       connection.close(CLOSE_CODES.HANDSHAKE_TIMEOUT),
     );
@@ -185,17 +244,34 @@ export async function registerWsEndpoint(
     });
 
     socket.on("pong", (data: Buffer) =>
-      guarded(connection, "pong", () => handlers.pong?.(connection, data)),
+      guarded(connection, "pong", () => {
+        // Pongs cost as much CPU per byte as text: charged too, a dropped one is not handled.
+        if (closing(connection)) unread(connection, "text", data.byteLength);
+        else if (admitted(connection, "text", data.byteLength)) handlers.pong?.(connection, data);
+      }),
+    );
+
+    socket.on("ping", (data: Buffer) =>
+      guarded(connection, "ping", () => onPing(connection, data)),
     );
 
     socket.on("close", (closeCode: number) => {
       connection.markClosed();
+      unreadSockets.delete(connection);
+      sockets.delete(connection);
+      if (sockets.size === 0) {
+        for (const resolve of waiters) resolve();
+        waiters = [];
+      }
       guarded(connection, "close", () => handlers.closed(connection, closeCode));
       logger.debug(
         { connection: connection.id, role: connection.role ?? "none", closeCode },
         "websocket closed",
       );
     });
+
+    // An upgrade that passed its check just before the drain began is told too (SRV-17).
+    if (draining()) connection.close(CLOSE_CODES.RELAY_RESTARTING);
   }
 
   /**
@@ -204,7 +280,7 @@ export async function registerWsEndpoint(
    */
   function guarded(
     connection: Connection,
-    stage: "open" | "frame" | "pong" | "close",
+    stage: "open" | "frame" | "ping" | "pong" | "close",
     run: () => void | Promise<void>,
     replyTo?: string,
   ): void {
@@ -227,8 +303,86 @@ export async function registerWsEndpoint(
     }
   }
 
+  /** `error SLOW_CONSUMER` + `4010` (§9.3), logged like the fan-out's (ids and bytes only). */
+  function closeSlow(connection: Connection): void {
+    logger.info(
+      {
+        connection: connection.id,
+        role: connection.role ?? "none",
+        bufferedBytes: connection.bufferedAmount,
+        errorCode: "SLOW_CONSUMER",
+      },
+      "slow consumer closed",
+    );
+    connection.fail(
+      "SLOW_CONSUMER",
+      "the socket does not read fast enough; reconnect (§3.3)",
+      CLOSE_CODES.SLOW_CONSUMER,
+      { retryable: true },
+    );
+  }
+
+  /**
+   * Charges a frame of `bytes` to the socket's budget: false when it must not be handled — dropped
+   * (the socket is told `RATE_LIMITED`), or the socket closed: `4006` for a publisher over its
+   * budget or anyone two bursts over it (§9.3), `4010` for an unbound socket over the hard
+   * watermark (the fan-out watches bound sockets only).
+   */
+  function admitted(connection: Connection, kind: "text" | "binary", bytes: number): boolean {
+    const { verdict, warn, retryAfterS } = budget.charge(connection, kind, bytes);
+    const publisher = connection.bound && connection.role === "publisher";
+    if (verdict === "exceeded" || (verdict === "limited" && publisher)) {
+      logger.info(
+        { connection: connection.id, role: connection.role ?? "none", errorCode: "RATE_LIMITED" },
+        "message budget exceeded: closed",
+      );
+      connection.fail("RATE_LIMITED", "message budget exceeded", CLOSE_CODES.RATE_LIMITED, {
+        retryable: true,
+        details: { retryAfterS },
+      });
+      return false;
+    }
+    if (verdict === "limited") {
+      if (warn)
+        connection.sendError("RATE_LIMITED", "message budget exhausted: frames are dropped", {
+          retryable: true,
+          details: { retryAfterS },
+        });
+      return false;
+    }
+    if (!connection.bound && connection.bufferedAmount > HARD_WATERMARK_BYTES) {
+      closeSlow(connection);
+      return false;
+    }
+    return true;
+  }
+
+  /** Reads nothing more: closing, or waiting to be closed (`Connection.awaitClose`, §12). */
+  const closing = (connection: Connection): boolean => !connection.isOpen || !connection.reading;
+
+  /**
+   * A frame of a socket that is closing (or waits to be closed, `Connection.awaitClose`): never
+   * handled, but charged — `ws` decodes what the peer sends until its close frame arrives, so a peer
+   * that floods instead of completing the close is not read any more once it owes a second burst,
+   * instead of keeping the relay busy until the close timer ends it (`Connection.close`, ≥ 5 s).
+   */
+  function unread(connection: Connection, kind: "text" | "binary", bytes: number): void {
+    if (budget.charge(connection, kind, bytes).verdict !== "exceeded") return;
+    connection.stopReading();
+    unreadSockets.add(connection);
+  }
+
+  /** A client's WebSocket ping: answered within its budget and the hard watermark (§3.3). */
+  function onPing(connection: Connection, data: Buffer): void {
+    if (closing(connection)) return unread(connection, "text", data.byteLength);
+    if (!admitted(connection, "text", data.byteLength)) return;
+    if (connection.bufferedAmount + MAX_PONG_BYTES > HARD_WATERMARK_BYTES) closeSlow(connection);
+    else connection.pong(data);
+  }
+
   function onFrame(connection: Connection, frame: Buffer, isBinary: boolean): void | Promise<void> {
-    if (!connection.isOpen || !connection.reading) return;
+    if (closing(connection))
+      return unread(connection, isBinary ? "binary" : "text", frame.byteLength);
     if (isBinary) {
       // Snapshot chunks only from a publisher whose session exists (§3.2, §11).
       if (connection.role !== "publisher" || !connection.bound) {
@@ -240,6 +394,7 @@ export async function registerWsEndpoint(
         );
         return;
       }
+      if (!admitted(connection, "binary", frame.byteLength)) return;
       return handlers.binary(connection, frame);
     }
     const tooBig = (limit: number, replyTo?: string): boolean => {
@@ -254,6 +409,7 @@ export async function registerWsEndpoint(
     };
     // Before the role is known, nothing above the publisher limit is even parsed.
     if (tooBig(textLimit(connection.role ?? "publisher"))) return;
+    if (!admitted(connection, "text", frame.byteLength)) return;
     // The only JSON.parse of this frame: the dispatcher works on its result.
     const textFrame = readFrame(frame.toString("utf8"));
     // The first message's own type decides its limit: 256 KiB for session.create/resume (§3.3
@@ -267,4 +423,10 @@ export async function registerWsEndpoint(
     // A failure answers the frame it was handling (`replyTo`, §3.2).
     guarded(connection, "frame", () => handlers.text(connection, textFrame), textFrame.id);
   }
+
+  return {
+    sockets,
+    emptied: () =>
+      sockets.size === 0 ? Promise.resolve() : new Promise((resolve) => waiters.push(resolve)),
+  };
 }

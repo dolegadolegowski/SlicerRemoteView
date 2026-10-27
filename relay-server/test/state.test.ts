@@ -5,6 +5,7 @@ import { WebSocket } from "ws";
 import type { RawData } from "ws";
 import { LIMITS, chunkify, encodeChunkFrame, validateMessage } from "@slicerremoteview/shared";
 import { loadConfig } from "../src/config.js";
+import { DEFAULT_MESSAGE_BUDGETS } from "../src/ws/budget.js";
 import type { Session } from "../src/registry.js";
 import { CLOSE_COMPLETE_MS } from "../src/ws/connection.js";
 import type { Connection } from "../src/ws/connection.js";
@@ -498,6 +499,14 @@ function maximalUpdate(baseVersion: number): string {
 
 describe("updates to viewers that read nothing stay within the send-buffer limits (T3, §3.3, architecture §4)", () => {
   it("no viewer gets an update that would take it above 8 MiB: it is closed 4010 instead, before any watch", async () => {
+    // A flood well past the publisher's message budget (SRV-25), which is not what this test is about.
+    const MIB = 1024 * 1024;
+    relay = await startRelay({
+      budgets: {
+        ...DEFAULT_MESSAGE_BUDGETS,
+        publisher: { rate: 64 * MIB, burst: 64 * MIB, frameCost: 0 },
+      },
+    });
     const { client, session } = await publisher();
     const viewers = [await viewer(session), await viewer(session)];
     await snapshot(client, 1);

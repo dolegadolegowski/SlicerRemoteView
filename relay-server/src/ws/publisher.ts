@@ -1,5 +1,5 @@
 /**
- * Publisher lifecycle (docs/protocol.md §4.1–§4.2, §4.5–§4.6, §9.1; architecture §2.1, §2.8–§2.9, §3).
+ * Publisher lifecycle (docs/protocol.md §4, §9.1; architecture §2.1, §2.8–§2.9, §3).
  *
  * - `session.create` → registry session + `session.created` (code, `publisherToken` once, viewer
  *   limit, TTLs, effective limits); `CAPACITY` at `MAX_SESSIONS` → `error` + `4006`; more than 5 per
@@ -9,7 +9,19 @@
  * - `session.close` → every viewer gets `session.closed{PUBLISHER_CLOSED}` + `4001`, the session is
  *   released (code quarantined, snapshot dropped), the publisher socket closes `1000`.
  * - Publisher socket lost → phase `grace`, viewers get `session.publisherState{online:false,
- *   graceEndsAt}`; resume is SRV-15.
+ *   graceEndsAt}`.
+ * - `session.resume{sessionId, publisherToken}` (§4.3; one per socket): while the session is live —
+ *   in grace, or with the old socket still open (half-open; it is closed `4011` and its snapshot in
+ *   flight aborted `PUBLISHER_GONE`) — → `session.resumed{code, sceneVersion, snapshotVersion,
+ *   viewerCount, ttl}`, and viewers that were told `online:false` get `online:true` (§4.6).
+ *   `sceneVersion` is the highest version used, a refused or aborted `begin`'s too (§8.4, report
+ *   `2026-10-26-server-1`). Unknown session → `error SESSION_NOT_FOUND`, the socket kept open for a
+ *   fresh 10 s window in which `session.create{preferredCode}` may follow; wrong token → `error
+ *   UNAUTHORIZED` + `4003` at once. Neither counts towards a rate limit: the 256-bit token is the
+ *   only secret (session ids reach every viewer; the two answers, which §4.3 requires, tell only
+ *   whether a session is still live). A resume that replaces an open socket is logged at `warn`. An
+ *   outstanding idle warning (`session.expiring`; no viewer since, not renewed) is repeated after
+ *   `session.resumed` with the same `closesAt` — also when the old socket got it.
  * - Registry `expired` (grace over, idle, lifetime) → `session.expired{reason}` + `4002` to the
  *   viewers and, if still connected, the publisher.
  * - Registry `expiring` (60 s before the idle expiry, only while no viewer is connected) →
@@ -20,7 +32,7 @@
  */
 import { CLOSE_CODES, LIMITS } from "@slicerremoteview/shared";
 import type { Logger } from "pino";
-import { isWellFormed } from "../codes.js";
+import { isWellFormed, tokenMatches } from "../codes.js";
 import { publicLimits } from "../config.js";
 import type { Config } from "../config.js";
 import type { RateLimiter } from "../ratelimit.js";
@@ -35,9 +47,20 @@ export interface PublisherDeps {
   /** `session.create` 5/min per client address; the `preferredCode` oracle (§12, SRV-08). */
   limiter: RateLimiter;
   logger: Logger;
+  /** A resume replaced a publisher socket that was still open: abort its snapshot in flight. */
+  publisherReplaced?: (session: Session) => void;
 }
 
-export function publisherHandlers({ registry, config, limiter, logger }: PublisherDeps) {
+export function publisherHandlers({
+  registry,
+  config,
+  limiter,
+  logger,
+  publisherReplaced,
+}: PublisherDeps) {
+  /** Sockets that sent their one `session.resume` (§4.3: only the fallback create may follow). */
+  const resumeTried = new WeakSet<Connection>();
+
   /** Sends `message` to every viewer with an open socket, then closes them with `closeCode`. */
   function endViewers(
     session: Session,
@@ -117,9 +140,81 @@ export function publisherHandlers({ registry, config, limiter, logger }: Publish
       logger.info({ sessionId: session.id, profile: session.profile }, "session created");
     },
 
+    "session.resume": (connection, message) => {
+      const replyTo = message.id;
+      if (resumeTried.has(connection)) {
+        connection.fail(
+          "UNAUTHORIZED",
+          "one session.resume per socket; only session.create may follow (§4.3)",
+          CLOSE_CODES.POLICY_VIOLATION,
+          { replyTo, retryable: false },
+        );
+        return;
+      }
+      resumeTried.add(connection);
+      const session = registry.get(message.sessionId);
+      if (session === undefined) {
+        // After a redeploy (§13 step 9): the client falls back to session.create on this socket.
+        connection.sendError("SESSION_NOT_FOUND", "no live session has this id", {
+          replyTo,
+          retryable: false,
+        });
+        connection.restartHandshakeTimer();
+        logger.info({ errorCode: "SESSION_NOT_FOUND" }, "session resume refused");
+        return;
+      }
+      if (!tokenMatches(message.publisherToken, session.publisherTokenHash)) {
+        connection.fail(
+          "UNAUTHORIZED",
+          "the publisher token does not match this session (§4.3)",
+          CLOSE_CODES.UNAUTHORIZED,
+          { replyTo, retryable: false },
+        );
+        logger.info({ sessionId: session.id, errorCode: "UNAUTHORIZED" }, "session resume refused");
+        return;
+      }
+      const old = session.publisher;
+      const wasOffline = session.phase === "grace";
+      if (old !== undefined) {
+        // Half-open (§4.3): the old socket is still open. It acts on the session no more.
+        session.publisher = undefined;
+        publisherReplaced?.(session);
+        old.close(CLOSE_CODES.REPLACED);
+      }
+      registry.publisherResumed(session);
+      registry.touchPublisher(session);
+      session.publisher = connection;
+      connection.session = session;
+      connection.completeHandshake();
+      const { snapshot } = session;
+      connection.send({
+        type: "session.resumed",
+        ...(replyTo !== undefined && { replyTo }),
+        sessionId: session.id,
+        code: session.code,
+        sceneVersion: Math.max(session.sceneVersion, session.lastSnapshotVersion),
+        snapshotVersion: snapshot?.sceneVersion ?? null,
+        viewerCount: session.connectedViewers,
+        ttl: registry.ttl(session),
+      });
+      if (wasOffline)
+        for (const viewer of session.viewers.values())
+          viewer.peer?.send({ type: "session.publisherState", online: true });
+      // An outstanding idle warning (§4.4): the old socket may never have got it.
+      const closesAt = session.idleWarned ? registry.idleDeadline(session) : undefined;
+      if (closesAt !== undefined)
+        connection.send({ type: "session.expiring", reason: "IDLE", closesAt });
+      // A replaced open socket is the only trace of a takeover with a stolen token (T4).
+      logger[old === undefined ? "info" : "warn"](
+        { sessionId: session.id, replaced: old !== undefined },
+        "session resumed",
+      );
+    },
+
     "session.close": (connection, message) => {
       const session = connection.session;
-      if (session === undefined) return;
+      // Only the session's own publisher socket, not one a resume replaced.
+      if (session === undefined || session.publisher !== connection) return;
       endViewers(
         session,
         { type: "session.closed", sessionId: session.id, reason: "PUBLISHER_CLOSED" },
