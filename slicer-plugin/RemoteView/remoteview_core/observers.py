@@ -9,7 +9,8 @@ observers miss events (research note §5), and the flush runs later from the eve
   ``hold()``, ``EndBatchProcessEvent`` → ``release()``, ``EndCloseEvent`` → ``reset()``. Close, import and restore
   always run inside a batch (research note §4), so the import events are not observed; attached in the middle of a
   batch, the watcher holds at once, so the batch's end finds its hold (``IsBatchProcessing`` from Python is
-  [TODO verify], research note §4).
+  [TODO verify], research note §4). The batch state is read with :meth:`SceneWatcher.batch_processing`, which fails
+  open: a hold nothing releases would stop every update.
 - Every exact-class ``vtkMRMLModelNode``, hidden ones too (shown later, it is marked): ``DisplayModifiedEvent`` →
   ``appearance`` (folder changes reach each model this way), ``MeshModifiedEvent`` → ``geometry``,
   ``TransformModifiedEvent`` → ``mark_transform`` unless the linear world matrix is unchanged (a parent transform's
@@ -27,7 +28,8 @@ observers miss events (research note §5), and the flush runs later from the eve
 - An exception would reach ``PyErr_Print``, which prints its text — often a node ID or name — to the console and the
   log file (T7): every handler catches ``Exception`` and logs its type only; :meth:`SceneWatcher.attach` raises a
   fixed text. An event on another thread marks nothing (MRML is main-thread only); :meth:`SceneWatcher.take_off_thread`
-  tells the pump to ask for a fresh snapshot.
+  tells the pump to ask for a fresh snapshot, and the pump brings the sink's batch hold in line with
+  :meth:`SceneWatcher.batch_processing` (SLC-33: an ``EndBatchProcessEvent`` missed released nothing).
 
 Pure: ``vtkmodules`` only; the event ids come from the adapter's ``slicer.vtkMRML*`` constants (:class:`MrmlEvents`).
 Main thread only.
@@ -142,6 +144,8 @@ class SceneWatcher:
         with self._off_thread_lock:
             seen, self._off_thread = self._off_thread, False
         if seen and self._attached:
+            for entry in self._nodes.values():
+                entry.matrix = _UNKNOWN  # even if the listing fails: the next transform event of each model marks
             try:
                 self._rescan()
             except Exception as exc:  # noqa: BLE001 — the adapter's text may carry an ID (T7)
@@ -150,8 +154,8 @@ class SceneWatcher:
 
     def _rescan(self) -> None:
         """The models are listed again — one added meanwhile is watched, one gone or replaced under the same ID is
-        not — and every cache is read again (name, *HideFromEditors*) or forgotten (the pose: the next transform event
-        of each model marks), so that what the fresh snapshot sends is what later events compare with."""
+        not — and the name and *HideFromEditors* caches are read again (the poses were forgotten before, and a model
+        watched here has none), so that what the fresh snapshot sends is what later events compare with."""
         listed: dict[str, Any] = {}
         for node in self._nodes_by_class(MODEL_CLASS):
             node_id = node.GetID()
@@ -164,7 +168,15 @@ class SceneWatcher:
         for entry in self._nodes.values():
             entry.name = entry.node.GetName()
             entry.hidden = bool(entry.node.GetHideFromEditors())
-            entry.matrix = _UNKNOWN
+
+    def batch_processing(self) -> bool:
+        """``IsBatchProcessing()`` of the scene; ``False`` when it cannot be read (fail open: a hold that nothing
+        releases would stop every update; the type of the error is logged only, T7)."""
+        try:
+            return bool(self._scene.IsBatchProcessing())
+        except Exception as exc:  # noqa: BLE001 — the adapter's text may carry an ID (T7)
+            _log.error("live: batch state not read (%s)", type(exc).__name__)
+            return False
 
     # ------------------------------------------------------------------ lifecycle (main thread)
 
@@ -186,7 +198,7 @@ class SceneWatcher:
                 (events.end_close, self._on_end_close),
             ):
                 self._scene_tags.append(self._scene.AddObserver(event, handler))
-            if self._scene.IsBatchProcessing():
+            if self.batch_processing():
                 self._sink.hold()  # the batch's EndBatchProcessEvent releases it
             for node in self._nodes_by_class(MODEL_CLASS):
                 self._watch(node, read_pose=True)
@@ -196,13 +208,16 @@ class SceneWatcher:
             raise RuntimeError("the scene could not be observed") from None
 
     def detach(self) -> None:
-        """Remove every observer (Stop, the session's end, the module's cleanup); idempotent."""
+        """Remove every observer (Stop, the session's end, the module's cleanup); idempotent. An event seen off the main
+        thread before is forgotten: it belongs to the session that ends."""
         self._attached = False
         tags, self._scene_tags = self._scene_tags, []
         for tag in tags:
             self._scene.RemoveObserver(tag)
         for node_id in list(self._nodes):
             self._unwatch(node_id)
+        with self._off_thread_lock:  # after the observers are gone: no event can set it again
+            self._off_thread = False
 
     # ------------------------------------------------------------------ watched nodes
 

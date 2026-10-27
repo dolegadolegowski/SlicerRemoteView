@@ -13,6 +13,7 @@ import gc
 import json
 import logging
 import sys
+import threading
 import weakref
 
 import pytest
@@ -684,3 +685,48 @@ def test_panel_live_without_a_watcher_the_texts_say_stop_and_start(fake):
     view = deliver(ctl, Connected(1), Received(1, created(maxSnapshotBytes=2_000)))
     assert view.detail.endswith(" " + panel.HIDE_MODELS_AND_RESTART)
     assert ctl.observer_count == 0
+
+
+# --------------------------------------------------------------------------- SLC-33: events off the main thread
+
+
+def _in_thread(fn, *args):
+    worker = threading.Thread(target=fn, args=args)
+    worker.start()
+    worker.join()
+
+
+@pytest.mark.parametrize("case", ["event", "missed-end", "missed-start"])
+def test_panel_live_events_off_the_main_thread_resync(fake, caplog, capfd, case):
+    caplog.set_level(logging.DEBUG)
+    a = MrmlModel(A, name="Doe^John liver")
+    rig = live_rig(a)
+    acked(rig, 1)
+    code, token = rig.ctl.view.code, rig.ctl._client.publisher_token().reveal()
+    if case == "event":
+        _in_thread(recolor, a, (0.0, 0.0, 1.0))
+        assert rig.timer.deadline is None  # marked nothing
+        rig.pump(0)
+        assert len(rig.begins()) == 2  # the re-sync
+    elif case == "missed-end":
+        rig.scene.InvokeEvent(EVENTS.start_batch)
+        rig.scene.batch = False
+        _in_thread(rig.scene.InvokeEvent, EVENTS.end_batch)
+        rig.pump(0)
+        assert "batch=0" in repr(rig.ctl._live)  # caught up: the hold is released
+        assert len(rig.begins()) == 2
+    else:
+        rig.scene.batch = True
+        _in_thread(rig.scene.InvokeEvent, EVENTS.start_batch)
+        view = rig.pump(0)
+        assert len(rig.begins()) == 1  # the re-sync waits for the batch
+        assert (view.status, view.detail) == (
+            "Updating the scene · no viewers yet.",
+            panel.WAITING_FOR_SLICER,
+        )
+        rig.scene.batch = False
+        rig.scene.InvokeEvent(EVENTS.end_batch)
+        rig.pump(0)
+        assert len(rig.begins()) == 2
+    assert acked(rig, 2).status == "Live · no viewers yet."
+    assert leaks(caplog, capfd, *NAMES, code, token) == []

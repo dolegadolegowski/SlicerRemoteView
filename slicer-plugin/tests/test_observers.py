@@ -738,3 +738,75 @@ def test_observers_a_rescan_that_fails_still_asks_for_the_snapshot(caplog):
     with caplog.at_level(logging.DEBUG):
         assert watcher.take_off_thread() is True
     assert "KeyError" in caplog.text and A not in caplog.text and "Smith" not in caplog.text
+
+
+# ------------------------------------------------------------------------- SLC-33: the batch state, the off-thread flag
+
+
+class _UnreadableBatch(Scene):
+    def IsBatchProcessing(self):  # noqa: N802 — the MRML API
+        raise KeyError(f"{A} Doe^John")
+
+
+def test_observers_batch_processing_reads_the_scene_and_fails_open(caplog):
+    scene = Scene(Node(A))
+    watcher = new_watcher(scene, Recorder())
+    assert watcher.batch_processing() is False
+    scene.batch = True
+    assert watcher.batch_processing() is True
+    broken = new_watcher(_UnreadableBatch(Node(A)), Recorder())
+    with caplog.at_level(logging.DEBUG):
+        assert broken.batch_processing() is False  # a hold nothing releases would stop every update
+    assert "live: batch state not read (KeyError)" in caplog.text
+    assert A not in caplog.text and "Doe" not in caplog.text
+
+
+def test_observers_an_unreadable_batch_state_at_attach_holds_nothing(caplog):
+    scene = _UnreadableBatch(Node(A), Node(B))
+    sink = Recorder()
+    watcher = new_watcher(scene, sink)
+    with caplog.at_level(logging.DEBUG):
+        watcher.attach()
+    assert sink.take() == [] and watcher.observer_count == 5 + 4 * 2
+    assert "KeyError" in caplog.text and A not in caplog.text and "Doe" not in caplog.text
+
+
+def test_observers_detach_forgets_an_event_off_the_main_thread():
+    a = Node(A)
+    _, _, watcher = watched(a)
+    off_thread(a.Modified)
+    watcher.detach()
+    watcher.attach()  # the next session
+    assert watcher.take_off_thread() is False
+
+
+def test_observers_a_rescan_that_fails_still_forgets_the_poses():
+    """The SLC-31 review: a listing that fails must not keep the poses the missed events may have changed."""
+    a = Node(A)
+    scene = Scene(a)
+    sink = Recorder()
+    failing = []
+
+    def nodes_by_class(name):
+        if failing:
+            raise KeyError(f"{A} Liver Smith")
+        return scene.by_class(name)
+
+    watcher = SceneWatcher(
+        sink,
+        scene=scene,
+        events=EVENTS,
+        nodes_by_class=nodes_by_class,
+        world_matrix=lambda node: node.world,
+    )
+    watcher.attach()
+    original = a.world
+    a.world = original.copy()
+    a.world[0, 3] = 7.0
+    off_thread(a.InvokeEvent, EVENTS.transform_modified)  # moved: missed
+    failing.append(True)
+    assert watcher.take_off_thread() is True
+    # back where the cache had it: the viewers' fresh snapshot has the moved pose
+    a.world = original
+    a.InvokeEvent(EVENTS.transform_modified)
+    assert sink.take() == [("mark_transform", A)]

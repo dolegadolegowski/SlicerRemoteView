@@ -34,7 +34,8 @@ of the session, the first snapshot included:
 The panel (SLC-32) calls ``start(deferred=True)``, attaches the observers, then :meth:`~LiveUpdates.tick` — all in
 one main-thread call, so a batch process running at Start holds the first snapshot until it ends; it calls
 :meth:`~LiveUpdates.observe` after every relay message and connection loss and :meth:`~LiveUpdates.tick` from its
-pump; the flush timer calls :meth:`~LiveUpdates.flush`. Its texts read :attr:`~LiveUpdates.in_flight`,
+pump — after :meth:`~LiveUpdates.request_resync` when the observers missed events off the main thread (SLC-33); the
+flush timer calls :meth:`~LiveUpdates.flush`. Its texts read :attr:`~LiveUpdates.in_flight`,
 :attr:`~LiveUpdates.owed`, :attr:`~LiveUpdates.waits_for_change` and :attr:`~LiveUpdates.batch_held` when they are
 shown. ``IDLE``/``CLOSED`` stop the controller: the marks are dropped and later ones ignored.
 
@@ -367,6 +368,35 @@ class LiveUpdates:
         self._needed_seen = True
         self._shrink = None
         self._needs_flush = False
+
+    def request_resync(self, *, batch: bool) -> None:
+        """The observers missed events (one arrived off the main thread, SLC-33): bring the batch hold in line with
+        the scene's batch state ``batch`` (MRML reports only the outermost batch, research note §4: a missed
+        ``EndBatchProcessEvent`` released nothing, a missed ``StartBatchProcessEvent`` held nothing), ask for a fresh
+        snapshot under the re-sync rule (a lost connection's: it neither counts toward nor closes the flush gate), and
+        lift the flush and too-large gates — a missed change is a change (at most one extra attempt per episode). A
+        re-sync already waiting for its time is not pushed back: events off the main thread that keep coming must not
+        hold it off for ever (SLC-33 review)."""
+        if not self._running:
+            return
+        try:
+            target = int(bool(batch))
+            for _ in range(self._depth - target):
+                self.release()
+            if target and not self._depth:
+                self.hold()
+            # owed already, waiting for its time or free to go at this pump's tick (the panel calls this first)
+            waiting = (
+                self._client.snapshot_needed
+                and self._needed_seen
+                and (self._clock() < self._until or self._gate_open())
+            )
+            self._shrink = None
+            self._needs_flush = False
+            if not waiting:
+                self._failed(_Cause.LOST)
+        except Exception as exc:  # noqa: BLE001 — called from the pump (T7)
+            _log.error("live: re-sync not asked for (%s)", type(exc).__name__)
 
     # ------------------------------------------------------------------ flush
 

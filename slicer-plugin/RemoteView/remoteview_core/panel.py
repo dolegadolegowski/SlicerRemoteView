@@ -20,9 +20,11 @@
   :class:`~remoteview_core.live.LiveUpdates` (SLC-32), which sends the first snapshot and every later change. With a
   ``watch`` factory, the observers that mark the changes (SLC-31's ``SceneWatcher``) are attached in the same
   main-thread call and removed when the session ends, on Stop, when the transport ends and when the module is
-  unloaded. The status follows the scene — sending, updating, live, not up to date, without the scene — with the
-  reason and what happens next; a scene that cannot go out now (too large, refused, not prepared) leaves the session
-  running (the code still works). A closed scene that cannot be cleared off the viewers ends the session (§7.3).
+  unloaded. After events the observers saw off the main thread, the pump brings the batch hold in line with Slicer's
+  and asks for a re-sync (SLC-33). The status follows the scene — sending, updating, live, not up to date, without the
+  scene — with the reason and what happens next; a scene that cannot go out now (too large, refused, not prepared)
+  leaves the session running (the code still works). A closed scene that cannot be cleared off the viewers ends the
+  session (§7.3).
 - No automatic ``session.renew``: until ``release`` decides how renewal follows user activity (SLC-17/SLC-18), a
   session nobody joins ends after the relay's idle TTL (NFR-11, T1) instead of living for its 12 h maximum.
 """
@@ -227,6 +229,10 @@ class Watcher(Protocol):
     def attach(self) -> None: ...
 
     def detach(self) -> None: ...
+
+    def take_off_thread(self) -> bool: ...
+
+    def batch_processing(self) -> bool: ...
 
 
 class _NoTimer:
@@ -560,8 +566,14 @@ class PanelController:
         live.tick()  # the first snapshot, unless a batch holds it
 
     def _tick_live(self) -> None:
-        if self._live is not None:
-            self._live.tick()
+        live, watcher = self._live, self._watcher
+        if live is None:
+            return
+        # an event off the main thread marked nothing (SLC-33): the watcher re-lists the models first (never raises),
+        # then the batch hold follows Slicer's again and a snapshot re-syncs the viewers
+        if watcher is not None and watcher.take_off_thread():
+            live.request_resync(batch=watcher.batch_processing())
+        live.tick()
 
     def _observe_live(self) -> None:
         if self._live is not None:

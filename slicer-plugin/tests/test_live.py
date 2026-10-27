@@ -4,6 +4,7 @@ debouncer; the client validates every message against the protocol's schemas."""
 
 from __future__ import annotations
 
+import itertools
 import logging
 import math
 
@@ -1569,3 +1570,135 @@ def test_live_properties_follow_the_controller(strict):
     assert rig.client.snapshot_needed
     assert not (rig.live.in_flight or rig.live.owed or rig.live.waits_for_change)
     assert not rig.live.batch_held
+
+
+# ------------------------------------------------------------------------- SLC-33: events missed off the main thread
+
+
+@pytest.mark.parametrize(
+    ("depth", "batch", "expected"), [(0, True, 1), (2, True, 1), (2, False, 0), (1, False, 0)]
+)
+def test_live_request_resync_aligns_the_batch_hold(strict, depth, batch, expected):
+    """MRML reports only the outermost batch (research note §4): the hold count follows it, one at most."""
+    rig = two(strict).started()
+    for _ in range(depth):
+        rig.live.hold()
+    rig.live.request_resync(batch=batch)
+    assert f"batch={expected}" in repr(rig.live) and rig.live.batch_held is bool(expected)
+    rig.advance(0)
+    assert len(rig.begins()) == 1 - expected  # a batch still running holds the re-sync
+
+
+def test_live_request_resync_follows_the_resync_rule(strict):
+    rig = two(strict).started()
+    rig.live.request_resync(batch=False)
+    rig.live.tick()
+    assert len(rig.begins()) == 1  # the first re-sync goes at once
+    rig.ack()
+    rig.wait(5)
+    rig.live.request_resync(batch=False)  # within 10 s of the previous re-sync's ack
+    first_begin_at(rig, rig.timer.clock() + 2.0)
+
+
+def test_live_request_resync_lifts_the_flush_and_too_large_gates(strict):
+    """A missed change is a change: the gates that wait for one open (at most one extra attempt per episode)."""
+    rig = two(strict).started()
+    refuse_next_snapshot(rig, "INTERNAL")  # 2 s
+    rig.wait(2)
+    for _ in range(2):  # 4 s, then the third failure closes the flush gate
+        begin_id = rig.begin_id()
+        rig.take()
+        rig.relay(error("INTERNAL", begin_id))
+        rig.wait(4)
+    rig.wait(10)
+    assert rig.live.waits_for_change and rig.take() == []
+    rig.live.request_resync(batch=False)
+    assert not rig.live.waits_for_change
+    rig.live.tick()
+    assert len(rig.begins()) == 1  # without a flush
+
+    large = Rig(strict, LiveScene({"id": A}, {"id": C, "mesh": BIG}), maxSnapshotBytes=SMALL_LIMIT)
+    large.live.start()
+    assert large.live.waits_for_change and large.exports == 1
+    large.live.request_resync(batch=False)
+    large.live.tick()  # tried again: still too large
+    assert large.exports == 2 and large.take() == []
+    assert large.kinds() == [LiveEventKind.TOO_LARGE, LiveEventKind.TOO_LARGE]
+    large.scene.node(C)["visible"] = False  # no mark: the observers missed it
+    large.live.request_resync(batch=False)
+    first_begin_at(large, large.timer.clock() + 2.0)  # the second re-sync in a row is paced
+
+
+def test_live_request_resync_in_flight_sends_again_after_the_ack(strict):
+    rig = two(strict).started()
+    rig.live.request_snapshot()
+    rig.live.tick()
+    assert len(rig.begins()) == 1  # in flight
+    rig.live.request_resync(batch=False)
+    rig.live.tick()
+    assert rig.begins() == []  # no supersede
+    rig.ack()
+    rig.advance(0)
+    assert len(rig.begins()) == 1
+
+
+def test_live_request_resync_before_start_or_after_stop_does_nothing(strict, caplog):
+    caplog.set_level(logging.DEBUG, logger="remoteview_core.live")
+    rig = two(strict)
+    rig.live.request_resync(batch=True)
+    assert not rig.client.snapshot_needed and "batch=0" in repr(rig.live)
+    rig.live.start()
+    rig.ack()
+    rig.take()
+    rig.live.stop()
+    rig.live.request_resync(batch=True)
+    assert not rig.client.snapshot_needed and "batch=0" in repr(rig.live)
+    rig.wait(3)
+    assert rig.take() == []
+    assert [r for r in caplog.records if r.name == "remoteview_core.live"] == []
+
+
+def test_live_request_resync_never_counts_toward_the_flush_gate(strict):
+    """Missed events are not refusals: two re-syncs and one refusal leave the gate open (a lost connection's rule)."""
+    rig = two(strict).started()
+    rig.live.request_resync(batch=False)
+    rig.live.request_resync(batch=False)  # the second in a row: after the 2 s back-off
+    rig.wait(2)
+    begin_id = rig.begin_id()
+    rig.take()
+    rig.relay(error("INTERNAL", begin_id))
+    assert rig.live.owed and not rig.live.waits_for_change
+
+
+def test_live_request_resync_that_fails_logs_only_the_type(strict, caplog, monkeypatch):
+    rig = two(strict).started()
+
+    def boom():
+        raise KeyError(f"{A} Liver Smith")
+
+    monkeypatch.setattr(rig.client, "require_snapshot", boom)
+    with caplog.at_level(logging.DEBUG):
+        rig.live.request_resync(batch=False)
+    assert "live: re-sync not asked for (KeyError)" in caplog.text
+    assert A not in caplog.text and "Smith" not in caplog.text
+
+
+@pytest.mark.parametrize("every", [1, 2, 20, 60])
+def test_live_request_resync_is_not_held_off_by_events_that_keep_coming(strict, every):
+    """The SLC-33 review: in the panel's order — a 50 ms pump that calls ``request_resync`` and then ``tick`` — a
+    steady stream of missed events (one every ``every`` pumps) never pushes back a re-sync that is due, so the viewers
+    are re-synced with the back-off settling at 60 s."""
+    rig = two(strict).started()
+    times = []
+    for step in range(1, 3601):  # 180 s
+        rig.timer.advance(50)
+        if step % every == 0:
+            rig.live.request_resync(batch=False)
+        rig.live.tick()
+        if rig.begins():
+            times.append(rig.timer.clock())
+            rig.ack()
+    assert (
+        times and times[0] <= every * 0.05 + 2.1
+    )  # the first event, then at most the first back-off
+    assert len(times) >= 4 and max(b - a for a, b in itertools.pairwise(times)) <= 60 + every * 0.05
