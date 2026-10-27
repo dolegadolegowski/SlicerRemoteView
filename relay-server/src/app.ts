@@ -4,6 +4,11 @@
  * `buildApp()` wires the HTTP surface without listening, so tests use `app.inject()` and
  * `src/index.ts` adds `listen()`. Per-request logging is off (request lines carry paths and
  * headers; T6) and every unknown path answers `404 {"error":"NOT_FOUND"}` without echoing it.
+ *
+ * `app.drain()` is the SIGTERM drain (SRV-17, architecture §5, §9.3 `4008`): from then on
+ * `/healthz` answers `503` and upgrades are refused `503`; every socket is closed `4008` — no
+ * `session.*` message, sessions do not survive a restart — and gets `shutdownFlushMs()` to complete
+ * its close; the ones left are terminated. It resolves when no socket is left; the caller then closes the app.
  */
 import type { Duplex } from "node:stream";
 import { getHeapStatistics } from "node:v8";
@@ -11,9 +16,9 @@ import helmet from "@fastify/helmet";
 import Fastify, { LogController } from "fastify";
 import type { FastifyBaseLogger, FastifyInstance, FastifyReply } from "fastify";
 import type { Logger } from "pino";
-import { defaultSchemas } from "@slicerremoteview/shared";
+import { CLOSE_CODES, defaultSchemas } from "@slicerremoteview/shared";
 import { systemClock } from "./clock.js";
-import type { Clock } from "./clock.js";
+import type { Clock, TimerHandle } from "./clock.js";
 import { loadConfig, publicLimits } from "./config.js";
 import type { Config } from "./config.js";
 import { registerSceneRoute, sceneDownloads } from "./http/scene.js";
@@ -62,6 +67,23 @@ export interface AppOptions {
 }
 
 const NOT_FOUND = { error: "NOT_FOUND" } as const;
+
+/** The longest the drain waits for closes to complete (architecture §5: "≤ 5 s"). */
+export const SHUTDOWN_FLUSH_MS = 5_000;
+/** Left of `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` for closing the app before Railway's SIGKILL. */
+export const SHUTDOWN_MARGIN_MS = 1_000;
+
+/** How long the drain waits: ≤ 5 s, and within the draining window Railway gives (architecture §9). */
+export function shutdownFlushMs(drainingSeconds: number): number {
+  return Math.min(SHUTDOWN_FLUSH_MS, Math.max(0, drainingSeconds * 1000 - SHUTDOWN_MARGIN_MS));
+}
+
+declare module "fastify" {
+  interface FastifyInstance {
+    /** The SIGTERM drain (SRV-17); see the module comment. Idempotent. */
+    drain(): Promise<void>;
+  }
+}
 
 /**
  * The text of Fastify's line per bound address in `listen()`; its default names the address (for
@@ -139,6 +161,9 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     // would trust every hop.
     trustProxy: config.trustProxy ? (_address: string, hop: number) => hop === 0 : false,
     clientErrorHandler: clientErrorHandler(logger),
+    // `app.close()` destroys every HTTP connection instead of waiting: a half-sent request would
+    // otherwise hold a shutdown until the safety exit (SRV-17). Upgraded sockets are the drain's.
+    forceCloseConnections: true,
     // A URL that does not decode (`/7KQ4X%zz`) is just another unknown path: Fastify's default
     // answer would echo it in a 400 body and bypass the not-found handler below.
     frameworkErrors: (error, _request, reply) => {
@@ -247,7 +272,10 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   });
 
   // Then the WebSocket plugin, which wraps every route registered after it (upgrade interception).
-  await registerWsEndpoint(app, {
+  /** Set by `app.drain()` (below): from then on upgrades are refused and `/healthz` answers 503. */
+  let draining: Promise<void> | undefined;
+  const endpoint = await registerWsEndpoint(app, {
+    draining: () => draining !== undefined,
     allowedOrigins: config.allowedOrigins,
     clock,
     logger,
@@ -317,16 +345,39 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     beat.dispose();
   });
 
+  // The SIGTERM drain (see the module comment); `index.ts` closes the app once it resolved.
+  app.decorate("drain", () => {
+    draining ??= (async () => {
+      const sockets = [...endpoint.sockets];
+      logger.info({ sockets: sockets.length }, "draining for a restart");
+      for (const connection of sockets) connection.close(CLOSE_CODES.RELAY_RESTARTING);
+      let timer!: TimerHandle;
+      const late = new Promise<void>((resolve) => {
+        timer = clock.setTimeout(resolve, shutdownFlushMs(config.drainingSeconds));
+      });
+      await Promise.race([endpoint.emptied(), late]);
+      clock.clearTimeout(timer);
+      // Peers that did not complete the close in time (nor read it): the process is going.
+      for (const connection of endpoint.sockets) connection.terminate();
+      await endpoint.emptied();
+    })();
+    return draining;
+  });
+
   // No endpoint takes a request body (§10); without parsers a POST to an unknown path is a plain 404.
   app.removeAllContentTypeParsers();
 
   // `/healthz` is the Railway healthcheck target: status only, no codes, no IPs, no memory figures.
-  app.get("/healthz", async () => ({
-    status: "ok",
-    uptimeS: Math.floor((clock.now() - startedAt) / 1000),
-    sessions: registry.size,
-    version: RELAY_VERSION,
-  }));
+  // `503` while draining, so the edge stops routing here (architecture §9).
+  app.get("/healthz", async (_request, reply) => {
+    if (draining !== undefined) reply.code(503);
+    return {
+      status: draining === undefined ? "ok" : "draining",
+      uptimeS: Math.floor((clock.now() - startedAt) / 1000),
+      sessions: registry.size,
+      version: RELAY_VERSION,
+    };
+  });
 
   app.get("/api/version", async () => ({
     name: RELAY_NAME,

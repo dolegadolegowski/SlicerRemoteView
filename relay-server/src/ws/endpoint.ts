@@ -15,6 +15,9 @@
  * - Text limits per role: publisher 256 KiB, viewer 16 KiB → `error PAYLOAD_TOO_LARGE` + `1009`. The
  *   first message gets the limit of the role its type would fix (16 KiB if none). Binary frames
  *   from anyone but a publisher → `error UNAUTHORIZED` + `1008`.
+ * - While the relay drains for a restart (SRV-17) an upgrade that passes the Origin check gets HTTP
+ *   503 `RELAY_RESTARTING`, before the per-address limit (not spent); one that slipped in just before
+ *   the drain began is closed `4008` at once.
  * - Upgrade requests to any other route are refused with 404 before the upgrade (the plugin would
  *   otherwise accept them on every HTTP route and close them right after).
  * - Every text frame, binary frame and WebSocket `ping`/`pong` that passes the role's size limit and
@@ -83,6 +86,16 @@ export interface WsEndpointOptions {
   errorCode: (error: unknown) => string;
   /** Per-socket message budgets (SRV-25); default `DEFAULT_MESSAGE_BUDGETS`. */
   budgets?: MessageBudgets;
+  /** True while the relay drains for a restart (SRV-17): upgrades are refused `503`. */
+  draining?: () => boolean;
+}
+
+/** What the app needs of the endpoint to drain it (SRV-17). */
+export interface WsEndpoint {
+  /** Every socket from its upgrade until its `close` event, bound or not. */
+  readonly sockets: ReadonlySet<Connection>;
+  /** Resolves once no socket is left. */
+  emptied(): Promise<void>;
 }
 
 /** Fragments per message (`ws` closes `1008` beyond them). */
@@ -108,8 +121,10 @@ function asBuffer(data: RawData): Buffer {
 export async function registerWsEndpoint(
   app: FastifyInstance,
   options: WsEndpointOptions,
-): Promise<void> {
-  const { clock, logger, limiter, handlers, errorCode } = options;
+): Promise<WsEndpoint> {
+  const { clock, logger, limiter, handlers, errorCode, draining = () => false } = options;
+  const sockets = new Set<Connection>();
+  let waiters: (() => void)[] = [];
   const budget = messageBudgets(clock, options.budgets);
   const allowed = new Set(options.allowedOrigins);
   /** The limiter key of each upgrade request, computed once in `checkUpgrade`. */
@@ -164,6 +179,13 @@ export async function registerWsEndpoint(
       return;
     }
     if (!request.ws) return;
+    // A relay that drains for a restart takes no new sockets (architecture §5; the edge routes
+    // clients to the new instance once it is healthy).
+    if (draining()) {
+      logger.debug({ errorCode: "RELAY_RESTARTING" }, "websocket upgrade refused");
+      await reply.code(503).send({ error: "RELAY_RESTARTING" });
+      return;
+    }
     if (request.headers["sec-websocket-protocol"] !== undefined) {
       logger.debug({ errorCode: "SUBPROTOCOL_REFUSED" }, "websocket upgrade refused");
       await reply.code(400).send({ error: "BAD_REQUEST" });
@@ -210,6 +232,7 @@ export async function registerWsEndpoint(
 
   function accept(socket: WebSocket, clientKey: string): void {
     const connection = new Connection(socket, clock, clientKey);
+    sockets.add(connection);
     connection.armHandshakeTimer(HANDSHAKE_TIMEOUT_MS, () =>
       connection.close(CLOSE_CODES.HANDSHAKE_TIMEOUT),
     );
@@ -235,12 +258,20 @@ export async function registerWsEndpoint(
     socket.on("close", (closeCode: number) => {
       connection.markClosed();
       unreadSockets.delete(connection);
+      sockets.delete(connection);
+      if (sockets.size === 0) {
+        for (const resolve of waiters) resolve();
+        waiters = [];
+      }
       guarded(connection, "close", () => handlers.closed(connection, closeCode));
       logger.debug(
         { connection: connection.id, role: connection.role ?? "none", closeCode },
         "websocket closed",
       );
     });
+
+    // An upgrade that passed its check just before the drain began is told too (SRV-17).
+    if (draining()) connection.close(CLOSE_CODES.RELAY_RESTARTING);
   }
 
   /**
@@ -392,4 +423,10 @@ export async function registerWsEndpoint(
     // A failure answers the frame it was handling (`replyTo`, §3.2).
     guarded(connection, "frame", () => handlers.text(connection, textFrame), textFrame.id);
   }
+
+  return {
+    sockets,
+    emptied: () =>
+      sockets.size === 0 ? Promise.resolve() : new Promise((resolve) => waiters.push(resolve)),
+  };
 }
