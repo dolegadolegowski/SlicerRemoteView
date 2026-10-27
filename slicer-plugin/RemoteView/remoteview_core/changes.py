@@ -471,12 +471,21 @@ def _lifts(skip: SkipInfo, flags: Change, node: Any, scene_api: _SafeScene) -> b
     if reason in (SkipReason.INVALID_TRANSFORM, SkipReason.NON_LINEAR_TRANSFORM):
         return bool(flags & (Change.TRANSFORM | _REEXPORT)) and _usable_placement(node, scene_api)
     if reason in (SkipReason.NO_TRIANGLES, SkipReason.INVALID_GEOMETRY):
-        if reason is SkipReason.NO_TRIANGLES and not _has_triangle_cells(scene_api.polydata(node)):
-            return False
-        if flags & _REEXPORT:
-            return True
-        # a TRS matrix never touches the vertices; a bake (before, or now) can change area and finiteness
-        return bool(flags & Change.TRANSFORM) and (
-            skip.baked or placement_of(scene_api.world_matrix(node)) is BAKE
-        )
+        return _mesh_lifts(skip, flags, node, scene_api)
     return False  # duplicate-node-id: never the first skip of an ID (the first node of an ID is decided first)
+
+
+def _mesh_lifts(skip: SkipInfo, flags: Change, node: Any, scene_api: _SafeScene) -> bool:
+    """A mark can make the export take a node left out for its mesh (``no-triangles``, ``invalid-geometry``)."""
+    if skip.reason is SkipReason.NO_TRIANGLES and not _has_triangle_cells(scene_api.polydata(node)):
+        return False
+    if flags & _REEXPORT:
+        return True  # a new mesh may pass
+    if not flags & Change.TRANSFORM:
+        return False
+    # a new transform may, if the bake broke a mesh that passes unbaked. The node's own mesh: non-finite points and bad
+    # cells stay so under any transform, and collinear points under any affine one (a TRS matrix never touches the
+    # vertices) — only a chain that is not linear can give them an area
+    return skip.baked or (
+        skip.reason is SkipReason.NO_TRIANGLES and scene_api.world_matrix(node) is None
+    )

@@ -18,6 +18,8 @@ from typing import ClassVar
 from unittest import mock
 
 import pytest
+from mrml_fakes import EVENT_IDS
+from mrml_fakes import Scene as MrmlScene
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 #: Directory of the scripted module; Slicer appends it to ``sys.path`` when it loads a non-embedded
@@ -86,12 +88,14 @@ class _StubApp:
 
 class _StubQTimer:
     """``qt.QTimer`` whose ``singleShot`` fires at once (deferred work must not escape the guard). Instances only
-    record their interval, connections and state; tests call the connected slot themselves."""
+    record their interval, connections and state; tests call the connected slot themselves (``fire``)."""
 
     def __init__(self) -> None:
         self.interval: int | None = None
         self.slots: dict[str, object] = {}
         self.active = False
+        self.single_shot = False
+        self.starts: list[int | None] = []
 
     @staticmethod
     def singleShot(_msec: int, callback) -> None:
@@ -100,14 +104,34 @@ class _StubQTimer:
     def setInterval(self, msec: int) -> None:
         self.interval = msec
 
+    def setSingleShot(self, on: bool) -> None:
+        self.single_shot = bool(on)
+
     def connect(self, signal: str, slot) -> None:
         self.slots[signal] = slot
 
-    def start(self) -> None:
+    def disconnect(self, signal: str, slot) -> bool:
+        """Like PythonQt: removes the slot only if it is the connected one (``==``) and says whether it did."""
+        if signal in self.slots and self.slots[signal] == slot:
+            del self.slots[signal]
+            return True
+        return False
+
+    def start(self, msec: int | None = None) -> None:
+        self.starts.append(msec)
+        if msec is not None:
+            self.interval = msec
         self.active = True
 
     def stop(self) -> None:
         self.active = False
+
+    def fire(self) -> None:
+        """The timeout: a single-shot timer is inactive again before its slot runs, as in Qt."""
+        assert self.active, "an inactive timer does not fire"
+        if self.single_shot:
+            self.active = False
+        self.slots["timeout()"]()
 
     def isActive(self) -> bool:
         return self.active
@@ -275,6 +299,23 @@ def _make_stub_modules() -> dict[str, types.ModuleType]:
     # an empty scene (MRML stays manual, docs/testing/slicer.md); tests replace these to add nodes
     util.getNodesByClass = lambda _class_name: []
     slicer.util = util
+    # the scene the observers attach to (SLC-34): VTK's own dispatch, empty until a test adds nodes
+    slicer.mrmlScene = MrmlScene()
+    # the event ids of Slicer 5.12.4 as the adapter reads them; a misspelt constant raises AttributeError
+    slicer.vtkMRMLScene = types.SimpleNamespace(
+        NodeAddedEvent=EVENT_IDS["node_added"],
+        NodeRemovedEvent=EVENT_IDS["node_removed"],
+        StartBatchProcessEvent=EVENT_IDS["start_batch"],
+        EndBatchProcessEvent=EVENT_IDS["end_batch"],
+        EndCloseEvent=EVENT_IDS["end_close"],
+    )
+    slicer.vtkMRMLDisplayableNode = types.SimpleNamespace(
+        DisplayModifiedEvent=EVENT_IDS["display_modified"]
+    )
+    slicer.vtkMRMLModelNode = types.SimpleNamespace(MeshModifiedEvent=EVENT_IDS["mesh_modified"])
+    slicer.vtkMRMLTransformableNode = types.SimpleNamespace(
+        TransformModifiedEvent=EVENT_IDS["transform_modified"]
+    )
     slicer.vtkMRMLFolderDisplayNode = mock.NonCallableMagicMock(
         name="slicer.vtkMRMLFolderDisplayNode",
         spec_set=[

@@ -18,13 +18,16 @@ transport in order.
 - Nodes that cannot be exported are reported in :attr:`Snapshot.skipped`, never sent.
 - :attr:`Snapshot.sent` is what the viewers hold once this snapshot is in: the live-change classifier's scene (SLC-30),
   installed by the caller in the same call that took the frames — the scene ``begin`` announces, not the ack's.
+- ``announce`` (a re-export's new nodes, SLC-29) gives :attr:`Snapshot.announced`, the ``scene.nodeAdded`` hint (§8.2)
+  the caller sends before the frames, for the nodes the export takes. It is built only once the binary chunk is known
+  to fit, so a scene too large for the relay leaves no hint without its snapshot on the wire.
 
 Main thread only (VTK, and the client is not thread-safe). The SHA-256 is computed here too (decided in SLC-08).
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -69,6 +72,8 @@ class Snapshot:
     sent: SentScene = field(
         default_factory=lambda: SentScene(anonymized=False), repr=False, compare=False
     )
+    #: ``scene.nodeAdded`` for ``announce`` (§8.2), to send before :meth:`frames`; ``None`` when there is none
+    announced: dict[str, Any] | None = field(default=None, repr=False, compare=False)
     _taken: list[bool] = field(
         default_factory=lambda: [False], init=False, repr=False, compare=False
     )
@@ -92,16 +97,18 @@ class Snapshot:
         yield self.messages.end
 
 
-def build_snapshot(
+def build_snapshot(  # noqa: PLR0913 — keyword-only options after the scene and the client
     scene_api: SceneApi,
     client: ProtocolClient,
     *,
     slicer_version: str,
     anonymize_names: bool = False,
     quantize: bool = True,
+    announce: Iterable[tuple[str, str]] = (),
 ) -> Snapshot:
     """Collect ``scene_api`` and build the next snapshot of ``client``'s session (see the module docstring). The GLB
-    is quantised (``KHR_mesh_quantization``, FR-09) unless ``quantize`` is false."""
+    is quantised (``KHR_mesh_quantization``, FR-09) unless ``quantize`` is false. ``announce`` lists the ``(nodeId,
+    kind)`` pairs for :attr:`Snapshot.announced` (``ProtocolClient.announce_added``: none while updates are held)."""
     limits = client.limits
     if (
         client.state not in (SessionState.CREATED, SessionState.ACTIVE)
@@ -117,6 +124,11 @@ def build_snapshot(
         raise SnapshotTooLargeError(
             estimate_glb_size(fitted.entities, quantize=quantize), limits["maxSnapshotBytes"]
         )
+    # the hint takes a version before the snapshot's own; once built, a snapshot must follow (§8.2): the client keeps
+    # snapshot_needed set if the full GLB below is refused after all, and that message is then never sent. Only IDs
+    # this export takes are announced: they passed collect's ID rules (T7)
+    exported = {e.node_id for e in fitted.entities}
+    announced = client.announce_added([(i, kind) for i, kind in announce if i in exported])
     version = client.next_scene_version
     root = RootExtras(
         scene_version=version,
@@ -147,4 +159,5 @@ def build_snapshot(
         unreduced=fitted.unreduced,
         target_bytes=budget.target_bytes,
         sent=sent,
+        announced=announced,
     )

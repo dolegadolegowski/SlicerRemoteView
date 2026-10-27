@@ -11,6 +11,7 @@ import time
 import pytest
 from support import (
     FakeScene,
+    ack,
     live_client,
     needs_node,
     needs_relay_stub,
@@ -102,6 +103,80 @@ def test_snapshot_versions_follow_the_client():
     begin, glb, _ = reassemble(list(second.frames()))
     assert (first.scene_version, second.scene_version, begin["sceneVersion"]) == (1, 2, 2)
     assert root_extras(glb)["sceneVersion"] == 2 and client.next_scene_version == 3
+
+
+def test_snapshot_announces_new_nodes_before_its_begin():
+    """``announce`` (SLC-29): ``scene.nodeAdded`` takes the version before the snapshot's own (§8.2, §8.4)."""
+    client = live_client()
+    scene = FakeScene({"id": "vtkMRMLModelNode4", "mesh": sphere(8)})
+    build_snapshot(scene, client, slicer_version="5.12.4")
+    client.handle(ack(1))
+    scene.nodes.append({"id": "vtkMRMLModelNode5", "mesh": sphere(8)})
+    new = [("vtkMRMLModelNode5", "model")]
+    second = build_snapshot(scene, client, slicer_version="5.12.4", announce=new)
+    added = second.announced
+    begin, glb, _ = reassemble(list(second.frames()))
+    assert (added["type"], added["sceneVersion"], added["baseVersion"]) == ("scene.nodeAdded", 2, 1)
+    assert added["nodes"] == [{"nodeId": "vtkMRMLModelNode5", "kind": "model"}]
+    assert begin["sceneVersion"] == root_extras(glb)["sceneVersion"] == second.scene_version == 3
+    assert "vtkMRMLModelNode5" not in repr(second)
+    # updates held (version 3 in flight): no hint, no version used for one
+    third = build_snapshot(scene, client, slicer_version="5.12.4", announce=new)
+    assert third.announced is None and third.scene_version == 4
+    assert build_snapshot(scene, client, slicer_version="5.12.4").announced is None
+
+
+def test_snapshot_announces_only_the_nodes_it_exports():
+    """A node the export leaves out is not announced (T7: only IDs that passed collect's rules)."""
+    client = live_client()
+    scene = FakeScene({"id": "vtkMRMLModelNode4", "mesh": sphere(8)})
+    build_snapshot(scene, client, slicer_version="5.12.4")
+    client.handle(ack(1))
+    scene.nodes += [
+        {"id": "vtkMRMLModelNode5", "mesh": sphere(8)},
+        {"id": "vtkMRMLModelNode6"},
+    ]  # no mesh
+    new = [("vtkMRMLModelNode5", "model"), ("vtkMRMLModelNode6", "model")]
+    snapshot = build_snapshot(scene, client, slicer_version="5.12.4", announce=new)
+    assert snapshot.announced["nodes"] == [{"nodeId": "vtkMRMLModelNode5", "kind": "model"}]
+    other = live_client()
+    build_snapshot(scene, other, slicer_version="5.12.4")
+    other.handle(ack(1))
+    only_left_out = build_snapshot(scene, other, slicer_version="5.12.4", announce=new[1:])
+    assert (
+        only_left_out.announced is None and only_left_out.scene_version == 2
+    )  # no version for a hint
+
+
+def test_snapshot_too_large_for_the_relay_announces_nothing():
+    """The binary chunk is checked before the hint is built: no ``scene.nodeAdded`` without its snapshot (§8.2)."""
+    client = live_client()
+    small = FakeScene({"id": "vtkMRMLModelNode4", "mesh": sphere(8)})
+    build_snapshot(small, client, slicer_version="5.12.4")
+    client.handle(ack(1))
+    client.limits["maxSnapshotBytes"] = 5_000
+    big = FakeScene({"id": "vtkMRMLModelNode4", "mesh": sphere(32)}, {"id": "vtkMRMLModelNode5"})
+    with pytest.raises(SnapshotTooLargeError):
+        build_snapshot(
+            big, client, slicer_version="5.12.4", announce=[("vtkMRMLModelNode5", "model")]
+        )
+    assert client.versions.last == 1 and not client.snapshot_needed
+
+
+def test_snapshot_refused_after_its_hint_keeps_a_snapshot_owed():
+    """The binary chunk fits but the whole file is one byte over: the hint was built (a version used) but is never
+    returned — and a snapshot stays owed, as §8.2 asks after a hint."""
+    scene = FakeScene({"id": "vtkMRMLModelNode4", "mesh": sphere(32)})
+    size = build_snapshot(scene, live_client(), slicer_version="5.12.4").byte_length
+    client = live_client()
+    build_snapshot(FakeScene(), client, slicer_version="5.12.4")
+    client.handle(ack(1))
+    client.limits["maxSnapshotBytes"] = size - 1
+    with pytest.raises(SnapshotTooLargeError):
+        build_snapshot(
+            scene, client, slicer_version="5.12.4", announce=[("vtkMRMLModelNode4", "model")]
+        )
+    assert client.snapshot_needed and client.updates_held and client.versions.last == 2
 
 
 def test_snapshot_of_an_empty_scene_has_no_nodes():

@@ -576,8 +576,9 @@ class ProtocolClient:
     @property
     def snapshot_needed(self) -> bool:
         """The viewers can only be brought up to date by a new snapshot (§8.1 re-sync): the relay refused a snapshot or
-        an update sent after the last ``begin``, the connection dropped, or ``scene.nodeAdded`` was sent and its
-        snapshot did not begin yet (§8.2). :meth:`begin_snapshot` clears it."""
+        an update sent after the last ``begin``, the connection dropped, ``scene.nodeAdded`` was sent and its snapshot
+        did not begin yet (§8.2), or the caller asked for one (:meth:`require_snapshot`). :meth:`begin_snapshot`
+        clears it."""
         return self._snapshot_needed
 
     @property
@@ -751,6 +752,18 @@ class ProtocolClient:
             return None
         self._snapshot_needed = True
         return message
+
+    def require_snapshot(self) -> None:
+        """Only a new snapshot can bring the viewers up to date, but none begins now (an export too large, a back-off,
+        SLC-29): set :attr:`snapshot_needed`, so changes and removals stay held until :meth:`begin_snapshot` clears
+        it. Sends nothing and uses no version; does nothing without a session (``idle``, ``connecting``, ``closed``)."""
+        if self.state in (
+            SessionState.CREATED,
+            SessionState.ACTIVE,
+            SessionState.GRACE,
+            SessionState.RESUMING,
+        ):
+            self._snapshot_needed = True
 
     def _send_versioned(self, parts: Sequence[tuple[str, str, list[Any]]]) -> list[dict[str, Any]]:
         try:

@@ -9,6 +9,7 @@ and imports nothing heavier than ``slicer``/``qt``. Runtime dependencies are imp
 user clicks *Start session* (SLC-09, SLC-10).
 """
 
+import logging
 import sys
 import time
 
@@ -20,6 +21,8 @@ from slicer.ScriptedLoadableModule import (
     ScriptedLoadableModuleTest,
     ScriptedLoadableModuleWidget,
 )
+
+_log = logging.getLogger(__name__)
 
 #: QSettings keys (Slicer's own settings file): the relay address and the path of an additional CA certificate. Only
 #: values the transport accepted are stored — a refused address may hold credentials (§3.1).
@@ -66,7 +69,10 @@ Shows the 3D scene on phones, tablets and Meta Quest headsets that join with a 5
 Nothing leaves this computer until you click <b>Start session</b>. From then on the relay server
 shown in the panel receives: the surface meshes of the models and segments shown in 3D (no images
 or volumes), their names (unless <i>Hide node names</i> is on) and MRML IDs, colours, opacity,
-visibility and transforms, and the Slicer, extension and operating-system versions.
+visibility and transforms, and the Slicer, extension and operating-system versions. While a session
+runs, the relay also receives every change to these models, including models shown, added or renamed
+later and any scene you open or load, until you click <b>Stop session</b>. Hiding, deleting or
+renaming a model does not take back what was already sent.
 Anyone who has the code can view the scene while the session runs. Traffic is encrypted (TLS) on
 the way to the relay, but the relay itself can read the scene (no end-to-end encryption).
 The first Start asks before downloading the Python packages the module needs from PyPI.
@@ -91,6 +97,7 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
         self.ui = None
         self.controller = None
         self.pumpTimer = None
+        self.flushTimer = None
         self.link = ""  # the join link of the running session (it holds the code): never logged
         self.qrLink = ""  # the link the cached pixmaps belong to
         self.qrPixmaps = {}  # pixel size -> QPixmap (or None when it could not be drawn)
@@ -132,11 +139,20 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
         self.pumpTimer = qt.QTimer()
         self.pumpTimer.setInterval(PUMP_INTERVAL_MS)
         self.pumpTimer.connect("timeout()", self.onPump)
+        # the debouncer's single-shot timer (SLC-34): one for every session of this panel; a timeout posted after
+        # Stop reaches a controller with no live session, which does nothing
+        self.flushTimer = qt.QTimer()
+        self.flushTimer.setSingleShot(True)
+        self.flushTimer.connect("timeout()", self.onFlushTimer)
 
     def cleanup(self) -> None:
-        """Called when the module is unloaded: a running session is closed (waits up to 3 s)."""
-        if self.pumpTimer is not None:
-            self.pumpTimer.stop()
+        """Called when the module is unloaded (Reload, exit): a running session is closed (waits up to 3 s), its
+        observers removed, and both timers stopped and disconnected. Entered from C++: a failure to close the session
+        is logged by type only, so Reload can finish (``slicer.util.reloadScriptedModule``); a failure clearing the
+        widgets still propagates, after the session is closed and the timers disconnected."""
+        for timer in (self.pumpTimer, self.flushTimer):
+            if timer is not None:
+                timer.stop()
         try:
             # no code is left on a projector or in a hidden label
             self.closePresentation()
@@ -144,10 +160,18 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
             self.forgetQr()
             self.link = ""
         finally:  # and the session is closed even if clearing the widgets failed
-            if self.controller is not None:
-                self.controller.shutdown()
-            self.controller = None
-            self.logic = None
+            try:
+                if self.controller is not None:
+                    self.controller.shutdown()  # session.close, observers removed, live updates stopped
+            except Exception as exc:  # noqa: BLE001 — its text may carry a node ID (T7)
+                _log.error("RemoteView: session not closed (%s)", type(exc).__name__)
+            finally:
+                self.controller = None
+                self.logic = None
+                if self.flushTimer is not None:
+                    self.flushTimer.disconnect("timeout()", self.onFlushTimer)
+                if self.pumpTimer is not None:
+                    self.pumpTimer.disconnect("timeout()", self.onPump)
 
     def onRelayUrlChanged(self, url: str) -> None:
         from remoteview_core.consent import consent_text  # noqa: PLC0415 — standard library only
@@ -164,6 +188,8 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
                 platform=sys.platform,
                 scene=self.logic.sceneApi,
                 ensure_deps=self.ensureDependencies,
+                flush_timer=self.flushTimer,
+                watch=self.makeWatcher,
             )
         url = self.ui.relayUrlLineEdit.text.strip()
         caFile = self.ui.extraCaPathLineEdit.currentPath.strip()
@@ -198,11 +224,47 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
         if self.controller is not None:
             self.render(self.controller.stop())
 
+    def makeWatcher(self, sink):
+        """The scene observers of one live session (SLC-31), marking changes on ``sink`` (its ``LiveUpdates``)."""
+        # imported at the first live session only (FR-02)
+        from remoteview_core.observers import MrmlEvents, SceneWatcher  # noqa: PLC0415
+
+        events = MrmlEvents(
+            node_added=slicer.vtkMRMLScene.NodeAddedEvent,
+            node_removed=slicer.vtkMRMLScene.NodeRemovedEvent,
+            start_batch=slicer.vtkMRMLScene.StartBatchProcessEvent,
+            end_batch=slicer.vtkMRMLScene.EndBatchProcessEvent,
+            end_close=slicer.vtkMRMLScene.EndCloseEvent,
+            display_modified=slicer.vtkMRMLDisplayableNode.DisplayModifiedEvent,
+            mesh_modified=slicer.vtkMRMLModelNode.MeshModifiedEvent,
+            transform_modified=slicer.vtkMRMLTransformableNode.TransformModifiedEvent,
+        )
+        return SceneWatcher(
+            sink,
+            scene=slicer.mrmlScene,
+            events=events,
+            nodes_by_class=slicer.util.getNodesByClass,
+            world_matrix=self.logic.sceneApi().world_matrix,
+        )
+
+    def onFlushTimer(self) -> None:
+        """The scene changes marked since the last flush go out; the pump shows the result."""
+        try:
+            if self.controller is not None:
+                self.controller.flush_live()
+        except Exception as exc:  # noqa: BLE001 — a Qt slot: PyErr_Print would print the text (T7)
+            _log.error("RemoteView: scene changes not sent (%s)", type(exc).__name__)
+
     def onPump(self) -> None:
-        view = self.controller.pump()
-        self.render(view)
-        if not self.controller.active:
-            self.pumpTimer.stop()
+        try:
+            if self.controller is None:
+                self.pumpTimer.stop()
+            else:
+                self.render(self.controller.pump())
+                if not self.controller.active:
+                    self.pumpTimer.stop()
+        except Exception as exc:  # noqa: BLE001 — a Qt slot: PyErr_Print would print the text (T7)
+            _log.error("RemoteView: panel not updated (%s)", type(exc).__name__)
         # let the transport thread take the GIL (architecture §6, docs/research/slicer.md §3)
         time.sleep(0.001)
 
@@ -286,9 +348,7 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
             finally:
                 painter.end()  # Qt must not destroy a device that is still being painted on
         except Exception as exc:  # noqa: BLE001 — a drawing problem must not end the session
-            import logging  # noqa: PLC0415 — only for this warning
-
-            logging.getLogger(__name__).warning("QR code not drawn (%s)", type(exc).__name__)
+            _log.warning("QR code not drawn (%s)", type(exc).__name__)
             pixmap = None
         self.qrPixmaps[minPixels] = pixmap
         return pixmap
@@ -334,7 +394,7 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
 
 class RemoteViewLogic(ScriptedLoadableModuleLogic):
     """Scene-side logic: the session lives in the panel's controller (SLC-09), which sends the scene this logic
-    exposes as the session's first snapshot (SLC-25)."""
+    exposes as the session's first snapshot and then follows its changes (SLC-32 to SLC-34)."""
 
     def __init__(self) -> None:
         ScriptedLoadableModuleLogic.__init__(self)

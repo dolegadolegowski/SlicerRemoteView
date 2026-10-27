@@ -608,6 +608,39 @@ def test_scene_updates_a_lost_connection_needs_a_snapshot(strict):
     assert client.state is SessionState.GRACE and client.snapshot_needed
 
 
+def test_scene_updates_require_snapshot_holds_updates_until_the_next_begin(strict):
+    """SLC-29: a snapshot that cannot begin now (too large, a back-off) keeps updates held; no message, no version."""
+    client = live(strict)
+    client.require_snapshot()
+    assert client.snapshot_needed and client.updates_held and client.versions.last == 1
+    assert_held(client)
+    client.handle(ack(1))  # a late ack changes nothing
+    assert client.snapshot_needed
+    _snapshot(client)  # version 2 drops what was held
+    assert not client.snapshot_needed
+    assert client.handle(ack(2)) == [] and not client.updates_held
+
+
+@pytest.mark.parametrize("state", ["idle", "connecting", "closed"])
+def test_scene_updates_require_snapshot_without_a_session_does_nothing(strict, state):
+    client = ProtocolClient(make_client_info("5.12.4", "linux"), validate=strict, auto_renew=False)
+    if state != "idle":
+        client.start("mobile")
+    if state == "closed":
+        client.close()
+    client.require_snapshot()
+    assert not client.snapshot_needed
+
+
+@pytest.mark.parametrize("state", [SessionState.GRACE, SessionState.RESUMING])
+def test_scene_updates_require_snapshot_while_the_connection_is_lost(strict, state):
+    """After a resume SLC-17 may find the relay up to date (no snapshot needed): a later request still holds."""
+    client = live(strict)
+    client.state = state  # as SLC-17 leaves it after comparing versions
+    client.require_snapshot()
+    assert client.snapshot_needed
+
+
 def test_scene_updates_close_forgets_what_was_held(strict):
     client = live(strict)
     _snapshot(client)

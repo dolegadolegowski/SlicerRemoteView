@@ -17,6 +17,7 @@ from typing import NoReturn
 from unittest import mock
 
 import pytest
+from mrml_fakes import EVENT_IDS
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 MODULE_DIR = PLUGIN_ROOT / "RemoteView"
@@ -38,6 +39,9 @@ DISCLOSURE_WORDS = (
     "opacity",
     "visibility",
     "transforms",
+    "every change",
+    "any scene you open or load",
+    "does not take back what was already sent",
     "Anyone who has the code",
     "PyPI",
 )
@@ -144,11 +148,24 @@ def test_skeleton_import_and_construct_have_no_side_effects(
     widget = module.RemoteViewWidget(mock.MagicMock(name="parentWidget"))
     widget.setup()
     assert isinstance(widget.logic, module.RemoteViewLogic)
+    # SLC-34: the flush timer is made, single-shot and idle; nothing observes the scene before Start
+    flush = widget.flushTimer
+    assert (
+        flush.single_shot and not flush.active and flush.slots["timeout()"] == widget.onFlushTimer
+    )
+    scene = slicer_stubs["slicer"].mrmlScene
+    assert not any(scene.HasObserver(event) for event in EVENT_IDS.values())
+    assert {"remoteview_core.observers", "remoteview_core.live"}.isdisjoint(sys.modules)
     for hook in ("enter", "exit"):  # Slicer calls these whenever the panel is shown/hidden
         if hasattr(widget, hook):
             getattr(widget, hook)()
     widget.cleanup()
     assert widget.logic is None
+    for timer in (
+        widget.pumpTimer,
+        widget.flushTimer,
+    ):  # stopped and disconnected: Reload frees the old widget
+        assert not timer.active and "timeout()" not in timer.slots
     parentless = module.RemoteViewWidget()  # Slicer calls setup() from the base __init__ here
     assert isinstance(parentless.logic, module.RemoteViewLogic)
 
@@ -326,3 +343,77 @@ def test_skeleton_extension_cmake_metadata():
         i = args.index(pair[0])
         assert args[i : i + 2] == pair, f"macro must receive {pair}"
     assert "WITH_GENERIC_TESTS" in args
+
+
+# --------------------------------------------------------------------------- SLC-34: live changes in the adapter
+
+
+def test_skeleton_watcher_factory_uses_slicer_event_ids(
+    import_remote_view, slicer_stubs, monkeypatch
+):
+    """Each Slicer constant lands in its own field (a swap would observe the wrong events silently)."""
+    from remoteview_core import observers  # noqa: PLC0415
+    from remoteview_core.mrml_scene import MrmlSceneApi  # noqa: PLC0415
+
+    made = {}
+
+    def record(sink, **kwargs):
+        made.update(kwargs, sink=sink)
+        return "watcher"
+
+    monkeypatch.setattr(observers, "SceneWatcher", record)
+    widget = import_remote_view().RemoteViewWidget(mock.MagicMock(name="parentWidget"))
+    widget.setup()
+    sink = object()
+    assert widget.makeWatcher(sink) == "watcher" and made["sink"] is sink
+    slicer = slicer_stubs["slicer"]
+    assert made["events"] == observers.MrmlEvents(**EVENT_IDS)
+    assert made["scene"] is slicer.mrmlScene
+    assert made["nodes_by_class"] is slicer.util.getNodesByClass
+    assert made["world_matrix"].__func__ is MrmlSceneApi.world_matrix
+    widget.cleanup()
+
+
+def test_skeleton_cleanup_stops_and_disconnects_both_timers_even_if_the_session_does_not_close(
+    import_remote_view, caplog
+):
+    widget = import_remote_view().RemoteViewWidget(mock.MagicMock(name="parentWidget"))
+    widget.setup()
+    widget.controller = mock.MagicMock(name="controller")
+    widget.controller.shutdown.side_effect = KeyError("vtkMRMLModelNode4 Doe^John")
+    widget.pumpTimer.start()
+    widget.flushTimer.start(150)
+    with caplog.at_level("DEBUG"):
+        widget.cleanup()  # entered from C++ on Reload: nothing may escape
+    assert "RemoteView: session not closed (KeyError)" in caplog.text
+    assert "vtkMRMLModelNode" not in caplog.text and "Doe" not in caplog.text
+    assert widget.controller is None and widget.logic is None
+    for timer in (widget.pumpTimer, widget.flushTimer):
+        assert not timer.active and "timeout()" not in timer.slots
+    widget.cleanup()  # Reload aborted, then exit: a second cleanup raises nothing
+
+
+def test_skeleton_flush_and_pump_slots_log_only_the_type(import_remote_view, caplog):
+    widget = import_remote_view().RemoteViewWidget(mock.MagicMock(name="parentWidget"))
+    widget.setup()
+    widget.controller = mock.MagicMock(name="controller")
+    widget.controller.flush_live.side_effect = KeyError("vtkMRMLModelNode4 Doe^John")
+    widget.controller.pump.side_effect = KeyError("vtkMRMLModelNode4 Doe^John")
+    with caplog.at_level("DEBUG"):
+        widget.onFlushTimer()  # Qt slots: an escaping exception would reach PyErr_Print (T7)
+        widget.onPump()
+    assert caplog.text.count("(KeyError)") == 2
+    assert "RemoteView: scene changes not sent (KeyError)" in caplog.text
+    assert "RemoteView: panel not updated (KeyError)" in caplog.text
+    assert "vtkMRMLModelNode" not in caplog.text and "Doe" not in caplog.text
+
+
+def test_skeleton_slots_without_a_controller_do_nothing(import_remote_view, caplog):
+    widget = import_remote_view().RemoteViewWidget(mock.MagicMock(name="parentWidget"))
+    widget.setup()
+    widget.pumpTimer.start()
+    with caplog.at_level("DEBUG"):
+        widget.onFlushTimer()
+        widget.onPump()
+    assert caplog.text == "" and widget.controller is None
+    assert not widget.pumpTimer.active  # a pump with nothing to pump stops

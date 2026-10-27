@@ -9,8 +9,9 @@ one :class:`Drained` set (SLC-16 turns it into ``scene.update`` / ``scene.nodeRe
   viewers four times a second (NFR-02: ≤ 500 ms from Slicer to the viewers);
 - a mesh change, a new node or a rename (all need a re-export) waits :data:`GEOMETRY_MS` (750 ms; protocol §8.1:
   500–1000 ms; segment editing fires mesh events continuously), at most :data:`GEOMETRY_MAX_MS` after the first;
-- while Slicer imports a scene or runs a batch process nothing is flushed: the marks are kept and flushed once when the
-  last import/batch ends (``EndImportEvent`` / ``EndBatchProcessEvent``);
+- while Slicer runs a batch process (a scene close, import or restore always runs inside one) nothing is flushed: the
+  marks are kept and flushed once when the last hold ends (``EndBatchProcessEvent``; SLC-29's controller also holds
+  while a snapshot is in flight or the connection is lost);
 - a closed scene (``EndCloseEvent``) drops every mark and flushes a reset: the next scene is a new snapshot.
 
 One timer serves both: while a re-export is pending, appearance changes wait with it (at most
@@ -139,8 +140,13 @@ class Debouncer:
 
     @property
     def held(self) -> bool:
-        """An import or batch process is running: marks are kept, nothing is flushed."""
+        """A batch process (or another hold) is on: marks are kept, nothing is flushed."""
         return self._holds > 0
+
+    @property
+    def pending(self) -> bool:
+        """Marks or a reset wait for a flush (held or not)."""
+        return bool(self._dirty)
 
     def mark(self, node_id: str, flags: Change) -> None:
         self._dirty.mark(node_id, flags)
@@ -152,13 +158,13 @@ class Debouncer:
         self._schedule()
 
     def hold(self) -> None:
-        """``StartImportEvent`` / ``StartBatchProcessEvent``: keep the marks until :meth:`release`."""
+        """``StartBatchProcessEvent`` (or another hold): keep the marks until the matching :meth:`release`."""
         self._holds += 1
         self._timer.stop()
 
     def release(self) -> None:
-        """``EndImportEvent`` / ``EndBatchProcessEvent``: once the last hold ends, flush what was kept — from the timer
-        at 0 ms, so the flush runs from the event loop, not inside the MRML event that ended the import."""
+        """``EndBatchProcessEvent`` (or the end of another hold): once the last hold ends, flush what was kept — from
+        the timer at 0 ms, so the flush runs from the event loop, not inside the MRML event that ended the batch."""
         if self._holds == 0:
             return
         self._holds -= 1

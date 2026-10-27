@@ -9,7 +9,7 @@ import traceback
 import numpy as np
 import pytest
 from pygltflib import GLTF2
-from support import FakeScene, ack, live_client, sphere
+from support import FakeScene, LiveScene, ack, live_client, small_sphere, sphere
 from vtkmodules.vtkCommonCore import vtkPoints
 from vtkmodules.vtkCommonDataModel import vtkCellArray, vtkPolyData
 from vtkmodules.vtkCommonTransforms import vtkTransform
@@ -33,7 +33,7 @@ from remoteview_core.snapshot import SnapshotTooLargeError, build_snapshot
 from remoteview_protocol import schemas
 
 ROOT = RootExtras(scene_version=1, profile="mobile", slicer_version="5.12.4")
-MESH = sphere(8)
+MESH = small_sphere()  # LiveScene's default mesh
 SHEAR = np.array([[1.0, 0.5, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
 COLLAPSE = np.diag([0.0, 0.0, 0.0, 1.0])  # every triangle loses its area once baked
 
@@ -58,60 +58,6 @@ def moved(x: float = 0.0, y: float = 0.0, z: float = 0.0) -> np.ndarray:
 
 def gltf(world: np.ndarray) -> tuple[float, ...]:
     return tuple(gltf_matrix_column_major(ras_matrix_to_gltf(world)))
-
-
-class LiveScene:
-    """A :class:`~remoteview_core.collect.SceneApi` whose nodes change between calls, like a live MRML scene: each
-    node is a dict with ``id``, ``name``, ``color``, ``opacity``, ``visible`` (shown in 3D), ``world`` (RAS matrix,
-    ``None`` for a non-linear chain), ``warp`` (that chain's transform, or ``None``) and ``mesh``. ``meshes`` counts
-    the mesh reads (the classifier makes none; it may count cells of a node left out without triangles)."""
-
-    def __init__(self, *nodes: dict) -> None:
-        self.nodes = [{**self._defaults(), **n} for n in nodes]
-        self.meshes = 0
-
-    @staticmethod
-    def _defaults() -> dict:
-        return {
-            "name": "Liver",
-            "color": (0.8, 0.3, 0.2),
-            "opacity": 1.0,
-            "visible": True,
-            "world": np.eye(4),  # one array per node
-            "warp": None,
-            "mesh": MESH,
-        }
-
-    def node(self, node_id: str) -> dict:
-        return next(n for n in self.nodes if n["id"] == node_id)
-
-    def add(self, node_id: str, **props) -> None:
-        self.nodes.append({**self._defaults(), "id": node_id, **props})
-
-    def remove(self, node_id: str) -> None:
-        self.nodes = [n for n in self.nodes if n["id"] != node_id]
-
-    def visible_model_nodes(self):
-        return [n for n in self.nodes if n["visible"]]
-
-    def node_id(self, node):
-        return node["id"]
-
-    def name(self, node):
-        return node["name"]
-
-    def polydata(self, node):
-        self.meshes += 1
-        return node["mesh"]
-
-    def display_props(self, node):
-        return node["color"], node["opacity"], node["visible"]
-
-    def world_matrix(self, node):
-        return node["world"]
-
-    def world_transform(self, node):
-        return node["warp"]
 
 
 def warp() -> vtkTransform:
@@ -582,6 +528,20 @@ def test_changes_a_node_with_invalid_geometry_comes_back_with_a_new_mesh():
     assert "vtkMRMLModelNode5" in {e.node_id for e in collect_scene(scene).entities}
 
 
+def test_changes_a_non_finite_mesh_never_comes_back_with_a_transform():
+    """Its own mesh fails (``baked`` false): non-finite points stay so under any chain, a new mesh may pass."""
+    broken = polydata_from_triangles(
+        np.array([[0.0, 0, 0], [np.nan, 0, 0], [0, 1, 0]]), np.array([[0, 1, 2]])
+    )
+    scene = LiveScene({"id": "vtkMRMLModelNode4"}, {"id": "vtkMRMLModelNode5", "mesh": broken})
+    sent = exported(scene)
+    assert sent.skipped == {"vtkMRMLModelNode5": SkipInfo(SkipReason.INVALID_GEOMETRY)}
+    for world, chain in ((moved(1.0), None), (SHEAR, None), (None, warp())):
+        scene.node("vtkMRMLModelNode5").update(world=world, warp=chain)
+        assert plan_of(scene, sent, ("vtkMRMLModelNode5", Change.TRANSFORM)) == Plan()
+    assert plan_of(scene, sent, ("vtkMRMLModelNode5", Change.GEOMETRY)) == Plan(snapshot=True)
+
+
 def test_changes_a_node_whose_bake_overflowed_comes_back_without_it():
     """``invalid-geometry`` after a bake (beyond float32): taking the transform away lifts it."""
     blow_up = vtkTransform()
@@ -607,7 +567,10 @@ def test_changes_a_node_collapsed_by_a_bake_comes_back_with_its_transform():
     assert flat_sent.skipped == {"vtkMRMLModelNode5": SkipInfo(SkipReason.NO_TRIANGLES)}
     flat.node("vtkMRMLModelNode5")["world"] = moved(4.0)
     assert plan_of(flat, flat_sent, ("vtkMRMLModelNode5", Change.TRANSFORM)) == Plan()
-    flat.node("vtkMRMLModelNode5")["world"] = SHEAR  # now baked: it may
+    # an affine bake keeps collinear points collinear (SLC-30 review part 2): a sheared drag sends nothing
+    flat.node("vtkMRMLModelNode5")["world"] = SHEAR
+    assert plan_of(flat, flat_sent, ("vtkMRMLModelNode5", Change.TRANSFORM)) == Plan()
+    flat.node("vtkMRMLModelNode5").update(world=None, warp=warp())  # a chain that is not linear may
     assert plan_of(flat, flat_sent, ("vtkMRMLModelNode5", Change.TRANSFORM)) == Plan(snapshot=True)
     assert plan_of(flat, flat_sent, ("vtkMRMLModelNode5", Change.GEOMETRY)) == Plan(snapshot=True)
 

@@ -527,21 +527,32 @@ def test_collect_skips_a_baked_mesh_that_overflows_float32():
 
 
 def test_collect_says_whether_a_mesh_left_out_was_baked():
-    """``SkippedNode.baked`` (SLC-30): the mesh check failed after the transform went into the vertices — not part
-    of equality, like ``index``."""
+    """``SkippedNode.baked`` (SLC-30): the mesh check failed after the transform went into the vertices and passes
+    without it — not part of equality, like ``index``."""
     collapse = np.diag([0.0, 0.0, 0.0, 1.0])  # every triangle loses its area
     line = vtkLineSource()
     line.Update()
+    collinear = _polydata(
+        [[0, 0, 0], [1, 0, 0], [2, 0, 0]], polys=[(0, 1, 2)]
+    )  # no area of its own
+    far = _polydata(
+        [[0, 0, 0], [1e300, 0, 0], [0, 1, 0]], polys=[(0, 1, 2)]
+    )  # beyond float32 on its own
     scene = FakeScene(
         FakeNode("vtkMRMLModelNode1", _cube(), world=collapse),
         FakeNode("vtkMRMLModelNode2", line.GetOutput()),
         FakeNode("vtkMRMLModelNode3", _cube(), world=np.full((4, 4), np.nan)),
+        # baked, but the node's own mesh fails: the bake is not to blame (SLC-30 review part 1)
+        FakeNode("vtkMRMLModelNode4", collinear, world=SHEAR),
+        FakeNode("vtkMRMLModelNode5", far, world=None, transform=_linear(np.eye(4))),
     )
     skipped = collect_scene(scene).skipped
     assert [(s.node_id, s.reason, s.baked) for s in skipped] == [
         ("vtkMRMLModelNode1", SkipReason.NO_TRIANGLES, True),
         ("vtkMRMLModelNode2", SkipReason.NO_TRIANGLES, False),
         ("vtkMRMLModelNode3", SkipReason.INVALID_TRANSFORM, False),
+        ("vtkMRMLModelNode4", SkipReason.NO_TRIANGLES, False),
+        ("vtkMRMLModelNode5", SkipReason.INVALID_GEOMETRY, False),
     ]
     assert skipped[0] == SkippedNode("vtkMRMLModelNode1", SkipReason.NO_TRIANGLES)
 
