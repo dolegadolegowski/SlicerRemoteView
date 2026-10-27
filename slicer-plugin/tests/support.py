@@ -13,6 +13,7 @@ import queue
 import shutil
 import struct
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -20,6 +21,7 @@ from typing import Any, ClassVar
 
 import numpy as np
 import pytest
+from vtkmodules.vtkCommonCore import vtkObject
 from vtkmodules.vtkFiltersSources import vtkSphereSource
 
 from remoteview_core.protocol_client import ProtocolClient, SessionState, make_client_info
@@ -157,6 +159,23 @@ def pump_while(ctl: Any, condition, seconds: float) -> None:
 
 
 # --------------------------------------------------------------------------- the panel
+
+
+def leaks(caplog: Any, capfd: Any, *needles: str) -> list[str]:
+    """Where a needle (a node ID, a name, a session code, a token, ``Traceback``) shows (T7): the captured log, this
+    process's stdout and stderr (VTK and PythonQt print an exception that escapes a callback there, never to the log),
+    and ``sys.last_value``/``sys.last_exc`` (set by ``PyErr_Print``; pytest clears them before each test call)."""
+    out, err = capfd.readouterr()
+    found = [
+        f"{where}: {needle}"
+        for where, text in (("log", caplog.text), ("stdout", out), ("stderr", err))
+        for needle in needles
+        if needle and needle in text
+    ]
+    found += [
+        f"sys.{name}" for name in ("last_value", "last_exc") if getattr(sys, name, None) is not None
+    ]
+    return found
 
 
 class FakeTimer:
@@ -498,6 +517,28 @@ class FakeView:
 
     def GetID(self):  # noqa: N802
         return self.view_id
+
+
+class MrmlModel(FakeModel, vtkObject):
+    """A model node read by both the scene adapter (the export) and the observers (VTK's own event dispatch), so a mark
+    and the export always see the same scene. ``FakeModel`` first: its ``GetClassName`` wins over VTK's."""
+
+    def __init__(self, node_id, **kw):
+        kw.setdefault("displays", [FakeDisplay()])
+        kw.setdefault("polydata", sphere(8))
+        FakeModel.__init__(self, node_id, **kw)
+        self.in_scene = True
+
+    def IsA(self, name):  # noqa: N802 — MRML's names
+        return int(name == self.cls)
+
+    def GetScene(self):  # noqa: N802
+        return object() if self.in_scene else None
+
+
+class MrmlView(FakeView):
+    def IsA(self, name):  # noqa: N802
+        return int(name == "vtkMRMLViewNode")
 
 
 class FakeFolders:

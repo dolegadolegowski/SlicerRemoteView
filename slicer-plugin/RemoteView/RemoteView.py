@@ -66,7 +66,10 @@ Shows the 3D scene on phones, tablets and Meta Quest headsets that join with a 5
 Nothing leaves this computer until you click <b>Start session</b>. From then on the relay server
 shown in the panel receives: the surface meshes of the models and segments shown in 3D (no images
 or volumes), their names (unless <i>Hide node names</i> is on) and MRML IDs, colours, opacity,
-visibility and transforms, and the Slicer, extension and operating-system versions.
+visibility and transforms, and the Slicer, extension and operating-system versions. While a session
+runs, the relay also receives every change to these models, including models shown, added or renamed
+later and any scene you open or load, until you click <b>Stop session</b>. Hiding, deleting or
+renaming a model does not take back what was already sent.
 Anyone who has the code can view the scene while the session runs. Traffic is encrypted (TLS) on
 the way to the relay, but the relay itself can read the scene (no end-to-end encryption).
 The first Start asks before downloading the Python packages the module needs from PyPI.

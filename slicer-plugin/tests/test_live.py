@@ -1488,3 +1488,84 @@ def test_live_a_lost_connection_does_not_close_the_flush_gate_again(strict):
     rig.live.observe()
     rig.wait(70)
     assert len(rig.begins()) == 1  # the re-sync, without another change
+
+
+# --------------------------------------------------------------------------- SLC-32: what the panel uses
+
+
+def test_live_deferred_start_leaves_the_first_snapshot_to_the_tick(strict):
+    rig = two(strict)
+    rig.live.start(deferred=True)
+    assert rig.take() == [] and rig.events == [] and rig.exports == 0
+    assert rig.client.snapshot_needed and rig.live.owed and not rig.live.in_flight
+    rig.live.start(deferred=True)  # a second call does nothing
+    rig.live.tick()
+    [begin] = rig.begins()
+    assert (begin["sceneVersion"], begin["nodeCount"]) == (1, 2)
+    assert rig.kinds() == [LiveEventKind.SENT]
+    assert rig.live.in_flight and not rig.live.owed
+
+
+def test_live_deferred_start_waits_for_a_hold_given_before_the_tick(strict):
+    """The panel attaches the observers between ``start(deferred=True)`` and the tick: a batch running at Start holds
+    the first snapshot until it ends, and the marks made in the batch announce nothing (SLC-31 review)."""
+    rig = two(strict)
+    rig.live.start(deferred=True)
+    rig.live.hold()  # the watcher's attach() during a batch process
+    assert rig.live.batch_held
+    rig.scene.add(C)
+    rig.live.mark(C, Change.ADDED)
+    rig.wait(3)
+    assert rig.take() == [] and rig.exports == 0
+    rig.live.release()
+    rig.advance(0)
+    sent = rig.take()
+    assert [m["type"] for m in sent] == ["scene.snapshot.begin", "scene.snapshot.end"]
+    assert sent[0]["nodeCount"] == 3 and not rig.live.batch_held
+    rig.live.release()  # unmatched: the in-flight hold stays
+    rig.scene.node(A)["color"] = (0.1, 0.2, 0.3)
+    rig.live.mark(A, Change.APPEARANCE)
+    rig.wait(1)
+    assert rig.take() == []
+    rig.ack()
+    rig.advance(0)
+    assert [m["type"] for m in rig.take()] == ["scene.update"]
+
+
+def test_live_properties_follow_the_controller(strict):
+    large = Rig(strict, LiveScene({"id": A}, {"id": C, "mesh": BIG}), maxSnapshotBytes=SMALL_LIMIT)
+    assert not (large.live.owed or large.live.waits_for_change or large.live.batch_held)
+    large.live.start()
+    assert large.live.waits_for_change and large.live.owed and not large.live.in_flight
+    large.live.stop()
+    assert not (large.live.waits_for_change or large.live.owed)
+
+    rig = two(strict).started()
+    assert not (rig.live.in_flight or rig.live.owed or rig.live.waits_for_change)
+    refuse_next_snapshot(rig, "CAPACITY")  # 2 s
+    rig.wait(2)
+    for _ in range(2):  # 4 s, then the third failure closes the flush gate
+        begin_id = rig.begin_id()
+        rig.take()
+        assert rig.live.in_flight
+        rig.relay(error("CAPACITY", begin_id))
+        rig.wait(4)
+    assert rig.live.waits_for_change and rig.live.owed and not rig.live.in_flight
+    rig.wait(10)  # past the 8 s back-off: only a change opens the gate
+    assert rig.take() == [] and rig.live.waits_for_change
+    rig.live.mark(A, Change.APPEARANCE)
+    rig.advance(150)
+    assert len(rig.begins()) == 1 and rig.live.in_flight and not rig.live.waits_for_change
+    rig.ack()  # an ack that owes nothing clears them all
+    assert not (rig.live.in_flight or rig.live.owed or rig.live.waits_for_change)
+
+    rig.live.hold()
+    assert rig.live.batch_held
+    rig.live.reset()  # a reset alone: no snapshot_needed, still owed
+    assert rig.live.owed and not rig.client.snapshot_needed
+    rig.live.request_snapshot()
+    rig.live.stop()
+    # the client's flag outlives the controller: owed reads it only while running
+    assert rig.client.snapshot_needed
+    assert not (rig.live.in_flight or rig.live.owed or rig.live.waits_for_change)
+    assert not rig.live.batch_held

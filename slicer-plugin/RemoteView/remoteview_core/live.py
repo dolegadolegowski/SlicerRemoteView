@@ -31,9 +31,12 @@ of the session, the first snapshot included:
 - *Hide node names* and the device profile have no MRML event: :meth:`~LiveUpdates.set_anonymize_names` and
   :meth:`~LiveUpdates.request_snapshot` (SLC-18) ask for a snapshot.
 
-The panel (SLC-32) calls :meth:`~LiveUpdates.observe` after every relay message and connection loss and
-:meth:`~LiveUpdates.tick` from its pump; the flush timer calls :meth:`~LiveUpdates.flush`. ``IDLE``/``CLOSED`` stop the
-controller: the marks are dropped and later ones ignored.
+The panel (SLC-32) calls ``start(deferred=True)``, attaches the observers, then :meth:`~LiveUpdates.tick` — all in
+one main-thread call, so a batch process running at Start holds the first snapshot until it ends; it calls
+:meth:`~LiveUpdates.observe` after every relay message and connection loss and :meth:`~LiveUpdates.tick` from its
+pump; the flush timer calls :meth:`~LiveUpdates.flush`. Its texts read :attr:`~LiveUpdates.in_flight`,
+:attr:`~LiveUpdates.owed`, :attr:`~LiveUpdates.waits_for_change` and :attr:`~LiveUpdates.batch_held` when they are
+shown. ``IDLE``/``CLOSED`` stop the controller: the marks are dropped and later ones ignored.
 
 Privacy (T7): every method the observers, the flush timer or the pump call (the marks, ``hold``/``release``,
 ``reset``, :meth:`~LiveUpdates.observe`, :meth:`~LiveUpdates.tick`, :meth:`~LiveUpdates.flush`) catches ``Exception``
@@ -202,6 +205,29 @@ class LiveUpdates:
         """What the viewers hold (the scene of the last export, with every change sent since)."""
         return self._sent
 
+    @property
+    def in_flight(self) -> bool:
+        """A snapshot began and has no ack, refusal or loss yet."""
+        return self._inflight is not None
+
+    @property
+    def owed(self) -> bool:
+        """The viewers need a new snapshot to catch up: the relay or a change asked for one, or a closed scene may
+        still be on them (updates are held until it begins)."""
+        return self._running and (self._client.snapshot_needed or self._reset_owed)
+
+    @property
+    def waits_for_change(self) -> bool:
+        """The owed snapshot goes out only after a change in Slicer or :meth:`request_snapshot`: the scene was too
+        large, or :data:`FAILURES_BEFORE_FLUSH_GATE` attempts failed without an ack (the SLC-29 review). Read it when a
+        text is shown: :attr:`LiveEventKind.REFUSED` is emitted before the refusal sets the gate."""
+        return self._shrink is not None or self._needs_flush  # stop() forgets both
+
+    @property
+    def batch_held(self) -> bool:
+        """A batch process (loading, closing, a script) holds the marks and any owed snapshot until it ends."""
+        return self._depth > 0  # stop() forgets it
+
     # ------------------------------------------------------------------ the observers (SLC-31); never raise
 
     def mark(self, node_id: str, flags: Change) -> None:
@@ -265,9 +291,14 @@ class LiveUpdates:
 
     # ------------------------------------------------------------------ the panel
 
-    def start(self) -> None:
-        """The session was created: send the first snapshot. Raises ``ProtocolStateError`` unless the client is
-        ``CREATED``/``ACTIVE`` (a caller's bug); a second call does nothing."""
+    def start(self, *, deferred: bool = False) -> None:
+        """The session was created: send the first snapshot — at once, or with ``deferred`` from the next
+        :meth:`tick`. The panel attaches the observers between ``start(deferred=True)`` and that tick: a batch process
+        running at Start gives the watcher's ``hold()`` (counted once running, and the only batch hold, the SLC-31
+        review), so the first snapshot waits for the batch's end; marks made in the batch then flush once against an
+        empty :attr:`sent`, and that export sends no ``scene.nodeAdded`` (none is sent while updates are held). Raises
+        ``ProtocolStateError`` unless the client is ``CREATED``/``ACTIVE`` (a caller's bug); a second call does
+        nothing."""
         if self._running:
             return
         if self._client.state not in _LIVE:
@@ -275,6 +306,10 @@ class LiveUpdates:
         self._forget_session()
         self._running = True
         self._seen_error = self._client.last_error
+        if deferred:
+            self._client.require_snapshot()
+            self._needed_seen = True  # the gate is open: the next tick exports
+            return
         try:
             self._export(None)
         except Exception as exc:  # noqa: BLE001 — the transport refused a frame (T7: type only)

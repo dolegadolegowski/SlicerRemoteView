@@ -528,13 +528,41 @@ def test_panel_texts_are_plain_and_complete():
     assert {"PUBLISHER_CLOSED", "PUBLISHER_GONE", "IDLE", "MAX_LIFETIME", "CAPACITY"} <= set(
         panel.END_REASONS
     )
-    texts = [*panel.SCENE_STATES.values(), *panel.SCENE_REFUSED.values(), panel.SCENE_FAILED]
-    assert all("<" not in text and ">" not in text for text in texts)
+    too_large = panel.scene_too_large_text(panel.SnapshotTooLargeError(3_000_000, 2_000_000))
+    # SLC-32: shown while changes in Slicer are followed, these never ask to stop and start the session
+    followed = [
+        *panel.SCENE_STATES.values(),
+        *panel.SCENE_REFUSED.values(),
+        panel.SCENE_FAILED,
+        panel.HIDE_MODELS,
+        panel.RETRY_ON_CHANGE,
+        panel.RETRY_LATER,
+        panel.OBSERVE_FAILED,
+        panel.WAITING_FOR_SLICER,
+        panel.scene_refused_text("INTERNAL"),
+        panel.scene_refused_text(None),
+        too_large,
+    ]
+    unfollowed = [panel.HIDE_MODELS_AND_RESTART, panel.RESTART]
+    texts = [*followed, *unfollowed]
+    assert all(text and "<" not in text and ">" not in text for text in texts)
+    assert [text for text in followed if "stop and start" in text.lower()] == []
+    assert all("stop and start" in text.lower() for text in unfollowed)
     for reason, text in panel.END_REASONS.items():
         assert re.fullmatch(r"[A-Z][A-Z0-9_]*", reason)
         assert "<" not in text and ">" not in text
         assert (text == "") == (reason == "USER_STOPPED")  # every other end is explained
     assert panel.viewers_text(0) == "Session running · no viewers yet."
+
+
+@pytest.mark.parametrize("missing", ["scene", "flush_timer"])
+def test_panel_watch_needs_a_scene_and_a_flush_timer(missing):
+    """SLC-32: marks that are never flushed would freeze the viewers silently; a watcher without a scene has nothing
+    to follow."""
+    given = {"scene": lambda: None, "flush_timer": object()}
+    del given[missing]
+    with pytest.raises(ValueError, match="watch needs a scene factory and a flush_timer"):
+        PanelController(slicer_version="5.12.4", platform="win32", watch=lambda live: None, **given)
 
 
 # --------------------------------------------------------------------------- the .ui file (criterion 2)

@@ -1,4 +1,8 @@
-"""SLC-25: the panel sends the first snapshot on session.created and goes "Live" on the relay's ack."""
+"""SLC-25: the panel sends the first snapshot on session.created and goes "Live" on the relay's ack.
+
+Since SLC-32 the panel hands the session to ``LiveUpdates``, which sends the scene again by itself after a refusal or a
+failure. These controllers have no watch factory (``RemoteView.py`` passes none before SLC-34): nothing in Slicer is
+followed, so the texts that wait for a change say to stop and start the session."""
 
 from __future__ import annotations
 
@@ -36,10 +40,22 @@ from remoteview_core.transport import Connected, Disconnected, Received, RelayTr
 from remoteview_protocol import envelope
 
 
-def controller(scene) -> PanelController:
+def controller(scene, now=None) -> PanelController:
+    """``now`` is a one-item list of the clock's seconds (the back-off is timed on it)."""
+    now = [0.0] if now is None else now
     return PanelController(
-        slicer_version="5.12.4", platform="win32", transport_factory=FakeTransport, scene=scene
+        slicer_version="5.12.4",
+        platform="win32",
+        transport_factory=FakeTransport,
+        scene=scene,
+        clock=lambda: now[0],
     )
+
+
+def begins(transport) -> list[dict]:
+    return [
+        m for _, m in transport.sent if isinstance(m, dict) and m["type"] == "scene.snapshot.begin"
+    ]
 
 
 def kinds(transport) -> list[str]:
@@ -190,7 +206,8 @@ def test_panel_snapshot_never_collects_after_the_session_was_given_up(fake, with
 
 
 def test_panel_snapshot_too_large_keeps_the_session(fake):
-    ctl = controller(liver_scene)
+    now = [0.0]
+    ctl = controller(liver_scene, now)
     ctl.start(URL)
     view = deliver(ctl, Connected(1), Received(1, created(maxSnapshotBytes=2_000)))
     assert kinds(fake.made[0]) == ["session.create"]  # nothing of the scene left the PC
@@ -202,18 +219,25 @@ def test_panel_snapshot_too_large_keeps_the_session(fake):
             "Hide models in 3D, then stop and start the session."
         )  # one action, NFR-23/31
     )
+    assert view.detail.endswith(" " + panel.HIDE_MODELS_AND_RESTART)
     assert ctl.phase is Phase.LIVE and view.code == CODE and view.stop_enabled
+    now[0] = 3600.0  # nothing in Slicer is followed: only a new session sends it
+    assert ctl.pump().detail == view.detail and kinds(fake.made[0]) == ["session.create"]
 
 
 @pytest.mark.parametrize(
-    ("code", "answers", "detail"),
-    [("PAYLOAD_TOO_LARGE", "begin", panel.SCENE_REFUSED["PAYLOAD_TOO_LARGE"]),
-     ("CAPACITY", "begin", panel.SCENE_REFUSED["CAPACITY"]),
-     ("CHECKSUM_MISMATCH", "end", "The relay refused the scene (CHECKSUM_MISMATCH). Stop and start the session; if it "
-                                  "happens again, please report this.")],
+    ("code", "answers", "detail", "again_after"),
+    [("PAYLOAD_TOO_LARGE", "begin",
+      "The relay refused the scene as too large. Hide models in 3D, then stop and start the session.", None),
+     ("CAPACITY", "begin",
+      "The relay has no room for the scene right now. RemoteView tries again automatically.", 2.0),
+     ("CHECKSUM_MISMATCH", "end",
+      "The relay refused the scene (CHECKSUM_MISMATCH); if this repeats, please report it. RemoteView tries again "
+      "automatically.", 2.0)],
 )  # fmt: skip
-def test_panel_snapshot_refused_by_the_relay(fake, code, answers, detail):
-    ctl = controller(liver_scene)
+def test_panel_snapshot_refused_by_the_relay(fake, code, answers, detail, again_after):
+    now = [0.0]
+    ctl = controller(liver_scene, now)
     ctl.start(URL)
     deliver(ctl, Connected(1), Received(1, created()))
     sent = {m["type"]: m for _, m in fake.made[0].sent if isinstance(m, dict)}
@@ -231,6 +255,17 @@ def test_panel_snapshot_refused_by_the_relay(fake, code, answers, detail):
     assert deliver(ctl, Received(1, ack(1))).status.startswith(
         "Session running without"
     )  # too late
+    now[0] = 1.9
+    ctl.pump()
+    assert len(begins(fake.made[0])) == 1
+    if again_after is None:  # a scene too large waits for a change nothing follows here
+        now[0] = 600.0
+        assert ctl.pump().detail == detail and len(begins(fake.made[0])) == 1
+        return
+    now[0] = again_after  # the back-off: sent again by itself
+    view = ctl.pump()
+    assert [m["sceneVersion"] for m in begins(fake.made[0])] == [1, 2]
+    assert (view.status, view.detail) == ("Sending the scene · no viewers yet.", "")
 
 
 def test_panel_snapshot_build_failure_is_contained(fake, caplog):
@@ -244,10 +279,10 @@ def test_panel_snapshot_build_failure_is_contained(fake, caplog):
     view = deliver(ctl, Connected(1), Received(1, created()))
     assert (view.status, view.detail) == (
         "Session running without the scene · no viewers yet.",
-        panel.SCENE_FAILED,
+        f"{panel.SCENE_FAILED} {panel.RETRY_LATER}",
     )
     assert kinds(fake.made[0]) == ["session.create"] and view.code == CODE
-    assert "Doe" not in caplog.text and "scene: snapshot not built (RuntimeError)" in caplog.text
+    assert "Doe" not in caplog.text and "live: scene not exported (RuntimeError)" in caplog.text
 
 
 def test_panel_snapshot_state_starts_over_with_each_session(fake):
@@ -323,15 +358,17 @@ def test_panel_snapshot_ignores_errors_about_other_messages(fake):
     assert deliver(ctl, Received(1, ack(1))).status == "Live · no viewers yet."
 
 
-def test_panel_snapshot_chunk_error_without_reply_to_refuses_it(fake):
-    """The relay's chunk timeout or a bad chunk answers no message id (§6.3, §9.2)."""
+def test_panel_snapshot_chunk_error_without_reply_to_is_sent_again_at_once(fake):
+    """The relay's chunk timeout or a bad chunk answers no message id (§6.3, §9.2): the snapshot is refused and the
+    first re-sync goes out in the same pump (SLC-29's re-sync rule)."""
     ctl = controller(liver_scene)
     ctl.start(URL)
     deliver(ctl, Connected(1), Received(1, created()))
     bad = envelope.make("error", code="BAD_SEQUENCE", message="relay text", retryable=True)
     view = deliver(ctl, Received(1, bad))
-    assert view.status == "Session running without the scene · no viewers yet."
-    assert view.detail == panel.scene_refused_text("BAD_SEQUENCE")
+    assert [m["sceneVersion"] for m in begins(fake.made[0])] == [1, 2]
+    assert fake.made[0].discarded == [1]
+    assert (view.status, view.detail) == ("Sending the scene · no viewers yet.", "")
 
 
 @pytest.mark.parametrize("failure", ["factory", "collect"])
@@ -349,7 +386,11 @@ def test_panel_snapshot_any_failure_while_preparing_is_contained(fake, failure):
     ctl = controller(factory)
     ctl.start(URL)
     view = deliver(ctl, Connected(1), Received(1, created()))
-    assert (view.detail, view.code, ctl.phase) == (panel.SCENE_FAILED, CODE, Phase.LIVE)
+    assert (view.detail, view.code, ctl.phase) == (
+        f"{panel.SCENE_FAILED} {panel.RETRY_LATER}",
+        CODE,
+        Phase.LIVE,
+    )
     assert kinds(fake.made[0]) == ["session.create"]
 
 

@@ -38,6 +38,9 @@ DISCLOSURE_WORDS = (
     "opacity",
     "visibility",
     "transforms",
+    "every change",
+    "any scene you open or load",
+    "does not take back what was already sent",
     "Anyone who has the code",
     "PyPI",
 )

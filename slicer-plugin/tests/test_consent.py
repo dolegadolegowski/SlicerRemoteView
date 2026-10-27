@@ -18,6 +18,9 @@ DATA_ITEMS = (
     "visibility",
     "position",
     "the Slicer, RemoteView and operating-system versions",
+    "While the session runs, RemoteView also sends every change",
+    "any scene you open or load",
+    "does not take back what was already sent",
     "Anyone who has the session code can view the scene",
 )
 
