@@ -24,6 +24,7 @@ import { createHmac, randomBytes } from "node:crypto";
 import { isIP, isIPv4 } from "node:net";
 import type { Logger } from "pino";
 import type { Clock, TimerHandle } from "./clock.js";
+import type { Metrics, RateLimitName } from "./metrics.js";
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
@@ -112,6 +113,8 @@ export interface RateLimiterOptions {
   /** HMAC key for client addresses; default 32 random bytes per process. */
   secret?: Buffer;
   maxKeys?: number;
+  /** Counts refusals and failed joins (`/metrics`, SRV-19). */
+  metrics?: Metrics;
 }
 
 export class RateLimiter {
@@ -119,6 +122,7 @@ export class RateLimiter {
   readonly #logger: Logger;
   readonly #secret: Buffer;
   readonly #maxKeys: number;
+  readonly #metrics: Metrics | undefined;
   /** Windows per key; `Map` order is the LRU order. */
   readonly #clients = new Map<string, ClientState>();
   /** Banned keys → end of the ban; never evicted by the LRU (each ban costs 20 failures). */
@@ -134,6 +138,7 @@ export class RateLimiter {
     this.#logger = options.logger;
     this.#secret = options.secret ?? randomBytes(32);
     this.#maxKeys = options.maxKeys ?? MAX_TRACKED_KEYS;
+    this.#metrics = options.metrics;
   }
 
   /**
@@ -165,12 +170,18 @@ export class RateLimiter {
 
   /** One WebSocket upgrade attempt (30/min). */
   upgrade(key: string): Verdict {
-    return this.#take(this.#state(key).upgrades, RATE_LIMITS.upgradesPerMinute, MINUTE_MS);
+    return this.#counted(
+      "upgrade",
+      this.#take(this.#state(key).upgrades, RATE_LIMITS.upgradesPerMinute, MINUTE_MS),
+    );
   }
 
   /** One `session.create` (5/min). */
   create(key: string): Verdict {
-    return this.#take(this.#state(key).creates, RATE_LIMITS.createsPerMinute, MINUTE_MS);
+    return this.#counted(
+      "create",
+      this.#take(this.#state(key).creates, RATE_LIMITS.createsPerMinute, MINUTE_MS),
+    );
   }
 
   /**
@@ -190,9 +201,9 @@ export class RateLimiter {
    */
   join(key: string): Verdict {
     const ban = this.checkBan(key);
-    if (!ban.ok) return ban;
+    if (!ban.ok) return this.#counted("ban", ban);
     const limit = this.alarmActive ? RATE_LIMITS.joinsPerMinuteAlarm : RATE_LIMITS.joinsPerMinute;
-    return this.#take(this.#state(key).joins, limit, MINUTE_MS);
+    return this.#counted("join", this.#take(this.#state(key).joins, limit, MINUTE_MS));
   }
 
   /**
@@ -209,6 +220,7 @@ export class RateLimiter {
    * client for 10 min; more than 1,000 of all clients within an hour raise the alarm.
    */
   joinFailed(key: string): void {
+    this.#metrics?.joinFailed();
     const now = this.#clock.now();
     const state = this.#state(key);
     prune(state.failures, now - RATE_LIMITS.failureWindowMs);
@@ -302,6 +314,11 @@ export class RateLimiter {
       if (minute <= current - HOUR_MS / MINUTE_MS) this.#failuresPerMinute.delete(minute);
       else total += count;
     return total;
+  }
+
+  #counted(limit: RateLimitName, verdict: Verdict): Verdict {
+    if (!verdict.ok) this.#metrics?.rateLimited(limit);
+    return verdict;
   }
 
   /**

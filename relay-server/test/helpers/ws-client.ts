@@ -41,7 +41,11 @@ export async function startRelay(
     });
   const limiter =
     options.limiter ??
-    new RateLimiter({ clock, logger: options.logger ?? createLogger({ level: "silent" }) });
+    new RateLimiter({
+      clock,
+      logger: options.logger ?? createLogger({ level: "silent" }),
+      ...(options.metrics !== undefined && { metrics: options.metrics }),
+    });
   // The heartbeat only where a test asks for it: advancing the manual clock by minutes would tick
   // it many times before any real pong could arrive.
   const app = await buildApp({

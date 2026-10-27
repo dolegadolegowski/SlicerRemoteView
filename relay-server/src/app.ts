@@ -24,6 +24,7 @@ import type { Config } from "./config.js";
 import { registerSceneRoute, sceneDownloads } from "./http/scene.js";
 import { DEFAULT_STATIC_ROOT, registerStatic } from "./http/static.js";
 import { createLogger } from "./logger.js";
+import { Metrics, registerMetricsRoute } from "./metrics.js";
 import { RateLimiter } from "./ratelimit.js";
 import { Registry } from "./registry.js";
 import { PROTOCOL_VERSIONS, RELAY_NAME, RELAY_VERSION } from "./version.js";
@@ -49,7 +50,10 @@ export interface AppOptions {
   clock?: Clock;
   /** Session registry; by default one is built from `config` and `clock`. */
   registry?: Registry;
-  /** Per-IP limits (SRV-08); by default one with a fresh per-boot key. */
+  /**
+   * Per-IP limits (SRV-08); by default one with a fresh per-boot key and `metrics`. A limiter passed
+   * here counts into `/metrics` only if it was built with the same `metrics`.
+   */
   limiter?: RateLimiter;
   /** Overrides for the WebSocket frame hooks (tests record frames); default: dispatch (SRV-23). */
   wsHandlers?: Partial<FrameHandlers>;
@@ -64,6 +68,8 @@ export interface AppOptions {
   staticRoot?: string;
   /** Per-socket message budgets (SRV-25); default `DEFAULT_MESSAGE_BUDGETS` (tests that flood raise them). */
   budgets?: MessageBudgets;
+  /** The counters behind `/metrics` (SRV-19); by default a fresh set. */
+  metrics?: Metrics;
 }
 
 const NOT_FOUND = { error: "NOT_FOUND" } as const;
@@ -191,12 +197,14 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
 
   // Compile every protocol schema now, not on the first client message (≈ 250 ms of blocked loop).
   const validators = defaultSchemas();
-  const limiter = options.limiter ?? new RateLimiter({ clock, logger });
+  const metrics = options.metrics ?? new Metrics();
+  const limiter = options.limiter ?? new RateLimiter({ clock, logger, metrics });
   const publisher = publisherHandlers({
     registry,
     config,
     limiter,
     logger,
+    metrics,
     // A resume that replaces a still-open publisher socket ends its snapshot in flight (§4.3).
     publisherReplaced: (session) => snapshot.publisherGone(session),
   });
@@ -208,6 +216,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     clock,
     overCapacity: fan.overCapacity,
     deliver: fan.deliver,
+    metrics,
   });
   const downloads = sceneDownloads({ registry });
   const snapshot = snapshotHandlers({
@@ -281,6 +290,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     logger,
     limiter,
     ...(options.budgets !== undefined && { budgets: options.budgets }),
+    metrics,
     handlers: {
       opened: (connection) => beat.add(connection),
       pong: (connection, data) => {
@@ -386,7 +396,24 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     limits,
   }));
 
-  registerSceneRoute(app, { registry, clock, logger, downloads });
+  registerSceneRoute(app, { registry, clock, logger, downloads, metrics });
+  // Only with a token (FR-32): otherwise `/metrics` is an unknown path, `404`.
+  if (config.metricsToken !== undefined)
+    registerMetricsRoute(app, {
+      token: config.metricsToken,
+      metrics,
+      read: () => {
+        let viewers = 0;
+        for (const session of registry.sessions()) viewers += session.connectedViewers;
+        return {
+          sessions: registry.size,
+          viewers,
+          snapshotBytes: registry.snapshotBytes,
+          bufferedBytes: fan.bufferedBytes(),
+          codesEvicted: registry.codesEvicted,
+        };
+      },
+    });
   await registerStatic(app, { root: options.staticRoot ?? DEFAULT_STATIC_ROOT });
 
   return app;

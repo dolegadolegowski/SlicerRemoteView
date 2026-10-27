@@ -24,6 +24,7 @@ import type { Socket } from "node:net";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Logger } from "pino";
 import type { Clock } from "../clock.js";
+import type { Metrics } from "../metrics.js";
 import type { Registry, Session, Viewer } from "../registry.js";
 
 /** `GET /api/scene` 30/min per token (§12). */
@@ -142,11 +143,13 @@ export interface SceneRouteDeps {
   clock: Clock;
   logger: Logger;
   downloads: SceneDownloads;
+  /** Counts refusals and the GLB bytes sent (`/metrics`, SRV-19). */
+  metrics?: Metrics;
 }
 
 export function registerSceneRoute(
   app: FastifyInstance,
-  { registry, clock, logger, downloads }: SceneRouteDeps,
+  { registry, clock, logger, downloads, metrics }: SceneRouteDeps,
 ): void {
   /** Request times of the last minute per viewer entry; they go with the entry. */
   const fetches = new WeakMap<Viewer, number[]>();
@@ -181,6 +184,7 @@ export function registerSceneRoute(
     const { session, viewer } = found;
     const retryAfterS = overLimit(viewer);
     if (retryAfterS !== undefined) {
+      metrics?.rateLimited("scene");
       logger.debug(
         { sessionId: session.id, viewerId: viewer.id, errorCode: "RATE_LIMITED" },
         "scene fetch refused",
@@ -203,6 +207,7 @@ export function registerSceneRoute(
       "scene fetched",
     );
     downloads.track(session, reply.raw, request.raw.socket);
+    if (request.method === "GET") metrics?.relayed(snapshot.byteLength);
     return reply
       .code(200)
       .header("Content-Type", "model/gltf-binary")

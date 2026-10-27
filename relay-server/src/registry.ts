@@ -273,6 +273,11 @@ export class Registry extends EventEmitter<RegistryEvents> {
     return this.#byCode.get(code);
   }
 
+  /** Codes released early because the quarantine was full (`/metrics`, SRV-19; T1 residual). */
+  get codesEvicted(): number {
+    return this.#quarantine.evicted;
+  }
+
   isCodeQuarantined(code: string): boolean {
     return this.#quarantine.has(code);
   }

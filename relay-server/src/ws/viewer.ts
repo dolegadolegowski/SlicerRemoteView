@@ -39,6 +39,7 @@ import type { Logger } from "pino";
 import type { Clock, TimerHandle } from "../clock.js";
 import { isWellFormed } from "../codes.js";
 import type { RandomInt } from "../codes.js";
+import type { Metrics } from "../metrics.js";
 import type { RateLimiter } from "../ratelimit.js";
 import { RegistryError } from "../registry.js";
 import type { Registry, Session, Viewer, ViewerPlatform } from "../registry.js";
@@ -82,6 +83,8 @@ export interface ViewerDeps {
    * The app passes the fan-out's (`ws/fanout.ts`); the default sends unchecked (unit tests).
    */
   deliver?: (session: Session, viewer: Viewer, messages: readonly Outgoing[]) => boolean;
+  /** Counts rejoins (`/metrics`, SRV-19). */
+  metrics?: Metrics;
 }
 
 /**
@@ -108,6 +111,7 @@ export function viewerHandlers({
     for (const message of messages) viewer.peer?.send(message);
     return viewer.peer !== undefined;
   },
+  metrics,
 }: ViewerDeps) {
   /**
    * The canonical code of each normalised `viewer.join` object, `null` when it is malformed. The
@@ -285,6 +289,7 @@ export function viewerHandlers({
     // close: the entry's peer is now the new socket.
     older?.close(CLOSE_CODES.REPLACED);
     welcome(connection, session, viewer, viewerToken, replyTo);
+    metrics?.reconnected("viewer");
     logger.info(
       { sessionId: session.id, viewerId: viewer.id, replaced: older !== undefined },
       "viewer rejoined",

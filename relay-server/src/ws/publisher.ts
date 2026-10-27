@@ -35,6 +35,7 @@ import type { Logger } from "pino";
 import { isWellFormed, tokenMatches } from "../codes.js";
 import { publicLimits } from "../config.js";
 import type { Config } from "../config.js";
+import type { Metrics } from "../metrics.js";
 import type { RateLimiter } from "../ratelimit.js";
 import { RegistryError } from "../registry.js";
 import type { ExpiryReason, Peer, Registry, Session } from "../registry.js";
@@ -49,6 +50,8 @@ export interface PublisherDeps {
   logger: Logger;
   /** A resume replaced a publisher socket that was still open: abort its snapshot in flight. */
   publisherReplaced?: (session: Session) => void;
+  /** Counts resumes (`/metrics`, SRV-19). */
+  metrics?: Metrics;
 }
 
 export function publisherHandlers({
@@ -57,6 +60,7 @@ export function publisherHandlers({
   limiter,
   logger,
   publisherReplaced,
+  metrics,
 }: PublisherDeps) {
   /** Sockets that sent their one `session.resume` (§4.3: only the fallback create may follow). */
   const resumeTried = new WeakSet<Connection>();
@@ -204,6 +208,7 @@ export function publisherHandlers({
       const closesAt = session.idleWarned ? registry.idleDeadline(session) : undefined;
       if (closesAt !== undefined)
         connection.send({ type: "session.expiring", reason: "IDLE", closesAt });
+      metrics?.reconnected("publisher");
       // A replaced open socket is the only trace of a takeover with a stolen token (T4).
       logger[old === undefined ? "info" : "warn"](
         { sessionId: session.id, replaced: old !== undefined },
