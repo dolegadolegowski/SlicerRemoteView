@@ -7,6 +7,7 @@ import { CLOSE_CODES, PROTOCOL_VERSION } from "@slicerremoteview/shared";
 import type { ErrorCode } from "@slicerremoteview/shared";
 import { WebSocket } from "ws";
 import type { Clock, TimerHandle } from "../clock.js";
+import type { Metrics } from "../metrics.js";
 import type { Peer, Session, Viewer } from "../registry.js";
 
 export type Role = "publisher" | "viewer";
@@ -70,6 +71,8 @@ export class Connection implements Peer {
     private readonly clock: Clock,
     /** HMAC of the client address (`RateLimiter.clientKey`); never the address itself (NFR-12). */
     readonly clientKey: string,
+    /** Counts the `error` messages and the bytes forwarded to a viewer (`/metrics`, SRV-19). */
+    private readonly metrics?: Metrics,
   ) {}
 
   /** False once a close was started by either side. */
@@ -81,6 +84,8 @@ export class Connection implements Peer {
   send(message: Outgoing): void {
     if (!this.isOpen) return;
     this.socket.send(encode(message, this.clock.now()));
+    // Every `error` passes here: `sendError`, and the fan-out's and the chunk timer's own (SRV-19).
+    if (message.type === "error") this.metrics?.error(message.code as ErrorCode);
   }
 
   /**
@@ -91,6 +96,8 @@ export class Connection implements Peer {
   forward(frame: string | Buffer, asText = false): void {
     if (!this.isOpen) return;
     this.socket.send(frame, { binary: typeof frame !== "string" && !asText });
+    if (this.role === "viewer" && this.metrics !== undefined)
+      this.metrics.relayed(typeof frame === "string" ? Buffer.byteLength(frame) : frame.byteLength);
   }
 
   get bufferedAmount(): number {

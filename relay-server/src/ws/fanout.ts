@@ -493,7 +493,10 @@ export function fanout({ registry, config, logger, clock }: FanoutDeps) {
     return recipients;
   }
 
-  return { events, broadcast, deliver, overCapacity, start, dispose };
+  /** Σ `bufferedAmount` over the connected viewer sockets (`/metrics`, SRV-19). */
+  const bufferedBytes = (): number => totalBuffered(false);
+
+  return { events, broadcast, deliver, overCapacity, bufferedBytes, start, dispose };
 }
 
 /**

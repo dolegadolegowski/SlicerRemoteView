@@ -47,6 +47,7 @@ import type { MessageBudgets } from "./budget.js";
 import { Connection, HANDSHAKE_ROLES } from "./connection.js";
 import { HARD_WATERMARK_BYTES } from "./fanout.js";
 import type { Role } from "./connection.js";
+import type { Metrics } from "../metrics.js";
 import type { RateLimiter } from "../ratelimit.js";
 import { readFrame } from "./frame.js";
 import type { TextFrame } from "./frame.js";
@@ -88,6 +89,8 @@ export interface WsEndpointOptions {
   budgets?: MessageBudgets;
   /** True while the relay drains for a restart (SRV-17): upgrades are refused `503`. */
   draining?: () => boolean;
+  /** Counts budget refusals; each socket counts its errors and relayed bytes (SRV-19). */
+  metrics?: Metrics;
 }
 
 /** What the app needs of the endpoint to drain it (SRV-17). */
@@ -122,7 +125,7 @@ export async function registerWsEndpoint(
   app: FastifyInstance,
   options: WsEndpointOptions,
 ): Promise<WsEndpoint> {
-  const { clock, logger, limiter, handlers, errorCode, draining = () => false } = options;
+  const { clock, logger, limiter, handlers, errorCode, draining = () => false, metrics } = options;
   const sockets = new Set<Connection>();
   let waiters: (() => void)[] = [];
   const budget = messageBudgets(clock, options.budgets);
@@ -231,7 +234,7 @@ export async function registerWsEndpoint(
   });
 
   function accept(socket: WebSocket, clientKey: string): void {
-    const connection = new Connection(socket, clock, clientKey);
+    const connection = new Connection(socket, clock, clientKey, metrics);
     sockets.add(connection);
     connection.armHandshakeTimer(HANDSHAKE_TIMEOUT_MS, () =>
       connection.close(CLOSE_CODES.HANDSHAKE_TIMEOUT),
@@ -331,6 +334,7 @@ export async function registerWsEndpoint(
   function admitted(connection: Connection, kind: "text" | "binary", bytes: number): boolean {
     const { verdict, warn, retryAfterS } = budget.charge(connection, kind, bytes);
     const publisher = connection.bound && connection.role === "publisher";
+    if (verdict !== "ok") metrics?.rateLimited("messages");
     if (verdict === "exceeded" || (verdict === "limited" && publisher)) {
       logger.info(
         { connection: connection.id, role: connection.role ?? "none", errorCode: "RATE_LIMITED" },

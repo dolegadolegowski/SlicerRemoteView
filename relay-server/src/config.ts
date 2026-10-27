@@ -6,7 +6,8 @@
  * Every variable in `ENV_VARIABLES` appears in `relay-server/.env.example` with its default (a test
  * compares both lists). Inputs the platform or the test harness provides are read too but are
  * not configuration: `RAILWAY_PUBLIC_DOMAIN` (default of `ALLOWED_ORIGINS`), `NODE_ENV` and the
- * test-only `RELAY_TEST_FAST_TIMERS` (honoured only under `NODE_ENV=test`, SRV-21).
+ * test-only `RELAY_TEST_FAST_TIMERS` (honoured only under exactly `NODE_ENV=test`, refused with
+ * `RAILWAY_PUBLIC_DOMAIN` or `RAILWAY_REPLICA_ID` present; SRV-29).
  */
 import { LIMITS } from "@slicerremoteview/shared";
 import type { LogLevel } from "./logger.js";
@@ -44,7 +45,10 @@ export interface Config {
   trustProxy: boolean;
   /** SIGTERM → SIGKILL window Railway grants for the `4008` drain (SRV-17). */
   drainingSeconds: number;
-  /** Shortened TTL/heartbeat timers for integration tests (SRV-21); only ever true under `NODE_ENV=test`. */
+  /**
+   * Rate-limit windows, ban and alarm ÷ 60 and a 1 s registry sweep for integration tests (SRV-29);
+   * only ever true under `NODE_ENV=test`, never with a Railway variable present.
+   */
   testFastTimers: boolean;
 }
 
@@ -72,6 +76,7 @@ export type EnvVariable = (typeof ENV_VARIABLES)[number];
 /** Read but not configuration (see the module comment); absent from `.env.example`. */
 export const PLATFORM_INPUTS = [
   "RAILWAY_PUBLIC_DOMAIN",
+  "RAILWAY_REPLICA_ID",
   "NODE_ENV",
   "RELAY_TEST_FAST_TIMERS",
 ] as const;
@@ -199,7 +204,18 @@ export function loadConfig(env: Env = process.env): Config {
   if (maxTotalSnapshotBytes < 2 * maxSnapshotBytes)
     throw new ConfigError("MAX_TOTAL_SNAPSHOT_BYTES", "must be at least 2 × MAX_SNAPSHOT_BYTES");
 
-  const nodeEnv = read(env, "NODE_ENV");
+  // Test-only (SRV-29): honoured under exactly NODE_ENV=test, and refused when a variable Railway
+  // injects is present (even empty) — a service variable can override the image's
+  // NODE_ENV=production, and the flag weakens T1. `RAILWAY_PUBLIC_DOMAIN` exists only with a
+  // generated domain; `RAILWAY_REPLICA_ID` on every replica (docs/research/relay.md). Other Railway
+  // variables (`RAILWAY_PROJECT_ID`, `RAILWAY_SERVICE_ID`, …) are [TODO verify].
+  const onRailway = env.RAILWAY_PUBLIC_DOMAIN !== undefined || env.RAILWAY_REPLICA_ID !== undefined;
+  const testFastTimers = env.NODE_ENV === "test" && boolean(env, "RELAY_TEST_FAST_TIMERS", false);
+  if (testFastTimers && onRailway)
+    throw new ConfigError(
+      "RELAY_TEST_FAST_TIMERS",
+      "is test-only and must not be set with RAILWAY_PUBLIC_DOMAIN or RAILWAY_REPLICA_ID",
+    );
   return {
     port: integer(env, "PORT", 8787, 0, 65_535),
     logLevel: logLevel as LogLevel,
@@ -236,7 +252,7 @@ export function loadConfig(env: Env = process.env): Config {
     allowedOrigins: allowedOrigins(env),
     trustProxy: boolean(env, "TRUST_PROXY", true),
     drainingSeconds: integer(env, "RAILWAY_DEPLOYMENT_DRAINING_SECONDS", 30, 0, 3_600),
-    testFastTimers: nodeEnv === "test" && boolean(env, "RELAY_TEST_FAST_TIMERS", false),
+    testFastTimers,
   };
 }
 

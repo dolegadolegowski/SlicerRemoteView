@@ -199,6 +199,8 @@ export class RegistryError extends Error {
 
 /** How often `start()` runs the sweep (architecture §5). */
 export const SWEEP_INTERVAL_MS = 10_000;
+/** The sweep under the test-only `RELAY_TEST_FAST_TIMERS` (SRV-29). */
+export const FAST_SWEEP_INTERVAL_MS = 1_000;
 /** Lead time of the idle warning (§4.4). */
 export const EXPIRING_LEAD_MS = 60_000;
 
@@ -271,6 +273,11 @@ export class Registry extends EventEmitter<RegistryEvents> {
   /** Exact lookup of a canonical code; normalisation is the caller's job (`ws/viewer.ts`). */
   getByCode(code: string): Session | undefined {
     return this.#byCode.get(code);
+  }
+
+  /** Codes released early because the quarantine was full (`/metrics`, SRV-19; T1 residual). */
+  get codesEvicted(): number {
+    return this.#quarantine.evicted;
   }
 
   isCodeQuarantined(code: string): boolean {

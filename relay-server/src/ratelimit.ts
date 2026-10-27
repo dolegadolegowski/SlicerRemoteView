@@ -18,12 +18,15 @@
  *   per-IP join limit drops to 3/min until an hour after the alarm.
  * The state is in memory only and resets on redeploy (ADR 0008 consequences). Keys idle for longer
  * than every window are swept; at most `maxKeys` keys are tracked (least recently used dropped
- * first). Bans are kept apart, so evicting a key never lifts its ban.
+ * first). Bans are kept apart, so evicting a key never lifts its ban. Under the test-only
+ * `RELAY_TEST_FAST_TIMERS` every window, the ban, the alarm and the sweep are 60 times shorter
+ * (`timeScale`); the counts stay (SRV-29).
  */
 import { createHmac, randomBytes } from "node:crypto";
 import { isIP, isIPv4 } from "node:net";
 import type { Logger } from "pino";
 import type { Clock, TimerHandle } from "./clock.js";
+import type { Metrics, RateLimitName } from "./metrics.js";
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
@@ -112,13 +115,42 @@ export interface RateLimiterOptions {
   /** HMAC key for client addresses; default 32 random bytes per process. */
   secret?: Buffer;
   maxKeys?: number;
+  /** Counts refusals and failed joins (`/metrics`, SRV-19). */
+  metrics?: Metrics;
+  /**
+   * Divides every window, the ban, the alarm and the sweep interval (default 1); the counts stay.
+   * Only `RELAY_TEST_FAST_TIMERS` sets it, to `FAST_TIMER_SCALE` (SRV-29).
+   */
+  timeScale?: number;
+  /**
+   * After `start()`, failed joins do not count towards the ban for this long (÷ `timeScale`): a
+   * room rejoining by code after a redeploy must not lock itself out (SRV-28). Default 0; the app
+   * passes `RESTART_GRACE_MS`.
+   */
+  restartGraceMs?: number;
 }
+
+/** How long after the relay starts failed joins do not count towards the ban (SRV-28). */
+export const RESTART_GRACE_MS = 120_000;
+
+/** What `RELAY_TEST_FAST_TIMERS` divides the limiter's times by: a minute becomes a second. */
+export const FAST_TIMER_SCALE = 60;
 
 export class RateLimiter {
   readonly #clock: Clock;
   readonly #logger: Logger;
   readonly #secret: Buffer;
   readonly #maxKeys: number;
+  readonly #metrics: Metrics | undefined;
+  /** `RATE_LIMITS`' times divided by `timeScale`. */
+  readonly #minuteMs: number;
+  readonly #failureWindowMs: number;
+  readonly #banMs: number;
+  readonly #alarmMs: number;
+  readonly #sweepIntervalMs: number;
+  readonly #restartGraceMs: number;
+  /** End of the restart grace, set by the first `start()`. */
+  #graceUntil = -Infinity;
   /** Windows per key; `Map` order is the LRU order. */
   readonly #clients = new Map<string, ClientState>();
   /** Banned keys → end of the ban; never evicted by the LRU (each ban costs 20 failures). */
@@ -134,6 +166,16 @@ export class RateLimiter {
     this.#logger = options.logger;
     this.#secret = options.secret ?? randomBytes(32);
     this.#maxKeys = options.maxKeys ?? MAX_TRACKED_KEYS;
+    this.#metrics = options.metrics;
+    const scale = options.timeScale ?? 1;
+    if (!(Number.isFinite(scale) && scale >= 1))
+      throw new RangeError("timeScale must be a finite number ≥ 1");
+    this.#minuteMs = MINUTE_MS / scale;
+    this.#failureWindowMs = RATE_LIMITS.failureWindowMs / scale;
+    this.#banMs = RATE_LIMITS.banMs / scale;
+    this.#alarmMs = RATE_LIMITS.alarmMs / scale;
+    this.#sweepIntervalMs = LIMITER_SWEEP_INTERVAL_MS / scale;
+    this.#restartGraceMs = (options.restartGraceMs ?? 0) / scale;
   }
 
   /**
@@ -159,23 +201,34 @@ export class RateLimiter {
     return this.#clients.keys();
   }
 
+  /** How long the restart grace lasts (`restartGraceMs` ÷ `timeScale`), for the start-up line. */
+  get restartGraceMs(): number {
+    return this.#restartGraceMs;
+  }
+
   get alarmActive(): boolean {
     return this.#clock.now() < this.#alarmUntil;
   }
 
   /** One WebSocket upgrade attempt (30/min). */
   upgrade(key: string): Verdict {
-    return this.#take(this.#state(key).upgrades, RATE_LIMITS.upgradesPerMinute, MINUTE_MS);
+    return this.#counted(
+      "upgrade",
+      this.#take(this.#state(key).upgrades, RATE_LIMITS.upgradesPerMinute, this.#minuteMs),
+    );
   }
 
   /** One `session.create` (5/min). */
   create(key: string): Verdict {
-    return this.#take(this.#state(key).creates, RATE_LIMITS.createsPerMinute, MINUTE_MS);
+    return this.#counted(
+      "create",
+      this.#take(this.#state(key).creates, RATE_LIMITS.createsPerMinute, this.#minuteMs),
+    );
   }
 
   /**
    * `ok` unless the client is banned for failed joins; `retryAfterS` is the rest of the ban (600 s
-   * right after it starts).
+   * right after it starts, ÷ `timeScale`).
    */
   checkBan(key: string): Verdict {
     const until = this.#bans.get(key);
@@ -190,9 +243,9 @@ export class RateLimiter {
    */
   join(key: string): Verdict {
     const ban = this.checkBan(key);
-    if (!ban.ok) return ban;
+    if (!ban.ok) return this.#counted("ban", ban);
     const limit = this.alarmActive ? RATE_LIMITS.joinsPerMinuteAlarm : RATE_LIMITS.joinsPerMinute;
-    return this.#take(this.#state(key).joins, limit, MINUTE_MS);
+    return this.#counted("join", this.#take(this.#state(key).joins, limit, this.#minuteMs));
   }
 
   /**
@@ -206,23 +259,26 @@ export class RateLimiter {
 
   /**
    * A failed join, or a probe that tells as much (a `preferredCode`): 20 within 10 min ban the
-   * client for 10 min; more than 1,000 of all clients within an hour raise the alarm.
+   * client for 10 min; more than 1,000 of all clients within an hour raise the alarm. During the
+   * restart grace (SRV-28) it counts towards the alarm only: the 10/min limit still holds, and
+   * the room's rejoins by code do not ban it while the sessions are being re-created.
    */
   joinFailed(key: string): void {
+    this.#metrics?.joinFailed();
     const now = this.#clock.now();
     const state = this.#state(key);
-    prune(state.failures, now - RATE_LIMITS.failureWindowMs);
-    state.failures.push(now);
+    prune(state.failures, now - this.#failureWindowMs);
+    if (now >= this.#graceUntil) state.failures.push(now);
     if (state.failures.length >= RATE_LIMITS.failuresBeforeBan && this.checkBan(key).ok) {
-      this.#ban(key, now + RATE_LIMITS.banMs);
+      this.#ban(key, now + this.#banMs);
       state.failures.length = 0;
-      this.#logger.warn({ event: "client_banned", banS: RATE_LIMITS.banMs / 1000 }, "join lockout");
+      this.#logger.warn({ event: "client_banned", banS: this.#banMs / 1000 }, "join lockout");
     }
-    const minute = Math.floor(now / MINUTE_MS);
+    const minute = Math.floor(now / this.#minuteMs);
     this.#failuresPerMinute.set(minute, (this.#failuresPerMinute.get(minute) ?? 0) + 1);
     const lastHour = this.#failuresLastHour(now);
     if (lastHour > RATE_LIMITS.alarmFailuresPerHour && !this.alarmActive) {
-      this.#alarmUntil = now + RATE_LIMITS.alarmMs;
+      this.#alarmUntil = now + this.#alarmMs;
       this.#logger.warn(
         { event: "join_failure_alarm", failuresLastHour: lastHour },
         "failed joins above the hourly alarm level; per-IP join limit tightened",
@@ -230,14 +286,14 @@ export class RateLimiter {
     }
   }
 
-  /** Drops clients with nothing left in any window, ended bans and old alarm buckets (every minute). */
+  /** Drops clients with nothing left in any window, ended bans and old alarm buckets. */
   sweep(): void {
     const now = this.#clock.now();
     for (const [key, state] of this.#clients) {
-      prune(state.upgrades, now - MINUTE_MS);
-      prune(state.joins, now - MINUTE_MS);
-      prune(state.creates, now - MINUTE_MS);
-      prune(state.failures, now - RATE_LIMITS.failureWindowMs);
+      prune(state.upgrades, now - this.#minuteMs);
+      prune(state.joins, now - this.#minuteMs);
+      prune(state.creates, now - this.#minuteMs);
+      prune(state.failures, now - this.#failureWindowMs);
       if (
         state.upgrades.length +
           state.joins.length +
@@ -251,14 +307,18 @@ export class RateLimiter {
     this.#failuresLastHour(now);
   }
 
-  /** Runs `sweep()` every minute on the injected clock until `stop()`. */
+  /**
+   * Runs `sweep()` every minute (÷ `timeScale`) on the injected clock until `stop()`; the first
+   * call starts the restart grace.
+   */
   start(): void {
     this.stop();
+    if (this.#graceUntil === -Infinity) this.#graceUntil = this.#clock.now() + this.#restartGraceMs;
     const arm = (): void => {
       this.#sweepTimer = this.#clock.setTimeout(() => {
         this.sweep();
         arm();
-      }, LIMITER_SWEEP_INTERVAL_MS);
+      }, this.#sweepIntervalMs);
       (this.#sweepTimer as { unref?: () => void }).unref?.();
     };
     arm();
@@ -294,14 +354,19 @@ export class RateLimiter {
     this.#bans.set(key, until);
   }
 
-  /** Failed joins within the last 60 minutes (minute buckets); drops older buckets. */
+  /** Failed joins within the last 60 minutes (minute buckets, both scaled); drops older buckets. */
   #failuresLastHour(now: number): number {
-    const current = Math.floor(now / MINUTE_MS);
+    const current = Math.floor(now / this.#minuteMs);
     let total = 0;
     for (const [minute, count] of this.#failuresPerMinute)
       if (minute <= current - HOUR_MS / MINUTE_MS) this.#failuresPerMinute.delete(minute);
       else total += count;
     return total;
+  }
+
+  #counted(limit: RateLimitName, verdict: Verdict): Verdict {
+    if (!verdict.ok) this.#metrics?.rateLimited(limit);
+    return verdict;
   }
 
   /**
