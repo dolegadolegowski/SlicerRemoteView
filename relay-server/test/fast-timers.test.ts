@@ -5,6 +5,7 @@ import { buildApp, listenTextResolver } from "../src/app.js";
 import { loadConfig } from "../src/config.js";
 import { createLogger } from "../src/logger.js";
 import { Metrics } from "../src/metrics.js";
+import { FAST_TIMER_SCALE, RESTART_GRACE_MS } from "../src/ratelimit.js";
 import { FAST_SWEEP_INTERVAL_MS, Registry } from "../src/registry.js";
 import { INVALID_CODE_JITTER_MS } from "../src/ws/viewer.js";
 import { fixture } from "./helpers/fixtures.js";
@@ -61,6 +62,7 @@ describe("RELAY_TEST_FAST_TIMERS (SRV-29)", () => {
     expect(start).toHaveBeenCalledWith(FAST_SWEEP_INTERVAL_MS);
     expect(logged().find((l) => l.message === "relay starting")).toMatchObject({
       testFastTimers: true,
+      restartGraceS: 2,
     });
     expect(logged().filter((l) => l.level === "warn")).toEqual([
       expect.objectContaining({ event: "test_fast_timers", timeScale: 60, sweepMs: 1_000 }),
@@ -69,6 +71,7 @@ describe("RELAY_TEST_FAST_TIMERS (SRV-29)", () => {
     const publisher = await connectClient(url);
     publisher.sendRaw(JSON.stringify(fixture("session.create")));
     const code = (await publisher.next()).code as string;
+    clock.advance(RESTART_GRACE_MS / FAST_TIMER_SCALE); // the restart grace (SRV-28), 2 s here
     const wrong = code === "22222" ? "33333" : "22222";
     for (let i = 1; i <= 20; i++) {
       const guess = await connectClient(url);
@@ -105,6 +108,7 @@ describe("RELAY_TEST_FAST_TIMERS (SRV-29)", () => {
     expect(start).toHaveBeenCalledWith(undefined);
     expect(logged().find((l) => l.message === "relay starting")).toMatchObject({
       testFastTimers: false,
+      restartGraceS: 120,
     });
     expect(logged().filter((l) => l.level === "warn")).toEqual([]);
   });

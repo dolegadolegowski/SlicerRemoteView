@@ -8,6 +8,7 @@ import {
   MAX_TRACKED_KEYS,
   RATE_LIMITS,
   RateLimiter,
+  RESTART_GRACE_MS,
 } from "../src/ratelimit.js";
 import { INVALID_CODE_JITTER_MS } from "../src/ws/viewer.js";
 import { fixture } from "./helpers/fixtures.js";
@@ -17,7 +18,7 @@ import type { Received, TestClient, TestRelay } from "./helpers/ws-client.js";
 
 const MINUTE = 60_000;
 
-function setup(options: { maxKeys?: number; timeScale?: number } = {}) {
+function setup(options: { maxKeys?: number; timeScale?: number; restartGraceMs?: number } = {}) {
   const clock = new ManualClock();
   const lines: string[] = [];
   const limiter = new RateLimiter({
@@ -102,6 +103,62 @@ describe("RateLimiter with timeScale (RELAY_TEST_FAST_TIMERS, SRV-29)", () => {
 
   it.each([0, -1, Number.NaN, 0.5])("refuses a timeScale of %s", (timeScale) => {
     expect(() => setup({ timeScale })).toThrow(RangeError);
+  });
+});
+
+describe("restart grace (SRV-28)", () => {
+  it("for 120 s after start() failed joins count towards the alarm, not the ban; then both", () => {
+    const { clock, limiter, key } = setup({ restartGraceMs: RESTART_GRACE_MS });
+    limiter.start();
+    for (let i = 0; i < 25; i++) limiter.joinFailed(key);
+    clock.advance(RESTART_GRACE_MS - 1);
+    limiter.joinFailed(key);
+    expect(limiter.checkBan(key).ok).toBe(true);
+    // The 10/min limit still holds during the grace.
+    for (let i = 0; i < RATE_LIMITS.joinsPerMinute; i++) limiter.join(key);
+    expect(limiter.join(key).ok).toBe(false);
+    clock.advance(1);
+    for (let i = 0; i < RATE_LIMITS.failuresBeforeBan - 1; i++) limiter.joinFailed(key);
+    expect(limiter.checkBan(key).ok).toBe(true);
+    limiter.joinFailed(key);
+    expect(limiter.checkBan(key)).toEqual({ ok: false, retryAfterS: 600 });
+    limiter.stop();
+  });
+
+  it("starts at start(), not when the limiter is built", () => {
+    const { clock, limiter, key } = setup({ restartGraceMs: RESTART_GRACE_MS });
+    clock.advance(RESTART_GRACE_MS);
+    limiter.start();
+    for (let i = 0; i < RATE_LIMITS.failuresBeforeBan; i++) limiter.joinFailed(key);
+    expect(limiter.checkBan(key).ok).toBe(true);
+    clock.advance(RESTART_GRACE_MS);
+    for (let i = 0; i < RATE_LIMITS.failuresBeforeBan; i++) limiter.joinFailed(key);
+    expect(limiter.checkBan(key).ok).toBe(false);
+    limiter.stop();
+  });
+
+  it("still raises the global alarm during the grace", () => {
+    const { limiter } = setup({ restartGraceMs: RESTART_GRACE_MS });
+    limiter.start();
+    for (let i = 0; i <= RATE_LIMITS.alarmFailuresPerHour; i++)
+      limiter.joinFailed(limiter.clientKey(`10.6.${i >> 8}.${i & 255}`));
+    expect(limiter.alarmActive).toBe(true);
+    limiter.stop();
+  });
+
+  it("is 2 s under timeScale 60, starts at the first start() only, and is off by default", () => {
+    const fast = setup({ restartGraceMs: RESTART_GRACE_MS, timeScale: FAST_TIMER_SCALE });
+    fast.limiter.start();
+    fast.clock.advance(2_000);
+    fast.limiter.start(); // a second start does not restart the grace
+    for (let i = 0; i < RATE_LIMITS.failuresBeforeBan; i++) fast.limiter.joinFailed(fast.key);
+    expect(fast.limiter.checkBan(fast.key).ok).toBe(false);
+    fast.limiter.stop();
+    const none = setup();
+    none.limiter.start();
+    for (let i = 0; i < RATE_LIMITS.failuresBeforeBan; i++) none.limiter.joinFailed(none.key);
+    expect(none.limiter.checkBan(none.key).ok).toBe(false);
+    none.limiter.stop();
   });
 });
 

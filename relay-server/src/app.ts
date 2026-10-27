@@ -25,7 +25,7 @@ import { registerSceneRoute, sceneDownloads } from "./http/scene.js";
 import { DEFAULT_STATIC_ROOT, registerStatic } from "./http/static.js";
 import { createLogger } from "./logger.js";
 import { Metrics, registerMetricsRoute } from "./metrics.js";
-import { FAST_TIMER_SCALE, RateLimiter } from "./ratelimit.js";
+import { FAST_TIMER_SCALE, RateLimiter, RESTART_GRACE_MS } from "./ratelimit.js";
 import { FAST_SWEEP_INTERVAL_MS, Registry } from "./registry.js";
 import { PROTOCOL_VERSIONS, RELAY_NAME, RELAY_VERSION } from "./version.js";
 import type { Connection } from "./ws/connection.js";
@@ -204,6 +204,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
       clock,
       logger,
       metrics,
+      restartGraceMs: RESTART_GRACE_MS,
       ...(config.testFastTimers && { timeScale: FAST_TIMER_SCALE }),
     });
   const publisher = publisherHandlers({
@@ -341,6 +342,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
         maxTotalSnapshotBytes: config.maxTotalSnapshotBytes,
         trustProxy: config.trustProxy,
         testFastTimers: config.testFastTimers,
+        restartGraceS: limiter.restartGraceMs / 1000,
       },
       "relay starting",
     );

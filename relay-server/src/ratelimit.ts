@@ -122,7 +122,16 @@ export interface RateLimiterOptions {
    * Only `RELAY_TEST_FAST_TIMERS` sets it, to `FAST_TIMER_SCALE` (SRV-29).
    */
   timeScale?: number;
+  /**
+   * After `start()`, failed joins do not count towards the ban for this long (÷ `timeScale`): a
+   * room rejoining by code after a redeploy must not lock itself out (SRV-28). Default 0; the app
+   * passes `RESTART_GRACE_MS`.
+   */
+  restartGraceMs?: number;
 }
+
+/** How long after the relay starts failed joins do not count towards the ban (SRV-28). */
+export const RESTART_GRACE_MS = 120_000;
 
 /** What `RELAY_TEST_FAST_TIMERS` divides the limiter's times by: a minute becomes a second. */
 export const FAST_TIMER_SCALE = 60;
@@ -139,6 +148,9 @@ export class RateLimiter {
   readonly #banMs: number;
   readonly #alarmMs: number;
   readonly #sweepIntervalMs: number;
+  readonly #restartGraceMs: number;
+  /** End of the restart grace, set by the first `start()`. */
+  #graceUntil = -Infinity;
   /** Windows per key; `Map` order is the LRU order. */
   readonly #clients = new Map<string, ClientState>();
   /** Banned keys → end of the ban; never evicted by the LRU (each ban costs 20 failures). */
@@ -163,6 +175,7 @@ export class RateLimiter {
     this.#banMs = RATE_LIMITS.banMs / scale;
     this.#alarmMs = RATE_LIMITS.alarmMs / scale;
     this.#sweepIntervalMs = LIMITER_SWEEP_INTERVAL_MS / scale;
+    this.#restartGraceMs = (options.restartGraceMs ?? 0) / scale;
   }
 
   /**
@@ -186,6 +199,11 @@ export class RateLimiter {
   /** Keys currently tracked (tests check that no raw address is among them). */
   keys(): IterableIterator<string> {
     return this.#clients.keys();
+  }
+
+  /** How long the restart grace lasts (`restartGraceMs` ÷ `timeScale`), for the start-up line. */
+  get restartGraceMs(): number {
+    return this.#restartGraceMs;
   }
 
   get alarmActive(): boolean {
@@ -241,14 +259,16 @@ export class RateLimiter {
 
   /**
    * A failed join, or a probe that tells as much (a `preferredCode`): 20 within 10 min ban the
-   * client for 10 min; more than 1,000 of all clients within an hour raise the alarm.
+   * client for 10 min; more than 1,000 of all clients within an hour raise the alarm. During the
+   * restart grace (SRV-28) it counts towards the alarm only: the 10/min limit still holds, and
+   * the room's rejoins by code do not ban it while the sessions are being re-created.
    */
   joinFailed(key: string): void {
     this.#metrics?.joinFailed();
     const now = this.#clock.now();
     const state = this.#state(key);
     prune(state.failures, now - this.#failureWindowMs);
-    state.failures.push(now);
+    if (now >= this.#graceUntil) state.failures.push(now);
     if (state.failures.length >= RATE_LIMITS.failuresBeforeBan && this.checkBan(key).ok) {
       this.#ban(key, now + this.#banMs);
       state.failures.length = 0;
@@ -287,9 +307,13 @@ export class RateLimiter {
     this.#failuresLastHour(now);
   }
 
-  /** Runs `sweep()` every minute (÷ `timeScale`) on the injected clock until `stop()`. */
+  /**
+   * Runs `sweep()` every minute (÷ `timeScale`) on the injected clock until `stop()`; the first
+   * call starts the restart grace.
+   */
   start(): void {
     this.stop();
+    if (this.#graceUntil === -Infinity) this.#graceUntil = this.#clock.now() + this.#restartGraceMs;
     const arm = (): void => {
       this.#sweepTimer = this.#clock.setTimeout(() => {
         this.sweep();
