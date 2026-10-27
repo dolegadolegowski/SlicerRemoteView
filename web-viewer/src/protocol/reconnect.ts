@@ -7,8 +7,11 @@
 // - Rejoin with `sessionId` + `viewerToken` (no rate-limit cost, §12), with backoff 0.5 s → 30 s and jitter; `4008`
 //   (relay restart) after 0–3 s; the relay's `retryAfterS` is honoured. The closed states that end a session
 //   (`enterCode`, `sessionEnded`, `stopped`, `idle`) stop retrying.
-// - `SESSION_NOT_FOUND` (the relay restarted and lost the session, §13 step 9): join by the code again, on a new
-//   socket — valid whatever the relay does with the old one (§9.2 keeps it open 10 s; `[TODO verify]` against SRV-15).
+// - `SESSION_NOT_FOUND` (the relay restarted and lost the session, §13 step 9): join by the code again. The first code
+//   join goes on the same socket, which the relay keeps open 10 s for exactly that (§9.2, SRV-15): a lecture room behind
+//   one NAT address would otherwise need two upgrades per viewer within seconds — 40 for 20 viewers, above the relay's
+//   30 a minute (§12, report 2026-10-27-server-8). Later code joins, or one whose socket is already gone, open a new
+//   socket.
 //   The presenter re-creates the session with the same code 0–3 s after the restart, so the code joins run on a
 //   fixed schedule (`CODE_FALLBACK_AT_MS`, ≈ 4 s to NFR-20's 60 s) rather than at once and on every backoff step:
 //   every `INVALID_CODE` counts against the room's IP, and 20 within 10 min ban it (§12 — a lecture room shares one
@@ -100,7 +103,10 @@ interface Fallback {
 }
 
 export function createReconnect(
-  connection: Pick<Connection, "state" | "connect" | "leave" | "checkAlive" | "on" | "onMessage">,
+  connection: Pick<
+    Connection,
+    "state" | "connect" | "joinAgain" | "leave" | "checkAlive" | "on" | "onMessage"
+  >,
   options: ReconnectOptions = {},
 ): Reconnect {
   const random = options.random ?? Math.random;
@@ -139,7 +145,9 @@ export function createReconnect(
     clearTimer();
     lastError = undefined;
     if (token) connection.connect(token);
-    else if (code !== null) connection.connect({ code });
+    // The fallback's first code join reuses the socket that got SESSION_NOT_FOUND while it is still open.
+    else if (code !== null && !(fallback?.step === 0 && connection.joinAgain({ code })))
+      connection.connect({ code });
   }
 
   function wait(delay: number, isFirm: boolean): void {
@@ -221,7 +229,7 @@ export function createReconnect(
       if (m.code !== "SESSION_NOT_FOUND" || token === null) return;
       if (connection.state.kind !== "connecting") return;
       // The relay no longer knows the session (restart, §13 step 9): the token died with it; the code did not. The
-      // old socket stays as it is until the code join replaces it (the relay keeps it open 10 s, §9.2).
+      // socket stays open (the relay keeps it 10 s, §9.2): the fallback's first code join goes on it (`joinAgain`).
       log("session not found, joining by code");
       token = null;
       fallback = { since: now(), step: 0 };

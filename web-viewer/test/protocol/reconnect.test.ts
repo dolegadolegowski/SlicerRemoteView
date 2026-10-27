@@ -69,10 +69,10 @@ function accept(overrides: Record<string, unknown> = {}): MockSocket {
   return s;
 }
 
-/** The `viewer.join` the client sent on `s`, opening the socket first if the test has not. */
+/** The latest `viewer.join` the client sent on `s`, opening the socket first if the test has not. */
 function join(s: MockSocket): Record<string, unknown> {
   if (s.readyState === 0) s.open();
-  return s.frames.find((f) => f["type"] === "viewer.join")!;
+  return s.frames.filter((f) => f["type"] === "viewer.join").at(-1)!;
 }
 
 beforeEach(() => {
@@ -269,17 +269,22 @@ describe("relay restart: SESSION_NOT_FOUND → join by code (§13 step 9, US-11,
     s.serverClose(4004);
   }
 
-  it("gives the presenter a head start, then joins by the code it still holds on a new socket", () => {
+  it("gives the presenter a head start, then joins by the code it still holds on the same socket", () => {
     const old = lostSession();
     const sockets = MockSocket.instances.length;
+    const joins = () => old.frames.filter((f) => f["type"] === "viewer.join").length;
     vi.advanceTimersByTime(CODE_FALLBACK_AT_MS[0]! - 1);
-    expect(MockSocket.instances).toHaveLength(sockets); // the old socket waits; no code join yet
+    expect(joins()).toBe(1); // the old socket waits; no code join yet
     vi.advanceTimersByTime(1);
-    expect(old.closedWith?.code).toBe(1000);
+    // No second upgrade: the relay takes one code join on the SESSION_NOT_FOUND socket (§9.2, §12).
+    expect(MockSocket.instances).toHaveLength(sockets);
+    expect(old.closedWith).toBeUndefined();
+    expect(joins()).toBe(2);
     const s = MockSocket.last;
-    expect(s).not.toBe(old);
+    expect(s).toBe(old);
     expect(join(s)).toMatchObject({ code: CODE });
     expect(join(s)).not.toHaveProperty("viewerToken");
+    expect(join(s)["id"]).not.toBe(old.frames.find((f) => f["type"] === "viewer.join")!["id"]);
     s.receive(
       joinedMessage({
         sessionId: NEW_SESSION,
@@ -322,12 +327,47 @@ describe("relay restart: SESSION_NOT_FOUND → join by code (§13 step 9, US-11,
 
   it("the head start is jittered so a room does not join at the same moment", () => {
     random.mockReturnValue(0.5);
-    lostSession();
-    const sockets = MockSocket.instances.length;
+    const old = lostSession();
     vi.advanceTimersByTime(CODE_FALLBACK_AT_MS[0]! + CODE_FALLBACK_JITTER_MS * 0.5 - 1);
+    expect(join(old)).toMatchObject({ viewerToken: TOKEN });
+    vi.advanceTimersByTime(1);
+    expect(join(old)).toMatchObject({ code: CODE });
+  });
+
+  it("the first code join fits the relay's 10 s window on the SESSION_NOT_FOUND socket (§9.2, 4012)", () => {
+    expect(CODE_FALLBACK_AT_MS[0]! + CODE_FALLBACK_JITTER_MS).toBeLessThan(10_000);
+  });
+
+  it("RATE_LIMITED on the reused socket waits retryAfterS, then joins by code on a new socket", () => {
+    const old = lostSession();
+    vi.advanceTimersByTime(CODE_FALLBACK_AT_MS[0]!);
+    expect(join(old)).toMatchObject({ code: CODE });
+    old.receive({
+      type: "error",
+      code: "RATE_LIMITED",
+      message: "x",
+      retryable: true,
+      details: { retryAfterS: 30 },
+    });
+    old.serverClose(4006);
+    expect(reconnect.willRetry(connection.state)).toBe(true);
+    const sockets = MockSocket.instances.length;
+    vi.advanceTimersByTime(29_999);
     expect(MockSocket.instances).toHaveLength(sockets);
     vi.advanceTimersByTime(1);
+    expect(MockSocket.last).not.toBe(old);
+    expect(join(MockSocket.last)).toMatchObject({ code: CODE });
+  });
+
+  it("the later code joins open new sockets: the relay closes the one whose code join failed", () => {
+    const old = lostSession();
+    vi.advanceTimersByTime(CODE_FALLBACK_AT_MS[0]!);
+    unknown(); // on the old socket, closed 4004
+    const sockets = MockSocket.instances.length;
+    vi.advanceTimersToNextTimer();
     expect(MockSocket.instances).toHaveLength(sockets + 1);
+    expect(MockSocket.last).not.toBe(old);
+    expect(join(MockSocket.last)).toMatchObject({ code: CODE });
   });
 
   it("INVALID_CODE is retried only on the schedule (≈ 4, 15, 35, 60 s), then 'presentation ended'", () => {

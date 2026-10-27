@@ -290,8 +290,10 @@ and decides after every closed socket whether to connect again (FR-43, NFR-19, N
 - Rejoin with `sessionId` + `viewerToken` (§5.1); backoff 0.5 s → 30 s with jitter (`[d/2, d]`), reset only after a
   rejoin held 10 s; `4008` after 0–3 s; the relay's `retryAfterS` honoured; `enterCode` / `sessionEnded` / `stopped`
   / `idle` stop it.
-- `SESSION_NOT_FOUND` (relay restarted): join by the code on a new socket, first after a 4–6 s head start for the
-  presenter, then `INVALID_CODE` retried at ≈ 15, 35 and 60 s only (each failure counts against the room's IP, §12);
+- `SESSION_NOT_FOUND` (relay restarted): join by the code, first after a 4–6 s head start for the presenter on the
+  same socket (the relay keeps it open 10 s for that, §9.2 — no second upgrade per viewer, so a room of 20 behind one
+  address stays under the 30 upgrades a minute, §12), then `INVALID_CODE` retried on new sockets at ≈ 15, 35 and 60 s
+  only (each failure counts against the room's IP, §12);
   then "Presentation ended" on the code entry. A closed state it retries keeps the scene, the token and the versions
   (`ends` passed to the model lifecycle, the loader and `bindSceneVersions`).
 - `visibilitychange → visible`: a `ping` at once while connected (`connection.checkAlive()`), or the backoff wait is

@@ -641,9 +641,10 @@ describe("reconnecting and the presenter (WEB-14)", () => {
       });
       for (let attempt = 0; attempt < 4; attempt++) {
         vi.advanceTimersToNextTimer();
-        const s = MockSocket.last;
-        s.open();
-        expect(s.frames[0]).toMatchObject({ type: "viewer.join", code: "7KQ4X" });
+        const s = MockSocket.last; // the first code join reuses the token join's socket (§9.2)
+        expect(s === tokenJoin).toBe(attempt === 0);
+        if (s.readyState === 0) s.open();
+        expect(s.frames.at(-1)).toMatchObject({ type: "viewer.join", code: "7KQ4X" });
         s.receive({ type: "error", code: "INVALID_CODE", message: "x", retryable: false });
         s.serverClose(4004);
         if (attempt < 3) {

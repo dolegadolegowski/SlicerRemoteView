@@ -124,6 +124,12 @@ export interface Connection {
   readonly state: ConnectionState;
   /** Opens the socket and sends `viewer.join` as the very first frame. */
   connect(credentials: JoinCredentials): void;
+  /**
+   * Sends another `viewer.join` on the open socket that is still waiting for `viewer.joined` — the code join after a
+   * token rejoin's `SESSION_NOT_FOUND`, which the relay accepts on the same socket within 10 s (§9.2, SRV-15) and
+   * which then costs no WebSocket upgrade (§12). `false` (nothing sent) when there is no such socket.
+   */
+  joinAgain(credentials: JoinCredentials): boolean;
   /** Sends a JSON message; `false` when the socket is not open. Adds `protocolVersion`, `id` and `ts`. */
   send(message: OutboundMessage): boolean;
   /** Next message id for callers that build their own messages (`v-<n>`). */
@@ -399,6 +405,30 @@ export function createConnection(options: ConnectionOptions = {}): Connection {
     log("ignored frame of unsupported kind", { kind: printableType(typeof data) ?? "?" });
   }
 
+  function joinMessage(credentials: JoinCredentials): OutboundMessage {
+    return {
+      type: "viewer.join",
+      id: nextId(),
+      ...credentials,
+      clientInfo: {
+        app: "web-viewer",
+        version: APP_VERSION,
+        platform: options.clientInfo?.platform ?? "web",
+        profile: options.clientInfo?.profile ?? "mobile",
+        capabilities: {
+          httpScene: true,
+          maxSnapshotBytes: options.maxSnapshotBytes ?? DEFAULT_MAX_SNAPSHOT_BYTES,
+        },
+      },
+    };
+  }
+
+  function joinAgain(credentials: JoinCredentials): boolean {
+    if (!socket || state.kind !== "connecting" || socket.readyState !== OPEN) return false;
+    lastError = undefined; // the refused join's error must not colour this one's outcome
+    return sendNow(socket, joinMessage(credentials));
+  }
+
   function connect(credentials: JoinCredentials): void {
     if (socket) {
       detach(socket);
@@ -443,21 +473,7 @@ export function createConnection(options: ConnectionOptions = {}): Connection {
     }, openTimeoutMs);
     s.onopen = () => {
       if (s !== socket) return;
-      sendNow(s, {
-        type: "viewer.join",
-        id: nextId(),
-        ...credentials,
-        clientInfo: {
-          app: "web-viewer",
-          version: APP_VERSION,
-          platform: options.clientInfo?.platform ?? "web",
-          profile: options.clientInfo?.profile ?? "mobile",
-          capabilities: {
-            httpScene: true,
-            maxSnapshotBytes: options.maxSnapshotBytes ?? DEFAULT_MAX_SNAPSHOT_BYTES,
-          },
-        },
-      });
+      sendNow(s, joinMessage(credentials));
       startHeartbeat(s);
     };
     s.onmessage = (event) => {
@@ -480,6 +496,7 @@ export function createConnection(options: ConnectionOptions = {}): Connection {
       return state;
     },
     connect,
+    joinAgain,
     send: (message) => (socket ? sendNow(socket, message) : false),
     nextId,
     leave() {

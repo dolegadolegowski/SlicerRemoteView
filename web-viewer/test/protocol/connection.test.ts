@@ -127,6 +127,33 @@ describe("join (§5.1)", () => {
     expect(validateMessage(join).ok).toBe(true);
   });
 
+  it("joinAgain sends a second viewer.join on the socket still waiting for viewer.joined (§9.2, WEB-14)", () => {
+    make();
+    expect(conn.joinAgain({ code: CODE })).toBe(false); // no socket
+    conn.connect({ sessionId: joined.sessionId, viewerToken: joined.viewerToken });
+    const s = MockSocket.last;
+    expect(conn.joinAgain({ code: CODE })).toBe(false); // not open yet
+    s.open();
+    s.receive({ type: "error", code: "SESSION_NOT_FOUND", message: "x", retryable: false });
+    expect(conn.joinAgain({ code: CODE })).toBe(true);
+    const again = s.frames.at(-1)!;
+    expect(again).toMatchObject({ type: "viewer.join", code: CODE });
+    expect(again).not.toHaveProperty("viewerToken");
+    expect(again["id"]).not.toBe(s.frames[0]!["id"]);
+    expect(validateMessage(again).ok).toBe(true);
+    expect(MockSocket.instances).toHaveLength(1);
+    // A bare drop of that socket is a retryable disconnect.
+    s.serverClose(1006);
+    expect(conn.state.kind).toBe("disconnected");
+    // Once joined (or closed) there is nothing to join again on.
+    conn.connect({ code: CODE });
+    MockSocket.last.open();
+    MockSocket.last.receive(joined);
+    expect(conn.joinAgain({ code: CODE })).toBe(false);
+    MockSocket.last.serverClose(1006);
+    expect(conn.joinAgain({ code: CODE })).toBe(false);
+  });
+
   it("becomes connected on viewer.joined and delivers it to typed handlers", () => {
     make();
     const handler = vi.fn();

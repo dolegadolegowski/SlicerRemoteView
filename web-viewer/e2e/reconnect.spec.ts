@@ -131,7 +131,7 @@ test("after a relay restart the viewer joins by its code again, waits for the pr
   page,
 }) => {
   test.setTimeout(60_000); // the second code join runs ≈ 15 s after the session was lost
-  const { next, first } = await joinAndShow(page);
+  const { next, first, opened } = await joinAndShow(page);
   await first.ws.close({ code: 4008, reason: "restarting" });
   const second = await next(); // within 0–3 s
   expect(second.join).toMatchObject({ viewerToken: TOKEN });
@@ -143,9 +143,13 @@ test("after a relay restart the viewer joins by its code again, waits for the pr
     retryable: false,
   });
   await expect(status(page)).toHaveText("Reconnecting…");
+  const sockets = opened();
   const third = await next(); // the presenter's head start: ≈ 4–6 s
   expect(third.join).toMatchObject({ code: CODE });
   expect(third.join).not.toHaveProperty("viewerToken");
+  // On the same socket: no second upgrade per viewer (§9.2, §12, report 2026-10-27-server-8).
+  expect(third.ws).toBe(second.ws);
+  expect(opened()).toBe(sockets);
   // The presenter has not re-created the session yet: the old scene stays while the viewer keeps trying.
   sendJson(third.ws, {
     type: "error",
