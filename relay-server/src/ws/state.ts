@@ -24,6 +24,9 @@
  *   matrices for all of them, ≈ 0.65 MiB at worst: 128-character ids, every property at full
  *   precision): a message that would go beyond → `BAD_SEQUENCE{field:"nodeState"}` and is ignored;
  *   the publisher's snapshot empties the state (T3).
+ * - `sceneState()` turns the merged state into §8.3's `scene.state` (ids and the four properties,
+ *   no names): after `viewer.joined` and in reply to `scene.request` (`viewer.ts`), after a
+ *   `scene.snapshot.ready` sent at `end` (`fanout.ts`).
  * Log lines carry the session id, versions and counts — never node ids.
  */
 import { LIMITS } from "@slicerremoteview/shared";
@@ -47,6 +50,22 @@ const REFUSALS = {
   sceneVersion: "sceneVersion must exceed every version used so far (§8.4)",
   nodeState: "the merged scene state is full: send a snapshot (§8.3)",
 } as const;
+
+/** `scene.state` of the session (§8.3): the merged node state since the cached snapshot. */
+export function sceneState(session: Session) {
+  const nodes: ({ nodeId: string } & NodeState)[] = [];
+  const removed: string[] = [];
+  for (const [nodeId, state] of session.nodeState)
+    if (state === "removed") removed.push(nodeId);
+    else nodes.push({ nodeId, ...state });
+  return {
+    type: "scene.state",
+    sceneVersion: session.sceneVersion,
+    snapshotVersion: session.snapshot?.sceneVersion ?? null,
+    nodes,
+    removed,
+  };
+}
 
 export interface StateDeps {
   logger: Logger;

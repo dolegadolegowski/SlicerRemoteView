@@ -172,6 +172,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     logger,
     clock,
     overCapacity: fan.overCapacity,
+    deliver: fan.deliver,
   });
   const downloads = sceneDownloads({ registry });
   const snapshot = snapshotHandlers({

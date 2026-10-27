@@ -165,6 +165,15 @@ describe("a whole session at trace level leaves no secret in the logs (SRV-18, F
       nodeIds: [REMOVED_NODE],
     });
     expect(await next(viewer, "scene.nodeRemoved")).toMatchObject({ sceneVersion: 3 });
+    // SRV-13: a scene.request whose answer carries the merged node ids and values.
+    viewer.send({
+      type: "scene.request",
+      id: "q-1",
+      haveSnapshotVersion: 1,
+      haveSceneVersion: 2,
+      reason: "GAP",
+    });
+    expect(await next(viewer, "scene.state")).toMatchObject({ replyTo: "q-1", sceneVersion: 3 });
 
     // Leave and close; the relay too, so that its shutdown lines are part of the grep.
     viewer.sendRaw(JSON.stringify(fixture("viewer.leave")));

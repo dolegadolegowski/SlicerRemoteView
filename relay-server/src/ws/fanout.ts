@@ -1,7 +1,8 @@
 /**
  * Snapshot and update fan-out to viewers, and the send buffers of viewers and publishers
  * (docs/protocol.md §3.3 watermarks, §6.1–§6.5, §8, §9.3, §11; architecture §2.3, §4, §5).
- * Implements `SnapshotEvents` of `snapshot.ts` and `broadcast` for `state.ts`.
+ * Implements `SnapshotEvents` of `snapshot.ts`, `broadcast` for `state.ts` and `deliver` for
+ * `viewer.ts`.
  *
  * - At an accepted `begin`, every connected viewer whose `bufferedAmount` is below the 4 MiB soft
  *   watermark is streamed: it gets the publisher's `begin`, each chunk and `end` as received, byte for
@@ -9,7 +10,10 @@
  *   Viewers at or above it, and viewers that join mid-stream, are deferred.
  * - A streamed viewer at or above 4 MiB before a chunk gets no further chunks and is deferred.
  * - At an accepted `end`, the streamed viewers get `end`; every other connected viewer gets
- *   `scene.snapshot.ready` (it fetches over HTTP, §6.4 a/b, §6.5); the publisher's ack counts both.
+ *   `scene.snapshot.ready` (it fetches over HTTP, §6.4 a/b, §6.5) and then `scene.state` (§8.3 b),
+ *   which is empty there (`snapshot.ts` clears the state right before `completed`), both held to
+ *   the limits below like a reply (`deliver`). The publisher's ack counts the streamed viewers and
+ *   the deferred ones told.
  * - An abort reaches every viewer that got the `begin`: the publisher's own abort as received, the
  *   relay's as `scene.snapshot.abort{sceneVersion, reason}`.
  * - Slow consumers get `error SLOW_CONSUMER` and close `4010` (§9.3): above the 8 MiB hard watermark,
@@ -38,18 +42,27 @@
  *   watermark is closed `4010` instead (it re-syncs on reconnect with the snapshot and
  *   `scene.state`), and for the budget the largest buffers are closed, whatever their size, until
  *   the sum plus the frame for every recipient fits.
+ * - The relay's own messages to one viewer (`deliver`: `scene.state` after `viewer.joined`, the reply
+ *   to `scene.request`, up to ≈ 0.65 MiB, `ws/viewer.ts`) are encoded once and held to the same
+ *   limits, their bytes together.
+ * - After `dispose()` (shutdown) nobody is closed any more (no timer may be armed): updates are not
+ *   sent, and relay messages only to a viewer they leave within the hard watermark.
  * - A socket closed for another reason (`viewer.leave`, the session ending) leaves the registry at
  *   once and is not counted while its close completes: its chunk and update frames are shared
  *   `Buffer`s, and `Connection.close` drops it after 5 s unless its peer keeps reading.
- * Checked before every forwarded chunk and update and every second (`start`). Logs carry ids, byte
- * counts and error codes only.
+ * Checked before every forwarded chunk, update, `scene.state` and `ready`, and every second
+ * (`start`); the small messages left (`viewer.count`, aborts, `pong`s, a stream's `begin`/`end`) only
+ * by the watch. Logs carry ids, byte counts and error codes only.
  */
 import { CLOSE_CODES, LIMITS } from "@slicerremoteview/shared";
 import type { Logger } from "pino";
 import type { Clock, TimerHandle } from "../clock.js";
 import type { Config } from "../config.js";
 import type { CachedSnapshot, Peer, Registry, Session, Viewer } from "../registry.js";
+import { encode } from "./connection.js";
+import type { Outgoing } from "./connection.js";
 import type { AbortReason, SnapshotEvents } from "./snapshot.js";
+import { sceneState } from "./state.js";
 
 export const SOFT_WATERMARK_BYTES = LIMITS.SLOW_CONSUMER_SOFT_BYTES;
 export const HARD_WATERMARK_BYTES = LIMITS.SLOW_CONSUMER_HARD_BYTES;
@@ -340,9 +353,8 @@ export function fanout({ registry, config, logger, clock }: FanoutDeps) {
       const stream = streams.get(session);
       streams.delete(session);
       unpause(stream?.publisher);
-      const ready = readyMessage(snapshot);
       let viewersStreamed = 0;
-      let viewersDeferred = 0;
+      const deferred: Viewer[] = [];
       for (const viewer of session.viewers.values()) {
         const peer = viewer.peer;
         if (peer === undefined || closing.has(peer)) continue;
@@ -352,12 +364,17 @@ export function fanout({ registry, config, logger, clock }: FanoutDeps) {
         ) {
           peer.forward(text);
           viewersStreamed += 1;
-        } else {
-          peer.send(ready);
-          viewersDeferred += 1;
-        }
+        } else deferred.push(viewer);
       }
-      return { viewersStreamed, viewersDeferred };
+      if (deferred.length === 0) return { viewersStreamed, viewersDeferred: 0 };
+      // `ready`, then §8.3 (b)'s state: empty, since `snapshot.ts` clears it right before this.
+      const now = clock.now();
+      const frames = [readyMessage(snapshot), sceneState(session)].map((message) =>
+        utf8Frame(encode(message, now)),
+      );
+      const told = admit(session, deferred, totalBytes(frames));
+      for (const peer of told.keys()) for (const frame of frames) peer.forward(frame, true);
+      return { viewersStreamed, viewersDeferred: told.size };
     },
 
     aborted(session, sceneVersion, reason, text) {
@@ -436,24 +453,67 @@ export function fanout({ registry, config, logger, clock }: FanoutDeps) {
    */
   function broadcast(session: Session, text: string): void {
     if (disposed) return;
-    // Its own memory, not a slice of Node's shared pool that a small frame would keep alive.
-    const frame = Buffer.allocUnsafeSlow(Buffer.byteLength(text));
-    frame.write(text);
-    const bytes = frame.byteLength + frameHeaderBytes(frame.byteLength);
-    const recipients = new Map<Peer, Viewer>();
-    for (const viewer of session.viewers.values()) {
-      const peer = viewer.peer;
-      if (peer === undefined || closing.has(peer)) continue;
-      const amount = peer.bufferedAmount;
-      if (amount + bytes > HARD_WATERMARK_BYTES)
-        slowConsumer({ session, viewer, peer, amount }, "HARD_WATERMARK");
-      else recipients.set(peer, viewer);
-    }
-    enforceBudget(recipients, bytes, false);
+    const frame = utf8Frame(text);
+    const recipients = admit(session, session.viewers.values(), wireBytes(frame));
     for (const peer of recipients.keys()) peer.forward(frame, true);
   }
 
-  return { events, broadcast, overCapacity, start, dispose };
+  /**
+   * Sends relay messages to one viewer (`scene.state`, and the `scene.snapshot.ready` before it in
+   * a `scene.request` reply), each encoded once, within the limits of `broadcast`: their bytes are
+   * admitted together. False when the relay did not send them (the viewer is gone, or closed `4010`
+   * instead).
+   */
+  function deliver(session: Session, viewer: Viewer, messages: readonly Outgoing[]): boolean {
+    const peer = viewer.peer;
+    if (peer === undefined) return false;
+    const now = clock.now();
+    const frames = messages.map((message) => utf8Frame(encode(message, now)));
+    if (!admit(session, [viewer], totalBytes(frames)).has(peer)) return false;
+    for (const frame of frames) peer.forward(frame, true);
+    return true;
+  }
+
+  /**
+   * The sockets of `viewers` that may take `bytes` more now: one it would take above the hard
+   * watermark is closed `4010` instead (an update or a reply cannot be deferred), then the budget
+   * closes the largest buffers, whatever their size, until `bytes` for every recipient fits. After
+   * `dispose()` such a socket is only left out, and the budget is not enforced.
+   */
+  function admit(session: Session, viewers: Iterable<Viewer>, bytes: number): Map<Peer, Viewer> {
+    const recipients = new Map<Peer, Viewer>();
+    for (const viewer of viewers) {
+      const peer = viewer.peer;
+      if (peer === undefined || closing.has(peer)) continue;
+      const amount = peer.bufferedAmount;
+      if (amount + bytes <= HARD_WATERMARK_BYTES) recipients.set(peer, viewer);
+      else if (!disposed) slowConsumer({ session, viewer, peer, amount }, "HARD_WATERMARK");
+    }
+    if (!disposed) enforceBudget(recipients, bytes, false);
+    return recipients;
+  }
+
+  return { events, broadcast, deliver, overCapacity, start, dispose };
+}
+
+/**
+ * The UTF-8 bytes of a text frame, in memory of its own: not a slice of Node's shared pool, which a
+ * small frame would keep alive while it waits in a send buffer.
+ */
+function utf8Frame(text: string): Buffer {
+  const frame = Buffer.allocUnsafeSlow(Buffer.byteLength(text));
+  frame.write(text);
+  return frame;
+}
+
+/** What `frame` adds to `bufferedAmount`: its bytes and the header `ws` puts before them. */
+function wireBytes(frame: Buffer): number {
+  return frame.byteLength + frameHeaderBytes(frame.byteLength);
+}
+
+/** What `frames` add to `bufferedAmount` together. */
+function totalBytes(frames: readonly Buffer[]): number {
+  return frames.reduce((sum, frame) => sum + wireBytes(frame), 0);
 }
 
 /**
@@ -464,7 +524,8 @@ function frameHeaderBytes(length: number): number {
   return length < 126 ? 2 : length < 65_536 ? 4 : 10;
 }
 
-function readyMessage(snapshot: CachedSnapshot) {
+/** `scene.snapshot.ready` of the cached snapshot (§6.4), at `end` and for `scene.request`. */
+export function readyMessage(snapshot: CachedSnapshot) {
   return {
     type: "scene.snapshot.ready",
     sceneVersion: snapshot.sceneVersion,

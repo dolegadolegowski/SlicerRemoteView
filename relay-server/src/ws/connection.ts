@@ -21,6 +21,11 @@ export const HANDSHAKE_ROLES: ReadonlyMap<string, Role> = new Map([
 /** An outgoing message before the envelope fields are added. */
 export type Outgoing = { type: string } & Record<string, unknown>;
 
+/** The text frame of `message` with the envelope fields of §3.2 (`protocolVersion`, `ts`). */
+export function encode(message: Outgoing, now: number): string {
+  return JSON.stringify({ protocolVersion: PROTOCOL_VERSION, ...message, ts: now });
+}
+
 export interface ErrorOptions {
   replyTo?: string | undefined;
   retryable?: boolean;
@@ -75,14 +80,13 @@ export class Connection implements Peer {
   /** Sends one JSON message with the envelope fields of §3.2. */
   send(message: Outgoing): void {
     if (!this.isOpen) return;
-    this.socket.send(
-      JSON.stringify({ protocolVersion: PROTOCOL_VERSION, ...message, ts: this.clock.now() }),
-    );
+    this.socket.send(encode(message, this.clock.now()));
   }
 
   /**
-   * Sends a publisher frame as received, unchanged (§11): text as is, a `Buffer` as binary, or —
-   * `asText` — a `Buffer` holding a text frame's UTF-8 bytes (one encoding for many sockets).
+   * Sends a frame as it is: a publisher frame as received (§11), text as is, a `Buffer` as binary,
+   * or — `asText` — a `Buffer` holding a text frame's UTF-8 bytes (an update encoded once for many
+   * sockets, or a relay message the fan-out measured before sending it, `fanout.ts`).
    */
   forward(frame: string | Buffer, asText = false): void {
     if (!this.isOpen) return;

@@ -4,6 +4,7 @@ import type { Validators } from "@slicerremoteview/shared";
 import type { Connection } from "../src/ws/connection.js";
 import { createDispatcher, MAX_INSTANCE_PATH_LENGTH } from "../src/ws/dispatch.js";
 import { readFrame } from "../src/ws/frame.js";
+import { fixture } from "./helpers/fixtures.js";
 import { ManualClock } from "./helpers/manual-clock.js";
 
 /** Records what the dispatcher sends; just enough of `Connection` for these unit tests. */
@@ -52,5 +53,18 @@ describe("createDispatcher (unit)", () => {
     const { details } = sent[0] as { details: { instancePath: string } };
     expect(sent[0]).toMatchObject({ code: "INVALID_MESSAGE", replyTo: "p-1" });
     expect(details.instancePath).toBe(longPath.slice(0, MAX_INSTANCE_PATH_LENGTH));
+  });
+
+  it("an allowed type without a handler answers UNSUPPORTED_TYPE and closes nothing", () => {
+    // Since SRV-13 every viewer→relay type has a handler in the app (`session.resume` gets one in
+    // SRV-15); the rule stays.
+    const dispatch = createDispatcher({ clock: new ManualClock() });
+    const { connection, sent } = fakeConnection("viewer");
+    void dispatch(
+      connection,
+      readFrame(JSON.stringify({ ...fixture("scene.request"), id: "r-1" })),
+    );
+    expect(sent).toEqual([expect.objectContaining({ code: "UNSUPPORTED_TYPE", replyTo: "r-1" })]);
+    expect(sent[0]).not.toHaveProperty("closeCode");
   });
 });
