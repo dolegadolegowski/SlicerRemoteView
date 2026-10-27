@@ -21,6 +21,8 @@
  * 5. `py/remoteview_protocol/generated.py` — `TypedDict`s and `AnyMessage` from the same bundle via
  *    `datamodel-code-generator` (PRO-11). Needs the local venv of `shared/README.md`; `--skip-python` skips this step
  *    (the vitest drift test uses it, so `npm test` works without Python; `npm run check` does not skip).
+ * 6. `cs/RemoteView.Protocol/*.cs` — C# classes and enums (Newtonsoft attributes) via quicktype, see `generate-cs.mjs`
+ *    (PRO-17); writes only inside `shared/cs/`. Standalone: `npm run generate:cs -w shared`.
  */
 import { execFileSync } from "node:child_process";
 import {
@@ -36,6 +38,7 @@ import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { compile } from "json-schema-to-typescript";
+import { syncCs } from "./generate-cs.mjs";
 import { bundleSchemas } from "./lib/bundle.mjs";
 
 const shared = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -195,6 +198,12 @@ if (skipPython) {
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
+}
+
+// 6. cs/RemoteView.Protocol/*.cs
+for (const line of await syncCs({ check })) {
+  drift = true;
+  console.error(`drift: ${line} — run \`npm run generate -w shared\``);
 }
 
 if (drift) process.exit(1);
