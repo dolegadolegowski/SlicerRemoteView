@@ -9,13 +9,24 @@
  * clients (SLC-08, QST-06) are expected to as well `[TODO verify]`.
  *
  * A missing pong is excused one interval at a time, its ping still outstanding (a late echo counts),
- * while each interval shows a sign of life that explains it:
- * - the relay paused the socket's reading (the fan-out pauses publishers, at most 5 s at a time) and
- *   the peer kept sending text or binary frames, which its pong may be queued behind;
+ * while the interval shows another sign of life (report 2026-10-20-slicer-7, SRV-27):
+ * - a publisher sent a complete text or binary frame since the last tick: its uplink works, and its
+ *   pong may be queued behind its own upload (TCP keeps the order) or behind a fan-out pause of its
+ *   reading. Not a viewer: it only sends small text frames, which never hold its pong back for a tick,
+ *   and a viewer that pinged on but read nothing would keep its slot and the relay's queues for it,
+ *   kernel ones included, which no budget sees (T3);
  * - the socket's send buffer shrank since the last tick: the peer is reading, and the ping may still
  *   be queued behind older data (the fan-out's slow-consumer rules decide about slow sockets).
- * A dead peer shows neither for long — the buffers in between fill once — so it is closed within
- * about two ticks even while the fan-out pauses it.
+ * Pongs that echo no ping, WebSocket pings and partial frames are no sign of life. A peer without a
+ * frame (a publisher's), an echo or a shrinking send buffer is closed at the second tick: at most
+ * about 60 s, also while the fan-out pauses it. A publisher that keeps sending but reads nothing is
+ * no longer closed here: it holds up to 1 MiB of send buffer (then the fan-out closes it `4010`)
+ * plus what the kernel queues for it, for at most `MAX_SESSIONS` publishers (SRV-25 follow-up).
+ *
+ * A socket no longer open at a tick whose peer started the close (a close frame, or a TCP half-close,
+ * after which `ws` arms no timer at all) is handed to `close()`, which drops it unless the close
+ * completes (`Connection.close`, T3): after a half-close it would otherwise keep its viewer slot and
+ * send buffer for good. A close the relay started is already bounded there.
  */
 import { randomBytes } from "node:crypto";
 import { CLOSE_CODES, LIMITS } from "@slicerremoteview/shared";
@@ -29,10 +40,6 @@ const PING_PAYLOAD_BYTES = 8;
 export interface Pingable {
   readonly id: number;
   readonly isOpen: boolean;
-  /** How many times reading was paused (`Connection.pauseCount`). */
-  readonly pauseCount: number;
-  /** Reading is paused right now. */
-  readonly readingPaused: boolean;
   /** Bytes queued for the peer and not yet handed to the network. */
   readonly bufferedAmount: number;
   /** For the timeout log line: ids only, safe to log (NFR-12). */
@@ -47,11 +54,9 @@ export interface Pingable {
 interface Watch {
   /** The payload of the ping still unanswered, if any. */
   payload: Buffer | undefined;
-  /** `pauseCount` at the last tick. */
-  pauses: number;
   /** `bufferedAmount` at the last tick (before a ping it sent): the next tick excuses if it shrank. */
   backlog: number;
-  /** The peer sent a text or binary frame since the last tick. */
+  /** The publisher sent a text or binary frame since the last tick (`heard`). */
   heard: boolean;
 }
 
@@ -70,12 +75,15 @@ export function heartbeat({
 
   /** An unanswered ping that is not (yet) the socket's fault (see the module comment). */
   function excused(socket: Pingable, watch: Watch): boolean {
-    const paused = socket.readingPaused || socket.pauseCount !== watch.pauses;
-    return (paused && watch.heard) || socket.bufferedAmount < watch.backlog;
+    return watch.heard || socket.bufferedAmount < watch.backlog;
   }
 
   function check(socket: Pingable, watch: Watch): void {
-    if (!socket.isOpen) return;
+    if (!socket.isOpen) {
+      watched.delete(socket);
+      socket.close(CLOSE_CODES.HEARTBEAT_TIMEOUT); // no frame for a closing socket, only the timer
+      return;
+    }
     if (watch.payload !== undefined && !excused(socket, watch)) {
       watched.delete(socket);
       logger.info(
@@ -94,7 +102,6 @@ export function heartbeat({
       return;
     }
     // What the next tick compares against.
-    watch.pauses = socket.pauseCount;
     watch.backlog = socket.bufferedAmount;
     watch.heard = false;
     if (watch.payload !== undefined) return;
@@ -115,22 +122,20 @@ export function heartbeat({
   return {
     /** Starts watching a socket once its upgrade is done. */
     add(socket: Pingable): void {
-      watched.set(socket, {
-        payload: undefined,
-        pauses: socket.pauseCount,
-        backlog: 0,
-        heard: false,
-      });
+      watched.set(socket, { payload: undefined, backlog: 0, heard: false });
     },
     /** The socket sent a pong: it counts if it echoes the outstanding ping. */
     pong(socket: Pingable, data: Buffer): void {
       const watch = watched.get(socket);
       if (watch?.payload?.equals(data) === true) watch.payload = undefined;
     },
-    /** The socket sent a text or binary frame (a sign of life while its reading is paused). */
+    /**
+     * The socket sent a complete text or binary frame: a sign of life of a publisher (never a pong,
+     * a ping or a viewer's frame, see the module comment).
+     */
     heard(socket: Pingable): void {
       const watch = watched.get(socket);
-      if (watch !== undefined) watch.heard = true;
+      if (watch !== undefined && socket.role === "publisher") watch.heard = true;
     },
     /** The socket is gone. */
     remove(socket: Pingable): void {

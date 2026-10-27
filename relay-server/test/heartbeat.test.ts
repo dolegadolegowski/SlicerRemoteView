@@ -1,6 +1,7 @@
-import type { AddressInfo } from "node:net";
+import { createHash, randomBytes } from "node:crypto";
+import type { AddressInfo, Socket } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { validateMessage } from "@slicerremoteview/shared";
+import { chunkify, encodeChunkFrame, validateMessage } from "@slicerremoteview/shared";
 import { buildApp } from "../src/app.js";
 import { loadConfig } from "../src/config.js";
 import { createLogger } from "../src/logger.js";
@@ -89,7 +90,7 @@ describe("WebSocket heartbeat (SRV-14 criterion 2, §9.1, §9.3, FR-21, NFR-21)"
     await flush(client);
     relay!.clock.advance(TICK); // pings both
     await flush(watcher.client); // the viewer's automatic pong has been read
-    await flush(client);
+    // No publisher frame since that tick: a text frame would now excuse it (SRV-27).
     relay!.clock.advance(TICK); // at most 60 s of silence
     await expect.poll(() => session.phase).toBe("grace");
     expect([4009, 1006]).toContain(await client.closed);
@@ -118,12 +119,16 @@ describe("WebSocket heartbeat (SRV-14 criterion 2, §9.1, §9.3, FR-21, NFR-21)"
     client.ws.resume();
   });
 
-  it("sockets that answer stay open, tick after tick", async () => {
+  it("sockets that answer stay open, tick after tick: each echo counts (a fresh ping every tick)", async () => {
     const { client, session, peer } = await publisher();
     const watcher = await viewer(session);
-    for (let i = 0; i < 4; i++) {
+    const pings: Buffer[] = [];
+    client.ws.on("ping", (data: Buffer) => pings.push(data));
+    for (let i = 1; i <= 4; i++) {
       relay!.clock.advance(TICK);
-      await flush(client);
+      // The publisher sends no frame, only its automatic echo; a new ping means the last echo counted.
+      await expect.poll(() => pings.length).toBe(i);
+      await expect.poll(() => session.lastPublisherSeen).toBe(relay!.clock.now());
       await flush(watcher.client);
     }
     expect(peer.isOpen && watcher.peer.isOpen).toBe(true);
@@ -236,6 +241,112 @@ describe("WebSocket heartbeat (SRV-14 criterion 2, §9.1, §9.3, FR-21, NFR-21)"
   });
 });
 
+describe("inbound frames count as life (SRV-27, report 2026-10-20-slicer-7, §9.1)", () => {
+  /** Every 8 s until `untilMs` (relative): `act` once per step; `act` awaits the relay's I/O. */
+  async function every8s(untilMs: number, act: () => Promise<void> | void): Promise<void> {
+    for (let t = 8_000; t <= untilMs; t += 8_000) {
+      relay!.clock.advance(8_000);
+      await act();
+    }
+  }
+
+  it("criterion 3: a publisher streaming a chunk every 8 s keeps its session with its pongs withheld > 60 s; a mute viewer of it is still closed", async () => {
+    const lines: string[] = [];
+    const logger = createLogger({ level: "trace", destination: { write: (s) => lines.push(s) } });
+    const { client, session, peer } = await publisher({ autoPong: false }, logger);
+    const pings: Buffer[] = [];
+    client.ws.on("ping", (data: Buffer) => pings.push(data));
+    const watcher = await viewer(session);
+    // Reads every chunk forwarded to it, sends nothing, answers no ping: frames of others are no life of its own.
+    const mute = await connectClient(relay!.url, {}, { autoPong: false });
+    mute.sendRaw(JSON.stringify({ ...fixture("viewer.join"), code: session.code }));
+    const muteId = (await mute.next()).viewerId as string;
+    // 12 chunks of 64 KiB, one every 8 s (≈ 1 Mbit/s with 1 MiB chunks: 8.4 s): 96 s, past the ticks at 30, 60, 90 s.
+    const data = randomBytes(12 * 65_536);
+    const sha256 = createHash("sha256").update(data).digest("hex");
+    client.send({
+      type: "scene.snapshot.begin",
+      id: "p-1",
+      sceneVersion: 1,
+      byteLength: data.byteLength,
+      sha256,
+      chunkCount: 12,
+      chunkSize: 65_536,
+      format: "glb",
+      extensionsUsed: [],
+      nodeCount: 1,
+    });
+    // The sync points below are relay state and the viewer: the publisher sends no text frame until `end`.
+    await expect.poll(() => session.assembling?.sceneVersion).toBe(1);
+    const chunks = [...chunkify(data, 65_536)].map(({ chunkIndex, payload }) =>
+      Buffer.from(encodeChunkFrame({ sceneVersion: 1, chunkIndex }, payload)),
+    );
+    const seen: Received[] = [];
+    let sent = 0;
+    await every8s(96_000, async () => {
+      client.sendRaw(chunks[sent++]!, true);
+      await expect.poll(() => session.assembling?.nextIndex).toBe(sent);
+      seen.push(...(await flush(watcher.client)));
+    });
+    expect(pings).toHaveLength(1); // the ping of the first tick, outstanding at 60 s and 90 s: excused, not answered
+    expect([peer.isOpen, session.publisher === peer, session.phase]).toEqual([
+      true,
+      true,
+      "allocated",
+    ]);
+    expect(seen.filter((m) => m.type === "session.publisherState")).toEqual([]);
+    expect([4009, 1006]).toContain(await mute.closed);
+    client.send({ type: "scene.snapshot.end", id: "p-2", sceneVersion: 1, sha256 });
+    for (;;) if ((await client.next()).type === "scene.snapshot.ack") break;
+    expect(session.phase).toBe("active");
+    // Negative control: `end` was its last frame (at 96 s); tick 120 excuses it, tick 150 closes it.
+    relay!.clock.advance(24_000);
+    await flush(watcher.client);
+    expect(peer.isOpen).toBe(true);
+    relay!.clock.advance(TICK);
+    await expect.poll(() => session.phase).toBe("grace");
+    expect([4009, 1006]).toContain(await client.closed);
+    const timeouts = lines
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((l) => l.errorCode === "HEARTBEAT_TIMEOUT");
+    expect(timeouts).toEqual([
+      expect.objectContaining({ role: "viewer", viewerId: muteId, sessionId: session.id }),
+      expect.objectContaining({ role: "publisher", sessionId: session.id }),
+    ]);
+    expect(lines.join("")).not.toMatch(
+      new RegExp(`(?<![A-Za-z0-9])${session.code}(?![A-Za-z0-9])`, "i"),
+    );
+  });
+
+  it("criterion 2 on the wire: unsolicited pongs every 8 s from a socket that reads nothing keep nothing open", async () => {
+    const { client, session } = await publisher({ autoPong: false });
+    await flush(client);
+    client.ws.pause(); // reads nothing more
+    await every8s(56_000, async () => {
+      client.ws.pong(Buffer.from("unsolicited"));
+      // Handled before the clock moves on (a pong of the publisher refreshes lastPublisherSeen).
+      await expect.poll(() => session.lastPublisherSeen).toBe(relay!.clock.now());
+    });
+    relay!.clock.advance(8_000); // tick 2 at 60 s
+    await expect.poll(() => session.phase).toBe("grace");
+    client.ws.resume();
+  });
+
+  it("WebSocket pings of the client are no frames: sent every 8 s, they keep nothing open", async () => {
+    const { client, session } = await publisher({ autoPong: false });
+    const pongs: Buffer[] = [];
+    client.ws.on("pong", (data: Buffer) => pongs.push(data));
+    await flush(client);
+    await every8s(56_000, async () => {
+      client.ws.ping(Buffer.from("c"));
+      await expect.poll(() => pongs.length).toBeGreaterThan(0); // `ws` answers it; the heartbeat ignores it
+      pongs.length = 0;
+    });
+    relay!.clock.advance(8_000); // tick 2 at 60 s
+    await expect.poll(() => session.phase).toBe("grace");
+  });
+});
+
 describe("publisher activity (§9.1)", () => {
   it("any publisher frame or pong refreshes lastPublisherSeen; viewer frames do not", async () => {
     const { client, session } = await publisher();
@@ -333,16 +444,14 @@ describe("the heartbeat itself (fake sockets)", () => {
     pings: Buffer[];
     closes: number[];
     terminated: number;
-    pauseCount: number;
-    readingPaused: boolean;
     bufferedAmount: number;
   }
-  function fake(): Fake {
+  /** A publisher's socket unless `role` says otherwise (only a publisher's frames are life). */
+  function fake(role: "publisher" | "viewer" = "publisher"): Fake {
     return {
       id: 1,
+      role,
       isOpen: true,
-      pauseCount: 0,
-      readingPaused: false,
       bufferedAmount: 0,
       pings: [],
       closes: [],
@@ -384,48 +493,87 @@ describe("the heartbeat itself (fake sockets)", () => {
     beat.dispose();
   });
 
-  it("a pause since the last tick is excused only for a socket that kept sending frames", () => {
+  it("criterion 1: frames every 8 s keep a socket whose pong is late past two ticks; a mute one is closed at the second", () => {
     const { clock, beat } = setup();
-    const [late, talking, mute] = [fake(), fake(), fake()];
-    for (const socket of [late, talking, mute]) beat.add(socket);
-    clock.advance(TICK); // pings
-    for (const socket of [late, talking, mute]) socket.pauseCount += 1; // paused, resumed meanwhile
-    beat.heard(late);
-    beat.heard(talking);
-    clock.advance(TICK);
-    expect([late.closes, talking.closes, mute.closes]).toEqual([[], [], [4009]]);
-    // Excused: the ping stays outstanding (no new one) and its late echo counts.
-    expect([late.pings.length, talking.pings.length]).toEqual([1, 1]);
-    beat.pong(late, late.pings[0]!);
-    beat.heard(talking); // frames, but no pause in this interval: no excuse
-    clock.advance(TICK);
-    expect([late.pings.length, late.closes, talking.closes]).toEqual([2, [], [4009]]);
+    const [talking, mute] = [fake(), fake()];
+    beat.add(talking);
+    beat.add(mute);
+    const start = clock.now();
+    let muteClosedAt: number | undefined;
+    // Ticks at 30, 60, 90, 120 s; the talking socket sends a frame every 8 s and echoes ping 1 at 104 s.
+    for (let t = 8_000; t <= 128_000; t += 8_000) {
+      clock.advance(8_000);
+      if (muteClosedAt === undefined && mute.closes.length > 0) muteClosedAt = clock.now();
+      beat.heard(talking);
+      if (t === 104_000) beat.pong(talking, talking.pings[0]!);
+      if (t > TICK && t < 104_000) expect(talking.pings).toHaveLength(1); // outstanding: no new ping
+    }
+    expect([talking.closes, talking.terminated]).toEqual([[], 0]);
+    expect(talking.pings).toHaveLength(2); // the late echo counted: a fresh ping at 120 s
+    expect([mute.closes, mute.terminated, mute.pings.length]).toEqual([[4009], 1, 1]);
+    expect(muteClosedAt! - start).toBeLessThanOrEqual(2 * TICK + 8_000); // seen at the next 8 s step
     beat.dispose();
   });
 
-  it("a socket paused since before the last tick counts as paused; each excuse needs new frames", () => {
+  it("the mute socket goes at the second tick exactly; a frame excuses only the tick right after it", () => {
     const { clock, beat } = setup();
-    const socket = fake();
-    beat.add(socket);
-    clock.advance(TICK); // ping
-    socket.readingPaused = true; // the pause count is unchanged: paused all along
-    beat.heard(socket);
-    clock.advance(TICK); // excused
-    expect(socket.closes).toEqual([]);
-    clock.advance(TICK); // still paused, nothing heard since
-    expect([socket.pings.length, socket.closes]).toEqual([1, [4009]]);
+    const [mute, early, late] = [fake(), fake(), fake()];
+    for (const socket of [mute, early, late]) beat.add(socket);
+    clock.advance(TICK - 1);
+    beat.heard(late); // a frame before ping 1 excuses nothing after it
+    clock.advance(1); // ping 1 to each
+    clock.advance(TICK - 2_000);
+    beat.heard(early); // just before tick 2
+    clock.advance(1_999);
+    expect(mute.closes).toEqual([]);
+    clock.advance(1); // tick 2
+    expect([mute.closes, early.closes, late.closes]).toEqual([[4009], [], [4009]]);
+    // `late` had no frame in (30 s, 60 s]; `early` is excused once, then needs another frame.
+    clock.advance(1);
+    beat.heard(early);
+    clock.advance(TICK - 1); // tick 3: excused by the frame at 60.001 s
+    expect(early.closes).toEqual([]);
+    clock.advance(TICK - 1);
+    expect(early.closes).toEqual([]);
+    clock.advance(1); // tick 4: nothing since tick 3 — 59.999 s after its last frame
+    expect([early.closes, early.pings.length]).toEqual([[4009], 1]);
     beat.dispose();
   });
 
-  it("frames alone do not excuse a socket the relay did not pause", () => {
+  it("a viewer's frames are no sign of life: it is closed at the second tick like a mute one (T3)", () => {
+    const { clock, beat } = setup();
+    const viewer = fake("viewer");
+    beat.add(viewer);
+    for (let t = 8_000; t <= 64_000 && viewer.closes.length === 0; t += 8_000) {
+      clock.advance(8_000);
+      beat.heard(viewer); // e.g. its application `ping` every 8 s
+    }
+    expect([viewer.closes, viewer.terminated]).toEqual([[4009], 1]);
+    beat.dispose();
+  });
+
+  it("a socket whose close never completes is handed to close() at the next tick, once", () => {
+    const { clock, beat } = setup();
+    const closing = fake();
+    beat.add(closing);
+    (closing as { isOpen: boolean }).isOpen = false; // e.g. its peer half-closed TCP
+    clock.advance(TICK);
+    expect([closing.closes, closing.pings, closing.terminated]).toEqual([[4009], [], 0]);
+    clock.advance(TICK); // no longer watched: Connection.close drops it
+    expect(closing.closes).toEqual([4009]);
+    beat.dispose();
+  });
+
+  it("criterion 2: pongs that echo no ping are no frames: sent every 8 s, they keep nothing open", () => {
     const { clock, beat } = setup();
     const socket = fake();
     beat.add(socket);
-    clock.advance(TICK);
-    beat.heard(socket);
-    clock.advance(TICK);
+    for (let t = 8_000; t <= 64_000 && socket.closes.length === 0; t += 8_000) {
+      clock.advance(8_000);
+      beat.pong(socket, Buffer.from("unsolicited"));
+    }
     expect(socket.closes).toEqual([4009]);
-    expect(() => beat.heard(fake())).not.toThrow(); // a socket no longer watched
+    expect(() => beat.heard(fake())).not.toThrow(); // a socket not (or no longer) watched
     beat.dispose();
   });
 
@@ -468,17 +616,60 @@ describe("the heartbeat itself (fake sockets)", () => {
 });
 
 describe("wiring (real sockets)", () => {
-  it("Connection counts one pause per pause, however often pauseReading() is called", async () => {
-    const { client, peer } = await publisher();
-    expect([peer.pauseCount, peer.readingPaused]).toEqual([0, false]);
-    peer.pauseReading();
-    peer.pauseReading();
-    expect([peer.pauseCount, peer.readingPaused]).toEqual([1, true]);
-    peer.resumeReading();
-    peer.pauseReading();
-    expect(peer.pauseCount).toBe(2);
-    peer.resumeReading();
-    await flush(client);
+  it("a viewer that answers no WS ping but sends `ping` every 8 s is closed 4009 at the second tick (T3)", async () => {
+    const { session } = await publisher();
+    const client = await connectClient(relay!.url, {}, { autoPong: false });
+    client.sendRaw(JSON.stringify({ ...fixture("viewer.join"), code: session.code }));
+    const joined = await client.next();
+    const peer = session.viewers.get(joined.viewerId as string)!.peer as Connection;
+    for (let t = 8_000; t < 2 * TICK; t += 8_000) {
+      relay!.clock.advance(8_000);
+      await flush(client); // an application ping, read by the relay before the clock moves on
+    }
+    expect(peer.isOpen).toBe(true);
+    relay!.clock.advance(2 * TICK - 56_000); // tick 2 at 60 s
+    expect([4009, 1006]).toContain(await client.closed);
+  });
+
+  it("a viewer whose peer half-closed TCP with a backlog leaves its live session at a tick + 5 s", async () => {
+    const { client: pub, session } = await publisher();
+    const v = await connectClient(relay!.url);
+    v.sendRaw(JSON.stringify({ ...fixture("viewer.join"), code: session.code }));
+    const joined = await v.next();
+    const peer = session.viewers.get(joined.viewerId as string)!.peer as Connection;
+    v.ws.pause(); // reads nothing: the relay's queue for it fills
+    const data = randomBytes(200 * 65_536);
+    const sha256 = createHash("sha256").update(data).digest("hex");
+    pub.send({
+      type: "scene.snapshot.begin",
+      sceneVersion: 1,
+      byteLength: data.byteLength,
+      sha256,
+      chunkCount: 200,
+      chunkSize: 65_536,
+      format: "glb",
+      extensionsUsed: [],
+      nodeCount: 1,
+    });
+    await expect.poll(() => session.assembling?.sceneVersion).toBe(1);
+    let sent = 0;
+    for (const { chunkIndex, payload } of chunkify(data, 65_536)) {
+      pub.sendRaw(Buffer.from(encodeChunkFrame({ sceneVersion: 1, chunkIndex }, payload)), true);
+      sent += 1;
+      await expect.poll(() => session.assembling?.nextIndex).toBe(sent);
+      if (peer.bufferedAmount > 150_000) break; // the kernel's buffers are full too
+    }
+    expect(peer.bufferedAmount).toBeGreaterThan(150_000);
+    // A TCP half-close (FIN, no close frame): `ws` arms no timer for it (`_socket` is `ws`'s own).
+    (v.ws as unknown as { _socket: Socket })._socket.end();
+    await expect.poll(() => peer.isOpen).toBe(false);
+    expect(session.viewers.get(joined.viewerId as string)?.peer).toBe(peer); // still in the session
+    relay!.clock.advance(TICK); // handed to close() …
+    await flush(pub);
+    expect(session.viewers.get(joined.viewerId as string)?.peer).toBe(peer); // not dropped at the tick
+    relay!.clock.advance(5_000); // … which drops it: its buffer does not shrink
+    await expect.poll(() => session.viewers.get(joined.viewerId as string)?.peer).toBeUndefined();
+    v.ws.terminate();
   });
 
   it("the app runs it only when asked (tests drive the clock in big steps)", async () => {

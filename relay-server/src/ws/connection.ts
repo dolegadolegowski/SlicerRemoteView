@@ -62,7 +62,6 @@ export class Connection implements Peer {
   #closing = false;
   #reading = true;
   #paused = false;
-  #pauses = 0;
   #handshakeTimer: TimerHandle | undefined;
 
   constructor(
@@ -100,7 +99,6 @@ export class Connection implements Peer {
   /** `ws` `pause()`/`resume()`: the socket stops / restarts emitting messages. */
   pauseReading(): void {
     if (this.#closing) return;
-    if (!this.#paused) this.#pauses += 1;
     this.#paused = true;
     this.socket.pause();
   }
@@ -108,19 +106,6 @@ export class Connection implements Peer {
   resumeReading(): void {
     this.#paused = false;
     this.socket.resume();
-  }
-
-  /**
-   * How many times reading was paused; with `readingPaused`, the heartbeat tells whether reading
-   * was paused since its last tick (§9.1).
-   */
-  get pauseCount(): number {
-    return this.#pauses;
-  }
-
-  /** Reading is paused right now (`pauseReading()` without a `resumeReading()` since). */
-  get readingPaused(): boolean {
-    return this.#paused;
   }
 
   /** A WebSocket-level ping (§9.1); the peer answers with a pong echoing `payload`. */
