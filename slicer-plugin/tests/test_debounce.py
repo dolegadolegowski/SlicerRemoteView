@@ -150,6 +150,14 @@ def test_debounce_fifty_marks_within_100_ms_flush_once_150_ms_after_the_last(set
     assert len(flushed) == 1  # nothing more
 
 
+@pytest.mark.parametrize("flags", [Change.NAME, Change.ADDED])
+def test_debounce_re_exports_wait_like_geometry(setup, flags):
+    """A rename (SLC-30) and an added node are shown by a re-export only: the 750 ms lane."""
+    timer, debouncer, _ = setup
+    debouncer.mark("vtkMRMLModelNode4", flags)
+    assert timer.starts[-1] == GEOMETRY_MS
+
+
 def test_debounce_geometry_extends_the_wait_to_750_ms(setup):
     timer, debouncer, flushed = setup
     debouncer.mark("vtkMRMLModelNode4", Change.APPEARANCE)

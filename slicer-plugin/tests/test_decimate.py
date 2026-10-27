@@ -8,7 +8,14 @@ import struct
 import numpy as np
 import pytest
 from pygltflib import GLTF2
-from support import FakeScene, created, needs_validator, reassemble, sphere, validate_glb
+from support import (
+    FakeScene,
+    live_client,
+    needs_validator,
+    reassemble,
+    sphere,
+    validate_glb,
+)
 from vtkmodules.vtkCommonDataModel import vtkPolyData
 from vtkmodules.vtkFiltersSources import vtkCubeSource
 
@@ -25,7 +32,6 @@ from remoteview_core.decimate import (
     glb_binary_size,
 )
 from remoteview_core.glb_writer import Entity, RootExtras, size_report, write_glb
-from remoteview_core.protocol_client import ProtocolClient, make_client_info
 from remoteview_core.snapshot import SnapshotTooLargeError, build_snapshot
 
 ROOT = RootExtras(scene_version=1, profile="quest2", slicer_version="5.12.4")
@@ -516,13 +522,6 @@ def test_decimate_output_passes_the_khronos_validator(tmp_path):
 
 
 # --------------------------------------------------------------------------- the snapshot
-
-
-def live_client(profile: str, **limits) -> ProtocolClient:
-    client = ProtocolClient(make_client_info("5.12.4", "win32"), auto_renew=False)
-    client.start(profile)
-    client.handle(created(**limits))
-    return client
 
 
 def _sent(snapshot) -> tuple[dict, list[int]]:

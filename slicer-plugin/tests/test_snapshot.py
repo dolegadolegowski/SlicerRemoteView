@@ -11,7 +11,7 @@ import time
 import pytest
 from support import (
     FakeScene,
-    created,
+    live_client,
     needs_node,
     needs_relay_stub,
     needs_validator,
@@ -34,15 +34,6 @@ from remoteview_core.snapshot import SnapshotTooLargeError, build_snapshot
 from remoteview_core.transport import Connected, Disconnected, Received, RelayTransport
 from remoteview_core.vendored import chunk_header
 from remoteview_protocol import envelope, schemas
-
-
-def live_client(profile: str = "mobile", **limits) -> ProtocolClient:
-    client = ProtocolClient(make_client_info("5.12.4", "win32"), auto_renew=False)
-    client.start(profile)
-    client.handle(created(**limits))
-    assert client.state is SessionState.CREATED
-    return client
-
 
 # --------------------------------------------------------------------------- the snapshot core
 
