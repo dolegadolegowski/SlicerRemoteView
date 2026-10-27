@@ -326,7 +326,8 @@ describe("swap and supersede (SRV-24 criterion 3, §6.2, §6.4, T11)", () => {
       const pendingBefore = relay!.clock.pending;
       end_(relay!, p);
       await p.client.closed;
-      expect(relay!.clock.pending).toBeLessThan(pendingBefore); // the chunk timeout is gone
+      // The chunk timeout is gone (and the close's own timer once the relay sees the close).
+      await expect.poll(() => relay!.clock.pending).toBeLessThan(pendingBefore);
       await new Promise((resolve) => setImmediate(resolve));
       gc();
       expect(buffer.deref() === undefined).toBe(true);

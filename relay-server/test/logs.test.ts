@@ -15,6 +15,9 @@ const glb = readFileSync(GLB_FILE);
 const CHUNK = 64 * 1024; // the smallest chunk size (§6.2): one chunk here
 const PUBLISHER_IP = "203.0.113.7";
 const VIEWER_IP = "198.51.100.9";
+const UPDATED_NODE = "vtkMRMLModelNodeUpdatedQ7";
+const REFUSED_NODE = "vtkMRMLModelNodeRefusedQ8";
+const REMOVED_NODE = "vtkMRMLModelNodeRemovedQ9";
 
 let relay: TestRelay | undefined;
 afterEach(async () => {
@@ -137,6 +140,32 @@ describe("a whole session at trace level leaves no secret in the logs (SRV-18, F
     });
     expect(refused.status).toBe(401);
 
+    // Updates (SRV-12): one accepted and forwarded, one refused, a removal; node ids and values
+    // are scene content.
+    publisher.send({
+      type: "scene.update",
+      id: "u-2",
+      sceneVersion: 2,
+      baseVersion: 1,
+      changes: [{ nodeId: UPDATED_NODE, color: [0.271828, 0.314159, 0.141421], opacity: 0.577215 }],
+    });
+    expect(await next(viewer, "scene.update")).toMatchObject({ sceneVersion: 2 });
+    publisher.send({
+      type: "scene.update",
+      id: "u-bad",
+      sceneVersion: 9,
+      baseVersion: 8,
+      changes: [{ nodeId: REFUSED_NODE, visible: false }],
+    });
+    expect(await next(publisher, "error")).toMatchObject({ code: "BAD_SEQUENCE" });
+    publisher.send({
+      type: "scene.nodeRemoved",
+      sceneVersion: 3,
+      baseVersion: 2,
+      nodeIds: [REMOVED_NODE],
+    });
+    expect(await next(viewer, "scene.nodeRemoved")).toMatchObject({ sceneVersion: 3 });
+
     // Leave and close; the relay too, so that its shutdown lines are part of the grep.
     viewer.sendRaw(JSON.stringify(fixture("viewer.leave")));
     expect(await viewer.closed).toBe(1000);
@@ -175,6 +204,13 @@ describe("a whole session at trace level leaves no secret in the logs (SRV-18, F
       VIEWER_IP,
       ...glbStrings(glb),
       ...byteForms(glb),
+      UPDATED_NODE,
+      REFUSED_NODE,
+      REMOVED_NODE,
+      "0.271828",
+      "0.314159",
+      "0.141421",
+      "0.577215",
     ];
     expect(secrets).toContain("SlicerRemoteView 0.1.0-fixtures");
     expect(secrets).toContain("vtkMRMLModelNode2");

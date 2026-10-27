@@ -1,7 +1,7 @@
 /**
- * Snapshot fan-out to viewers, and the send buffers of viewers and publishers (docs/protocol.md §3.3
- * watermarks, §6.1–§6.5, §9.3, §11; architecture §2.3, §4, §5). Implements `SnapshotEvents` of
- * `snapshot.ts`.
+ * Snapshot and update fan-out to viewers, and the send buffers of viewers and publishers
+ * (docs/protocol.md §3.3 watermarks, §6.1–§6.5, §8, §9.3, §11; architecture §2.3, §4, §5).
+ * Implements `SnapshotEvents` of `snapshot.ts` and `broadcast` for `state.ts`.
  *
  * - At an accepted `begin`, every connected viewer whose `bufferedAmount` is below the 4 MiB soft
  *   watermark is streamed: it gets the publisher's `begin`, each chunk and `end` as received, byte for
@@ -31,10 +31,18 @@
  *   second, so its `ping`s are answered within the clients' 10 s (§9.1).
  * - New viewers are refused `CAPACITY` (`overCapacity`, §5.2) while the live sockets' buffers (not
  *   those closed here, which are on their way out) are at or above the budget.
+ * - An accepted update frame (`ws/state.ts`, §8) goes to every connected viewer as received
+ *   (`broadcast`), encoded once into one `Buffer` sent as a text frame (no copy per viewer, and
+ *   `bufferedAmount` counts its bytes: `ws` counts a string in UTF-16 units). It is held to the same
+ *   limits before it is sent, but cannot be deferred: a viewer it would take above the hard
+ *   watermark is closed `4010` instead (it re-syncs on reconnect with the snapshot and
+ *   `scene.state`), and for the budget the largest buffers are closed, whatever their size, until
+ *   the sum plus the frame for every recipient fits.
  * - A socket closed for another reason (`viewer.leave`, the session ending) leaves the registry at
- *   once and is not counted while its close completes (its chunks are the shared `Buffer`s).
- * Checked before every forwarded chunk and every second (`start`). Logs carry ids, byte counts and
- * error codes only.
+ *   once and is not counted while its close completes: its chunk and update frames are shared
+ *   `Buffer`s, and `Connection.close` drops it after 5 s unless its peer keeps reading.
+ * Checked before every forwarded chunk and update and every second (`start`). Logs carry ids, byte
+ * counts and error codes only.
  */
 import { CLOSE_CODES, LIMITS } from "@slicerremoteview/shared";
 import type { Logger } from "pino";
@@ -148,7 +156,8 @@ export function fanout({ registry, config, logger, clock }: FanoutDeps) {
       retryable: true,
     });
     peer.close(CLOSE_CODES.SLOW_CONSUMER);
-    // A client that reads nothing never answers the close: `ws` would keep its bytes for 30 s.
+    // A slow consumer gets no longer, even while it reads (`Connection.close` allows a draining
+    // peer up to 30 s); and `dispose()` terminates the ones still closing at once.
     const timer = clock.setTimeout(() => {
       terminations.delete(timer);
       peer.terminate?.();
@@ -170,13 +179,15 @@ export function fanout({ registry, config, logger, clock }: FanoutDeps) {
   }
 
   /**
-   * Closes the largest send buffers, of any session, until Σ `bufferedAmount` plus `chunkBytes` for
-   * each socket of `stream.streaming` is within the budget (architecture §4). A socket holding less
-   * than the chunk is not closed: a streamed one is deferred (`ready` after `end`), which frees the
-   * chunk; any other would free next to nothing.
+   * Closes the largest send buffers, of any session, until Σ `bufferedAmount` plus `bytes` for each
+   * socket of `targets` (about to get a frame of that size) is within the budget (architecture §4).
+   * With `deferrable` (a chunk), a socket holding less than the frame is not closed: a target is
+   * dropped from `targets` instead (deferred: `ready` after `end`), which frees its share; any other
+   * would free next to nothing. Without it (an update, which every target must get), such sockets
+   * are closed too, largest first, so that the sum stays within the budget after the send.
    */
-  function enforceBudget(stream?: Stream, chunkBytes = 0): void {
-    const adding = stream === undefined ? 0 : chunkBytes * stream.streaming.size;
+  function enforceBudget(targets?: Map<Peer, Viewer>, bytes = 0, deferrable = true): void {
+    const adding = targets === undefined ? 0 : bytes * targets.size;
     let total = totalBuffered(true) + adding;
     if (total <= budget) return;
     // Largest first; on a tie the one above the soft watermark for longest.
@@ -184,13 +195,18 @@ export function fanout({ registry, config, logger, clock }: FanoutDeps) {
     const list = consumers().sort((a, b) => b.amount - a.amount || since(a.peer) - since(b.peer));
     for (const consumer of list) {
       if (total <= budget) break;
-      const streamed = stream?.streaming.has(consumer.peer) === true;
-      if (consumer.amount > 0 && consumer.amount >= chunkBytes) {
-        total -= consumer.amount + (streamed ? chunkBytes : 0);
+      const isTarget = targets?.has(consumer.peer) === true;
+      const closes = deferrable
+        ? consumer.amount > 0 && consumer.amount >= bytes // a smaller one is deferred instead
+        : consumer.amount > 0 || isTarget; // an update cannot be deferred
+      if (closes) {
+        total -= consumer.amount + (isTarget ? bytes : 0);
         slowConsumer(consumer, "BUDGET");
-      } else if (streamed) {
-        total -= chunkBytes;
-        stream?.streaming.delete(consumer.peer);
+        targets?.delete(consumer.peer);
+      } else if (isTarget) {
+        // Deferred (chunks only): `ready` after `end`.
+        total -= bytes;
+        targets?.delete(consumer.peer);
       }
     }
   }
@@ -313,7 +329,7 @@ export function fanout({ registry, config, logger, clock }: FanoutDeps) {
           slowConsumer({ session, viewer, peer, amount }, "HARD_WATERMARK");
         else if (amount >= SOFT_WATERMARK_BYTES) stream.streaming.delete(peer); // deferred
       }
-      enforceBudget(stream, frame.byteLength);
+      enforceBudget(stream.streaming, frame.byteLength);
       // The same Buffer for every socket: `ws` only prepends its frame header (NFR-05).
       for (const peer of stream.streaming.keys()) peer.forward(frame);
       stream.chunkBytes = frame.byteLength;
@@ -413,7 +429,39 @@ export function fanout({ registry, config, logger, clock }: FanoutDeps) {
    */
   const overCapacity = (): boolean => totalBuffered(true) >= budget;
 
-  return { events, overCapacity, start, dispose };
+  /**
+   * Sends an accepted update frame (`scene.update`, `scene.nodeRemoved`, `scene.nodeAdded`) to every
+   * connected viewer of `session` as received (§11), within the hard watermark and the budget, its
+   * WebSocket header included.
+   */
+  function broadcast(session: Session, text: string): void {
+    if (disposed) return;
+    // Its own memory, not a slice of Node's shared pool that a small frame would keep alive.
+    const frame = Buffer.allocUnsafeSlow(Buffer.byteLength(text));
+    frame.write(text);
+    const bytes = frame.byteLength + frameHeaderBytes(frame.byteLength);
+    const recipients = new Map<Peer, Viewer>();
+    for (const viewer of session.viewers.values()) {
+      const peer = viewer.peer;
+      if (peer === undefined || closing.has(peer)) continue;
+      const amount = peer.bufferedAmount;
+      if (amount + bytes > HARD_WATERMARK_BYTES)
+        slowConsumer({ session, viewer, peer, amount }, "HARD_WATERMARK");
+      else recipients.set(peer, viewer);
+    }
+    enforceBudget(recipients, bytes, false);
+    for (const peer of recipients.keys()) peer.forward(frame, true);
+  }
+
+  return { events, broadcast, overCapacity, start, dispose };
+}
+
+/**
+ * The header `ws` puts before an unmasked frame of `length` bytes (RFC 6455 §5.2); `bufferedAmount`
+ * counts it.
+ */
+function frameHeaderBytes(length: number): number {
+  return length < 126 ? 2 : length < 65_536 ? 4 : 10;
 }
 
 function readyMessage(snapshot: CachedSnapshot) {
