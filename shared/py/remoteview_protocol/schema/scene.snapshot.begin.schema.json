@@ -11,7 +11,7 @@
       "description": "MUST be greater than every version used so far in the session (§6.2, §8.4).",
       "$ref": "defs.schema.json#/definitions/snapshotVersion"
     },
-    "byteLength": { "$ref": "defs.schema.json#/definitions/byteLength" },
+    "byteLength": { "$ref": "defs.schema.json#/definitions/announcedByteLength" },
     "sha256": {
       "description": "SHA-256 of the complete GLB, repeated in scene.snapshot.end (§6.2, §6.4).",
       "$ref": "defs.schema.json#/definitions/sha256"

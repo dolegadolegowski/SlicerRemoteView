@@ -10,7 +10,8 @@
     "haveSnapshotVersion": {
       "description": "Version of the GLB the viewer holds, or null when it has none (§8.3).",
       "type": ["integer", "null"],
-      "minimum": 1
+      "minimum": 1,
+      "maximum": 4294967295
     },
     "haveSceneVersion": {
       "description": "Last scene version the viewer applied; 0 when none (§8.3, §8.4).",
