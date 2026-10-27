@@ -1,6 +1,6 @@
-# SlicerRemoteView protocol v1.0 (contract)
+# SlicerRemoteView protocol v1.1 (contract)
 
-Status: **contract**. Protocol version `1.0`, written by `architect` on 2026-10-17 from the decisions
+Status: **contract**. Protocol version `1.1` (revision of 2026-10-27, see section 14; the `1.0` wire format is unchanged), written by `architect` on 2026-10-17 from the decisions
 D1–D7 (see `docs/adr/0001`–`0008`) and the research notes in `docs/research/`. Every component
 (`slicer-plugin`, `relay-server`, `web-viewer`, `quest-app`, `tools/fake-slicer`) implements exactly what is
 written here. Changes follow CLAUDE.md rule 2: edit this file and bump the version first, separate
@@ -25,10 +25,14 @@ the publisher's scene to viewers: a **GLB snapshot** (full geometry) plus **incr
 
 ## 2. Versioning
 
-- Every JSON message carries `"protocolVersion": "1.0"` in its envelope (string, `MAJOR.MINOR`).
+- Every JSON message carries `"protocolVersion": "1.0"` (or `"1.1"`) in its envelope (string, `MAJOR.MINOR`).
+  Revision `1.1` of this document adds publisher-side conventions (section 7.2–7.3), limits and clarifications of
+  behaviour the components already share; it adds **no** message type, field or error code, so every receiver
+  accepts `1.0` and `1.1` alike. An implementation announces `"1.1"` once it follows the `1.1` rules of
+  section 7; announcing `"1.0"` stays valid.
 - **Minor** versions are additive: new optional fields, new message types, new error codes. A receiver MUST
-  ignore unknown fields and MUST reply `error` `UNSUPPORTED_TYPE` (not close) to an unknown message type
-  of a known major version.
+  ignore unknown fields. The **relay** MUST reply `error` `UNSUPPORTED_TYPE` (not close) to an unknown message
+  type of a known major version; **clients** (publisher, viewers) silently ignore an unknown type (section 11).
 - **Major** versions are breaking. The relay rejects a first message whose major is not supported with
   `error` `UNSUPPORTED_VERSION` and WebSocket close `4000`. Clients MUST NOT silently downgrade.
 - The relay answers with its own `protocolVersion`; a client whose minor is lower than the relay's MUST still
@@ -42,7 +46,12 @@ the publisher's scene to viewers: a **GLB snapshot** (full geometry) plus **incr
 - One endpoint for both roles: `wss://<host>/ws` (plain `ws://` only on `localhost` in development).
 - No code, token or role in the URL path, query string, cookies or `Sec-WebSocket-Protocol`. The role is
   declared by the **first message** (`session.create`, `session.resume` or `viewer.join`), which MUST arrive
-  within 10 s of the upgrade, otherwise the relay closes with `4012`.
+  within 10 s of the upgrade (or of a `SESSION_NOT_FOUND` reply to `session.resume`, section 4.3), otherwise
+  the relay closes with `4012`. Until `session.created`, `session.resumed` or `viewer.joined` has been sent, the
+  relay accepts only handshake messages and `ping`; anything else is an `UNAUTHORIZED` offence (an unknown type
+  too, close `1008`).
+- Clients offer no WebSocket subprotocol; the relay refuses an upgrade that carries `Sec-WebSocket-Protocol`
+  with HTTP 400 (it would otherwise echo the client's first offer).
 - Browsers send an `Origin` header; the relay accepts only its own origin(s) (`ALLOWED_ORIGINS`). Requests
   without `Origin` (Slicer, Unity) are accepted; foreign origins get HTTP 403 before the upgrade.
 - `permessage-deflate` is disabled (relay.md: zlib memory fragmentation; GLB does not compress well).
@@ -72,7 +81,7 @@ the publisher's scene to viewers: a **GLB snapshot** (full geometry) plus **incr
 | Max text message, viewer | 16 KiB (16,384 B) | relay (`1009`) | viewers only send join/ping/request; small cap limits abuse |
 | Max binary chunk payload | 1 MiB (1,048,576 B) + 12 B header | relay (`PAYLOAD_TOO_LARGE`, `1009`) | bounded reassembly buffers; progress UI; browser WS message limits are undocumented (web.md §5) |
 | `ws` `maxPayload` (server-wide) | 1 MiB + 64 KiB (1,114,112 B) | relay | `@fastify/websocket` has one server-wide limit (relay.md §2); chunking lets it be small for everyone |
-| Max snapshot (`MAX_SNAPSHOT_BYTES`) | 64 MiB (67,108,864 B) hard | relay (`PAYLOAD_TOO_LARGE` on `scene.snapshot.begin`) | 1 M quantized triangles with normals ≈ 20–30 MiB; 64 MiB leaves headroom and bounds relay memory at 2× per session (architecture.md §5) |
+| Max snapshot (`MAX_SNAPSHOT_BYTES`) | 64 MiB (67,108,864 B) hard | relay (`PAYLOAD_TOO_LARGE` on `scene.snapshot.begin`; the schema of `begin.byteLength` has no maximum, so every receiver reaches this rule, section 6.2) | 1 M quantized triangles with normals ≈ 20–30 MiB; 64 MiB leaves headroom and bounds relay memory at 2× per session (architecture.md §5) |
 | Recommended snapshot, `mobile` profile | ≤ 32 MiB (33,554,432 B) | publisher (decimation) | Safari WebContent process limit ≈ 1.5 GB (web.md §2); GLB + three.js copies ≈ 4× the file; keep well under 1 GB |
 | Max chunks per snapshot | 1,024 | relay (`INVALID_MESSAGE` on `scene.snapshot.begin`) | 64 MiB / 64 KiB (smallest `chunkSize`); the relay checks `chunkCount == ceil(byteLength / chunkSize) <= 1024` |
 | Chunk inter-arrival timeout | 120 s | relay (abort snapshot, `BAD_SEQUENCE`) | stalled publisher must not pin memory |
@@ -80,14 +89,17 @@ the publisher's scene to viewers: a **GLB snapshot** (full geometry) plus **incr
 | Max live sessions (`MAX_SESSIONS`) | 100 default | relay (`CAPACITY` on `session.create`) | bounds memory and the live-code population `S` (section 12) |
 | Max viewers per session (`MAX_VIEWERS`) | 20 | relay (`SESSION_FULL`) | fan-out of a 32 MiB snapshot to 20 viewers = 640 MiB egress per snapshot; also Railway ~10,000 connections per domain (relay.md §1.3) |
 | Max `changes` per `scene.update` | 1,000 | relay (`INVALID_MESSAGE`) | with the text limit above |
-| `nodeId` length | ≤ 128 chars, `[A-Za-z0-9_./:-]` | relay, viewers | MRML IDs are short ASCII |
-| Node `name` length (GLB extras) | ≤ 64 chars after sanitisation | publisher | UI labels; see section 7.3 |
-| Application heartbeat | client `ping` every 15 s; `pong` expected within 10 s | clients | browsers cannot send WS pings (web.md §5) |
-| Relay WS ping | every 30 s; terminate if no pong by the next tick | relay | `ws` README pattern (relay.md §2) |
+| `sceneVersion`, `snapshotVersion`, `baseVersion` and their echoes | uint32: `snapshotVersion` and the `sceneVersion` of updates `1 … 4,294,967,295`; `sceneVersion` / `baseVersion` elsewhere `0 …` (0 = nothing published) | schema | the chunk header carries the version as uint32 (section 6.3) |
+| `nodeId` length | ≤ 128 chars, `[A-Za-z0-9_./:-]` | relay, viewers | MRML IDs are short ASCII; a segment ID that does not fit is replaced by an alias (section 7.3) |
+| Node `name` length (GLB extras) | ≤ 64 chars (UTF-16 code units, the length JavaScript and C# report) after sanitisation | publisher | UI labels; see section 7.3 |
+| Merged scene state (`scene.state`) | ≤ 1,000 node ids | relay (`BAD_SEQUENCE`, `details.field: "nodeState"`) | bounds relay memory; a snapshot empties the state (section 8.3) |
+| Application heartbeat | client `ping` every 15 s; `pong` expected within 10 s (publishers uploading a snapshot: section 9.1) | clients | browsers cannot send WS pings (web.md §5) |
+| Relay WS ping | every 30 s; terminate if no pong, no publisher frame and no draining by the next tick (section 9.1) | relay | `ws` README pattern (relay.md §2) |
 | Publisher grace (`PUBLISHER_GRACE_S`) | 120 s | relay | resume after network blip or relay redeploy |
 | Idle TTL without viewers (`SESSION_TTL_S`) | 1,800 s | relay | shrinks the live-code population (anti-guessing) |
 | Max session lifetime (`SESSION_MAX_LIFETIME_S`) | 43,200 s (12 h) | relay | memory hygiene |
 | Handshake timeout | 10 s | relay (`4012`) | idle upgraded sockets |
+| Publisher send buffer | 1 MiB, no soft watermark: `SLOW_CONSUMER` + close `4010` | relay | a publisher only receives short replies; a publisher that reads nothing must not grow relay memory (T3) |
 | Viewer slow-consumer watermarks | soft **4 MiB**: stop forwarding live chunks to that viewer (it fetches via HTTP after `scene.snapshot.ready`); hard **8 MiB** or stuck > 60 s: close `4010` `SLOW_CONSUMER` | relay | `ws` backpressure is `bufferedAmount` only (relay.md §2); Σ over all viewers is capped by `MAX_TOTAL_BUFFERED_BYTES` (architecture.md §4) |
 
 ## 4. Session lifecycle (publisher)
@@ -102,8 +114,11 @@ the publisher's scene to viewers: a **GLB snapshot** (full geometry) plus **incr
 ```
 
 - `preferredCode` (string|null): a code the publisher previously held (after a relay restart the registry is
-  empty, so the code shown on the lecture screen can stay valid). Granted only if the code is currently free
-  and well-formed; otherwise a fresh code is generated silently.
+  empty, so the code shown on the lecture screen can stay valid). Granted only if the code is well-formed and
+  currently free, that is neither live nor in the post-release quarantine (`CODE_QUARANTINE_S`, ADR 0008);
+  otherwise a fresh code is generated silently. A well-formed `preferredCode` counts as a failed join of the
+  sender's address (section 12). `session.create` carries no token field (`publisherToken`, `viewerToken`,
+  `token` are refused).
 - `profile`: `"mobile" | "quest2" | "quest3"` — the decimation budget the publisher exported for (section 7.5).
   Informational for viewers.
 
@@ -170,7 +185,8 @@ needs a user click) and receives `session.renewed`.
 { "protocolVersion": "1.0", "type": "session.close", "id": "p-77", "reason": "USER_STOPPED" }
 ```
 
-The relay frees the code immediately, drops the snapshot buffer, and sends to every viewer:
+The relay releases the code into the quarantine (`CODE_QUARANTINE_S`, ADR 0008), drops the snapshot buffer,
+and sends to every viewer:
 
 ```json
 { "protocolVersion": "1.0", "type": "session.closed", "sessionId": "sess_01K7Q4XMB2TJ9RD6", "reason": "PUBLISHER_CLOSED" }
@@ -281,16 +297,23 @@ relay    → viewers:  … or scene.snapshot.ready {sceneVersion, byteLength, sh
 ```
 
 - `sceneVersion` MUST be greater than every version used so far in the session (section 8.4).
+- `sceneVersion` and `profile` MUST equal the `extras.sceneVersion` and `extras.profile` of the GLB root (section
+  7.1); `nodeCount` is the number of `T` nodes (section 7.2) and `triangleCount` the sum of their
+  `triangleCount`.
 - `chunkSize` MUST be between 64 KiB and 1 MiB (SHOULD be 1 MiB) and is identical for all chunks except the
   last; the relay checks `chunkCount == ceil(byteLength / chunkSize) <= 1024` (`INVALID_MESSAGE` otherwise).
 - `extensionsUsed` MUST be a subset of what v1 allows: `KHR_mesh_quantization` only (Draco is planned for
   v1.1 — ADR-0001; meshopt is excluded because Unity's decoder is experimental, quest.md §4).
-- The relay rejects the message with `error` `PAYLOAD_TOO_LARGE` if `byteLength > MAX_SNAPSHOT_BYTES`, or
-  `CAPACITY` if the global snapshot budget would be exceeded; it then ignores the chunks of that version.
+- The relay rejects the message with `error` `PAYLOAD_TOO_LARGE` (`details.maxSnapshotBytes`, no strike) if
+  `byteLength > MAX_SNAPSHOT_BYTES`, or `CAPACITY` if the global snapshot budget would be exceeded; it then
+  ignores the chunks of that version. The schema of `begin.byteLength` has **no maximum** (`byteLength` of
+  `scene.snapshot.ready` and `viewer.joined.snapshot` keeps the 64 MiB maximum), so a publisher can tell
+  "scene too large for this relay" (reduce the profile) from a malformed message.
 - A `scene.snapshot.begin` while another snapshot is in flight **aborts** the in-flight one (relay sends
   `scene.snapshot.abort` for the old version to viewers). The publisher MUST NOT send `scene.update` or
-  `scene.nodeRemoved` between `scene.snapshot.begin` and `scene.snapshot.end`: the relay answers `error`
-  `BAD_SEQUENCE` (`retryable: true`) and ignores the message. The publisher queues state changes locally and
+  `scene.nodeRemoved` or `scene.nodeAdded` between `scene.snapshot.begin` and `scene.snapshot.end`: the relay
+  answers `error` `BAD_SEQUENCE` (`retryable: true`, `details.field: "snapshotInFlight"`) and ignores the
+  message. The publisher queues state changes locally and
   sends them after `end` with `baseVersion` = the new snapshot version.
 
 ### 6.3 Binary chunk format
@@ -348,6 +371,11 @@ publisher (user cancelled export) or by the relay. Receivers free the partial bu
 `scene.snapshot.ready` tells a viewer "fetch this version over HTTP". The relay sends it (a) to viewers that
 were connected but skipped during streaming because their `bufferedAmount` exceeded the soft watermark (4 MiB),
 (b) to viewers that joined while a snapshot was in flight, (c) in answer to `scene.request`.
+A viewer that is assembling the stream of the same `sceneVersion` when `scene.snapshot.ready` arrives
+discards the partial buffer (and ignores any later chunk of that version) and fetches the version over HTTP. A
+scene download that ends before `Content-Length` bytes (the session ended or a newer snapshot replaced the
+cache) is a failed download: drop the bytes and fetch the version the latest `scene.snapshot.ready` or
+`viewer.joined` announced, if the session is still live.
 
 ### 6.5 Late joiners and the HTTP path — which one viewers should prefer
 
@@ -366,8 +394,8 @@ Rule: a viewer MUST support the HTTP path (`capabilities.httpScene: true`) and S
 relay announces an existing snapshot (`viewer.joined.snapshotAvailable`, `scene.snapshot.ready`). Streaming is
 what a connected viewer receives for *new* snapshots; the relay decides per viewer at `scene.snapshot.begin`
 (stream if `bufferedAmount` < 4 MiB, otherwise defer to `scene.snapshot.ready`). A viewer that cannot keep the
-HTTP path (e.g. a future constrained client) MAY instead send `scene.request` after `viewer.joined` and will
-get a streamed copy only if the relay has spare budget — this is a best-effort fallback, not a guarantee.
+HTTP path (e.g. a future constrained client) is out of scope in v1: the relay never streams a copy on request,
+it answers `scene.request` with `scene.snapshot.ready` (section 8.3).
 
 ## 7. Scene manifest inside the GLB
 
@@ -401,6 +429,13 @@ exactly one **mesh node** `M` as its only child:
 
 - `T.name` = sanitised display name; `T.extras` = the manifest entry (7.3); `T.matrix` = the entity's
   world transform in glTF space (column-major, 16 floats; identity if none). Updates (section 8) address `T`.
+  `T.matrix` MUST be **TRS-decomposable**: an affine matrix (last row `0 0 0 1`) whose upper 3×3 is a rotation
+  times a non-zero, finite scale, without shear (columns orthogonal within a relative tolerance of 1e-6). glTF
+  requires it (`NODE_MATRIX_NON_TRS` in the validator) and three.js and Unity decompose node matrices, so a
+  shear would be dropped silently. A transform that is not TRS-decomposable — shear (common after affine
+  registration), zero or non-finite scale, a scale that overflows float32, or a non-linear transform — is
+  applied to the vertices by the publisher (`baked: true`, `T.matrix` identity, section 7.3). A viewer treats a
+  node whose `matrix` is not TRS-decomposable as a malformed snapshot.
 - `M` has no extras (or `{"role":"mesh"}`), owns exactly **one mesh with one primitive and one material**,
   and `M.matrix` carries only the **dequantisation** transform when `KHR_mesh_quantization` is used
   (`POSITION` as `SHORT`, non-normalised, `M.matrix = scale ⊕ offset`), identity otherwise.
@@ -420,13 +455,24 @@ Viewers map `extras.nodeId → T`, set visibility/transform on `T`, and material
 - `nodeId`: stable for the lifetime of the Slicer scene — `node.GetID()` for models,
   `"<segmentationNodeID>/<segmentID>"` for segments (slicer.md §2). When Slicer closes/reloads the scene the
   publisher MUST start a new snapshot; IDs may be reused with new meaning only after a new snapshot.
-- `kind` ∈ `model | segment`. `name`: display name with control characters removed, trimmed, ≤ 64 chars;
-  when the user enables "anonymise names" the publisher substitutes `"Model 3"`/`"Segment 7"` and sets
-  `anonymizedNames: true` on the root. **Names may contain PHI** (patient names in file-derived node names);
+  **Segment aliases (1.1):** Slicer keeps caller-supplied segment IDs verbatim (`left lung`, `Tumor(1)`, 100+
+  characters, IDs an importer derived from a name). When `<segmentID>` is outside the `nodeId` character set
+  (section 3.3), when the resulting `nodeId` would exceed 128 characters, or whenever `anonymizedNames` is `true`,
+  the publisher uses the alias `"<segmentationNodeID>/s_<n>"` instead (`n` from a per-session counter, skipping
+  any value that equals a real segment ID of that segmentation). The alias is fixed for the lifetime of the Slicer
+  scene and used by every later `scene.update`. `extras.segmentId` then carries the raw ID, or is **omitted**
+  when `anonymizedNames` is `true`. Models keep their MRML ID (generated by Slicer, never name-derived). Viewers
+  treat `nodeId` as an opaque string.
+- `kind` ∈ `model | segment`. `name`: display name with control characters removed, trimmed, ≤ 64 UTF-16 code
+  units (the length JavaScript and C# report); when the user enables "anonymise names" the publisher
+  substitutes `"Model 3"`/`"Segment 7"` and sets `anonymizedNames: true` on the root. With `anonymizedNames:
+  true` **no string derived from a display name leaves Slicer**: not in `extras`, not in any `nodeId` (hence the
+  alias above), not in any message. **Names may contain PHI** (patient names in file-derived node names);
   see the threat model in `docs/architecture.md`.
 - `color`/`opacity`/`visible` duplicate the material and node state at export time so a viewer can rebuild
-  its UI list without reading materials. `baked: true` means a non-linear transform was applied to the
-  vertices and `T.matrix` is identity (slicer.md §2).
+  its UI list without reading materials. `baked: true` means the node's world transform was applied to the
+  vertices because it is not TRS-decomposable (non-linear, sheared, zero or overflowing scale; section 7.2) and
+  `T.matrix` is identity (slicer.md §2).
 
 ### 7.4 Material rules
 
@@ -463,14 +509,22 @@ further, **never dropped** (requirements FR-10 / NFR-04).
 ```
 
 - `changes[]`: each item has `nodeId` and at least one of `visible` (bool), `color` (`[r,g,b]` 0..1),
-  `opacity` (0..1), `matrix` (16 floats, column-major, **glTF space**, replaces `T.matrix`). Semantics:
-  last-writer-wins per property. Unknown `nodeId` → viewer ignores the item (and MAY log).
+  `opacity` (0..1), `matrix` (16 floats, column-major, **glTF space**, TRS-decomposable, replaces `T.matrix`;
+  section 7.2). A change that makes a node non-TRS-decomposable (or a baked node's transform change) is not a
+  `scene.update`: the publisher sends a new snapshot. Semantics: last-writer-wins per property. Unknown `nodeId` → viewer ignores the item (and MAY log).
 - `baseVersion` is the version the receiver must currently hold; `sceneVersion` is the new version.
   The relay enforces `baseVersion == session.sceneVersion` and `sceneVersion > baseVersion`, else `error`
   `BAD_SEQUENCE` to the publisher (the publisher then re-syncs by sending a snapshot). A `scene.update` or
-  `scene.nodeRemoved` received **while a snapshot is in flight** (between `begin` and `end`) is always
-  `BAD_SEQUENCE` (`retryable: true`) and ignored (section 6.2); the publisher resends it after `end` with
+  `scene.nodeRemoved` (and `scene.nodeAdded`) received **while a snapshot is in flight** (between `begin` and `end`)
+  is always `BAD_SEQUENCE` (`retryable: true`) and ignored (section 6.2); the publisher resends it after `end` with
   `baseVersion` = the snapshot version.
+- An update or removal received before the session's first snapshot is `BAD_SEQUENCE`
+  (`details.field: "noSnapshot"`), and one that would take the merged state beyond 1,000 node ids is
+  `BAD_SEQUENCE` (`details.field: "nodeState"`, section 8.3); both are ignored, not forwarded, and count no
+  strike; the publisher re-syncs with a snapshot. `details.field` of `BAD_SEQUENCE` is one of
+  `snapshotInFlight`, `noSnapshot`, `baseVersion`, `sceneVersion`, `nodeState`. A viewer whose send buffer an
+  update would push over the hard watermark (8 MiB) is closed `4010` before the send; it re-syncs on
+  reconnect with `scene.snapshot.ready` and `scene.state`.
 - Debounce guidance for the publisher: coalesce MRML events for 100–250 ms; mesh-level events 500–1000 ms
   (slicer.md §3).
 
@@ -508,9 +562,11 @@ visual properties only — never names — so the relay stays free of PHI beyond
   "removed": ["vtkMRMLModelNode5"] }
 ```
 
-Sent (a) **always** right after `viewer.joined` — with `nodes: []`, `removed: []` when nothing accumulated
+The merged state holds at most 1,000 node ids (section 3.3). Sent (a) **always** right after `viewer.joined` — with `nodes: []`, `removed: []` when nothing accumulated
 since the snapshot (and `snapshotVersion: null` while no snapshot exists), so clients have one code path —,
-(b) after `scene.snapshot.ready`, (c) in reply to `scene.request`. A viewer applies it after the GLB of
+(b) after `scene.snapshot.ready` (also after a `ready` sent to a viewer that was deferred or skipped during
+streaming: an empty `scene.state{sceneVersion = snapshotVersion, nodes: [], removed: []}` without `replyTo`
+follows), (c) in reply to `scene.request`. A viewer applies it after the GLB of
 `snapshotVersion` is loaded and then continues with live messages whose `baseVersion ≥ sceneVersion` of the state.
 
 ```json
@@ -521,13 +577,19 @@ since the snapshot (and `snapshotVersion: null` while no snapshot exists), so cl
 Viewer-side rule (version monotonicity): keep `sceneVersion`; on an incoming update with
 `baseVersion != sceneVersion` (missed message, reconnect, clock of events out of order) do **not** apply it;
 send `scene.request`. The relay answers with `scene.snapshot.ready` if `haveSnapshotVersion` differs from its
-cached snapshot, then `scene.state`. `reason` ∈ `GAP | RECONNECT | CHECKSUM_MISMATCH | USER`.
+cached snapshot, then `scene.state`. `haveSnapshotVersion` is the last snapshot version whose bytes the viewer
+**verified** (a version whose hash failed is not "had"). `reason` ∈ `GAP | RECONNECT | CHECKSUM_MISMATCH |
+USER`. The relay answers at most one `scene.request` per viewer every 5 s and ignores the others without an
+error or a strike; a viewer that gets no `scene.state` within 5 s sends its request again (once per gap).
 
 ### 8.4 Version rules
 
 - `sceneVersion` is a single per-session `uint32` counter owned by the publisher, strictly increasing across
   snapshots **and** updates, starting at 1 for the first snapshot. The relay tracks the last accepted value and
-  `snapshotVersion` (version of the cached GLB).
+  `snapshotVersion` (version of the cached GLB). Values are uint32 (section 3.3).
+- The relay treats **every version a `scene.snapshot.begin` announced, accepted, refused or aborted** as used:
+  a later `begin`, update, removal or addition must be higher (`BAD_SEQUENCE`, `details.field: "sceneVersion"`).
+  The first versioned message of a session is a snapshot (updates before it: section 8.1).
 - After `session.resume` the publisher continues from `session.resumed.sceneVersion`; after a fallback
   `session.create` it restarts at 1 and MUST send a snapshot.
 
@@ -546,10 +608,26 @@ version unchanged once v1.1 defines them; in v1.0 they are rejected with `UNSUPP
 { "protocolVersion": "1.0", "type": "pong", "replyTo": "hb-102", "ts": 1792238445031, "serverTs": 1792238445031 }
 ```
 
-- Clients send `ping` every 15 s; if no `pong` arrives within 10 s they close the socket and reconnect with
-  exponential backoff (0.5 s → 30 s, jitter). The relay never initiates application `ping`.
+- Clients send `ping` every 15 s; if nothing at all arrives from the relay within 10 s of a `ping` (no `pong`
+  and no other text or binary frame, for instance snapshot chunks that are queued ahead of the `pong` on a slow
+  link) they close the socket and reconnect with exponential backoff (0.5 s → 30 s, jitter). The relay never
+  initiates application `ping`.
+- **Publisher uploading a snapshot.** The relay reads the publisher's stream in order, so it answers a `ping`
+  only after every byte written before it, and the buffers of the operating system and the network can hold
+  several MiB. A publisher therefore MAY extend its `pong` deadline to `10 s + min(60 s, B / 125,000 B/s)`,
+  where `B` is the number of bytes it wrote after the most recent answered `ping` and has not yet seen
+  consumed (the slowest uplink the contract supports is 1 Mbit/s = 125,000 B/s). The extension never exceeds
+  60 s, so the deadline is at most 70 s; this equals the relay's own silence bound (two 30 s ticks), beyond
+  which a longer deadline would not detect anything. An idle connection keeps the plain 10 s. A publisher
+  SHOULD NOT write more than 4 MiB ahead of the last answered `ping`, so that `session.close` (Stop) reaches
+  the relay within about 35 s on that uplink. Viewers upload no scenes and have no extension.
 - The relay sends a WebSocket-level ping every 30 s and terminates sockets that did not pong by the next
-  tick (max 60 s of silence). Browsers answer WS pings automatically (web.md §5).
+  tick (max 60 s of silence), unless since the previous tick the **publisher** sent a complete text or binary
+  frame, or the socket's send buffer shrank (the peer is reading; the ping may still be queued behind older
+  data); the ping then stays outstanding and a late echo counts. A viewer's frames do not count. A socket
+  with no echo, no such frame and no shrinking buffer is closed `4009` at the second tick. Browsers answer WS
+  pings automatically (web.md §5). Liveness is thus split by direction: the relay detects dead or silent
+  uplinks, a client detects a dead downlink by its own `pong` timeout.
 - Publisher disconnect → session enters `grace` (`PUBLISHER_GRACE_S` = 120 s), viewers get
   `session.publisherState{online:false}`; resume within grace restores everything (snapshot cache included);
   otherwise `session.expired{reason:"PUBLISHER_GONE"}`, close `4002`, code released.
@@ -568,15 +646,15 @@ version unchanged once v1.1 defines them; in v1.0 they are rejected with `UNSUPP
 | `SESSION_NOT_FOUND` | `sessionId`/token refer to no live session (resume/rejoin) | false | socket kept open 10 s for fallback |
 | `SESSION_FULL` | viewer limit reached | true | `4005` |
 | `SESSION_CLOSED` | message for a session that is closing | false | `4001` |
-| `RATE_LIMITED` | join/create attempts exceeded; `details.retryAfterS` | true | `4006` |
+| `RATE_LIMITED` | join/create attempts exceeded; `details.retryAfterS` = seconds until the ban ends (≤ 600) | true | `4006` |
 | `UNSUPPORTED_VERSION` | unknown protocol major | false | `4000` |
 | `UNSUPPORTED_TYPE` | unknown message type (same major) | — | none |
 | `INVALID_MESSAGE` | JSON/schema validation failed | — | none (3 strikes → `4007`) |
-| `PAYLOAD_TOO_LARGE` | snapshot/chunk/text above limits | false | `1009` for frames; none for `begin` |
-| `BAD_SEQUENCE` | version/chunk ordering violated; `details` names the field | true | none; snapshot discarded |
+| `PAYLOAD_TOO_LARGE` | snapshot/chunk/text above limits; for `begin`, `details.maxSnapshotBytes` | false | `1009` for frames; none for `begin` |
+| `BAD_SEQUENCE` | version/chunk ordering violated; `details.field` names the field (section 8.1) | true | none; snapshot discarded |
 | `CHECKSUM_MISMATCH` | SHA-256 mismatch at `scene.snapshot.end` | true | none |
 | `UNAUTHORIZED` | wrong token, role not allowed to send this type, binary from viewer | false | `4003` / `1008` |
-| `SLOW_CONSUMER` | viewer `bufferedAmount` over the hard watermark (8 MiB), stuck > 60 s, or evicted under `MAX_TOTAL_BUFFERED_BYTES` | true | `4010` |
+| `SLOW_CONSUMER` | socket send buffer over its hard limit: viewer `bufferedAmount` over 8 MiB, stuck > 60 s, or evicted under `MAX_TOTAL_BUFFERED_BYTES`; publisher over 1 MiB | true | `4010` |
 | `CAPACITY` | relay global budget (sessions/bytes) exhausted | true | `4006` |
 | `INTERNAL` | unexpected relay failure | true | `1011` |
 
@@ -602,9 +680,9 @@ localised UI text). `details` MUST NOT contain codes, tokens or scene content.
 | `4007` | relay | protocol violation (repeated `INVALID_MESSAGE`/`BAD_SEQUENCE`) — reconnect, resync |
 | `4008` | relay | relay restarting (SIGTERM drain) — reconnect immediately with jitter 0–3 s; publisher uses `session.resume` then falls back to `session.create{preferredCode}` |
 | `4009` | relay | heartbeat timeout — reconnect |
-| `4010` | relay | slow consumer — reconnect; the viewer gets `scene.snapshot.ready` instead of a stream |
+| `4010` | relay | slow consumer — reconnect; the viewer gets `scene.snapshot.ready` instead of a stream; a publisher treats it like a drop (backoff, then `session.resume` within `PUBLISHER_GRACE_S`) |
 | `4011` | relay | replaced by a newer connection with the same credentials — do not reconnect |
-| `4012` | relay | handshake timeout (no first message in 10 s) — reconnect if intended |
+| `4012` | relay | handshake timeout (no session bound within 10 s of the upgrade or of a `SESSION_NOT_FOUND` reply to `session.resume`) — reconnect if intended |
 
 ## 10. HTTP endpoints
 
@@ -619,7 +697,7 @@ header (edge logs record method + path + host + status + IP + UA, relay.md §1.1
 | `GET /assets/*` | none | hashed static assets, `immutable, max-age=30d` |
 | `GET /manifest.webmanifest` | none | web app manifest of the viewer build (`application/manifest+json`, `Cache-Control: no-cache`); `404` when the build has none |
 | `GET /icons/<name>.png` | none | PNG icons named by `index.html` and the manifest (`image/png`, `no-cache`); only plain names `[A-Za-z0-9][A-Za-z0-9_-]*.png`, anything else `404` |
-| `GET /api/scene/:sceneVersion` | `Authorization: Bearer <viewerToken>` | the cached GLB of exactly that version. `200` with `Content-Type: model/gltf-binary`, `Content-Length`, `ETag: "<sha256>"`, `X-Scene-Version`, `Cache-Control: private, no-store`. `401` unknown/expired token, `404` if the cached version differs (viewer sends `scene.request`), `410` session gone, `429` > 30 requests/min per token. Supports `HEAD`. No `Range` in v1 |
+| `GET /api/scene/:sceneVersion` | `Authorization: Bearer <viewerToken>` | the cached GLB of exactly that version. `200` with `Content-Type: model/gltf-binary`, `Content-Length`, `ETag: "<sha256>"`, `X-Scene-Version`, `Cache-Control: private, no-store`. `401` unknown token, or one the relay no longer remembers (more than `CODE_QUARANTINE_S` after its session ended), `404` if the cached version differs (viewer sends `scene.request`), `410` the token's session was closed or expired, `429` > 30 requests/min per token. Supports `HEAD`. No `Range` in v1 |
 | `GET /healthz` | none | `{ "status": "ok", "uptimeS": 1234, "sessions": 3, "version": "0.3.0" }` — no codes, no IPs. Railway deploy healthcheck target |
 | `GET /api/version` | none | `{ "name": "slicer-remote-view-relay", "version": "0.3.0", "protocolVersions": ["1.0"], "limits": { "maxSnapshotBytes": 67108864, "maxChunkBytes": 1048576, "maxTextBytes": 262144, "maxViewers": 20 } }` |
 | `GET /metrics` | `Authorization: Bearer <METRICS_TOKEN>` | Prometheus text format; `404` when `METRICS_TOKEN` is unset (endpoint disabled). Counters only (sessions, viewers, bytes, errors by code) |
@@ -627,7 +705,8 @@ header (edge logs record method + path + host + status + IP + UA, relay.md §1.1
 
 Any other path → `404` JSON `{ "error": "NOT_FOUND" }` (no SPA fallback beyond `/` and `/j`, so a leaked
 `/7KQ4X` style URL can never work). Security headers (`@fastify/helmet` CSP with `connect-src 'self' wss:`,
-`worker-src blob:`) are a relay implementation detail recorded in `docs/architecture.md`.
+`worker-src 'self' blob:`, ADR 0006 §4) are a relay implementation detail. `GET /j?code=X` answers `200` with the
+same bytes as `/j` and echoes nothing of the query; `/ABCDE`, `/j/ABCDE` and `/join?code=X` are `404`.
 
 ## 11. Permissions matrix
 
@@ -659,10 +738,15 @@ close `1008`. The relay never originates scene content; it forwards publisher me
   an hour at S = 100 is 0.21 %. Entropy is therefore not the wall — rate limits, lockouts and short code
   lifetimes are (relay.md §4). Codes are released immediately on close/expiry, and idle sessions without
   viewers expire after `SESSION_TTL_S`, keeping `S` small.
-- Per IP (`X-Forwarded-For` from Railway's edge, Fastify `trustProxy` — `[TODO verify]` header presence with
-  the first deploy): WebSocket upgrades 30/min; `viewer.join` with a `code` **10/min**, counted inside the
+- Per IP — the client address as determined by the relay's trusted-proxy configuration, i.e. the address the
+  edge appended to `X-Forwarded-For` (`[TODO verify]` the number of proxy hops and the header on the first
+  deploy, DEP-06); "IP" is an IPv4 address or an IPv6 /64, an IPv4-mapped IPv6 address counts as its IPv4
+  address: WebSocket upgrades 30/min (upgrades refused for their `Origin` or subprotocol do not count); `viewer.join` with a `code` **10/min**, counted inside the
   socket handler as well as at the HTTP layer; after **20 failed joins within 10 min** the IP is banned for
-  **10 min** (`RATE_LIMITED`, `details.retryAfterS: 600`); `session.create` 5/min; `GET /api/scene` 30/min
+  **10 min** (`RATE_LIMITED`, `details.retryAfterS` = seconds left of the ban, 600 at its start); `session.create` 5/min;
+  a well-formed `session.create{preferredCode}` counts as a failed join (not as a join attempt) because
+  whether the code is granted reveals whether it is free, and it is ignored (a fresh code is drawn) while the
+  address is banned; `GET /api/scene` 30/min
   per token. Rejoins with a valid `viewerToken` do not count. Every failed `viewer.join` closes its socket
   (`4004`–`4006`, section 5.2) — there is no per-socket retry allowance; the limits above are per IP only.
 - Global alarm: > 1,000 failed joins/hour across all IPs → `warn` log event (counts only), per-IP join limit
@@ -694,7 +778,8 @@ close `1008`. The relay never originates scene content; it forwards publisher me
 7. Lecturer loads a new model: plugin sends `scene.nodeAdded{sceneVersion:3, baseVersion:2, snapshotFollows:true}`
    then `scene.snapshot.begin{sceneVersion:4, …}` + chunks + `end`. A has `bufferedAmount` ≈ 0 → streamed;
    B is on slow 4G with 5 MiB buffered (over the 4 MiB soft watermark) → deferred, gets
-   `scene.snapshot.ready{sceneVersion:4}` after `end` and fetches over HTTP. A visibility change made in
+   `scene.snapshot.ready{sceneVersion:4}` and an empty `scene.state{sceneVersion:4, snapshotVersion:4}` after `end`
+   and fetches over HTTP. A visibility change made in
    Slicer during the upload is queued by the plugin and sent after `end` as `scene.update{sceneVersion:5,
    baseVersion:4}`. Both viewers end at version 5; relay state holds that one change.
 8. B's Safari goes to the background; the relay's WS ping gets no pong, B is removed, `viewer.count{1}`.
@@ -725,8 +810,8 @@ close `1008`. The relay never originates scene content; it forwards publisher me
   `reason`/`platform` fields (treat as `other`).
 - A relay running `1.x` accepts clients `1.0 … 1.x`; a client `1.y` with `y > x` connects but MUST NOT rely on
   fields the relay does not emit (check `GET /api/version` first if a feature matters).
-- JSON Schema for every message lives in `shared/schema/` (draft 2020-12 constrained to what NJsonSchema
-  supports — `[TODO verify]` quest.md §6); TS/Python/C# types are generated from it and vendored as described
+- JSON Schema for every message lives in `shared/schema/` (draft 2020-12 restricted to a draft-07-compatible
+  subset: `definitions` instead of `$defs`, no `unevaluatedProperties`); TS/Python/C# types are generated from it and vendored as described
   in ADR-0007. The schema is normative where this prose is ambiguous; this document is normative for
   behaviour (sequencing, limits, timeouts).
 - Limits in section 3.3 are protocol maximums; a relay MAY run with lower configured values and announces
@@ -739,3 +824,4 @@ close `1008`. The relay never originates scene content; it forwards publisher me
 | `1.0` | 2026-10-17 | Initial contract: session lifecycle with resume token, viewer join by code or token, chunked GLB snapshot with 12-byte chunk header and SHA-256, HTTP cached-scene endpoint, incremental `scene.update`/`scene.nodeRemoved`, relay-merged `scene.state`, heartbeat, error model, close codes `4000–4012`, permissions matrix, rate limits. Reserved: `scene.camera`, `viewer.command` (v1.1 / M4), Draco (`KHR_draco_mesh_compression`) and per-node GLB in `scene.nodeAdded` (v1.1 candidates). |
 | `1.0` | 2026-10-17 | Review fixes before any implementation: chunk limit 1024 (`chunkSize` 64 KiB–1 MiB), in-flight update rule (`BAD_SEQUENCE`, publisher queues until `end`), `scene.state` always sent after `viewer.joined`, slow-consumer watermarks 4/8 MiB, per-node triangle cap 100 k, `UNAUTHORIZED` on resume closes `4003` immediately. |
 | `1.0` | 2026-10-21 | Documentation only, wire format unchanged: §10 lists the two static paths of the viewer build that the relay serves (`/manifest.webmanifest`, `/icons/<name>.png`, SRV-26, report 2026-10-21-web). |
+| `1.1` | 2026-10-27 | Revision decided by the project owner (`docs/research/protocol-v1.1-decisions.md`); **wire format unchanged, no new message, field or error code**; a `1.0` peer interoperates. Added: segment `nodeId` aliases `<segmentationNodeID>/s_<n>` for IDs outside the grammar and for all segments when names are anonymised (7.3); TRS-only `T.matrix` / `scene.update.matrix`, `baked` covers shear and degenerate scales (7.2, 7.3, 8.1); `begin.byteLength` has no schema maximum, `PAYLOAD_TOO_LARGE` for oversize (6.2); uint32 bound on versions (3.3); publisher `pong` deadline extension while uploading and liveness by publisher frames (9.1); neutral per-IP wording (12). Clarified to match the relay and plugin: handshake gate and no subprotocol (3.1), `4012` (9.3), `preferredCode` and quarantine (4.1, 4.5), `begin` vs root extras (6.2), partial stream vs `ready` (6.4), no streamed copy on request (6.5), publisher `SLOW_CONSUMER`/`4010`, state cap, `BAD_SEQUENCE` fields (3.3, 8.1, 9.2), `scene.request` throttle and empty `scene.state` (8.3), uint-version bookkeeping (8.4), `401`/`410` and `/j?code=` (10), rate-limit details (12), UNSUPPORTED_TYPE for the relay only (2). |

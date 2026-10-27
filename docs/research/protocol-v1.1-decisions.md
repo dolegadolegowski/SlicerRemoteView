@@ -1,8 +1,8 @@
 # Protocol v1.1 — decision memo (options and defaults)
 
-- **Status**: proposal for the project owner. **No protocol text, schema, fixture or code is changed by this memo.**
-  Every item below becomes a `docs(protocol): …` commit (CLAUDE.md rule 2) only after the owner answers the
-  questions at the end.
+- **Status**: **decided 2026-10-27 — the owner chose every recommended default** (see "Outcome" at the end). The
+  options below stay as the record of what was considered. Written as a proposal; the text of the memo itself is
+  unchanged except for this status and the Outcome section.
 - **Written**: 2026-10-27 by the `protocol` workstream (`ws/protocol`, on `main` b8ab99b), after reading every report in
   `docs/testing/reports/` that names `protocol` under *Affects* (23 reports) and the current `docs/protocol.md` v1.0,
   `shared/schema/`, the relay (`relay-server/`), the Slicer plugin (`slicer-plugin/RemoteView/remoteview_core/`) and
@@ -217,3 +217,23 @@ recommendation".
 10. **Appendix A, `session.publisherState.sessionId`**: add the field (1.1) / **narrow T11 instead**?
 11. **Appendix A, FR-21 heartbeat** (publisher frames count as life): **accept** / reject?
 12. **Appendix A, publisher `pong` deadline on slow uplinks**: **extend** / keep 10 s?
+
+---
+
+## Outcome (2026-10-27)
+
+All twelve questions were answered with the default. Implementation:
+
+| Decision | Where |
+|---|---|
+| D1, D2 (alias A; always alias when names are hidden), D3 (TRS-only erratum), D4 text (no `begin` maximum), D6 (neutral wording), versions as uint32, version label 1.1, Annex A wording batch, T11 narrowed (no `sessionId`), FR-21 accepted, publisher `pong` deadline extended | `docs/protocol.md` v1.1, task **PRO-20** (docs only) |
+| D4 schema + uint32 bound | **PRO-21** |
+| `PROTOCOL_VERSION = "1.1"` | **PRO-22** |
+| Alias fixture | **PRO-23** |
+| `toIssues` masking, `parseEnvelopeValue`, Python lazy imports | **PRO-24** (`todo`) |
+| D5 (T5) | no protocol text; `release` (report `2026-10-27-protocol-4`) |
+| Work for the other components | reports `2026-10-27-protocol-1` (server), `-2` (slicer), `-3` (web, quest), `-4` (release); the originating reports of Annex A read `triaged` |
+
+The publisher `pong` rule decided in PRO-20: deadline `10 s + min(60 s, B / 125,000 B/s)`, hence at most 70 s —
+two relay ticks, beyond which a longer deadline would detect nothing — plus "do not write more than 4 MiB ahead of
+the last answered `ping`" so that Stop reaches the relay within about 35 s at 1 Mbit/s.
