@@ -30,6 +30,7 @@ import { fanout } from "./ws/fanout.js";
 import { heartbeat } from "./ws/heartbeat.js";
 import { publisherHandlers } from "./ws/publisher.js";
 import { snapshotHandlers } from "./ws/snapshot.js";
+import { stateHandlers } from "./ws/state.js";
 import { viewerHandlers } from "./ws/viewer.js";
 import type { FrameHandlers } from "./ws/endpoint.js";
 
@@ -171,6 +172,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     logger,
     clock,
     overCapacity: fan.overCapacity,
+    deliver: fan.deliver,
   });
   const downloads = sceneDownloads({ registry });
   const snapshot = snapshotHandlers({
@@ -206,6 +208,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
       ...publisher.handlers,
       ...viewer.handlers,
       ...snapshot.handlers,
+      ...stateHandlers({ logger, broadcast: fan.broadcast }).handlers,
       ...options.messageHandlers,
     },
   });

@@ -93,6 +93,23 @@ export const CHUNK_TIMEOUT_MS = LIMITS.CHUNK_TIMEOUT_S * 1000;
 /** At most one `CAPACITY` warning per minute (a publisher can repeat refused begins at will). */
 const CAPACITY_WARN_INTERVAL_MS = 60_000;
 
+/**
+ * `INVALID_MESSAGE` (a strike) for a `sceneVersion` above the uint32 of §6.3, which the schema leaves
+ * open; true when it was answered. Snapshots and updates share the `sceneVersion` counter (§8.4).
+ */
+export function refusedAboveUint32(
+  connection: Connection,
+  sceneVersion: number,
+  replyTo: string | undefined,
+): boolean {
+  if (sceneVersion <= UINT32_MAX) return false;
+  connection.violation("INVALID_MESSAGE", "sceneVersion must fit a uint32 (§6.3, §8.4)", {
+    replyTo,
+    details: { instancePath: "/sceneVersion" },
+  });
+  return true;
+}
+
 export function snapshotHandlers({ registry, config, logger, clock, events = {} }: SnapshotDeps) {
   /**
    * The chunk timeout of each session with a snapshot in flight. Keyed by session and holding only
@@ -190,13 +207,7 @@ export function snapshotHandlers({ registry, config, logger, clock, events = {} 
       if (session === undefined) return;
       const replyTo = message.id;
       const { sceneVersion, byteLength, chunkSize, chunkCount } = message;
-      if (sceneVersion > UINT32_MAX) {
-        connection.violation("INVALID_MESSAGE", "sceneVersion must fit the uint32 of §6.3", {
-          replyTo,
-          details: { instancePath: "/sceneVersion" },
-        });
-        return;
-      }
+      if (refusedAboveUint32(connection, sceneVersion, replyTo)) return;
       if (sceneVersion <= Math.max(session.sceneVersion, session.lastSnapshotVersion)) {
         // Discards a snapshot of that version in flight (§9.2); its chunks, like those of any stale
         // version, would otherwise each be a violation of their own.

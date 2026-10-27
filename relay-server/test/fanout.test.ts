@@ -8,15 +8,19 @@ import { loadConfig } from "../src/config.js";
 import { createLogger } from "../src/logger.js";
 import { Registry } from "../src/registry.js";
 import type { Session } from "../src/registry.js";
-import type { Connection } from "../src/ws/connection.js";
+import { encode } from "../src/ws/connection.js";
+import type { Connection, Outgoing } from "../src/ws/connection.js";
 import {
   fanout,
   MAX_PAUSE_MS,
   PUBLISHER_BUFFER_LIMIT_BYTES,
   SLOW_CONSUMER_TERMINATE_MS,
+  SOFT_WATERMARK_BYTES,
   STUCK_MS,
   WATCH_INTERVAL_MS,
+  readyMessage,
 } from "../src/ws/fanout.js";
+import { sceneState } from "../src/ws/state.js";
 import { fixture } from "./helpers/fixtures.js";
 import { ManualClock } from "./helpers/manual-clock.js";
 import { connectClient, startRelay } from "./helpers/ws-client.js";
@@ -755,14 +759,19 @@ describe("boundaries of the watermarks and the budget (§3.3, architecture §4)"
     send(client, frames, 0, 5);
     await flush(client);
     mockBuffered(viewer.peer, 8 * MIB);
-    send(client, frames, 5);
-    expect(await acks(client)).toEqual(ack(0, 1));
+    send(client, frames, 5, frames.chunks.length, false);
+    await flush(client);
     relay!.clock.advance(WATCH_INTERVAL_MS);
     await flush(viewer.client);
     expect(viewer.peer.isOpen).toBe(true);
     expect(types(viewer)).not.toContain("error");
-    expect(types(viewer)).toContain("scene.snapshot.ready");
     expect(binaries(viewer)).toHaveLength(5);
+    // `ready` at `end` cannot be deferred: it is sent once it leaves the socket within 8 MiB.
+    mockBuffered(viewer.peer, 8 * MIB - 1024);
+    client.sendRaw(frames.end);
+    expect(await acks(client)).toEqual(ack(0, 1));
+    await flush(viewer.client);
+    expect(types(viewer)).toContain("scene.snapshot.ready");
   });
 
   it("a chunk that brings Σ exactly to the budget evicts nobody", async () => {
@@ -1085,43 +1094,49 @@ describe("the watch (every second)", () => {
   });
 });
 
+/** The fan-out over fake sockets whose `bufferedAmount` a test sets. */
+function setup(budget = 8 * MIB) {
+  const config = loadConfig({ MAX_TOTAL_BUFFERED_BYTES: String(budget) });
+  const clock = new ManualClock();
+  const registry = new Registry({ ...config, clock });
+  const fan = fanout({ registry, config, logger: createLogger({ level: "silent" }), clock });
+  const fake = (amount = 0) => ({
+    amount,
+    out: [] as unknown[],
+    /** Every frame as `forward` got it (to tell one shared `Buffer` from copies). */
+    frames: [] as unknown[],
+    closes: [] as number[],
+    pauses: 0,
+    resumes: 0,
+    get bufferedAmount() {
+      return this.amount;
+    },
+    send(message: unknown) {
+      this.out.push(message);
+    },
+    forward(frame: unknown, asText?: boolean) {
+      // An update arrives as the UTF-8 bytes of a text frame: recorded as its text.
+      this.out.push(asText === true ? { text: String(frame) } : frame);
+      this.frames.push(frame);
+    },
+    close(code: number) {
+      this.closes.push(code);
+    },
+    pauseReading() {
+      this.pauses += 1;
+    },
+    resumeReading() {
+      this.resumes += 1;
+    },
+    terminate() {},
+  });
+  const session = registry.createSession("mobile").session;
+  const publisher = fake();
+  session.publisher = publisher;
+  return { registry, fan, fake, session, publisher, clock };
+}
+
 describe("pausing and dispose with fake sockets", () => {
-  function setup() {
-    const config = loadConfig({ MAX_TOTAL_BUFFERED_BYTES: String(8 * MIB) });
-    const clock = new ManualClock();
-    const registry = new Registry({ ...config, clock });
-    const fan = fanout({ registry, config, logger: createLogger({ level: "silent" }), clock });
-    const fake = (amount = 0) => ({
-      amount,
-      out: [] as unknown[],
-      closes: [] as number[],
-      pauses: 0,
-      resumes: 0,
-      get bufferedAmount() {
-        return this.amount;
-      },
-      send(message: unknown) {
-        this.out.push(message);
-      },
-      forward(frame: unknown) {
-        this.out.push(frame);
-      },
-      close(code: number) {
-        this.closes.push(code);
-      },
-      pauseReading() {
-        this.pauses += 1;
-      },
-      resumeReading() {
-        this.resumes += 1;
-      },
-      terminate() {},
-    });
-    const session = registry.createSession("mobile").session;
-    const publisher = fake();
-    session.publisher = publisher;
-    return { registry, fan, fake, session, publisher, clock };
-  }
   const snapshot = {
     buffer: Buffer.alloc(0),
     sha256: "0".repeat(64),
@@ -1254,5 +1269,205 @@ describe("pausing and dispose with fake sockets", () => {
     fan.events.begun?.(other, 1, "{}");
     fan.events.chunk?.(other, Buffer.alloc(1024));
     expect(late.out).toEqual([]);
+  });
+});
+
+describe("updates with fake sockets (`broadcast`, §3.3, architecture §4)", () => {
+  it("a frame that would take a viewer above 8 MiB closes it instead; up to exactly 8 MiB it is sent", () => {
+    const { registry, fan, fake, session } = setup(64 * MIB); // the budget plays no part
+    const text = "x".repeat(1024); // with its 4-byte WebSocket header: 1,028 bytes
+    const exact = fake(8 * MIB - 1028);
+    const over = fake(8 * MIB - 1027);
+    registry.addViewer(session, exact, "web");
+    registry.addViewer(session, over, "web");
+    fan.broadcast(session, text);
+    expect([exact.out, exact.closes]).toEqual([[{ text }], []]);
+    expect(over.closes).toEqual([4010]);
+    expect(over.out).toEqual([expect.objectContaining({ type: "error", code: "SLOW_CONSUMER" })]);
+    fan.broadcast(session, text); // closed here: skipped from now on
+    expect(over.out).toHaveLength(1);
+  });
+
+  it("it is measured in UTF-8 bytes, not string length: 3-byte characters count three times", () => {
+    const { registry, fan, fake, session } = setup(64 * MIB);
+    const text = "€".repeat(1024); // 1,024 UTF-16 units, 3,072 bytes + a 4-byte header
+    const fits = fake(8 * MIB - 3076);
+    const over = fake(8 * MIB - 3075);
+    registry.addViewer(session, fits, "web");
+    registry.addViewer(session, over, "web");
+    fan.broadcast(session, text);
+    expect(fits.out).toEqual([{ text }]);
+    expect(over.closes).toEqual([4010]);
+  });
+
+  it("for the budget, buffers of any size are closed, largest first, until the sum with the frame fits", () => {
+    const { registry, fan, fake, session } = setup(); // budget 8 MiB
+    const other = registry.createSession("mobile").session;
+    // Twelve viewers elsewhere at about 0.5 MiB, each less than the frame: closing the two largest
+    // makes room.
+    const elsewhere = Array.from({ length: 12 }, (_, i) => fake(MIB / 2 - i));
+    for (const peer of elsewhere) registry.addViewer(other, peer, "web");
+    const recipients = [fake(), fake(), fake()];
+    for (const peer of recipients) registry.addViewer(session, peer, "web");
+    fan.broadcast(session, "x".repeat(MIB)); // 6 MiB held + 3 × 1 MiB > 8 MiB
+    expect(elsewhere.filter((peer) => peer.closes.length > 0)).toEqual([
+      elsewhere[0],
+      elsewhere[1],
+    ]);
+    for (const peer of recipients) expect(peer.out).toEqual([{ text: "x".repeat(MIB) }]);
+    const held = elsewhere.filter((peer) => peer.closes.length === 0);
+    const sent = 3 * (MIB + 10); // the frame and its header, to each recipient
+    expect(held.reduce((sum, peer) => sum + peer.amount, 0) + sent).toBeLessThanOrEqual(8 * MIB);
+    for (const peer of held) expect(peer.out).toEqual([]); // another session's viewers get nothing
+  });
+
+  it("when nothing else holds bytes, a recipient is closed instead of sent the frame", () => {
+    const { registry, fan, fake, session } = setup(); // budget 8 MiB
+    const recipients = [fake(), fake(), fake()];
+    for (const peer of recipients) registry.addViewer(session, peer, "web");
+    fan.broadcast(session, "x".repeat(3 * MIB)); // 3 × 3 MiB > 8 MiB
+    const [closed, ...sent] = recipients;
+    expect(closed!.closes).toEqual([4010]);
+    expect(closed!.out).toEqual([
+      expect.objectContaining({ type: "error", code: "SLOW_CONSUMER" }),
+    ]);
+    for (const peer of sent)
+      expect([peer.out, peer.closes]).toEqual([[{ text: "x".repeat(3 * MIB) }], []]);
+  });
+
+  it("a snapshot chunk still defers small viewers instead of closing them", () => {
+    const { registry, fan, fake, session } = setup(); // budget 8 MiB
+    const other = registry.createSession("mobile").session;
+    const elsewhere = Array.from({ length: 12 }, () => fake(MIB / 2));
+    for (const peer of elsewhere) registry.addViewer(other, peer, "web");
+    const streamed = fake();
+    registry.addViewer(session, streamed, "web");
+    fan.events.begun?.(session, 1, "{}");
+    fan.events.chunk?.(session, Buffer.alloc(3 * MIB)); // 6 MiB held + 3 MiB > 8 MiB
+    expect(elsewhere.every((peer) => peer.closes.length === 0)).toBe(true);
+    expect(streamed.out).toEqual(["{}"]); // deferred: no chunk
+  });
+
+  it("after dispose nothing is sent", () => {
+    const { registry, fan, fake, session } = setup();
+    const here = fake();
+    registry.addViewer(session, here, "web");
+    fan.dispose();
+    fan.broadcast(session, "{}");
+    expect(here.out).toEqual([]);
+  });
+});
+
+describe("relay messages to one viewer with fake sockets (`deliver`, SRV-13)", () => {
+  const message = {
+    type: "scene.state",
+    sceneVersion: 1,
+    snapshotVersion: 1,
+    nodes: [],
+    removed: [],
+  };
+  /** What `message` adds to `bufferedAmount`: its text and its WebSocket header. */
+  function onSocket(clock: ManualClock): { text: string; size: number } {
+    const text = encode(message, clock.now());
+    const length = Buffer.byteLength(text);
+    return { text, size: length + (length < 126 ? 2 : 4) };
+  }
+
+  it("encoded once and held to the hard watermark, the header counted", () => {
+    const { registry, fan, fake, session, clock } = setup(64 * MIB); // the budget plays no part
+    const { text, size } = onSocket(clock);
+    const over = fake(8 * MIB - size + 1);
+    const exact = fake(8 * MIB - size);
+    const toOver = registry.addViewer(session, over, "web").viewer;
+    const toExact = registry.addViewer(session, exact, "web").viewer;
+    expect(fan.deliver(session, toOver, [message])).toBe(false);
+    expect(over.closes).toEqual([4010]);
+    expect(over.out).toEqual([expect.objectContaining({ type: "error", code: "SLOW_CONSUMER" })]);
+    expect(fan.deliver(session, toExact, [message])).toBe(true);
+    expect([exact.out, exact.closes]).toEqual([[{ text }], []]);
+  });
+
+  it("held to the budget with the bytes of all its messages together", () => {
+    const { registry, fan, fake, session } = setup(); // budget 8 MiB
+    const here = fake();
+    const viewer = registry.addViewer(session, here, "web").viewer;
+    // Each message alone would fit next to 7 MiB elsewhere; together they do not: that buffer goes.
+    const elsewhere = fake(7 * MIB);
+    registry.addViewer(registry.createSession("mobile").session, elsewhere, "web");
+    const ready = { type: "scene.snapshot.ready", pad: "x".repeat(0.6 * MIB) };
+    const big = { ...message, pad: "y".repeat(0.6 * MIB) };
+    expect(fan.deliver(session, viewer, [ready, big])).toBe(true);
+    expect(elsewhere.closes).toEqual([4010]);
+    expect(
+      here.out.map((m) => (JSON.parse((m as { text: string }).text) as Outgoing).type),
+    ).toEqual(["scene.snapshot.ready", "scene.state"]);
+  });
+
+  it("after dispose: sent within the hard watermark, otherwise left out — nobody is closed", () => {
+    const { registry, fan, fake, session, clock } = setup();
+    const { size } = onSocket(clock);
+    const within = fake(8 * MIB - size);
+    const above = fake(8 * MIB - size + 1);
+    const toWithin = registry.addViewer(session, within, "web").viewer;
+    const toAbove = registry.addViewer(session, above, "web").viewer;
+    fan.dispose();
+    expect(fan.deliver(session, toWithin, [message])).toBe(true);
+    expect(fan.deliver(session, toAbove, [message])).toBe(false);
+    expect([within.out.length, within.closes, above.out, above.closes]).toEqual([1, [], [], []]);
+  });
+
+  /** The snapshot `completed` announces in these tests. */
+  const cached = {
+    buffer: Buffer.alloc(0),
+    sha256: "0".repeat(64),
+    byteLength: 0,
+    sceneVersion: 1,
+    extensionsRequired: [],
+  };
+  /** What `message` adds to a socket at `clock.now()`: its text and its WebSocket header. */
+  function wire(message: Outgoing, clock: ManualClock): number {
+    const length = Buffer.byteLength(encode(message, clock.now()));
+    return length + (length < 126 ? 2 : 4);
+  }
+  /** What `ready` and the empty state of `cached` add to a socket. */
+  const endBytes = (session: Session, clock: ManualClock): number =>
+    wire(readyMessage(cached), clock) + wire(sceneState(session), clock);
+
+  it("ready and the empty state at `end` too: up to exactly 8 MiB they are sent, above it the viewer is closed", () => {
+    const { registry, fan, fake, session, clock } = setup(64 * MIB); // the budget plays no part
+    const bytes = endBytes(session, clock);
+    const exact = fake(8 * MIB - bytes);
+    const over = fake(8 * MIB - bytes + 1);
+    registry.addViewer(session, exact, "web");
+    registry.addViewer(session, over, "web");
+    fan.events.begun?.(session, 1, "{}"); // both at or above 4 MiB: deferred
+    expect(fan.events.completed?.(session, cached, "{}")).toEqual({
+      viewersStreamed: 0,
+      viewersDeferred: 1,
+    });
+    expect(over.closes).toEqual([4010]);
+    expect(exact.closes).toEqual([]);
+    expect(
+      exact.out.map((m) => (JSON.parse((m as { text: string }).text) as Outgoing).type),
+    ).toEqual(["scene.snapshot.ready", "scene.state"]);
+  });
+
+  it("…held to the budget with both messages for every deferred viewer, each encoded once", () => {
+    const { registry, fan, fake, session, clock } = setup(); // budget 8 MiB
+    const deferred = [fake(SOFT_WATERMARK_BYTES), fake(SOFT_WATERMARK_BYTES)];
+    for (const peer of deferred) registry.addViewer(session, peer, "web");
+    fan.events.begun?.(session, 1, "{}"); // both at 4 MiB: deferred
+    for (const peer of deferred) peer.amount = 2 * MIB;
+    // Room for both viewers' `ready`, not for both messages each: the largest buffer goes.
+    const elsewhere = fake(8 * MIB - 4 * MIB - 2 * wire(readyMessage(cached), clock));
+    registry.addViewer(registry.createSession("mobile").session, elsewhere, "web");
+    expect(fan.events.completed?.(session, cached, "{}")).toEqual({
+      viewersStreamed: 0,
+      viewersDeferred: 2,
+    });
+    expect(elsewhere.closes).toEqual([4010]);
+    const [a, b] = deferred;
+    expect(a!.frames.slice(-2)).toHaveLength(2);
+    for (const i of [-2, -1]) expect(a!.frames.at(i)).toBe(b!.frames.at(i)); // the same Buffers
   });
 });

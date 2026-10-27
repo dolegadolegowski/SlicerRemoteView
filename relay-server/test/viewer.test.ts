@@ -9,10 +9,10 @@ import type { Session } from "../src/registry.js";
 import type { Connection } from "../src/ws/connection.js";
 import { readFrame } from "../src/ws/frame.js";
 import type { TextFrame } from "../src/ws/frame.js";
+import { sceneState } from "../src/ws/state.js";
 import {
   INVALID_CODE_JITTER_MS,
   normalizeCode,
-  sceneState,
   viewerHandlers,
   viewerPlatform,
 } from "../src/ws/viewer.js";

@@ -253,18 +253,6 @@ describe("dispatch table (SRV-23, used by SRV-06 onwards)", () => {
     await expect.poll(() => seen).toEqual([fixture("scene.request").reason]);
     client.ws.close();
   });
-
-  it("an allowed type without a handler yet answers UNSUPPORTED_TYPE and stays open", async () => {
-    const client = await handshaken("viewer.join");
-    client.sendRaw(JSON.stringify({ ...fixture("scene.request"), id: "r-1" }));
-    expect(await client.next()).toMatchObject({
-      type: "error",
-      code: "UNSUPPORTED_TYPE",
-      replyTo: "r-1",
-    });
-    await expectPong(client, "p-9");
-    client.ws.close();
-  });
 });
 
 describe("unknown types and fields (SRV-23 criterion 3, §2, §14)", () => {

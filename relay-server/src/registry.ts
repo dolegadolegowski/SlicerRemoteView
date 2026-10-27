@@ -85,8 +85,12 @@ export interface AssemblingSnapshot {
 export interface Peer {
   /** Sends one JSON message; the transport adds `protocolVersion` and `ts`. */
   send(message: { type: string } & Record<string, unknown>): void;
-  /** Sends a publisher frame as received, byte for byte: text as is, a `Buffer` as binary (§11). */
-  forward(frame: string | Buffer): void;
+  /**
+   * Sends a frame byte for byte: a publisher frame as received (§11), text as is, a `Buffer` as
+   * binary, or — `asText` — a `Buffer` holding a text frame's UTF-8 bytes (an update encoded once
+   * for many sockets, or a relay message the fan-out measured, `ws/fanout.ts`).
+   */
+  forward(frame: string | Buffer, asText?: boolean): void;
   /** Bytes queued for this socket and not yet handed to the network (`ws` `bufferedAmount`). */
   readonly bufferedAmount: number;
   /** Stops / restarts reading from this socket (TCP backpressure on its sender). */

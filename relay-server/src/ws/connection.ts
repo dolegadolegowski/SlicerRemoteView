@@ -21,6 +21,11 @@ export const HANDSHAKE_ROLES: ReadonlyMap<string, Role> = new Map([
 /** An outgoing message before the envelope fields are added. */
 export type Outgoing = { type: string } & Record<string, unknown>;
 
+/** The text frame of `message` with the envelope fields of §3.2 (`protocolVersion`, `ts`). */
+export function encode(message: Outgoing, now: number): string {
+  return JSON.stringify({ protocolVersion: PROTOCOL_VERSION, ...message, ts: now });
+}
+
 export interface ErrorOptions {
   replyTo?: string | undefined;
   retryable?: boolean;
@@ -30,6 +35,13 @@ export interface ErrorOptions {
 
 /** `INVALID_MESSAGE`/`BAD_SEQUENCE` answers per socket before close `4007` (§9.2: "3 strikes"). */
 export const PROTOCOL_VIOLATION_STRIKES = 3;
+/**
+ * A socket the relay closes is dropped unless its peer completes the close within this time, or
+ * keeps reading (its send buffer shrinks), then up to `CLOSE_DRAIN_MAX_MS` in all.
+ */
+export const CLOSE_COMPLETE_MS = 5_000;
+/** `ws`'s own `closeTimeout`: the longest a draining peer gets to read up to its close frame. */
+export const CLOSE_DRAIN_MAX_MS = 30_000;
 
 let nextConnectionId = 1;
 
@@ -50,7 +62,6 @@ export class Connection implements Peer {
   #closing = false;
   #reading = true;
   #paused = false;
-  #pauses = 0;
   #handshakeTimer: TimerHandle | undefined;
 
   constructor(
@@ -68,15 +79,17 @@ export class Connection implements Peer {
   /** Sends one JSON message with the envelope fields of §3.2. */
   send(message: Outgoing): void {
     if (!this.isOpen) return;
-    this.socket.send(
-      JSON.stringify({ protocolVersion: PROTOCOL_VERSION, ...message, ts: this.clock.now() }),
-    );
+    this.socket.send(encode(message, this.clock.now()));
   }
 
-  /** Sends a publisher frame as received (text or binary), unchanged (§11). */
-  forward(frame: string | Buffer): void {
+  /**
+   * Sends a frame as it is: a publisher frame as received (§11), text as is, a `Buffer` as binary,
+   * or — `asText` — a `Buffer` holding a text frame's UTF-8 bytes (an update encoded once for many
+   * sockets, or a relay message the fan-out measured before sending it, `fanout.ts`).
+   */
+  forward(frame: string | Buffer, asText = false): void {
     if (!this.isOpen) return;
-    this.socket.send(frame, { binary: typeof frame !== "string" });
+    this.socket.send(frame, { binary: typeof frame !== "string" && !asText });
   }
 
   get bufferedAmount(): number {
@@ -86,7 +99,6 @@ export class Connection implements Peer {
   /** `ws` `pause()`/`resume()`: the socket stops / restarts emitting messages. */
   pauseReading(): void {
     if (this.#closing) return;
-    if (!this.#paused) this.#pauses += 1;
     this.#paused = true;
     this.socket.pause();
   }
@@ -94,19 +106,6 @@ export class Connection implements Peer {
   resumeReading(): void {
     this.#paused = false;
     this.socket.resume();
-  }
-
-  /**
-   * How many times reading was paused; with `readingPaused`, the heartbeat tells whether reading
-   * was paused since its last tick (§9.1).
-   */
-  get pauseCount(): number {
-    return this.#pauses;
-  }
-
-  /** Reading is paused right now (`pauseReading()` without a `resumeReading()` since). */
-  get readingPaused(): boolean {
-    return this.#paused;
   }
 
   /** A WebSocket-level ping (§9.1); the peer answers with a pong echoing `payload`. */
@@ -154,11 +153,38 @@ export class Connection implements Peer {
     this.#clearHandshakeTimer();
     // A paused socket would not read the peer's close frame: `ws` would wait 30 s to destroy it.
     if (this.#paused) this.resumeReading();
-    if (
-      this.socket.readyState === WebSocket.OPEN ||
-      this.socket.readyState === WebSocket.CONNECTING
-    )
-      this.socket.close(closeCode);
+    const state = this.socket.readyState;
+    if (state === WebSocket.CLOSED) return;
+    // The peer may have started the close (a close frame, or a TCP half-close, after which `ws`
+    // arms no timer at all): only the timer below then ends the socket.
+    if (state !== WebSocket.CLOSING) this.socket.close(closeCode);
+    this.#dropUnlessClosed();
+  }
+
+  /**
+   * Terminates the socket unless its close completes: checked every `CLOSE_COMPLETE_MS`, it gets
+   * more time only while its send buffer shrinks (the close frame is queued behind data its peer is
+   * still reading, so the close code reaches it), and never past `CLOSE_DRAIN_MAX_MS`. A peer that
+   * reads nothing would otherwise keep the socket, and what is queued for it, outside the fan-out's
+   * accounting for `ws`'s 30 s `closeTimeout`, or for good after a half-close (T3).
+   */
+  #dropUnlessClosed(): void {
+    const deadline = this.clock.now() + CLOSE_DRAIN_MAX_MS;
+    let left = this.socket.bufferedAmount;
+    let timer: TimerHandle;
+    const arm = (): void => {
+      timer = this.clock.setTimeout(() => {
+        const amount = this.socket.bufferedAmount;
+        if (amount >= left || this.clock.now() >= deadline) this.socket.terminate();
+        else {
+          left = amount;
+          arm();
+        }
+      }, CLOSE_COMPLETE_MS);
+      (timer as { unref?: () => void }).unref?.();
+    };
+    arm();
+    this.socket.once("close", () => this.clock.clearTimeout(timer));
   }
 
   /** Destroys the socket without a closing handshake (a peer that reads nothing cannot complete one). */
