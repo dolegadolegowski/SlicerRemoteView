@@ -15,7 +15,8 @@ NFR-16; those rules ignore opacity 0 and clipping, so such meshes are sent whole
 - colour and opacity come from the outermost folder that applies its display properties to the branch, else from the
   display node, and the opacity is multiplied by the folders' opacity — exactly like the 3D view;
 - the world matrix is the identity without a parent transform and ``None`` for a non-linear chain (never ask Slicer for
-  the matrix of a non-linear chain — it logs errors).
+  the matrix of a non-linear chain — it logs errors); the transform of such a chain, for baking (SLC-13), is the one the
+  3D view applies with its ``vtkTransformFilter``: ``GetTransformToWorld`` into an identity ``vtkGeneralTransform``.
 
 Main thread only (MRML).
 """
@@ -28,6 +29,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 from vtkmodules.vtkCommonMath import vtkMatrix4x4
+from vtkmodules.vtkCommonTransforms import vtkGeneralTransform
 
 MODEL_CLASS = "vtkMRMLModelNode"
 VIEW_CLASS = "vtkMRMLViewNode"  # the 3D views
@@ -86,6 +88,15 @@ class MrmlSceneApi:
         matrix = vtkMatrix4x4()
         parent.GetMatrixTransformToWorld(matrix)
         return np.array([[matrix.GetElement(row, col) for col in range(4)] for row in range(4)])
+
+    def world_transform(self, node: Any) -> vtkGeneralTransform | None:
+        parent = node.GetParentTransformNode()
+        if parent is None:
+            return None
+        transform = vtkGeneralTransform()
+        transform.Identity()
+        parent.GetTransformToWorld(transform)
+        return transform
 
     # ------------------------------------------------------------------ helpers
 

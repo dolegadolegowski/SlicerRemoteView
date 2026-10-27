@@ -9,9 +9,12 @@ set(MODULE_NAME RemoteView)
 set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}.py
   remoteview_core/__init__.py
+  remoteview_core/changes.py
   remoteview_core/collect.py
   remoteview_core/consent.py
   remoteview_core/coords.py
+  remoteview_core/debounce.py
+  remoteview_core/decimate.py
   remoteview_core/deps.py
   remoteview_core/glb_writer.py
   remoteview_core/links.py

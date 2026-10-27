@@ -21,6 +21,7 @@ import numpy as np
 import pytest
 from vtkmodules.vtkFiltersSources import vtkSphereSource
 
+from remoteview_core.protocol_client import ProtocolClient, SessionState, make_client_info
 from remoteview_core.transport import check_relay_url
 from remoteview_core.vendored import chunk_header
 from remoteview_protocol import envelope
@@ -128,10 +129,13 @@ def _started(process: NodeProcess, prefix: str, what: str) -> NodeProcess:
     return process
 
 
-def start_relay_stub() -> NodeProcess:
-    """The relay stub of tools/fake-slicer (``tests/relay_stub.mjs``); ``.address`` is its ``ws://`` URL."""
+def start_relay_stub(*options: str) -> NodeProcess:
+    """The relay stub of tools/fake-slicer (``tests/relay_stub.mjs``, with its ``options``); ``.address`` is its
+    ``ws://`` URL."""
     return _started(
-        NodeProcess("relay_stub.mjs", RELAY_STUB.as_uri()), "ws://127.0.0.1:", "the relay stub"
+        NodeProcess("relay_stub.mjs", *options, RELAY_STUB.as_uri()),
+        "ws://127.0.0.1:",
+        "the relay stub",
     )
 
 
@@ -199,6 +203,17 @@ def created(reply_to: str = "p-1", *, code: str = CODE, **limits: int) -> dict:
     )
 
 
+def live_client(profile: str = "mobile", *, validate=None, **limits: int) -> ProtocolClient:
+    """A client whose session the relay created (``limits`` override the announced ones); no snapshot yet."""
+    client = ProtocolClient(
+        make_client_info("5.12.4", "win32"), validate=validate, auto_renew=False
+    )
+    client.start(profile)
+    client.handle(created(**limits))
+    assert client.state is SessionState.CREATED
+    return client
+
+
 def ack(version: int) -> dict:
     return envelope.make(
         "scene.snapshot.ack", sceneVersion=version, viewersStreamed=0, viewersDeferred=0
@@ -264,6 +279,9 @@ class FakeScene:
     def world_matrix(self, node):
         return np.eye(4)
 
+    def world_transform(self, node):
+        return None
+
 
 MODEL_DISPLAY = ("vtkMRMLModelDisplayNode", "vtkMRMLDisplayNode", "vtkMRMLNode")
 SLICE_DISPLAY = ("vtkMRMLSliceDisplayNode", *MODEL_DISPLAY)
@@ -318,8 +336,9 @@ class FakeDisplay:
 
 
 class FakeMrmlTransform:
-    def __init__(self, matrix=None):
+    def __init__(self, matrix=None, warp=None):
         self.matrix = matrix  # None = non-linear chain
+        self.warp = warp  # the VTK transform of a non-linear chain
         self.asked = 0
 
     def IsTransformToWorldLinear(self):  # noqa: N802
@@ -329,6 +348,10 @@ class FakeMrmlTransform:
         self.asked += 1
         out.DeepCopy([v for row in self.matrix for v in row])
         return 1
+
+    def GetTransformToWorld(self, out):  # noqa: N802
+        if self.warp is not None:
+            out.Concatenate(self.warp)
 
 
 class FakeModel:

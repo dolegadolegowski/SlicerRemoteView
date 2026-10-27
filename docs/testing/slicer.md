@@ -392,6 +392,88 @@ Expected results:
 |---|---|---|---|---|
 | | | | | |
 
+## §5 Transforms baked into the vertices (SLC-13; FR-06, FR-12 part, US-02, protocol §7.3)
+
+Preconditions: §2's setup with relay (b) or (c) and a viewer joined (with relay (a) the steps run, but nothing shows the
+result). In a new scene run in the Python console
+
+```python
+import numpy as np, vtk
+def model(center, name, stretch=1.0):  # a sphere of radius 20 mm, stretched along R
+    source = vtk.vtkSphereSource()
+    source.SetRadius(20)
+    source.SetThetaResolution(48)
+    source.SetPhiResolution(48)
+    place = vtk.vtkTransform()
+    place.Translate(*center)
+    place.Scale(stretch, 1, 1)
+    moved = vtk.vtkTransformPolyDataFilter()
+    moved.SetTransform(place)
+    moved.SetInputConnection(source.GetOutputPort())
+    moved.Update()
+    node = slicer.modules.models.logic().AddModel(moved.GetOutput())
+    node.SetName(name)
+    return node
+def linear(rows, name):
+    node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", name)
+    node.SetMatrixTransformToParent(slicer.util.vtkMatrixFromArray(np.array(rows, dtype=float)))
+    return node
+src, dst = vtk.vtkPoints(), vtk.vtkPoints()
+for x in (240, 270, 300, 330, 360):
+    for y in (-30, 30, 90):
+        for z in (-30, 30):
+            src.InsertNextPoint(x, y, z)
+            dst.InsertNextPoint(x, y, z + 15 * (1 - ((x - 300) / 60) ** 2))  # an arch: +15 mm S at R = 300
+tps = vtk.vtkThinPlateSplineTransform()
+tps.SetBasisToR()
+tps.SetSourceLandmarks(src)
+tps.SetTargetLandmarks(dst)
+bend = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTransformNode", "Bend")
+bend.SetAndObserveTransformToParent(tps)
+```
+
+Steps:
+
+1. `model((0, 0, 0), "Shifted").SetAndObserveTransformNodeID(linear([[1, 0, 0, 30], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0,
+   0, 1]], "Shift").GetID())`
+2. `model((100, 0, 0), "Sheared").SetAndObserveTransformNodeID(linear([[1, 0.3, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0,
+   0, 0, 1]], "Shear").GetID())`
+3. `model((200, 0, 0), "Mirrored").SetAndObserveTransformNodeID(linear([[-1, -0.3, 0, 400], [0, 1, 0, 0], [0, 0, 1,
+   0], [0, 0, 0, 1]], "Mirror").GetID())` (mirrored in R and sheared the other way)
+4. `model((300, 0, 0), "Bent", 3).SetAndObserveTransformNodeID(bend.GetID())`; then a linear transform under the bend:
+   `anterior = linear([[1, 0, 0, 0], [0, 1, 0, 60], [0, 0, 1, 0], [0, 0, 0, 1]], "Anterior")`,
+   `anterior.SetAndObserveTransformNodeID(bend.GetID())`, `model((300, 0, 0), "Bent and moved",
+   3).SetAndObserveTransformNodeID(anterior.GetID())`.
+5. `model((400, 0, 0), "Flipped").SetAndObserveTransformNodeID(linear([[-1, 0, 0, 800], [0, 1, 0, 0], [0, 0, 1, 0],
+   [0, 0, 0, 1]], "Flip").GetID())` — a plain mirror: a TRS matrix with a negative determinant, sent as `T.matrix`, not
+   baked. Then note the points of two models: `before = {n: slicer.util.arrayFromModelPoints(slicer.util.getNode(n))
+   .copy() for n in ("Bent", "Sheared")}`.
+6. Click *Start session*, join with the viewer and turn Slicer's 3D view and the viewer to look from the front (Slicer:
+   *Anterior* view), then from above (*Superior*).
+7. Stop the session. Run `[np.array_equal(before[n], slicer.util.arrayFromModelPoints(slicer.util.getNode(n))) for n in
+   before]` and look in *Data* at the transform tree.
+
+Expected results (simulated through the module's collection with the same scene):
+
+- Step 6, from the front: "Shifted" 30 mm towards R (patient right) of where it was made; "Bent" and "Bent and moved"
+  — ellipsoids 120 mm long along R — arch upwards: the top of the middle about 15 mm higher than the sphere's own
+  (S ≈ 35 mm), the parts 45 mm from the middle about 8 mm higher (S ≈ 21 mm), as in Slicer's 3D view.
+- Step 6, from above: "Sheared" and "Mirrored" are ellipses that lean opposite ways (0.3 mm along R per mm along A, one
+  each way); "Bent and moved" lies 60 mm towards A from "Bent".
+- Throughout step 6: every model — "Flipped" too, whose mirror the viewer applies itself — is lit from outside, none
+  looks dark, inside-out or see-through (front faces stay outside after a mirror); the panel reports no model that could not be shared; the viewer matches Slicer's 3D view.
+- Step 7: `[True, True]` — the models' own points are unchanged — and every model is still under its transform in
+  *Data* (nothing was hardened).
+- Throughout: no traceback in the Python console.
+- `[TODO verify]` in Slicer 5.12.4: `vtkMRMLTransformNode.SetAndObserveTransformToParent` with a
+  `vtkThinPlateSplineTransform` makes `IsTransformToWorldLinear()` false; `GetTransformToWorld(vtkGeneralTransform)` from
+  Python fills the transform (it is the C++ call of the model displayable manager); `InternalTransformDerivative` on
+  that `vtkGeneralTransform` is wrapped in Slicer's VTK 9.6.2 as in the `vtk` wheel.
+
+| Date | Slicer version | OS | Result | Tester |
+|---|---|---|---|---|
+| | | | | |
+
 ## §12 Consent text and the scene adapter (SLC-22; R-06, NFR-16, FR-05)
 
 Preconditions: the test Slicer of §2; the *MRHead* sample (*Sample Data*) and two models made in the Python console:
@@ -441,6 +523,51 @@ Expected results:
   80 mm of the two transforms as 0.08 m along glTF +X.
 - Step 4: the first line is `['Sphere B']`.
 - Throughout: no traceback and no error logged by Slicer (in particular none from `GetMatrixTransformToWorld`).
+
+| Date | Slicer version | OS | Result | Tester |
+|---|---|---|---|---|
+| | | | | |
+
+## §14 Decimation to the device profile (SLC-14; FR-10, NFR-03, protocol §7.5)
+
+Preconditions: §2's setup with relay (b) or (c) and a viewer joined. The panel uses the `mobile` profile (500k
+triangles in all, 100k per model; the profile selector is SLC-18). In a new scene run in the Python console
+
+```python
+import vtk
+def sphere(center, n, name):  # 2·n·(n − 2) triangles
+    source = vtk.vtkSphereSource()
+    source.SetCenter(*center)
+    source.SetRadius(40)
+    source.SetThetaResolution(n)
+    source.SetPhiResolution(n)
+    source.Update()
+    model = slicer.modules.models.logic().AddModel(source.GetOutput())
+    model.SetName(name)
+    return model
+sphere((0, 0, 0), 448, "Big")         # 399,616 triangles
+sphere((100, 0, 0), 240, "Medium")    # 114,240
+sphere((200, 0, 0), 160, "Small")     # 50,560
+sphere((300, 0, 0), 8, "Tiny")        # 96
+```
+
+Steps:
+
+1. Click *Start session* and join with the viewer.
+2. Stop the session. In *Models* select "Big" and look at *Information* (number of cells).
+
+Expected results:
+
+- Step 1: Slicer is busy for a few seconds while it simplifies "Big" and "Medium", and the code appears only then (SLC-28,
+  §15, shows the code first and a progress dialog); then "Sending the scene", then "Live". The viewer shows the four spheres, round and in
+  place — "Big" and "Medium" with visibly fewer, larger facets than in Slicer (100,000 triangles at most each; the
+  total is at most 500,000), "Small" and "Tiny" unchanged; all lit from outside. The panel shows no warning (the scene
+  is about 3 MB, below the 32 MB recommended for `mobile`).
+- Step 2: "Big" still has 399,616 cells in Slicer: only the copy that is sent is simplified.
+- Throughout: no traceback in the Python console.
+- `[TODO verify]` in Slicer 5.12.4: `vtkQuadricDecimation` and `vtkDecimatePro` from `vtkmodules.vtkFiltersCore` behave
+  as in the `vtk` 9.6.2 wheel (Slicer builds VTK 9.6.2, `docs/research/slicer-decimate.md`); how long the scene takes to
+  prepare (≈ 6 s on the development machine, which sends 250,656 triangles, 3.0 MB).
 
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|

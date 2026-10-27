@@ -51,3 +51,6 @@ known-first-party = ["remoteview_core", "remoteview_protocol", "RemoteView"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+# a warning is a failure: collect must skip bad input without warnings (they would abort a snapshot where warnings
+# are errors), and the numpy/VTK deprecations show up early
+filterwarnings = ["error"]
