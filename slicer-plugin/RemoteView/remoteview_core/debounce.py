@@ -7,8 +7,8 @@ one :class:`Drained` set (SLC-16 turns it into ``scene.update`` / ``scene.nodeRe
 - appearance, transform and removal wait :data:`APPEARANCE_MS` (150 ms) after the **last** mark (protocol §8.1: coalesce
   100–250 ms) and at most :data:`APPEARANCE_MAX_MS` after the first, so a slider dragged for seconds still updates the
   viewers four times a second (NFR-02: ≤ 500 ms from Slicer to the viewers);
-- a mesh change or a new node (both need a re-export) waits :data:`GEOMETRY_MS` (750 ms; protocol §8.1: 500–1000 ms;
-  segment editing fires mesh events continuously), at most :data:`GEOMETRY_MAX_MS` after the first;
+- a mesh change, a new node or a rename (all need a re-export) waits :data:`GEOMETRY_MS` (750 ms; protocol §8.1:
+  500–1000 ms; segment editing fires mesh events continuously), at most :data:`GEOMETRY_MAX_MS` after the first;
 - while Slicer imports a scene or runs a batch process nothing is flushed: the marks are kept and flushed once when the
   last import/batch ends (``EndImportEvent`` / ``EndBatchProcessEvent``);
 - a closed scene (``EndCloseEvent``) drops every mark and flushes a reset: the next scene is a new snapshot.
@@ -45,10 +45,12 @@ class Change(enum.Flag):
     GEOMETRY = enum.auto()  # the mesh (or a segment's surface)
     ADDED = enum.auto()
     REMOVED = enum.auto()
+    #: the node's name: the JSON protocol never carries names (§8.3), so only a re-export shows a new one (SLC-30)
+    NAME = enum.auto()
 
 
-#: The changes that need a re-export, hence the longer wait.
-SLOW = Change.GEOMETRY | Change.ADDED
+#: The changes that need a re-export (a new mesh, an added node, a rename), hence the longer wait.
+SLOW = Change.GEOMETRY | Change.ADDED | Change.NAME
 
 
 @dataclass(frozen=True)

@@ -16,6 +16,8 @@ transport in order.
   the GLB is written when its binary chunk alone is too large (the error then carries the estimated size, which can
   differ from the real one by a few percent).
 - Nodes that cannot be exported are reported in :attr:`Snapshot.skipped`, never sent.
+- :attr:`Snapshot.sent` is what the viewers hold once this snapshot is in: the live-change classifier's scene (SLC-30),
+  installed by the caller in the same call that took the frames — the scene ``begin`` announces, not the ack's.
 
 Main thread only (VTK, and the client is not thread-safe). The SHA-256 is computed here too (decided in SLC-08).
 """
@@ -26,6 +28,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from remoteview_core.changes import SentScene
 from remoteview_core.collect import SceneApi, SkippedNode, collect_scene
 from remoteview_core.decimate import PROFILES, estimate_glb_size, fit_to_budget, glb_binary_size
 from remoteview_core.glb_writer import RootExtras, write_glb
@@ -62,6 +65,10 @@ class Snapshot:
     unreduced: tuple[str, ...] = ()
     #: the profile's recommended size (0: none)
     target_bytes: int = 0
+    #: the viewers' scene after this snapshot (SLC-30): its entities, the skipped nodes, the *Hide node names* setting
+    sent: SentScene = field(
+        default_factory=lambda: SentScene(anonymized=False), repr=False, compare=False
+    )
     _taken: list[bool] = field(
         default_factory=lambda: [False], init=False, repr=False, compare=False
     )
@@ -121,6 +128,10 @@ def build_snapshot(
     if len(glb) > limits["maxSnapshotBytes"]:
         raise SnapshotTooLargeError(len(glb), limits["maxSnapshotBytes"])
     triangles = fitted.triangle_count
+    # before begin uses a version: nothing after it can fail but the invariant below
+    sent = SentScene.from_export(
+        fitted.entities, collected.skipped, anonymized=collected.anonymized_names
+    )
     messages = client.begin_snapshot(glb, node_count=len(fitted.entities), triangle_count=triangles)
     # invariant: the root extras name the version the begin announces
     if messages.begin["sceneVersion"] != version:
@@ -135,4 +146,5 @@ def build_snapshot(
         reduced=fitted.reduced,
         unreduced=fitted.unreduced,
         target_bytes=budget.target_bytes,
+        sent=sent,
     )

@@ -21,6 +21,7 @@ import numpy as np
 import pytest
 from vtkmodules.vtkFiltersSources import vtkSphereSource
 
+from remoteview_core.protocol_client import ProtocolClient, SessionState, make_client_info
 from remoteview_core.transport import check_relay_url
 from remoteview_core.vendored import chunk_header
 from remoteview_protocol import envelope
@@ -200,6 +201,17 @@ def created(reply_to: str = "p-1", *, code: str = CODE, **limits: int) -> dict:
         ttl={"graceS": 120, "idleS": 1800, "maxLifetimeS": 43200, "expiresAt": 1792281600120},
         limits={**LIMITS, **limits},
     )
+
+
+def live_client(profile: str = "mobile", *, validate=None, **limits: int) -> ProtocolClient:
+    """A client whose session the relay created (``limits`` override the announced ones); no snapshot yet."""
+    client = ProtocolClient(
+        make_client_info("5.12.4", "win32"), validate=validate, auto_renew=False
+    )
+    client.start(profile)
+    client.handle(created(**limits))
+    assert client.state is SessionState.CREATED
+    return client
 
 
 def ack(version: int) -> dict:

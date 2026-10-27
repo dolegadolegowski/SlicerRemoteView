@@ -112,6 +112,9 @@ class SkippedNode:
     node_id: str
     reason: SkipReason
     index: int = field(default=-1, compare=False)
+    #: the node's transform was baked into the mesh before the mesh check failed (``no-triangles`` and
+    #: ``invalid-geometry`` only): a new transform may lift the reason (SLC-30)
+    baked: bool = field(default=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -388,7 +391,9 @@ def _finite_geometry(mesh: Mesh) -> bool:
     return bool(np.all(np.isfinite(metres32)) and np.all(np.isfinite(mesh.normals)))
 
 
-def _display(props: Any) -> tuple[tuple[float, float, float], float, bool] | None:
+def display_of(props: Any) -> tuple[tuple[float, float, float], float, bool] | None:
+    """``SceneApi.display_props`` as exported — colour and opacity clipped to 0..1, visibility a bool — or ``None``
+    when they are not a finite colour and opacity (the node is then skipped as ``invalid-display``)."""
     try:
         color, opacity, visible = props
         rgb = np.asarray(color, dtype=np.float64)
@@ -403,29 +408,29 @@ def _display(props: Any) -> tuple[tuple[float, float, float], float, bool] | Non
 
 
 class _Bake:
-    """What :func:`_placement` returns for a transform to bake into the vertices (the one instance :data:`_BAKE`)."""
+    """What :func:`placement_of` returns for a transform to bake into the vertices (the one instance :data:`BAKE`)."""
 
 
-_BAKE = _Bake()
+BAKE = _Bake()
 
 
-def _placement(world: Any) -> NDArray[np.float64] | SkipReason | _Bake | None:
+def placement_of(world: Any) -> NDArray[np.float64] | SkipReason | _Bake | None:
     """How a node with RAS world matrix ``world`` is placed: ``None`` (identity) or ``C·M·C⁻¹`` as ``T.matrix``,
-    :data:`_BAKE` for a chain that is not linear (``None``) or is sheared (glTF ``node.matrix`` must be TRS, and the
+    :data:`BAKE` for a chain that is not linear (``None``) or is sheared (glTF ``node.matrix`` must be TRS, and the
     writer's own predicate decides — ``is_exportable_matrix``), or a skip reason for a matrix that is not a finite
     affine 4×4."""
     if world is None:
-        return _BAKE
+        return BAKE
     try:
         matrix = ras_matrix_to_gltf(world)
     except (TypeError, ValueError):  # not a finite affine 4×4
         return SkipReason.INVALID_TRANSFORM
     if not is_exportable_matrix(matrix):
-        return _BAKE
+        return BAKE
     return None if np.array_equal(matrix, np.eye(4)) else matrix
 
 
-def _world_transform(world: Any, scene_api: SceneApi, node: Any) -> vtkAbstractTransform | None:
+def transform_to_bake(world: Any, scene_api: SceneApi, node: Any) -> vtkAbstractTransform | None:
     """The transform to bake: a sheared linear world matrix as a ``vtkTransform`` (exact, no round trip through
     Slicer), otherwise the scene's own non-linear transform."""
     if world is not None:
@@ -443,7 +448,9 @@ def _world_transform(world: Any, scene_api: SceneApi, node: Any) -> vtkAbstractT
 _GENERATED_ID = re.compile(r"vtkMRMLModelNode[0-9]{1,10}")
 
 
-def _valid_model_id(node_id: Any, *, anonymize: bool) -> bool:
+def valid_model_id(node_id: Any, *, anonymize: bool) -> bool:
+    """The ID rules of an exported model: §3.3 shape, no ``/`` (segments use it), not ``root``; with *Hide node
+    names* only Slicer's generated IDs (T7)."""
     valid = (
         isinstance(node_id, str)
         and NODE_ID_PATTERN.fullmatch(node_id) is not None
@@ -453,7 +460,7 @@ def _valid_model_id(node_id: Any, *, anonymize: bool) -> bool:
     return valid and (not anonymize or _GENERATED_ID.fullmatch(node_id) is not None)
 
 
-def _raw_name(name: Any) -> str | bytes | None:
+def raw_name(name: Any) -> str | bytes | None:
     """A name of another type (an adapter bug) counts as no name: the node gets its substitute, not dropped."""
     return name if name is None or isinstance(name, (str, bytes)) else None
 
@@ -466,7 +473,7 @@ def collect_scene(scene_api: SceneApi, *, anonymize_names: bool = False) -> Coll
     seen: set[str] = set()
     for index, node in enumerate(scene_api.visible_model_nodes()):
         node_id = scene_api.node_id(node)
-        if not _valid_model_id(node_id, anonymize=anonymize_names):
+        if not valid_model_id(node_id, anonymize=anonymize_names):
             skipped.append(SkippedNode("", SkipReason.INVALID_NODE_ID, index))
             continue
         if node_id in seen:
@@ -474,17 +481,17 @@ def collect_scene(scene_api: SceneApi, *, anonymize_names: bool = False) -> Coll
             continue
         seen.add(node_id)
         world = scene_api.world_matrix(node)
-        matrix = _placement(world)
+        matrix = placement_of(world)
         if isinstance(matrix, SkipReason):
             skipped.append(SkippedNode(node_id, matrix, index))
             continue
         bake = None
-        if matrix is _BAKE:
-            bake, matrix = _world_transform(world, scene_api, node), None
+        if matrix is BAKE:
+            bake, matrix = transform_to_bake(world, scene_api, node), None
             if bake is None:
                 skipped.append(SkippedNode(node_id, SkipReason.NON_LINEAR_TRANSFORM, index))
                 continue
-        display = _display(scene_api.display_props(node))
+        display = display_of(scene_api.display_props(node))
         if display is None:
             skipped.append(SkippedNode(node_id, SkipReason.INVALID_DISPLAY, index))
             continue
@@ -497,14 +504,14 @@ def collect_scene(scene_api: SceneApi, *, anonymize_names: bool = False) -> Coll
         elif not isinstance(mesh, SkipReason) and not _finite_geometry(mesh):
             mesh = SkipReason.INVALID_GEOMETRY
         if isinstance(mesh, SkipReason):
-            skipped.append(SkippedNode(node_id, mesh, index))
+            skipped.append(SkippedNode(node_id, mesh, index, baked=bake is not None))
             continue
         color, opacity, visible = display
         entities.append(
             Entity(
                 node_id=node_id,
                 kind="model",
-                name=names.assign("model", _raw_name(scene_api.name(node))),
+                name=names.assign("model", raw_name(scene_api.name(node))),
                 positions=ras_to_gltf_points(mesh.positions, dtype=np.float64),
                 normals=ras_to_gltf_normals(mesh.normals),
                 indices=mesh.triangles,

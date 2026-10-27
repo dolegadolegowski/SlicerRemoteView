@@ -297,8 +297,8 @@ def test_collect_uses_the_writers_matrix_predicate():
         shear = np.eye(3) + np.triu(rng.normal(size=(3, 3)) * rng.choice([0.0, 1e-9, 1e-3]), 1)
         m[:3, :3] = rotation @ shear @ np.diag(rng.uniform(0.01, 100, size=3))
         m[:3, 3] = rng.normal(size=3) * 100
-        result = collect._placement(m)
-        if result is collect._BAKE:
+        result = collect.placement_of(m)
+        if result is collect.BAKE:
             assert not is_exportable_matrix(collect.ras_matrix_to_gltf(m))
         else:
             kept += 1
@@ -523,6 +523,27 @@ def test_collect_skips_a_baked_mesh_that_overflows_float32():
     collected = collect_scene(scene)
     assert [e.node_id for e in collected.entities] == ["vtkMRMLModelNode2"]
     assert collected.skipped == (SkippedNode("vtkMRMLModelNode1", SkipReason.INVALID_GEOMETRY),)
+    assert collected.skipped[0].baked  # a new transform may lift it (SLC-30)
+
+
+def test_collect_says_whether_a_mesh_left_out_was_baked():
+    """``SkippedNode.baked`` (SLC-30): the mesh check failed after the transform went into the vertices — not part
+    of equality, like ``index``."""
+    collapse = np.diag([0.0, 0.0, 0.0, 1.0])  # every triangle loses its area
+    line = vtkLineSource()
+    line.Update()
+    scene = FakeScene(
+        FakeNode("vtkMRMLModelNode1", _cube(), world=collapse),
+        FakeNode("vtkMRMLModelNode2", line.GetOutput()),
+        FakeNode("vtkMRMLModelNode3", _cube(), world=np.full((4, 4), np.nan)),
+    )
+    skipped = collect_scene(scene).skipped
+    assert [(s.node_id, s.reason, s.baked) for s in skipped] == [
+        ("vtkMRMLModelNode1", SkipReason.NO_TRIANGLES, True),
+        ("vtkMRMLModelNode2", SkipReason.NO_TRIANGLES, False),
+        ("vtkMRMLModelNode3", SkipReason.INVALID_TRANSFORM, False),
+    ]
+    assert skipped[0] == SkippedNode("vtkMRMLModelNode1", SkipReason.NO_TRIANGLES)
 
 
 # --------------------------------------------------------------------------- skipped nodes (criterion 2)
