@@ -89,7 +89,7 @@ export type SnapshotVersion = number;
  */
 export type SnapshotAbortReason = "SUPERSEDED" | "CHECKSUM_MISMATCH" | "BAD_SEQUENCE" | "PUBLISHER_GONE" | "TIMEOUT";
 /**
- * byteLength as a publisher announces it in scene.snapshot.begin: deliberately without a maximum, so that a value above MAX_SNAPSHOT_BYTES reaches the relay's rule and is answered PAYLOAD_TOO_LARGE with details.maxSnapshotBytes instead of INVALID_MESSAGE (§3.3, §6.2, report 2026-10-20-server-2).
+ * byteLength as a publisher announces it in scene.snapshot.begin: deliberately without the 64 MiB maximum (only the largest exactly representable integer, 2^53 - 1, bounds it), so that a value above MAX_SNAPSHOT_BYTES reaches the relay's rule and is answered PAYLOAD_TOO_LARGE with details.maxSnapshotBytes instead of INVALID_MESSAGE (§3.3, §6.2, report 2026-10-20-server-2).
  */
 export type AnnouncedByteLength = number;
 /**

@@ -87,6 +87,8 @@ describe("snapshot schemas + fixtures (PRO-05)", () => {
     // the sizes the relay reports (`ready`, `viewer.joined.snapshot`) keep the 64 MiB maximum (see the next test).
     expect(ok({ byteLength: 67108865, chunkCount: 65 })).toBe(true);
     expect(ok({ byteLength: 1e12, chunkCount: 1024 })).toBe(true);
+    expect(ok({ byteLength: Number.MAX_SAFE_INTEGER, chunkCount: 1024 })).toBe(true);
+    expect(ok({ byteLength: Number.MAX_SAFE_INTEGER + 1, chunkCount: 1024 })).toBe(false);
     expect(ok({ byteLength: 0, chunkCount: 1 })).toBe(false);
     expect(ok({ sceneVersion: 4294967295 })).toBe(true);
     expect(ok({ sceneVersion: 4294967296 })).toBe(false);
@@ -113,7 +115,7 @@ describe("snapshot schemas + fixtures (PRO-05)", () => {
       { maximum?: number }
     >;
     expect(defs.announcedByteLength).toBeDefined();
-    expect(defs.announcedByteLength!.maximum).toBeUndefined();
+    expect(defs.announcedByteLength!.maximum).toBe(Number.MAX_SAFE_INTEGER); // exact integers only, no 64 MiB cap
     expect(defs.byteLength!.maximum).toBe(67108864);
     const ready = compile(ajv, "scene.snapshot.ready.schema.json");
     const base = fixtureSet("scene.snapshot.ready").valid[0]!.message;
@@ -128,17 +130,28 @@ describe("snapshot schemas + fixtures (PRO-05)", () => {
     >;
     for (const name of ["sceneVersion", "snapshotVersion", "updateVersion"])
       expect(defs[name]!.maximum, name).toBe(4294967295);
-    for (const [file, schema] of loadSchemas()) {
-      const text = JSON.stringify(schema);
-      for (const match of text.matchAll(
-        /"(\w*(?:snapshotVersion|SnapshotVersion)\w*)":\{([^{}]*)\}/g,
-      ))
-        if (
-          match[2]!.includes('"type":["integer","null"]') ||
-          match[2]!.includes('"type":"integer"')
-        )
-          expect(match[2], `${file}: ${match[1]}`).toContain('"maximum":4294967295');
-    }
+    // Walk every schema: any property whose name says it is a version (…Version) and whose type is integer
+    // (or integer|null) must carry the uint32 maximum, whether it is inline or reached through a $ref.
+    let versionProperties = 0;
+    const walk = (node: unknown, file: string): void => {
+      if (Array.isArray(node)) return node.forEach((n) => walk(n, file));
+      if (node === null || typeof node !== "object") return;
+      const object = node as Record<string, unknown>;
+      const properties = object["properties"] as
+        Record<string, Record<string, unknown>> | undefined;
+      for (const [name, prop] of Object.entries(properties ?? {})) {
+        const type = ([] as unknown[]).concat(prop["type"] ?? []);
+        if (!/Version$/.test(name) || prop["$ref"] !== undefined || !type.includes("integer"))
+          continue;
+        versionProperties += 1;
+        expect(prop["maximum"], `${file}: ${name}`).toBe(4294967295);
+      }
+      for (const value of Object.values(object)) walk(value, file);
+    };
+    for (const [file, schema] of loadSchemas()) walk(schema, file);
+    // inline version fields today: scene.request.haveSnapshotVersion, scene.state.snapshotVersion,
+    // session.resumed.snapshotVersion, viewer.joined.snapshotVersion (+ its `then` branch)
+    expect(versionProperties).toBeGreaterThanOrEqual(5);
   });
 
   it("every valid begin fixture is self-consistent: chunkCount = ceil(byteLength / chunkSize), one at 64 KiB", () => {

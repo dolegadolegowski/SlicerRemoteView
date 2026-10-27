@@ -515,6 +515,12 @@
       "valid": true
     },
     {
+      "file": "scene.snapshot.begin/invalid-byteLength-over-2pow53.json",
+      "type": "scene.snapshot.begin",
+      "valid": false,
+      "instancePath": "/byteLength"
+    },
+    {
       "file": "scene.snapshot.begin/invalid-byteLength-zero.json",
       "type": "scene.snapshot.begin",
       "valid": false,

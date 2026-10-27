@@ -2,7 +2,7 @@
   "protocolVersion": "1.0",
   "type": "scene.snapshot.begin",
   "id": "p-34",
-  "sceneVersion": 2,
+  "sceneVersion": 1,
   "byteLength": 3452,
   "sha256": "3d46dc9529d340d887655e0408e9ec90e19089bebf11542f90d51e624ef1aa2d",
   "chunkCount": 1,

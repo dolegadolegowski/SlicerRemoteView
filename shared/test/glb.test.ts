@@ -355,6 +355,25 @@ describe("GLB fixtures (PRO-08, §7)", () => {
     const doc = parseGlb(bytes("anonymized-segments.glb"));
     const text = JSON.stringify(doc.json);
     expect(text).not.toMatch(/segmentId|left lung|Left lung|Spleen|Segment_/);
+    // §7.3: EVERY string of the JSON chunk is a fixed constant, an alias / generated MRML ID or a generic name —
+    // an allow-list, so a new name-derived string (a mesh, material or scene name) cannot slip in unnoticed.
+    const allowed = [
+      /^2\.0$|^SlicerRemoteView( \S+| fixtures)?$|^0\.1\.0-fixtures$|^root$|^mobile$|^m$|^\+Y$/,
+      /^x=R\*0\.001, y=S\*0\.001, z=-A\*0\.001$|^(segment|model)$|^(OPAQUE|BLEND)$|^(VEC3|SCALAR)$/,
+      /^(Segment|Model) \d+( mesh)?$/,
+      /^vtkMRML[A-Za-z]+Node\d+(\/s_\d+)?$/,
+    ];
+    const strings: string[] = [];
+    (function collect(node: unknown): void {
+      if (typeof node === "string") strings.push(node);
+      else if (node && typeof node === "object") Object.values(node).forEach(collect);
+    })(doc.json);
+    expect(strings.length).toBeGreaterThan(10);
+    for (const value of strings)
+      expect(
+        allowed.some((pattern) => pattern.test(value)),
+        `unexpected string in the anonymised GLB: ${value}`,
+      ).toBe(true);
     const segments = doc.json.nodes!.filter((n) => n.extras?.["kind"] === "segment");
     expect(segments.map((n) => n.extras!["nodeId"])).toEqual([
       "vtkMRMLSegmentationNode1/s_1",
@@ -391,6 +410,13 @@ describe("GLB fixtures (PRO-08, §7)", () => {
         nodeCount?: number;
         triangleCount?: number;
       };
+      // §6.2: begin.sceneVersion and profile equal the GLB root extras
+      const rootExtras = parseGlb(bytes(`${file.slice("valid-".length, -".json".length)}.glb`)).json
+        .nodes![0]!.extras!;
+      expect((message as { sceneVersion: number }).sceneVersion, file).toBe(
+        rootExtras["sceneVersion"],
+      );
+      expect((message as { profile: string }).profile, file).toBe(rootExtras["profile"]);
       expect(m.byteLength, file).toBe(entry.byteLength);
       expect(m.sha256, file).toBe(entry.sha256);
       expect(m.chunkCount, file).toBe(chunkCountFor(entry.byteLength, m.chunkSize));

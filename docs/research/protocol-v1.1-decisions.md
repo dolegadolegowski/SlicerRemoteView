@@ -231,6 +231,8 @@ All twelve questions were answered with the default. Implementation:
 | `PROTOCOL_VERSION = "1.1"` | **PRO-22** |
 | Alias fixture | **PRO-23** |
 | `toIssues` masking, `parseEnvelopeValue`, Python lazy imports | **PRO-24** (`todo`) |
+| Reports that arrived later (2026-10-27-server-3/4/5) and review follow-ups | **PRO-25** (`todo`) |
+| Review fixes after the first reviews: reserved alias namespaces `s_<n>` / `m_<n>`, whole-GLB string allow-list under anonymised names, `byteLength` ≤ 2^53 − 1, out-of-cycle `ping`, no-redirect and path-only-logging rules | `docs/protocol.md` v1.1 as committed |
 | D5 (T5) | no protocol text; `release` (report `2026-10-27-protocol-4`) |
 | Work for the other components | reports `2026-10-27-protocol-1` (server), `-2` (slicer), `-3` (web, quest), `-4` (release); the originating reports of Annex A read `triaged` |
 

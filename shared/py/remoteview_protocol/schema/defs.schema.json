@@ -126,9 +126,10 @@
       "maximum": 67108864
     },
     "announcedByteLength": {
-      "description": "byteLength as a publisher announces it in scene.snapshot.begin: deliberately without a maximum, so that a value above MAX_SNAPSHOT_BYTES reaches the relay's rule and is answered PAYLOAD_TOO_LARGE with details.maxSnapshotBytes instead of INVALID_MESSAGE (§3.3, §6.2, report 2026-10-20-server-2).",
+      "description": "byteLength as a publisher announces it in scene.snapshot.begin: deliberately without the 64 MiB maximum (only the largest exactly representable integer, 2^53 - 1, bounds it), so that a value above MAX_SNAPSHOT_BYTES reaches the relay's rule and is answered PAYLOAD_TOO_LARGE with details.maxSnapshotBytes instead of INVALID_MESSAGE (§3.3, §6.2, report 2026-10-20-server-2).",
       "type": "integer",
-      "minimum": 1
+      "minimum": 1,
+      "maximum": 9007199254740991
     },
     "snapshotFormat": {
       "description": "Container format of a snapshot; v1 knows only binary glTF (§6.2).",
