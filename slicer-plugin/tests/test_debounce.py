@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from support import FakeTimer
 
 from remoteview_core import debounce
 from remoteview_core.debounce import (
@@ -20,39 +21,6 @@ from remoteview_core.debounce import (
     DirtySet,
     Drained,
 )
-
-
-class FakeTimer:
-    """A single-shot timer on a fake clock: ``advance(ms)`` fires it when its deadline passes, like ``qt.QTimer``."""
-
-    def __init__(self) -> None:
-        self.now = 0.0  # milliseconds
-        self.deadline: float | None = None
-        self.callback = None
-        self.starts: list[int] = []
-
-    def clock(self) -> float:  # seconds, like time.monotonic
-        return self.now / 1000.0
-
-    def start(self, msec: int) -> None:
-        assert isinstance(msec, int) and msec >= 0
-        self.starts.append(msec)
-        self.deadline = self.now + msec
-
-    def stop(self) -> None:
-        self.deadline = None
-
-    def advance(self, ms: float) -> None:
-        target = self.now + ms
-        for _ in range(100_000):
-            if self.deadline is None or self.deadline > target:
-                break
-            self.now = self.deadline
-            self.deadline = None
-            self.callback()
-        else:
-            raise AssertionError("the timer re-armed itself 100,000 times")
-        self.now = target
 
 
 @pytest.fixture
@@ -311,6 +279,22 @@ def test_debounce_nested_holds_flush_after_the_last_release(setup):
     assert not debouncer.held and len(flushed) == 1
     debouncer.hold()  # and does not cancel the next hold
     assert debouncer.held
+
+
+def test_debounce_pending_says_whether_a_flush_waits(setup):
+    """``pending`` (SLC-29): marks or a reset wait — held or not; a flush or ``stop`` empties it."""
+    timer, debouncer, flushed = setup
+    assert not debouncer.pending
+    debouncer.hold()
+    debouncer.mark("vtkMRMLModelNode4", Change.APPEARANCE)
+    assert debouncer.pending
+    debouncer.release()
+    timer.advance(0)
+    assert not debouncer.pending and len(flushed) == 1
+    debouncer.reset()
+    assert debouncer.pending
+    debouncer.stop()
+    assert not debouncer.pending
 
 
 def test_debounce_release_without_marks_flushes_nothing(setup):

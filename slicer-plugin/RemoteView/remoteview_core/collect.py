@@ -112,8 +112,8 @@ class SkippedNode:
     node_id: str
     reason: SkipReason
     index: int = field(default=-1, compare=False)
-    #: the node's transform was baked into the mesh before the mesh check failed (``no-triangles`` and
-    #: ``invalid-geometry`` only): a new transform may lift the reason (SLC-30)
+    #: ``no-triangles`` and ``invalid-geometry`` only: the bake of the node's transform made a mesh that passes the
+    #: check unbaked fail it — a new transform may lift the reason (SLC-30); false when the node's own mesh fails
     baked: bool = field(default=False, compare=False)
 
 
@@ -465,6 +465,17 @@ def raw_name(name: Any) -> str | bytes | None:
     return name if name is None or isinstance(name, (str, bytes)) else None
 
 
+def _checked_mesh(polydata: Any, bake: vtkAbstractTransform | None) -> Mesh | SkipReason:
+    """The node's mesh (baked by ``bake``), or why the export leaves it out."""
+    try:
+        mesh = mesh_from_polydata(polydata, bake)
+    except InvalidMeshError:
+        return SkipReason.INVALID_GEOMETRY
+    if mesh is None:
+        return SkipReason.NO_TRIANGLES
+    return mesh if _finite_geometry(mesh) else SkipReason.INVALID_GEOMETRY
+
+
 def collect_scene(scene_api: SceneApi, *, anonymize_names: bool = False) -> CollectedScene:
     """Collect every exportable model node of ``scene_api`` (see the module docstring)."""
     names = NameAssigner(anonymize=anonymize_names)
@@ -495,16 +506,12 @@ def collect_scene(scene_api: SceneApi, *, anonymize_names: bool = False) -> Coll
         if display is None:
             skipped.append(SkippedNode(node_id, SkipReason.INVALID_DISPLAY, index))
             continue
-        try:
-            mesh = mesh_from_polydata(scene_api.polydata(node), bake)
-        except InvalidMeshError:
-            mesh = SkipReason.INVALID_GEOMETRY
-        if mesh is None:
-            mesh = SkipReason.NO_TRIANGLES
-        elif not isinstance(mesh, SkipReason) and not _finite_geometry(mesh):
-            mesh = SkipReason.INVALID_GEOMETRY
+        polydata = scene_api.polydata(node)
+        mesh = _checked_mesh(polydata, bake)
         if isinstance(mesh, SkipReason):
-            skipped.append(SkippedNode(node_id, mesh, index, baked=bake is not None))
+            # the bake is to blame only if the mesh passes unbaked (the extra check runs for skipped nodes only)
+            baked = bake is not None and not isinstance(_checked_mesh(polydata, None), SkipReason)
+            skipped.append(SkippedNode(node_id, mesh, index, baked=baked))
             continue
         color, opacity, visible = display
         entities.append(

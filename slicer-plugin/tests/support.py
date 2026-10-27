@@ -6,6 +6,7 @@ Pure test code: importing it starts nothing. Fixtures that use these fakes live 
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import queue
@@ -158,6 +159,39 @@ def pump_while(ctl: Any, condition, seconds: float) -> None:
 # --------------------------------------------------------------------------- the panel
 
 
+class FakeTimer:
+    """A single-shot timer on a fake clock: ``advance(ms)`` fires it when its deadline passes, like ``qt.QTimer``."""
+
+    def __init__(self) -> None:
+        self.now = 0.0  # milliseconds
+        self.deadline: float | None = None
+        self.callback = None
+        self.starts: list[int] = []
+
+    def clock(self) -> float:  # seconds, like time.monotonic
+        return self.now / 1000.0
+
+    def start(self, msec: int) -> None:
+        assert isinstance(msec, int) and msec >= 0
+        self.starts.append(msec)
+        self.deadline = self.now + msec
+
+    def stop(self) -> None:
+        self.deadline = None
+
+    def advance(self, ms: float) -> None:
+        target = self.now + ms
+        for _ in range(100_000):
+            if self.deadline is None or self.deadline > target:
+                break
+            self.now = self.deadline
+            self.deadline = None
+            self.callback()
+        else:
+            raise AssertionError("the timer re-armed itself 100,000 times")
+        self.now = target
+
+
 class FakeTransport:
     """``RelayTransport``'s interface: validates the URL like the real one, records sends and stops."""
 
@@ -281,6 +315,66 @@ class FakeScene:
 
     def world_transform(self, node):
         return None
+
+
+@functools.cache
+def small_sphere():
+    """One shared coarse sphere (``sphere(8)``): :class:`LiveScene`'s default mesh."""
+    return sphere(8)
+
+
+class LiveScene:
+    """A :class:`~remoteview_core.collect.SceneApi` whose nodes change between calls, like a live MRML scene: each
+    node is a dict with ``id``, ``name``, ``color``, ``opacity``, ``visible`` (shown in 3D), ``world`` (RAS matrix,
+    ``None`` for a non-linear chain), ``warp`` (that chain's transform, or ``None``) and ``mesh``. ``meshes`` counts
+    the mesh reads (the classifier makes none; it may count cells of a node left out without triangles)."""
+
+    def __init__(self, *nodes: dict) -> None:
+        self.nodes = [{**self._defaults(), **n} for n in nodes]
+        self.meshes = 0
+
+    @staticmethod
+    def _defaults() -> dict:
+        return {
+            "name": "Liver",
+            "color": (0.8, 0.3, 0.2),
+            "opacity": 1.0,
+            "visible": True,
+            "world": np.eye(4),  # one array per node
+            "warp": None,
+            "mesh": small_sphere(),
+        }
+
+    def node(self, node_id: str) -> dict:
+        return next(n for n in self.nodes if n["id"] == node_id)
+
+    def add(self, node_id: str, **props) -> None:
+        self.nodes.append({**self._defaults(), "id": node_id, **props})
+
+    def remove(self, node_id: str) -> None:
+        self.nodes = [n for n in self.nodes if n["id"] != node_id]
+
+    def visible_model_nodes(self):
+        return [n for n in self.nodes if n["visible"]]
+
+    def node_id(self, node):
+        return node["id"]
+
+    def name(self, node):
+        return node["name"]
+
+    def polydata(self, node):
+        self.meshes += 1
+        return node["mesh"]
+
+    def display_props(self, node):
+        return node["color"], node["opacity"], node["visible"]
+
+    def world_matrix(self, node):
+        return node["world"]
+
+    def world_transform(self, node):
+        return node["warp"]
 
 
 MODEL_DISPLAY = ("vtkMRMLModelDisplayNode", "vtkMRMLDisplayNode", "vtkMRMLNode")
