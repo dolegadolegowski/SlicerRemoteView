@@ -474,6 +474,208 @@ Expected results (simulated through the module's collection with the same scene)
 |---|---|---|---|---|
 | | | | | |
 
+## §6 Live scene changes (SLC-32, SLC-33, SLC-34; NFR-02, FR-11, FR-12, architecture §6, protocol §6.2, §7.3, §8)
+
+Preconditions: §2's setup. Relay (a) with the update report:
+`node slicer-plugin/tests/relay_stub.mjs --port 8787 --report-updates`. When its input ends, it prints
+`<closes> <pings> v<n>:<sha256> …` and then `{"violations": [...], "updates": [[type, sceneVersion, baseVersion],
+...]}`. Use one stub run per step unless a step says otherwise: start the stub, click *Start session*, do the step,
+click *Stop session*, then end the stub's input. Use relay (b) or (c) with a viewer joined for the visual checks.
+
+Every step also expects `violations == []`, closes `1` and no traceback in the Python console. Write down each
+session code shown; step 15 searches the logs for them.
+
+Paste §5's helpers (`model`, `linear`, `bend`) once, then these:
+
+```python
+import gc, math, threading, time, weakref
+w = slicer.modules.RemoteViewWidget          # open the module once first
+def spheres(count, prefix="Doe^John sphere"):  # placed by their vertices (§5's model): no transform events
+    return [model((50 * i, 0, 0), f"{prefix} {i}") for i in range(count)]
+def every(ms, count, step):                  # calls step(i) every ms, count times; prints the elapsed time
+    timer, state = qt.QTimer(), {"i": 0, "t0": time.monotonic()}
+    def tick():
+        step(state["i"]); state["i"] += 1
+        if state["i"] >= count:
+            timer.stop(); print(f"every: {time.monotonic() - state['t0']:.2f} s")
+    timer.connect("timeout()", tick); timer.start(ms)
+    return timer                             # keep a reference
+def exact_models():
+    return len([n for n in slicer.util.getNodesByClass("vtkMRMLModelNode") if n.GetClassName() == "vtkMRMLModelNode"])
+```
+
+Steps:
+
+1. **Bindings** (no session; research note §4 and §9, SLC-31 `[TODO verify]`).
+   - Run `print(slicer.vtkMRMLScene.NodeAddedEvent, slicer.vtkMRMLScene.NodeRemovedEvent,
+     slicer.vtkMRMLScene.StartBatchProcessEvent, slicer.vtkMRMLScene.EndBatchProcessEvent,
+     slicer.vtkMRMLScene.EndCloseEvent, slicer.vtkMRMLDisplayableNode.DisplayModifiedEvent,
+     slicer.vtkMRMLModelNode.MeshModifiedEvent, slicer.vtkMRMLTransformableNode.TransformModifiedEvent,
+     slicer.mrmlScene.IsBatchProcessing())`.
+     Expected: `8193 8195 8449 8705 8707 17000 17001 15000 False` (or `0` for the last value).
+   - Run `t = qt.QTimer(); t.setSingleShot(True); f = lambda: print("fired"); t.connect("timeout()", f); t.start(100)`.
+     Expected: "fired" is printed once, and `t.isSingleShot()` is `True`.
+   - Run `t.disconnect("timeout()", f)`. Expected: it returns `True`.
+   - Run the same disconnect a second time. Expected: nothing is raised. Record what it returns.
+2. **Wiring and one change** (NFR-02).
+   1. `a, = spheres(1)`
+   2. Click *Start*.
+   3. Run `w.flushTimer.isSingleShot(), w.controller.observer_count == 5 + 4 * exact_models()`. Expected: `(True,
+      True)`. The count includes one hidden model per slice view.
+   4. Run `wr = weakref.ref(w.controller._watcher)` as one statement.
+   5. Change the colour in *Models*.
+   6. Click *Stop*.
+   7. Run `gc.collect(); w.controller.observer_count, wr() is None`. Expected: `(0, True)`.
+   8. Change the colour again.
+
+   Expected:
+   - The status reads "Sending the scene", then "Live".
+   - The viewer shows the first colour change within 0.5 s.
+   - Nothing more is sent after Stop.
+   - The stub shows `v1:` only, and updates `[["scene.update",2,1]]`.
+3. **Idle and slice scrolling.**
+   1. *Sample Data → MRHead*, then `spheres(2)`, with the Red slice shown in 3D.
+   2. Click *Start*. Wait for "Live".
+   3. Scroll the Red slice for about 10 s.
+   4. Leave Slicer idle for 10 s.
+
+   Expected: `v1:` only, and updates `[]` (slice planes cause no loop of marks; research note §5).
+4. **One folder eye toggle** (FR-11).
+   1. `nodes = spheres(5)`, then move them into one folder in *Data*.
+   2. Click *Start*. Wait for "Live".
+   3. Click the folder's eye, wait 1 s, then click it again. Console variant, each as one line:
+      `for n in nodes: n.GetDisplayNode().SetVisibility(0)`, then the same with `(1)`.
+
+   Expected:
+   - Updates exactly `[["scene.update",2,1],["scene.update",3,2]]`, and `v1:` only.
+   - The viewer hides all five at once, then shows them all at once.
+5. **Opacity drag** (two stub runs). Setup: `a, = spheres(1); d = a.GetDisplayNode()`.
+   - Run 1:
+     1. Click *Start*. Wait for "Live".
+     2. Drag *Opacity* by hand for about 5 s, and time it (`T`).
+
+     Expected: `v1:` only; at most `4·T + 2` `scene.update`; the viewer follows within 0.5 s.
+   - Run 2:
+     1. Click *Start*. Wait for "Live".
+     2. Run `keep = every(50, 100, lambda i: d.SetOpacity(0.2 + 0.8 * abs(math.sin(i / 10))))`.
+     3. Wait until it prints `every: T s`.
+
+     Expected: `v1:` only; between `4·T − 1` and `4·T + 2` `scene.update` (`APPEARANCE_MAX_MS` 250).
+6. **Smoothing** (FR-12).
+   1. `a, = spheres(1)`.
+   2. Click *Start*. Wait for "Live".
+   3. In *Surface Toolbox*, set input = output = `a`, choose Smoothing and click Apply.
+
+   Expected:
+   - One new `v2:`, and no `scene.update` for it.
+   - The status reads "Updating the scene", then "Live".
+   - The new shape is on the viewer about 1 s after Apply.
+7. **Transforms.**
+   1. `m = model((0, 0, 0), "Doe^John moved"); t = linear(np.eye(4).tolist(), "Move");
+      m.SetAndObserveTransformNodeID(t.GetID())`.
+   2. Click *Start*. Wait for "Live".
+   3. Drag "Move"'s LR slider in *Transforms* for about 3 s.
+   4. Run `t.SetAndObserveTransformNodeID(bend.GetID())`.
+   5. Drag the slider again.
+
+   Expected:
+   - During the first drag: updates only, and the sphere follows.
+   - After the bend: snapshots at most about every 2 s while dragging, and one about 750 ms after the last change. A
+     baked node takes the slow lane (FR-12).
+8. **Add, delete, rename.**
+   1. `spheres(2)`.
+   2. Click *Start*. Wait for "Live".
+   3. `b = model((0, 80, 0), "Doe^John added")`, then wait 2 s.
+   4. `slicer.mrmlScene.RemoveNode(b)`, then wait 2 s.
+   5. Rename sphere 0 in *Data*.
+
+   Expected:
+   - Updates `[["scene.nodeAdded",2,1],["scene.nodeRemoved",4,3]]`.
+   - Snapshots `v1: v3: v5:`.
+   - The viewer's list shows the new name.
+9. **Close and load** (§7.3). Beforehand, save step 4's scene as `five.mrb`.
+   1. Load `five.mrb`.
+   2. Click *Start*. Wait for "Live".
+   3. *File → Close Scene*, then wait 2 s.
+   4. Load `five.mrb` (*File → Add Data* or *Load Scene*; same result), then wait for "Live".
+
+   Expected:
+   - The viewer is empty within 1 s of the close.
+   - No `scene.nodeRemoved` for the closed models.
+   - The load gives one `scene.nodeAdded` and exactly one more snapshot: `v1: v2: v4:`, updates
+     `[["scene.nodeAdded",3,2]]`.
+10. **HideFromEditors** (SLC-31 `[TODO verify]`).
+    1. `a, b = spheres(2)`.
+    2. Click *Start*. Wait for "Live".
+    3. `a.SetHideFromEditors(1)`, then wait 2 s.
+    4. `a.SetHideFromEditors(0)`.
+
+    Expected:
+    - Updates `[["scene.nodeRemoved",2,1],["scene.nodeAdded",3,2]]`, and snapshots `v1: v4:`.
+    - The sphere leaves the viewer, then comes back.
+    - If nothing happens at `(1)`, the flip fires no `ModifiedEvent`: report it.
+11. **Start during a batch** (SLC-31 review, SLC-33).
+    1. `spheres(3); slicer.mrmlScene.StartState(slicer.vtkMRMLScene.BatchProcessState)`.
+    2. Click *Start*. Wait for the code, then 5 s more.
+    3. `slicer.mrmlScene.EndState(slicer.vtkMRMLScene.BatchProcessState)`.
+
+    Expected:
+    - Until `EndState`, the status reads "Sending the scene · no viewers yet." with the detail "Slicer is still loading
+      or changing the scene: RemoteView sends it when Slicer is done.", and the stub has no snapshot.
+    - Within 0.1 s after `EndState`, one snapshot with all three spheres; updates `[]`.
+    - Variant: click Start during a large `.mrb` load, if the panel accepts the click while the progress dialog is open
+      `[TODO verify]`. Expected: one snapshot after the load.
+12. **Events off the main thread** (SLC-33; research note §5 `[TODO verify]`). Do not run MRML calls on a thread:
+    Slicer's own observers (displayable managers, subject hierarchy, Qt scene models) are not thread-safe. A missed
+    start or end of a batch is covered by SLC-33's unit tests.
+    - Probe on a private object. Run `o = vtk.vtkObject(); seen = []; o.AddObserver(vtk.vtkCommand.ModifiedEvent,
+      lambda c, e: seen.append(threading.get_ident())); th = threading.Thread(target=o.Modified); th.start();
+      th.join(); print(bool(seen) and seen[0] != threading.get_ident())`. Expected: `True` — a Python observer runs on
+      the invoking thread, which is why the watcher's guard exists. Record the result.
+    - The guard:
+      1. `a, = spheres(1)`.
+      2. Click *Start*. Wait for "Live".
+      3. `watcher = w.controller._watcher; th = threading.Thread(target=watcher._on_display, args=(a, "NoEvent"));
+         th.start(); th.join()`.
+
+      Expected: within 0.1 s, one new snapshot at the stub (a re-sync) with no `scene.update` for it, and no traceback.
+      A colour change afterwards gives one `scene.update`.
+13. **SlicerVirtualReality** (N/A without it; research note §2 row 17 `[TODO verify]`).
+    1. Click *Start*. Wait for "Live".
+    2. Enable VR.
+    3. Run `slicer.mrmlScene.GetFirstNodeByClass("vtkMRMLVirtualRealityViewNode").IsA("vtkMRMLViewNode")`. Expected:
+       `True`.
+    4. Turn VR off and on again. Expected: each turn sends at most one `scene.update`, with no error.
+14. **Reload and quit.** Research note §9; Slicer 5.12.4 `util.py:1626` calls `cleanup()`.
+    1. Click *Start*. Wait for "Live".
+    2. `wr = weakref.ref(w.controller._watcher); old = w` (as statements).
+    3. *Developer mode → Reload*.
+    4. Change a colour.
+    5. `gc.collect(); wr() is None, old.flushTimer.isActive()`. Expected: `(True, False)`, and no traceback (the
+       `disconnect` calls work).
+    6. End the stub's input. Expected: closes `1`, and no update after the reload.
+    7. `w = slicer.modules.RemoteViewWidget`, then click *Start* in the reloaded panel. Expected: it works.
+    8. *File → Exit* while live. Expected: Slicer exits within 3 s.
+15. **Logs** (T7, rule 6). Search the application log file (*Help → Report a bug* lists the log files
+    `[TODO verify]`) and the Error Log window, not the console window (it echoes the commands typed). Search for
+    `Doe`, `Traceback`, `vtkMRMLModelNode` and every session code written down during §6. Expected:
+    - None of them is on a line from `remoteview_core` or `RemoteView.py` (Slicer's Python log lines name the source
+      file `[TODO verify]`). Hits on lines Slicer itself wrote, or on console output of the commands typed here
+      (Slicer may mirror the console into its log `[TODO verify]`), are allowed.
+    - No publisher token anywhere (a 43+ character `[A-Za-z0-9_-]` string on a RemoteView line).
+
+Known gaps (not failures):
+- A reset not acknowledged when the connection drops stays on the viewers until the relay's grace ends (≤ 2 min;
+  SLC-17).
+- An error answering an update with a busy code shows "Updating the scene" during the relay's wait (SLC-18).
+- A Close Scene missed off the main thread is not handled as a reset: if the new scene is too large, the closed one
+  stays on the viewers, and a snapshot of the closed scene already in flight is not superseded.
+- Events off the main thread that keep coming re-send the whole scene about every 60 s (SLC-33).
+
+| Date | Slicer version | OS | Result | Tester |
+|---|---|---|---|---|
+| | | | | |
+
 ## §12 Consent text and the scene adapter (SLC-22; R-06, NFR-16, FR-05)
 
 Preconditions: the test Slicer of §2; the *MRHead* sample (*Sample Data*) and two models made in the Python console:

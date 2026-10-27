@@ -16,10 +16,10 @@ from support import (
     URL,
     FakeDisplay,
     FakeFolders,
-    FakeModel,
     FakeScene,
     FakeTransport,
     FakeView,
+    MrmlModel,
     ack,
     created,
     deliver,
@@ -400,7 +400,8 @@ def test_panel_snapshot_any_failure_while_preparing_is_contained(fake, failure):
 def test_panel_snapshot_adapter_sends_the_mrml_scene(
     import_remote_view, slicer_stubs, monkeypatch, fake, packages_installed
 ):
-    model = FakeModel("vtkMRMLModelNode4", displays=[FakeDisplay()], polydata=sphere(8))
+    # MrmlModel: since SLC-34 the adapter's watcher observes the model (a FakeModel cannot be observed)
+    model = MrmlModel("vtkMRMLModelNode4", displays=[FakeDisplay()], polydata=sphere(8))
     nodes = {"vtkMRMLModelNode": [model], "vtkMRMLViewNode": [FakeView("vtkMRMLViewNode1")]}
     monkeypatch.setattr(slicer_stubs["slicer"], "vtkMRMLFolderDisplayNode", FakeFolders())
     monkeypatch.setattr(slicer_stubs["slicer"].util, "getNodesByClass", nodes.__getitem__)

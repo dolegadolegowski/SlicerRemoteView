@@ -20,6 +20,7 @@ import pytest
 from mrml_fakes import EVENT_IDS, Scene
 from support import (
     SESSION_ID,
+    TOKEN,
     URL,
     FakeFolders,
     FakeTimer,
@@ -32,6 +33,7 @@ from support import (
     leaks,
     live_client,
     needs_relay_stub,
+    parent_widget,
     pump_while,
     sphere,
     start_relay_stub,
@@ -730,3 +732,82 @@ def test_panel_live_events_off_the_main_thread_resync(fake, caplog, capfd, case)
         assert len(rig.begins()) == 2
     assert acked(rig, 2).status == "Live · no viewers yet."
     assert leaks(caplog, capfd, *NAMES, code, token) == []
+
+
+# --------------------------------------------------------------------------- SLC-34: the Slicer adapter
+
+
+def _adapter(import_remote_view, slicer_stubs, monkeypatch, *nodes):
+    """``RemoteView.py`` against the stubs, with ``slicer.mrmlScene`` holding ``nodes`` and a fake transport."""
+    slicer = slicer_stubs["slicer"]
+    slicer.mrmlScene.nodes = [MrmlView("vtkMRMLViewNode1"), *nodes]
+    monkeypatch.setattr(slicer.util, "getNodesByClass", slicer.mrmlScene.by_class)
+    monkeypatch.setattr(slicer, "vtkMRMLFolderDisplayNode", FakeFolders())
+    monkeypatch.setattr(panel, "RelayTransport", FakeTransport)
+    module = import_remote_view()
+
+    def start():
+        widget = module.RemoteViewWidget(parent=parent_widget())
+        widget.setup()
+        widget.ui.relayUrlLineEdit.text = URL
+        widget.ui.extraCaPathLineEdit.currentPath = ""
+        widget.onStartClicked()
+        transport = FakeTransport.made[-1]
+        transport.events.put(Connected(1))
+        transport.events.put(Received(1, created()))
+        widget.onPump()
+        return widget, transport
+
+    return slicer.mrmlScene, start
+
+
+def _observed(scene, *nodes) -> bool:
+    return any(scene.HasObserver(e) for e in SCENE_EVENTS) or any(
+        node.HasObserver(e) for node in nodes for e in MODEL_EVENTS
+    )
+
+
+@pytest.mark.usefixtures("fake", "packages_installed")
+def test_panel_live_adapter_follows_the_mrml_scene_only_while_live(
+    import_remote_view, slicer_stubs, monkeypatch, caplog, capfd
+):
+    caplog.set_level(logging.DEBUG)
+    a = MrmlModel(A, name="Doe^John liver")
+    scene, start = _adapter(import_remote_view, slicer_stubs, monkeypatch, a)
+    widget, transport = start()
+    code = widget.controller.view.code
+    assert [m["type"] for _, m in transport.sent if isinstance(m, dict)][:2] == [
+        "session.create",
+        "scene.snapshot.begin",
+    ]
+    assert widget.controller.observer_count == 5 + 4
+    transport.events.put(Received(1, ack(1)))
+    widget.onPump()
+    assert widget.ui.statusLabel.text == "Live · no viewers yet."
+    recolor(a, (0.0, 0.0, 1.0))
+    # 150 ms after the mark (the panel's clock is the real one here: a stall can only shorten it)
+    assert widget.flushTimer.active and 0 < widget.flushTimer.starts[-1] <= 150
+    widget.flushTimer.fire()
+    assert [m["type"] for _, m in transport.sent if isinstance(m, dict)].count("scene.update") == 1
+    widget.onStopClicked()
+    assert widget.controller.observer_count == 0 and not _observed(scene, a)
+    assert not widget.flushTimer.active
+    widget.cleanup()
+    assert leaks(caplog, capfd, *NAMES, code, TOKEN) == []
+
+
+@pytest.mark.usefixtures("fake", "packages_installed")
+def test_panel_live_adapter_reload_during_a_session(import_remote_view, slicer_stubs, monkeypatch):
+    a = MrmlModel(A)
+    scene, start = _adapter(import_remote_view, slicer_stubs, monkeypatch, a)
+    widget, transport = start()
+    assert _observed(scene, a)
+    widget.cleanup()  # Reload: the old widget closes the session and lets go of the scene
+    assert [(f["type"] if f else None, t) for f, t in transport.stops] == [
+        ("session.close", 0),
+        (None, 3.0),
+    ]
+    assert not _observed(scene, a)
+    again, _ = start()  # the reloaded panel's Start works
+    assert _observed(scene, a) and again.controller.observer_count == 5 + 4
+    again.cleanup()
