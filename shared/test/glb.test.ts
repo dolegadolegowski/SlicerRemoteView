@@ -358,7 +358,7 @@ describe("GLB fixtures (PRO-08, §7)", () => {
     // §7.3: EVERY string of the JSON chunk is a fixed constant, an alias / generated MRML ID or a generic name —
     // an allow-list, so a new name-derived string (a mesh, material or scene name) cannot slip in unnoticed.
     const allowed = [
-      /^2\.0$|^SlicerRemoteView( \S+| fixtures)?$|^0\.1\.0-fixtures$|^root$|^mobile$|^m$|^\+Y$/,
+      /^2\.0$|^SlicerRemoteView( 0\.1\.0-fixtures| fixtures)?$|^0\.1\.0-fixtures$|^root$|^mobile$|^m$|^\+Y$/,
       /^x=R\*0\.001, y=S\*0\.001, z=-A\*0\.001$|^(segment|model)$|^(OPAQUE|BLEND)$|^(VEC3|SCALAR)$/,
       /^(Segment|Model) \d+( mesh)?$/,
       /^vtkMRML[A-Za-z]+Node\d+(\/s_\d+)?$/,
