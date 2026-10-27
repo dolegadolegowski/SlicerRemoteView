@@ -1,7 +1,7 @@
 # remoteview_protocol — SlicerRemoteView protocol contract for Python
 
 Part of **SlicerRemoteView** `shared/` (owned by the `protocol` workstream, branch `ws/protocol`, plan
-`docs/plan/protocol.md`). Contract: `docs/protocol.md` v1.0. Mirrors `shared/ts/` so the Slicer extension and
+`docs/plan/protocol.md`). Contract: `docs/protocol.md` v1.1 (the library still announces `protocolVersion` `1.0`, which every receiver accepts; PRO-22). Mirrors `shared/ts/` so the Slicer extension and
 the TypeScript components agree on every message.
 
 ## How it is consumed

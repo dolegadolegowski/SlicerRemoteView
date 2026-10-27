@@ -5,7 +5,7 @@ Part of **SlicerRemoteView**. Owned by the `protocol` workstream (branch `ws/pro
 
 ## Purpose
 
-`docs/protocol.md` v1.0 as an executable contract: one JSON Schema (draft 2020-12) per message type,
+`docs/protocol.md` v1.1 as an executable contract: one JSON Schema (draft 2020-12) per message type,
 valid/invalid fixtures shared by every language, and generated types (`ts/`, `py/`, `cs/`). See
 `docs/architecture.md` and `docs/plan/protocol.md` for the task list.
 
@@ -23,7 +23,7 @@ valid/invalid fixtures shared by every language, and generated types (`ts/`, `py
 | `fixtures/blob/` | binary test vectors of the chunk header (`chunk-header-*.bin`, table in `chunk-headers.json`, see its `README.md`) shared with Python/C# |
 | `fixtures/codes/` | `normalize-cases.json`: `normalizeCode` inputs and expected codes/hints (ADR 0008 §7) |
 | `test/` | vitest suites (`*.test.ts`); file names match the plan's `npm test -w shared -- <name>` filters |
-| `fixtures/glb/` | GLB snapshot fixtures of §7 (`asymmetric-2nodes.glb`, `quantized-1node.glb`, `large-synthetic.glb` ≈ 5 MiB) and five broken files for §7.1 pre-validators; `manifest.json` (byteLength, sha256, nodeIds, triangleCount) — generated, never edited by hand |
+| `fixtures/glb/` | GLB snapshot fixtures of §7 (`asymmetric-2nodes.glb`, `quantized-1node.glb`, `large-synthetic.glb` ≈ 5 MiB, `aliased-segments.glb`, `anonymized-segments.glb`) and five broken files for §7.1 pre-validators; `manifest.json` (byteLength, sha256, nodeIds, triangleCount) — generated, never edited by hand |
 | `scripts/` | generation and check scripts; `generate.mjs` writes `ts/generated/schemas.ts`, `fixtures/messages/expected.json` `ts/generated/messages.ts`, `py/remoteview_protocol/schema/` and `py/remoteview_protocol/generated.py` (`npm run generate`, `--check` for drift); `lib/bundle.mjs` bundles the schemas for the generators, `check.mjs` is `npm run check` (PRO-12, `lib/protocol-doc.mjs` parses the §9.2/§11 tables), `vendor-py.mjs <dir> [--check]` vendors the Python package (ADR 0007 §3, `test/vendor.test.ts`), `make-glb-fixtures.ts` regenerates `fixtures/glb/` (`npm run fixtures`), `check-generators.mjs` = the PRO-02 generator spike, `generate-cs.mjs` writes `cs/` (PRO-17, also called by `generate.mjs`), `build-cs.mjs` + `cs-conformance/Program.cs` compile and exercise the C# when `dotnet` exists (`npm run check:cs`) |
 
 ## How to run
@@ -67,7 +67,7 @@ if (!isAllowed("viewer", result.value.type)) {
 | `validateMessage(message, type?, validators?)` | the same for an already-parsed object, optionally against a named schema (conformance tests, relay-built messages) |
 | `defaultSchemas()` | lazily compiled strict validators used when none are passed |
 | `PERMISSIONS`, `isAllowed(sender, type, recipient = "relay")`, `isBinaryAllowed(sender, recipient?)`, `BINARY_FRAME_PERMISSION` | §11 matrix with the four directions (`publisherToRelay`, `viewerToRelay`, `relayToPublisher`, `relayToViewer`); unknown and `RESERVED_TYPES` (`scene.camera`, `viewer.command`) are never allowed; `test/lib.test.ts` parses the §11 table from `docs/protocol.md` and checks every cell |
-| `MESSAGE_TYPES`, `MessageType`, `isMessageType`, `Message`, `Result`, `ParseError`, `ValidationIssue` | the 28 v1.0 types and the result types; `Message` = the generated `AnyMessage` union; `MessageOfType<"scene.update">` picks one interface |
+| `MESSAGE_TYPES`, `MessageType`, `isMessageType`, `Message`, `Result`, `ParseError`, `ValidationIssue` | the 28 message types and the result types; `Message` = the generated `AnyMessage` union; `MessageOfType<"scene.update">` picks one interface |
 | `PROTOCOL_VERSION` (`"1.0"`), `PROTOCOL_MAJOR`, `ERROR_CODES` (15 codes of §9.2), `CLOSE_CODES` (§9.3: `NORMAL` 1000 … `HANDSHAKE_TIMEOUT` 4012), `LIMITS` (§3.3 maximums in bytes / seconds, e.g. `MAX_TEXT_BYTES_PUBLISHER`, `MAX_SNAPSHOT_BYTES`, `MAX_VIEWERS`, `HEARTBEAT_INTERVAL_S`) | constants; the test cross-checks them against the §3.3, §9.2 and §9.3 tables of `docs/protocol.md` |
 
 ## Generated types (PRO-11)
@@ -158,7 +158,7 @@ Browser-safe (no `node:` imports, WebCrypto for hashing):
 | `npm run typecheck -w shared` | `tsc --noEmit` over `ts/`, `test/` (strict) |
 | `npm run build -w shared` | `tsc -p tsconfig.build.json` → `dist/` (ESM + `.d.ts`) |
 | `npm run generate -w shared` | `node scripts/generate.mjs`: rewrites `ts/generated/schemas.ts`, `ts/generated/messages.ts`, `fixtures/messages/expected.json`, `py/remoteview_protocol/schema/*.json` and `py/remoteview_protocol/generated.py` (needs the Python venv); `npm run generate:check -w shared` (= `--check`, add `--skip-python` without the venv) exits 1 on drift; vitest (`lib`) runs it with `--skip-python`, pytest (`test_generated.py`) runs the full check |
-| `npm run check -w shared` | `node scripts/check.mjs` (PRO-12, offline, ~2 s; the CI entry point DEP-01 calls): Ajv strict compile of every schema; each type of `docs/protocol.md` §11 has a schema and a `valid-*.json` fixture (and no schema is unlisted); §9.2 codes = `errorCode` enum; valid/invalid fixture partition; `generate --check`; `pytest py/tests/test_conformance.py`; `vendor-py --check` for `slicer-plugin/RemoteView/_vendor/remoteview_protocol` when that directory exists. Exit 1 lists every problem with the type name. `-- --skip-python` skips the Python parts when there is no venv |
+| `npm run check -w shared` | `node scripts/check.mjs` (PRO-12, offline, ~2 s; the CI entry point DEP-01 calls): Ajv strict compile of every schema; each type of `docs/protocol.md` §11 has a schema and a `valid-*.json` fixture (and no schema is unlisted); §9.2 codes = `errorCode` enum; valid/invalid fixture partition; `generate --check`; `pytest py/tests/test_conformance.py`; `vendor-py --check` for `slicer-plugin/RemoteView/_vendor/remoteview_protocol` when that directory exists. Exit 1 lists every problem with the type name. `-- --skip-python` skips the Python parts when there is no venv, `-- --skip-vendored` skips the vendored-copy comparison (the unit test uses it; the directory is the slicer workstream's and is stale after a `shared/py` change until it re-vendors) |
 | `npm run generate:cs -w shared` | `node scripts/generate-cs.mjs`: rewrites only `cs/RemoteView.Protocol/*.cs` (`-- --check` = drift check, `-- --out-dir <dir>` = write/compare elsewhere; `npm run generate` and `npm run check` already include it) |
 | `npm run check:cs -w shared` | `node scripts/build-cs.mjs` (PRO-17): builds `cs/RemoteView.Protocol/*.cs` in a throwaway `netstandard2.1` project (LangVersion 9.0, Newtonsoft.Json 13.0.2 from NuGet, i.e. network) and runs `scripts/cs-conformance/Program.cs` over `fixtures/messages`. Prints "skipped" and exits 0 without `dotnet`; `-- --require-dotnet` (CI) fails instead. Manual steps and offline options: `docs/testing/protocol.md` |
 | `npm run test:py -w shared` | `py/.venv/bin/pytest py` (needs the venv below) |
@@ -210,7 +210,8 @@ devDependency (`prompts/01-protocol.md`). `gltf-validator` (Khronos, Dart compil
 - Valid fixtures other than `valid-example.json` are shape fixtures with synthetic `byteLength`/`sha256` values
   (e.g. `scene.snapshot.begin/valid-chunk-64k.json`, 3 full 64 KiB chunks + 1 byte), **except**
   `scene.snapshot.begin/valid-<name>.json` where `<name>.glb` exists in `fixtures/glb/manifest.json`: those carry the
-  manifest's `byteLength`/`sha256`/`nodeCount`/`triangleCount` and `test/glb.test.ts` fails when they drift.
+  manifest's `byteLength`/`sha256`/`nodeCount`/`triangleCount` (and `sceneVersion`/`profile` of the GLB root, §6.2) and `test/glb.test.ts` fails when they drift.
+- `scene.snapshot.begin.byteLength` uses `defs.announcedByteLength` (no 64 MiB maximum, only 2^53 − 1; the relay answers `PAYLOAD_TOO_LARGE`, §6.2), while `scene.snapshot.ready` and `viewer.joined.snapshot` keep `defs.byteLength` with the maximum. Every version field is a uint32 (`maximum: 4294967295`).
 - `fixtures/messages/expected.json` is generated from the directories above (`npm run generate -w shared`) and lists
   every fixture with `type` (the schema to validate against — not the message's own `type`, which is wrong on purpose
   in `invalid-type-const.json`), `valid` and, for invalid ones, the expected `instancePath`; every language's
@@ -232,6 +233,8 @@ octahedron subdivided onto a sphere, an asymmetric tetrahedron), so the output i
 | `asymmetric-2nodes.glb` | §7 reference scene: root `SlicerRemoteView` with the §7.1 extras; segment `Liver` (opaque tetrahedron with vertices at glTF `(+0.1, 0, 0)` and `(0, 0, −0.1)` — a mirrored load shows up immediately) and model `Tumor` (translucent, `T.matrix` translation) |
 | `quantized-1node.glb` | `KHR_mesh_quantization` in `extensionsUsed`/`extensionsRequired`: `POSITION` as `SHORT` (8-byte stride), dequantisation scale/offset in `M.matrix`, `M.extras = {"role": "mesh"}` |
 | `large-synthetic.glb` | ≈ 5 MiB, four spheres, the first with > 65,535 vertices (`UNSIGNED_INT` indices), one translucent, one hidden — load tests and multi-chunk snapshots |
+| `aliased-segments.glb` | §7.3 segment alias (protocol 1.1): segment with raw ID `left lung` has `nodeId` `vtkMRMLSegmentationNode1/s_1` and `extras.segmentId` `left lung`; a second segment keeps its verbatim conforming `nodeId` |
+| `anonymized-segments.glb` | root `anonymizedNames: true`: every segment aliased (`s_1`, `s_2`), no `extras.segmentId`, names `Segment <n>` / `Model 3`; the manifest entry carries `anonymizedNames: true` |
 | `bad-magic.glb`, `truncated.glb`, `external-uri.glb`, `two-scenes.glb`, `no-root-extras.glb` | broken on purpose: each fails the §7.1 pre-validation a viewer runs before its loader (WEB / QST plans); all but `no-root-extras.glb` also fail `gltf-validator` |
 
 `manifest.json` lists `byteLength`, `sha256`, `nodeIds`, `nodeCount`, `triangleCount`, `extensionsRequired` per file;

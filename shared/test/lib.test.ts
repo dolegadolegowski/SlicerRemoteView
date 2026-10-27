@@ -129,7 +129,12 @@ describe("TS validation library (PRO-06)", () => {
       code: "INVALID_MESSAGE",
       instancePath: "/id",
     });
-    // Minor versions are additive (§2): a 1.7 message is accepted by a 1.0 receiver.
+    // Minor versions are additive (§2): 1.0, 1.1 and a 1.7 message are all accepted; a foreign major is not.
+    for (const protocolVersion of ["1.0", "1.1"])
+      expect(parseEnvelope(JSON.stringify({ ...ping, protocolVersion }), strict).ok).toBe(true);
+    expect(fail(JSON.stringify({ ...ping, protocolVersion: "2.0" })).code).toBe(
+      "UNSUPPORTED_VERSION",
+    );
     expect(parseEnvelope(JSON.stringify({ ...ping, protocolVersion: "1.7" }), strict).ok).toBe(
       true,
     );

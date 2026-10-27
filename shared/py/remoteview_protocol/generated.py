@@ -87,6 +87,9 @@ type Sha256 = str
 type ByteLength = int
 
 
+type AnnouncedByteLength = int
+
+
 type SnapshotFormat = Literal['glb']
 
 
@@ -253,7 +256,7 @@ class SceneSnapshotBegin(TypedDict):
     replyTo: NotRequired[Id]
     ts: NotRequired[TimestampMs]
     sceneVersion: SnapshotVersion
-    byteLength: ByteLength
+    byteLength: AnnouncedByteLength
     sha256: Sha256
     chunkCount: int
     chunkSize: int
