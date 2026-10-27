@@ -6,7 +6,7 @@
  * Every variable in `ENV_VARIABLES` appears in `relay-server/.env.example` with its default (a test
  * compares both lists). Inputs the platform or the test harness provides are read too but are
  * not configuration: `RAILWAY_PUBLIC_DOMAIN` (default of `ALLOWED_ORIGINS`), `NODE_ENV` and the
- * test-only `RELAY_TEST_FAST_TIMERS` (honoured only under `NODE_ENV=test`, SRV-21).
+ * test-only `RELAY_TEST_FAST_TIMERS` (honoured only under `NODE_ENV=test`; shortens nothing yet, SRV-29).
  */
 import { LIMITS } from "@slicerremoteview/shared";
 import type { LogLevel } from "./logger.js";
@@ -44,7 +44,7 @@ export interface Config {
   trustProxy: boolean;
   /** SIGTERM → SIGKILL window Railway grants for the `4008` drain (SRV-17). */
   drainingSeconds: number;
-  /** Shortened TTL/heartbeat timers for integration tests (SRV-21); only ever true under `NODE_ENV=test`. */
+  /** Fast timers for integration tests (SRV-29; none shortened yet); only ever true under `NODE_ENV=test`. */
   testFastTimers: boolean;
 }
 

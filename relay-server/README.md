@@ -129,7 +129,7 @@ HMAC'd `clientKey` — never an address. Memory figures are not on `/healthz` (S
 
 ```bash
 npm test -w relay-server             # vitest (all relay tests)
-npm test -w relay-server -- app      # one file by name filter, e.g. `app`, `config`, `codes`, `viewer`, `snapshot`, `state`, `late-join`, `fanout`, `budget`, `resume`, `shutdown`, `dispatch`, `http-scene`, `heartbeat`, `static`, `logs`, `e2e-fake-slicer`, `docker-smoke`
+npm test -w relay-server -- app      # one file by name filter, e.g. `app`, `config`, `codes`, `viewer`, `snapshot`, `state`, `late-join`, `fanout`, `budget`, `resume`, `shutdown`, `load-smoke`, `dispatch`, `http-scene`, `heartbeat`, `static`, `logs`, `e2e-fake-slicer`, `docker-smoke`
 npm run lint -w relay-server         # eslint + prettier --check
 npm run typecheck -w relay-server
 npm run build -w relay-server        # tsc → relay-server/dist (needs `npm run build -w shared` first)
@@ -139,7 +139,45 @@ The root `npm test`, `npm run lint`, `npm run typecheck`, `npm run build` run ev
 
 The per-address limits (`src/ratelimit.ts`) also apply to E2E and load tests: from one address, more than 30
 upgrades, 10 wrong codes or 5 sessions per minute are refused, and 20 wrong codes within 10 minutes ban it. Harnesses run the relay with `TRUST_PROXY=true`
-and give each simulated client its own `X-Forwarded-For` address, as `test/ratelimit.test.ts` does.
+and give each simulated client its own `X-Forwarded-For` address, as `test/ratelimit.test.ts` does — unless they
+stay under the limits from one address, as the load smoke does (below).
+
+## Load smoke (SRV-21)
+
+```bash
+npm run load:smoke -w relay-server                  # 20 viewers, 3 cycles of large-synthetic.glb (4.7 MiB), 5–10 s
+npm run load:smoke -w relay-server -- --viewers 10 --cycles 5 --max-fanout-ms 3000 --max-growth-factor 2
+```
+
+`scripts/load-smoke.ts` starts the relay as a child process (`src/index.ts`, `NODE_ENV=test`, `TRUST_PROXY=false`, a
+free port) with the test-only preload `scripts/memory-probe.ts` (`--expose-gc`; on `SIGUSR2` a full GC, then the
+memory figures as one JSON line — nothing of it is in `src/` or the image). All sockets come from one address: a run
+makes at most 21 upgrades (30 a minute are allowed), and its viewers join one after another, each join with the right
+code giving its attempt back (`RateLimiter.joinSucceeded`, ADR 0008). The publisher plays the fixture with
+fake-slicer's snapshot playback (`loadGlb`, `sendSnapshot` from `tools/fake-slicer/src`, PRO-14) in the script's own
+process, so each cycle starts once every viewer is ready. It prints the relay's memory before the first snapshot and
+one line per cycle, and exits 1 when a check fails:
+
+- every cycle, from `scene.snapshot.begin` to the last viewer holding the whole GLB (its `end`, or `ready` plus the
+  HTTP download; SHA-256 and `X-Scene-Version` checked) ≤ `--max-fanout-ms` (5,000), every viewer streamed
+  (criterion 1, NFR-05 scaled);
+- after a full GC, the relay's live buffers (`arrayBuffers`) grow by less than `--max-growth-factor` (2) × the snapshot
+  from before the first cycle to after the last, and hold less than two snapshots after every cycle (criterion 2,
+  NFR-06). RSS is printed, not gated: even after a GC it swings by up to about three snapshots between cycles;
+- then one viewer stops reading; cycles go on (at most 30) until the relay defers it (`scene.snapshot.ack`
+  `viewersDeferred`) — it alone: every earlier cycle streams all viewers, the deferring one all the others — and the
+  others stay within min(`--max-fanout-ms`, max(2 × the slowest phase-1 cycle, that + 1 s)); reading again, it holds
+  the last snapshot via `ready` and HTTP (criterion 3, FR-24). On loopback the kernel queues tens of MiB for a socket
+  that reads nothing before the relay's own queue reaches the 4 MiB soft watermark, so this takes 2–10 cycles (and a
+  `--fixture` smaller than that watermark is never deferred).
+
+Every wait fails at once when a socket closes, the relay sends an `error`, a hash or a download is wrong, or the relay
+exits; a run gives up after 120 s. The relay and every socket are taken down at the end of every run, failed or timed
+out. The relay has its own process group, so a Ctrl-C reaches only the smoke; whenever the smoke's process dies, the
+relay's stdin pipe ends and the probe kills the relay (`SIGKILL`: the relay's own exit could hang flushing its log to
+the smoke's closed pipe). Nothing printed carries the session code or a token. `test/load-smoke.test.ts` runs a small
+version (3 viewers) and timed-out runs in the normal suite. `RELAY_TEST_FAST_TIMERS` is not set: no relay timer
+bounds these checks (SRV-29, report `docs/testing/reports/2026-10-27-server-6.md`).
 
 ## Test with fake-slicer
 

@@ -18,7 +18,8 @@
     "test": "vitest run",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "load:smoke": "tsx scripts/load-smoke.ts"
   },
   "dependencies": {
     "@fastify/helmet": "13.2.0",
