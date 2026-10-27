@@ -31,7 +31,7 @@ of the session, the first snapshot included:
 - *Hide node names* and the device profile have no MRML event: :meth:`~LiveUpdates.set_anonymize_names` and
   :meth:`~LiveUpdates.request_snapshot` (SLC-18) ask for a snapshot.
 
-The panel (SLC-31) calls :meth:`~LiveUpdates.observe` after every relay message and connection loss and
+The panel (SLC-32) calls :meth:`~LiveUpdates.observe` after every relay message and connection loss and
 :meth:`~LiveUpdates.tick` from its pump; the flush timer calls :meth:`~LiveUpdates.flush`. ``IDLE``/``CLOSED`` stop the
 controller: the marks are dropped and later ones ignored.
 
@@ -97,7 +97,7 @@ class LiveEventKind(enum.Enum):
 
 @dataclass(frozen=True)
 class LiveEvent:
-    """What happened to the scene, for the panel's texts (SLC-31). ``code`` has the shape of a §9.2 code, possibly one
+    """What happened to the scene, for the panel's texts (SLC-32). ``code`` has the shape of a §9.2 code, possibly one
     this version does not know: map it to a fixed text, never show it raw."""
 
     kind: LiveEventKind

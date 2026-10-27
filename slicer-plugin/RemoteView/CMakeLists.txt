@@ -21,6 +21,7 @@ set(MODULE_PYTHON_SCRIPTS
   remoteview_core/live.py
   remoteview_core/mrml_scene.py
   remoteview_core/names.py
+  remoteview_core/observers.py
   remoteview_core/panel.py
   remoteview_core/protocol_client.py
   remoteview_core/snapshot.py
