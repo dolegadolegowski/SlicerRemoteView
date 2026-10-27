@@ -10,7 +10,7 @@
  * 3. the §9.2 error codes equal the `errorCode` enum of `defs.schema.json`;
  * 4. fixture partition: valid fixtures pass, invalid ones fail at their `expect.instancePath`
  *    (the Python run is replayed by `py/tests/test_conformance.py`, step 6);
- * 5. generated files are current (`generate.mjs --check`);
+ * 5. generated files are current (`generate.mjs --check`: TypeScript, Python and — limited to `shared/cs` — C#, PRO-17);
  * 6. Python: `pytest py/tests/test_conformance.py`, and — when the directory exists —
  *    `vendor-py.mjs slicer-plugin/RemoteView/_vendor/remoteview_protocol --check` (ADR 0007 §3).
  *

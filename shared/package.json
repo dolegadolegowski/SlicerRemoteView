@@ -29,6 +29,8 @@
     "build": "tsc -p tsconfig.build.json",
     "generate": "node scripts/generate.mjs",
     "generate:check": "node scripts/generate.mjs --check",
+    "generate:cs": "node scripts/generate-cs.mjs",
+    "check:cs": "node scripts/build-cs.mjs",
     "check": "node scripts/check.mjs",
     "fixtures": "node --experimental-strip-types scripts/make-glb-fixtures.ts",
     "test": "vitest run",
@@ -49,6 +51,7 @@
     "gltf-validator": "^2.0.0-dev.3.10",
     "json-schema-to-typescript": "^16.0.0",
     "prettier": "^3.9.10",
+    "quicktype-core": "26.0.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.71.2",
     "vitest": "^5.0.5"
