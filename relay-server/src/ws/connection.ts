@@ -113,6 +113,11 @@ export class Connection implements Peer {
     if (this.isOpen) this.socket.ping(payload);
   }
 
+  /** Answers the peer's WebSocket ping with its `payload` (`autoPong` is off, `endpoint.ts`). */
+  pong(payload: Buffer): void {
+    if (this.isOpen) this.socket.pong(payload);
+  }
+
   /** Sends `error` (§9.2); `message` is developer-facing English without client data. */
   sendError(code: ErrorCode, message: string, options: ErrorOptions = {}): void {
     this.send({
@@ -185,6 +190,15 @@ export class Connection implements Peer {
     };
     arm();
     this.socket.once("close", () => this.clock.clearTimeout(timer));
+  }
+
+  /**
+   * Stops decoding a socket that is closing or waits to be closed while its peer floods: nothing it
+   * sends is read any more (also not its close frame), and the close timer ends it. Unlike
+   * `terminate()`, what was queued for the peer — the close code — still reaches it.
+   */
+  stopReading(): void {
+    this.socket.pause();
   }
 
   /** Destroys the socket without a closing handshake (a peer that reads nothing cannot complete one). */

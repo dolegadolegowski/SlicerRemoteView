@@ -26,6 +26,7 @@ import type { Connection } from "./ws/connection.js";
 import { createDispatcher } from "./ws/dispatch.js";
 import type { HandlerTable } from "./ws/dispatch.js";
 import { registerWsEndpoint } from "./ws/endpoint.js";
+import type { MessageBudgets } from "./ws/budget.js";
 import { fanout } from "./ws/fanout.js";
 import { heartbeat } from "./ws/heartbeat.js";
 import { publisherHandlers } from "./ws/publisher.js";
@@ -56,6 +57,8 @@ export interface AppOptions {
   heartbeat?: boolean;
   /** The viewer build (`index.html`, `assets/`); default `relay-server/public/` (SRV-16). */
   staticRoot?: string;
+  /** Per-socket message budgets (SRV-25); default `DEFAULT_MESSAGE_BUDGETS` (tests that flood raise them). */
+  budgets?: MessageBudgets;
 }
 
 const NOT_FOUND = { error: "NOT_FOUND" } as const;
@@ -242,6 +245,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     clock,
     logger,
     limiter,
+    ...(options.budgets !== undefined && { budgets: options.budgets }),
     handlers: {
       opened: (connection) => beat.add(connection),
       pong: (connection, data) => {
