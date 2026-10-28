@@ -12,8 +12,9 @@ import numpy as np
 from vtkmodules.vtkCommonCore import vtkObject
 
 #: ``vtkSegmentation``'s event ids by Slicer's attribute names (Libs/Segmentations/vtkSegmentation.h: an enum starting
-#: at 62100 in declaration order; ``[TODO verify]`` against ``slicer.vtkSegmentation.*``, manual §13 step 1). SLC-37's
-#: ``conftest.slicer_stubs`` builds ``slicer.vtkSegmentation`` from it.
+#: at 62100 in declaration order; ``[TODO verify]`` against ``slicer.vtkSegmentation.*``, manual §13 step 1).
+#: ``conftest.slicer_stubs`` builds ``slicer.vtkSegmentation`` from it (SLC-36), and ``test_skeleton`` asserts that
+#: ``RemoteView.makeWatcher`` passes five of them into their own ``MrmlEvents`` fields (SLC-37).
 VTK_SEGMENTATION_EVENTS = {
     "SourceRepresentationModified": 62100,  # not observed: a pass-through of the source representation
     "RepresentationModified": 62101,

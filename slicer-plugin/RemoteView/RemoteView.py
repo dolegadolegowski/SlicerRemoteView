@@ -420,7 +420,9 @@ class RemoteViewLogic(ScriptedLoadableModuleLogic):
 
     @staticmethod
     def sceneApi():
-        """The current scene as ``remoteview_core.collect`` reads it: the model nodes the 3D view shows (SLC-22)."""
+        """The current scene as ``remoteview_core.collect`` reads it: the model nodes (SLC-22) and the segments (SLC-35)
+        the 3D view shows. No segmentations logic is injected: the adapter reads the representation the 3D view draws
+        and never creates one (spec D-g; manual §13)."""
         from remoteview_core.mrml_scene import MrmlSceneApi  # noqa: PLC0415 — imports VTK
 
         return MrmlSceneApi(slicer.util.getNodesByClass, slicer.vtkMRMLFolderDisplayNode)

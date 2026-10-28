@@ -157,7 +157,9 @@ def test_skeleton_import_and_construct_have_no_side_effects(
     )
     scene = slicer_stubs["slicer"].mrmlScene
     assert not any(scene.HasObserver(event) for event in EVENT_IDS.values())
-    assert {"remoteview_core.observers", "remoteview_core.live"}.isdisjoint(sys.modules)
+    assert {"remoteview_core.observers", "remoteview_core.live", "remoteview_core.ids"}.isdisjoint(
+        sys.modules
+    )
     for hook in ("enter", "exit"):  # Slicer calls these whenever the panel is shown/hidden
         if hasattr(widget, hook):
             getattr(widget, hook)()
@@ -350,12 +352,20 @@ def test_skeleton_extension_cmake_metadata():
 # --------------------------------------------------------------------------- SLC-34: live changes in the adapter
 
 
-def test_skeleton_watcher_factory_uses_slicer_event_ids(
-    import_remote_view, slicer_stubs, monkeypatch
-):
-    """Each Slicer constant lands in its own field (a swap would observe the wrong events silently)."""
+#: The five ``vtkSegmentation`` events the adapter passes (SLC-36/37): ``MrmlEvents`` field → ``slicer.vtkSegmentation``
+#: attribute → the id Slicer 5.12.4 is believed to give it (``[TODO verify]`` in Slicer: manual §13 step 1).
+SEGMENTATION_EVENT_FIELDS = {
+    "segment_added": ("SegmentAdded", 62102),
+    "segment_removed": ("SegmentRemoved", 62103),
+    "segment_modified": ("SegmentModified", 62104),
+    "representation_modified": ("RepresentationModified", 62101),
+    "representation_names_modified": ("ContainedRepresentationNamesModified", 62105),
+}
+
+
+def _made_watcher(import_remote_view, monkeypatch, sink) -> dict:
+    """``makeWatcher(sink)`` with ``SceneWatcher`` replaced by a recorder: the keyword arguments it was built with."""
     from remoteview_core import observers  # noqa: PLC0415
-    from remoteview_core.mrml_scene import MrmlSceneApi  # noqa: PLC0415
 
     made = {}
 
@@ -366,14 +376,110 @@ def test_skeleton_watcher_factory_uses_slicer_event_ids(
     monkeypatch.setattr(observers, "SceneWatcher", record)
     widget = import_remote_view().RemoteViewWidget(mock.MagicMock(name="parentWidget"))
     widget.setup()
+    assert widget.makeWatcher(sink) == "watcher"
+    widget.cleanup()
+    return made
+
+
+def test_skeleton_watcher_factory_uses_slicer_event_ids(
+    import_remote_view, slicer_stubs, monkeypatch
+):
+    """Each Slicer constant lands in its own field (a swap would observe the wrong events silently)."""
+    from remoteview_core import observers  # noqa: PLC0415
+    from remoteview_core.mrml_scene import MrmlSceneApi  # noqa: PLC0415
+
     sink = object()
-    assert widget.makeWatcher(sink) == "watcher" and made["sink"] is sink
+    made = _made_watcher(import_remote_view, monkeypatch, sink)
+    assert made["sink"] is sink
     slicer = slicer_stubs["slicer"]
     assert made["events"] == observers.MrmlEvents(**EVENT_IDS)
     assert made["scene"] is slicer.mrmlScene
     assert made["nodes_by_class"] is slicer.util.getNodesByClass
     assert made["world_matrix"].__func__ is MrmlSceneApi.world_matrix
+
+
+# --------------------------------------------------------------------------- SLC-37: segments in the adapter
+
+
+def test_skeleton_watcher_factory_passes_the_five_segmentation_event_ids(
+    import_remote_view, slicer_stubs, monkeypatch
+):
+    """``SegmentAdded``, ``SegmentRemoved``, ``SegmentModified``, ``RepresentationModified`` and
+    ``ContainedRepresentationNamesModified`` each land in their own ``MrmlEvents`` field, read from the
+    ``slicer.vtkSegmentation`` constants — never from a number written into the adapter."""
+    events = _made_watcher(import_remote_view, monkeypatch, object())["events"]
+    vtk_segmentation = slicer_stubs["slicer"].vtkSegmentation
+    assert {field: getattr(events, field) for field in SEGMENTATION_EVENT_FIELDS} == {
+        "segment_added": 62102,
+        "segment_removed": 62103,
+        "segment_modified": 62104,
+        "representation_modified": 62101,
+        "representation_names_modified": 62105,
+    }
+    for field, (attribute, _expected) in SEGMENTATION_EVENT_FIELDS.items():
+        assert getattr(events, field) == getattr(vtk_segmentation, attribute)
+    # the two events the watcher does not observe are in the stub too, and none of them is passed
+    passed = {getattr(events, field) for field in SEGMENTATION_EVENT_FIELDS}
+    assert vtk_segmentation.SourceRepresentationModified not in passed
+    assert vtk_segmentation.SegmentsOrderModified not in passed
+
+
+@pytest.mark.parametrize(
+    "attribute", sorted(attribute for attribute, _ in SEGMENTATION_EVENT_FIELDS.values())
+)
+def test_skeleton_watcher_factory_never_guesses_a_segmentation_event_id(
+    import_remote_view, slicer_stubs, monkeypatch, attribute
+):
+    """A Slicer build whose ``vtkSegmentation`` lacks one of the attributes fails loudly at Start (``AttributeError``),
+    instead of observing an id the adapter made up."""
+    monkeypatch.delattr(slicer_stubs["slicer"].vtkSegmentation, attribute)
+    widget = import_remote_view().RemoteViewWidget(mock.MagicMock(name="parentWidget"))
+    widget.setup()
+    with pytest.raises(AttributeError):
+        widget.makeWatcher(object())
     widget.cleanup()
+
+
+def test_skeleton_scene_api_is_built_from_slicer_functions_only(
+    import_remote_view, slicer_stubs, monkeypatch
+):
+    """``sceneApi()`` takes exactly ``(slicer.util.getNodesByClass, slicer.vtkMRMLFolderDisplayNode)``: segments need
+    no segmentations logic (the adapter reads the representation the 3D view draws and never creates one)."""
+    from remoteview_core import mrml_scene  # noqa: PLC0415
+
+    made: list[tuple] = []
+
+    def record(*args, **kwargs):
+        made.append((args, kwargs))
+        return "api"
+
+    monkeypatch.setattr(mrml_scene, "MrmlSceneApi", record)
+    module = import_remote_view()
+    assert module.RemoteViewLogic.sceneApi() == "api"
+    slicer = slicer_stubs["slicer"]
+    assert made == [((slicer.util.getNodesByClass, slicer.vtkMRMLFolderDisplayNode), {})]
+
+
+_MANUAL_STEP_RE = re.compile(r"§13[^;,.)|]*step (\d+)")
+
+
+def test_skeleton_manual_section_13_exists_for_every_todo_verify_reference():
+    """The ``[TODO verify]`` notes of the adapter and the core point at numbered steps of manual §13 (CLAUDE.md rule
+    10): the section exists, is numbered, and holds every step they name."""
+    manual = (PLUGIN_ROOT.parent / "docs" / "testing" / "slicer.md").read_text()
+    section = re.search(r"^## §13 .*?(?=^## §)", manual, re.MULTILINE | re.DOTALL)
+    assert section, "docs/testing/slicer.md has no §13"
+    steps = {int(n) for n in re.findall(r"^(\d{1,2})\. \*\*", section.group(0), re.MULTILINE)}
+    assert steps == set(range(1, 15)), f"§13 should number steps 1–14, found {sorted(steps)}"
+    referenced = {
+        int(n)
+        for path in (*MODULE_DIR.rglob("*.py"), *(PLUGIN_ROOT / "tests").glob("*.py"))
+        if "_vendor" not in path.parts
+        for n in _MANUAL_STEP_RE.findall(path.read_text())
+    }
+    assert referenced and referenced <= steps, f"dangling §13 step references: {referenced - steps}"
+    readme = (PLUGIN_ROOT / "README.md").read_text()
+    assert "remoteview_core/ids.py" in readme and "slicer.vtkSegmentation" in readme
 
 
 def test_skeleton_cleanup_stops_and_disconnects_both_timers_even_if_the_session_does_not_close(

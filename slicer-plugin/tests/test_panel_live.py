@@ -847,6 +847,50 @@ def test_panel_live_adapter_reload_during_a_session(import_remote_view, slicer_s
     again.cleanup()
 
 
+@pytest.mark.usefixtures("fake", "packages_installed")
+def test_panel_live_adapter_follows_a_segmentation(
+    import_remote_view, slicer_stubs, monkeypatch, caplog, capfd
+):
+    """SLC-37: ``RemoteView.py``'s watcher observes a segmentation node through the five ``slicer.vtkSegmentation.*``
+    ids it passes — a per-segment colour change (``SegmentModified`` with the segment ID) is one ``scene.update``
+    addressing that segment, and Stop leaves no observer on the scene or the node (T7 checked on the log)."""
+    caplog.set_level(logging.DEBUG)
+    seg = MrmlSegmentation(
+        SEG,
+        segments=[
+            FakeSegment("Segment_1", name="Doe^John liver", polydata=sphere(8)),
+            FakeSegment("Segment_2", name="Doe^John spleen", polydata=sphere(8)),
+        ],
+    )
+    scene, start = _adapter(import_remote_view, slicer_stubs, monkeypatch, seg)
+    widget, transport = start()
+    code = widget.controller.view.code
+    assert widget.controller.observer_count == 5 + 8
+    assert all(seg.HasObserver(e) for e in SEGMENTATION_EVENTS)
+    [begin] = [
+        m for _, m in transport.sent if isinstance(m, dict) and m["type"] == "scene.snapshot.begin"
+    ]
+    assert begin["nodeCount"] == 2
+    transport.events.put(Received(1, ack(1)))
+    widget.onPump()
+    assert widget.ui.statusLabel.text == "Live · no viewers yet."
+    seg.displays[0].per_segment["Segment_1"] = {"override_color": (0.0, 0.0, 1.0)}
+    seg.fire("SegmentModified", "Segment_1")
+    # an appearance change: the fast lane, 150 ms after the mark
+    assert widget.flushTimer.active and 0 < widget.flushTimer.starts[-1] <= 150
+    widget.flushTimer.fire()
+    updates = [m for _, m in transport.sent if isinstance(m, dict) and m["type"] == "scene.update"]
+    assert len(updates) == 1
+    assert updates[0]["changes"] == [{"nodeId": f"{SEG}/Segment_1", "color": [0.0, 0.0, 1.0]}]
+    widget.onStopClicked()
+    assert widget.controller.observer_count == 0
+    assert not any(seg.HasObserver(e) for e in SEGMENTATION_EVENTS)
+    assert not any(scene.HasObserver(e) for e in SCENE_EVENTS)
+    assert not widget.flushTimer.active
+    widget.cleanup()
+    assert leaks(caplog, capfd, *NAMES, "Segment_1", "Segment_2", SEG, code, TOKEN) == []
+
+
 # --------------------------------------------------------------------------- SLC-36: segments and aliases end to end
 
 
@@ -924,6 +968,70 @@ def test_panel_live_segments_and_a_scripted_model_follow_slicer(fake, caplog, ca
     ctl.stop()
     assert rig.observers() == 0
     assert leaks(caplog, capfd, *NAMES, "Sphere", "left lung", "Segment_1", SEG) == []
+
+
+def _of_type(rig: Rig, type_: str) -> list[dict]:
+    return [m for m in rig.sent() if isinstance(m, dict) and m["type"] == type_]
+
+
+def test_panel_live_segmentation_opacity_3d_zero_is_visible_false_not_a_removal(fake):
+    """Manual §13 step 5 sub-step 3: a segmentation at ``Opacity3D`` 0 is not drawn (the DM's ``IsVisible``), so its
+    segments leave ``shown`` with an appearance-only mark — the viewers hold them, so each gets ``visible: false`` and
+    ``visible: true`` when the opacity comes back (the fast lane), never ``scene.nodeRemoved`` or a snapshot. Models
+    and segmentations differ at opacity 0 at export time only (a segmentation at ``Opacity3D`` 0 is left out of a
+    snapshot, a model at opacity 0 is exported)."""
+    seg = MrmlSegmentation(SEG)
+    rig = live_rig(seg)
+    acked(rig, 1)
+    seg.displays[0].opacity_3d = 0.0
+    seg.InvokeEvent(EVENTS.display_modified)
+    assert 0 < rig.timer.starts[-1] <= 150
+    rig.timer.advance(150)
+    [hidden] = _updates(rig)
+    assert (hidden["sceneVersion"], hidden["baseVersion"]) == (2, 1)
+    assert sorted(hidden["changes"], key=lambda c: c["nodeId"]) == [
+        {"nodeId": f"{SEG}/Segment_1", "visible": False},
+        {"nodeId": f"{SEG}/Segment_2", "visible": False},
+    ]
+    seg.displays[0].opacity_3d = 1.0
+    seg.InvokeEvent(EVENTS.display_modified)
+    rig.timer.advance(150)
+    shown = _updates(rig)[-1]
+    assert (shown["sceneVersion"], shown["baseVersion"]) == (3, 2)
+    assert sorted(shown["changes"], key=lambda c: c["nodeId"]) == [
+        {"nodeId": f"{SEG}/Segment_1", "visible": True},
+        {"nodeId": f"{SEG}/Segment_2", "visible": True},
+    ]
+    assert len(_updates(rig)) == 2 and len(rig.begins()) == 1
+    assert _of_type(rig, "scene.nodeRemoved") == [] and _of_type(rig, "scene.nodeAdded") == []
+
+
+def test_panel_live_an_empty_segment_added_while_live_costs_a_snapshot_each_step(fake):
+    """Manual §13 step 9 sub-step 2: ``SegmentAdded`` of an empty segment is a snapshot (``v2``) in which the segment
+    is left out as ``no-triangles`` — not held and not in ``sent.skipped`` yet, it can only be re-exported; nothing is
+    announced since only exported entities are. Its first stroke (``RepresentationModified``) lifts a skip reason the
+    classifier is not sure about, so it is another plain snapshot (``v3``) with no ``scene.nodeAdded`` either. The
+    export's own deferred ``SegmentModified(NULL)`` afterwards marks appearance only and sends nothing."""
+    seg = MrmlSegmentation(SEG)
+    rig = live_rig(seg)
+    acked(rig, 1)
+    seg.add_segment(FakeSegment("Segment_3", name="Doe^John added", polydata=None))
+    assert rig.timer.starts[-1] == 750
+    rig.timer.advance(750)
+    assert len(rig.begins()) == 2 and rig.begins()[-1]["nodeCount"] == 2
+    assert [m["nodeId"] for m in manifest(rig.glb())] == [f"{SEG}/Segment_1", f"{SEG}/Segment_2"]
+    view = acked(rig, 2)
+    assert view.detail == panel.skipped_text(1)  # the panel: one segment could not be shared
+    seg.segmentation.segments[-1].mesh = sphere(8)
+    seg.fire("RepresentationModified", "Segment_3")
+    rig.timer.advance(750)
+    assert len(rig.begins()) == 3 and rig.begins()[-1]["nodeCount"] == 3
+    assert f"{SEG}/Segment_3" in [m["nodeId"] for m in manifest(rig.glb())]
+    acked(rig, 3)
+    seg.fire("SegmentModified")  # the deferred NULL event the export's own getters may fire
+    rig.timer.advance(750)
+    assert len(rig.begins()) == 3
+    assert _of_type(rig, "scene.nodeAdded") == [] and _updates(rig) == []
 
 
 @pytest.mark.parametrize("run", ["exported", "skipped", "failing-writer"])
