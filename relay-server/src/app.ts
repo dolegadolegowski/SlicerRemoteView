@@ -392,7 +392,15 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   // No endpoint takes a request body (§10); without parsers a POST to an unknown path is a plain 404.
   app.removeAllContentTypeParsers();
 
-  // `/healthz` is the Railway healthcheck target: status only, no codes, no IPs, no memory figures.
+  /** Viewer sockets open across all sessions (`/healthz`, `/metrics`). */
+  const connectedViewers = (): number => {
+    let viewers = 0;
+    for (const session of registry.sessions()) viewers += session.connectedViewers;
+    return viewers;
+  };
+
+  // `/healthz` is the Railway healthcheck target: status and relay-wide counts only (the viewer's home
+  // page shows them, SRV-31), no codes, no IPs, no per-session or memory figures.
   // `503` while draining, so the edge stops routing here (architecture §9).
   app.get("/healthz", async (_request, reply) => {
     if (draining !== undefined) reply.code(503);
@@ -400,6 +408,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
       status: draining === undefined ? "ok" : "draining",
       uptimeS: Math.floor((clock.now() - startedAt) / 1000),
       sessions: registry.size,
+      viewers: connectedViewers(),
       version: RELAY_VERSION,
     };
   });
@@ -417,17 +426,13 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     registerMetricsRoute(app, {
       token: config.metricsToken,
       metrics,
-      read: () => {
-        let viewers = 0;
-        for (const session of registry.sessions()) viewers += session.connectedViewers;
-        return {
-          sessions: registry.size,
-          viewers,
-          snapshotBytes: registry.snapshotBytes,
-          bufferedBytes: fan.bufferedBytes(),
-          codesEvicted: registry.codesEvicted,
-        };
-      },
+      read: () => ({
+        sessions: registry.size,
+        viewers: connectedViewers(),
+        snapshotBytes: registry.snapshotBytes,
+        bufferedBytes: fan.bufferedBytes(),
+        codesEvicted: registry.codesEvicted,
+      }),
     });
   await registerStatic(app, { root: options.staticRoot ?? DEFAULT_STATIC_ROOT });
 
