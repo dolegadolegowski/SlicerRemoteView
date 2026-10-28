@@ -1037,7 +1037,7 @@ Known gaps (not failures):
 |---|---|---|---|---|
 | | | | | |
 
-## §14 Decimation to the device profile (SLC-14; FR-10, NFR-03, protocol §7.5)
+## §14 Decimation to the device profile (SLC-14, SLC-41; FR-10, NFR-03, NFR-04, protocol §7.5)
 
 Preconditions: §2's setup with relay (b) or (c) and a viewer joined. The panel uses the `mobile` profile (500k
 triangles in all, 100k per model; the profile selector is SLC-18). In a new scene run in the Python console
@@ -1074,9 +1074,58 @@ Expected results:
   is about 3 MB, below the 32 MB recommended for `mobile`).
 - Step 2: "Big" still has 399,616 cells in Slicer: only the copy that is sent is simplified.
 - Throughout: no traceback in the Python console.
-- `[TODO verify]` in Slicer 5.12.4: `vtkQuadricDecimation` and `vtkDecimatePro` from `vtkmodules.vtkFiltersCore` behave
+- `[TODO verify]` in Slicer 5.12.4: `vtkQuadricDecimation` from `vtkmodules.vtkFiltersCore` behaves
   as in the `vtk` 9.6.2 wheel (Slicer builds VTK 9.6.2, `docs/research/slicer-decimate.md`); how long the scene takes to
   prepare (≈ 6 s on the development machine, which sends 250,656 triangles, 3.0 MB).
+
+Steps (large segmentation, SLC-41):
+
+Preconditions: a micro-CT or CT labelmap segmentation whose closed surface has more than 10M triangles, built with the
+smoothing factor of your choice and decimation factor 0 in *Show 3D*'s surface settings — for example the reporter's
+scene, or a CT bone threshold (e.g. *CTChest* from Sample Data, threshold 200 HU) with the segmentation geometry
+oversampled × 2-4 (*Specify geometry*; that it passes 10M is `[TODO verify]`); MRHead at its native resolution is
+very likely far below 10M. Check the count before step 3:
+`seg.GetClosedSurfaceInternalRepresentation(sid).GetNumberOfPolys()` (`seg` the segmentation node, `sid` the
+segment ID). Restart Slicer first so the module is loaded fresh; a phone joined in
+step 4. The memory reading below is for macOS (`ru_maxrss` is in bytes there; on Linux it is in KiB, and
+`resource` does not exist on Windows — use the system monitor instead). `ru_maxrss` is the process peak since
+start, so it also counts Slicer's own conversion of the labelmap to a surface: note it once before and once after
+the snippet.
+
+3. In the Python console, run the snapshot's steps by hand and time them:
+
+   ```python
+   import resource, time
+   from remoteview_core import collect, decimate, mrml_scene
+   start = time.perf_counter()
+   scene = mrml_scene.MrmlSceneApi(slicer.util.getNodesByClass, slicer.vtkMRMLFolderDisplayNode)
+   collected = collect.collect_scene(scene, anonymize_names=False)
+   middle = time.perf_counter()
+   fitted = decimate.fit_to_budget(collected.entities, decimate.PROFILES["mobile"])
+   end = time.perf_counter()
+   print(f"collect {middle - start:.1f} s, fit {end - middle:.1f} s, {fitted.triangle_count} triangles,",
+         f"reduced {len(fitted.reduced)}, unreduced {len(fitted.unreduced)},",
+         f"peak {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20:.0f} MiB")  # macOS: bytes
+   ```
+
+   (The scene adapter is built as `RemoteView.py` builds it; peak memory can also be read in Activity Monitor.)
+4. Click *Start session*, time it from the click to "Live", and join with the phone.
+5. On the phone, orbit to the same view as Slicer's 3D view and take a screenshot of both.
+
+Expected results:
+
+- Step 3: collect < 5 s, fit < 8 s and both together about 11 s on the development Mac under Rosetta (measured
+  2026-10-28 on the reporter's scene with a script doing the same steps: 3.8-4.4 s + 6.6-6.7 s; natively 3.4 s +
+  4.5 s; before SLC-41: 6.3 s + 169.6 s and 16 GB); peak memory about 12 GiB (measured 12.2 GiB, of which 7.2 GiB is
+  Slicer with the scene loaded, so the snippet prints about 12,500 MiB; natively the same flow peaks at 7.3 GiB);
+  the node is reduced to ≤ 100,000 triangles and none is unreduced; no `Decimation: …` warning in the Python
+  console or the Error Log (that warning means the coarser clustering fallback ran instead of the quadric, and says
+  why and with what result; whether the console shows it depends on its log level, `[TODO verify]` for 5.12.4).
+- Step 4: Slicer is busy for about 11-15 s, not about 3 minutes.
+- Step 5: the phone's view is smooth like Slicer's: no cracks along lines, no shards, no large flat facets, no dark
+  speckle pattern. Expected at 100k triangles: the fine grain is smoothed away, and the thinnest perforated walls show
+  a few see-through specks.
+- Throughout: no warning or traceback in the Python console (step 3 prints its one line).
 
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|

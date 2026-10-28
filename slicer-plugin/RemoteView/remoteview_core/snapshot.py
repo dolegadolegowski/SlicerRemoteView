@@ -9,7 +9,7 @@ transport in order.
 - The GLB is quantised (``KHR_mesh_quantization``, FR-09, SLC-12): about half the vertex data; ``begin`` declares the
   extension because the client reads it from the file.
 - The meshes are decimated to the budgets of the session's profile (SLC-14, §7.5, FR-10): :attr:`Snapshot.reduced`
-  names the nodes that were, :attr:`Snapshot.unreduced` those no filter could reduce (sent whole), and
+  names the nodes that were, :attr:`Snapshot.unreduced` those nothing could reduce (sent whole), and
   :attr:`Snapshot.over_target` says the GLB is above the profile's recommended size (NFR-03: warn).
 - An empty scene is a snapshot too (no nodes): viewers then show an empty scene instead of an old one.
 - A GLB over the relay's ``maxSnapshotBytes`` raises :class:`SnapshotTooLargeError` before any version is used — before
