@@ -13,7 +13,7 @@
   close reasons and error codes are mapped to texts, and an unknown code is shown only as its validated enum value.
   The adapter's labels are plain text (no rich text from anywhere).
 - The session code is shown only while the session runs and is never logged.
-- No resume yet (SLC-17): a connection lost after ``session.created`` ends the session; one lost before it is
+- No resume yet (SLC-37): a connection lost after ``session.created`` ends the session; one lost before it is
   retried by the transport, which then sends a new ``session.create``. A relay that keeps the socket open but does
   not answer ``session.create`` within :data:`CREATE_TIMEOUT_S` ends the attempt.
 - With a ``scene`` factory, the first ``session.created`` hands the session to SLC-29's
@@ -25,7 +25,7 @@
   scene — with the reason and what happens next; a scene that cannot go out now (too large, refused, not prepared)
   leaves the session running (the code still works). A closed scene that cannot be cleared off the viewers ends the
   session (§7.3).
-- No automatic ``session.renew``: until ``release`` decides how renewal follows user activity (SLC-17/SLC-18), a
+- No automatic ``session.renew``: until ``release`` decides how renewal follows user activity (SLC-40), a
   session nobody joins ends after the relay's idle TTL (NFR-11, T1) instead of living for its 12 h maximum.
 """
 
@@ -91,6 +91,53 @@ FINAL_NOT_SENT = (
     "The stop message could not be sent in time: the relay keeps the session for up to 2 minutes, "
     "then ends it."
 )
+#: Reconnecting after a lost connection (SLC-37/SLC-38; protocol §4.3, §9.1). "A few minutes", never a number: the
+#: relay's grace plus up to 60 s before the relay notices the drop (§9.1 heartbeat). While the relay may keep the
+#: session, the texts say who can still see the scene, as the consent text does ("anyone who has the session code").
+RECONNECTING_IN = "Connection lost — reconnecting in {seconds} s."
+RESTARTING_IN = "The relay is restarting — reconnecting in {seconds} s."
+RECONNECTING = "Reconnecting to the session…"
+RELAY_HOLDS_SESSION = (
+    "Anyone with the code can still see the last scene until the relay ends the session, "
+    "after a few minutes."
+)
+RECONNECT_DETAIL = (
+    "The code stays the same: viewers continue when RemoteView is back. Until then anyone with the code "
+    "can still see the last scene; the relay ends the session if RemoteView is not back within a few "
+    "minutes."
+)
+RECONNECT_GAVE_UP = (
+    "The connection to the relay was lost for too long, so the session ended. "
+    "Click Start session for a new code."
+)
+SESSION_LOST = (
+    "Session lost: the relay no longer accepts RemoteView for this session. "
+    + RELAY_HOLDS_SESSION
+    + " Click Start session for a new code."
+)
+SESSION_GONE_OFFLINE = (
+    "The relay ended the session while RemoteView was offline. Click Start session for a new code."
+)
+RESUME_NO_ANSWER = (
+    "The relay did not answer after the connection came back, so the session was stopped. "
+    "Click Start session for a new code."
+)
+STOPPED_OFFLINE = (
+    "RemoteView was not connected to the relay when you stopped. " + RELAY_HOLDS_SESSION
+)
+RELAY_RESTARTED = (
+    "The relay restarted: RemoteView starts the session again, "
+    "with the same code if it is still free."
+)
+NEW_CODE = (
+    "The relay restarted and could not keep the old code: give the viewers the new code. "
+    "The old code may now belong to another session."
+)
+SCENE_INTERRUPTED = "Sending the scene was interrupted: RemoteView sends it again once reconnected."
+RESET_PENDING = (
+    "The scene was closed in Slicer, but anyone with the code still sees it until RemoteView "
+    "reconnects, or until the relay ends the session after a few minutes."
+)
 #: Why a session ended, by ``ProtocolClient.close_reason`` (§4.5 reasons, §9.2 error codes, §9.3 close codes).
 END_REASONS = {
     "USER_STOPPED": "",
@@ -108,13 +155,28 @@ END_REASONS = {
     "POLICY_VIOLATION": "The relay refused a message from RemoteView. Please report this.",
     "INTERNAL": "The relay had an internal error. Try again later.",
 }
+#: Why a session ended while reconnecting, where :data:`END_REASONS` would mislead: the relay refused the resume
+#: (§4.3, §9.2). ``SESSION_NOT_FOUND`` ends a session only then (a create refused with it is not "offline").
+RECONNECT_END_REASONS = {
+    "UNAUTHORIZED": SESSION_LOST,
+    "SESSION_NOT_FOUND": SESSION_GONE_OFFLINE,
+}
 
 
 class Phase(enum.Enum):
     IDLE = "idle"  # nothing runs; Start is enabled
     CONNECTING = "connecting"  # transport started, waiting for session.created
     LIVE = "live"  # session created: the code is shown
+    # the connection was lost: the code and Stop stay while the session waits for a resume (SLC-37)
+    RECONNECTING = "reconnecting"
     STOPPING = "stopping"  # waiting for the transport to end
+
+
+#: The phases that show the session code and its link: a session keeps its code while reconnecting (after a 4008
+#: restart the relay may have freed it until the session is created again: SLC-38 says so, T4).
+_SHOWS_CODE = (Phase.LIVE, Phase.RECONNECTING)
+#: The phases in which a transport runs for a session that is not stopping: Stop is enabled, the extra-CA note shows.
+_RUNNING = (Phase.CONNECTING, Phase.LIVE, Phase.RECONNECTING)
 
 
 @dataclass(frozen=True)
@@ -129,6 +191,11 @@ class PanelView:
     start_enabled: bool = True
     stop_enabled: bool = False
     settings_enabled: bool = True  # relay address and CA file
+
+    def __post_init__(self) -> None:
+        # the link holds the code: no link without its code (a code may show alone: NO_LINK)
+        if self.link and not self.code:
+            raise ValueError("a join link needs its code")  # fixed text: never the link itself
 
 
 #: The first part of the live status, by the state of the scene (no scene factory: "").
@@ -217,6 +284,12 @@ def end_text(reason: str | None) -> str:
     if reason in END_REASONS:
         return END_REASONS[reason]
     return f"The relay ended the session ({reason})."
+
+
+def retry_seconds(retry_in: float) -> int:
+    """Whole seconds until the transport tries again, for the texts: rounded up and never 0 (a 4008 restart retries
+    after 0–3 s, §9.3)."""
+    return max(1, math.ceil(retry_in))
 
 
 class Watcher(Protocol):
@@ -382,15 +455,27 @@ class PanelController:
         return self.view
 
     def shutdown(self, timeout: float = SHUTDOWN_TIMEOUT_S) -> bool:
-        """Module cleanup: like :meth:`stop`, but waits up to ``timeout`` s for the transport to end."""
+        """Module cleanup: like :meth:`stop`, but waits up to ``timeout`` s for the transport to end. The transport is
+        stopped and the panel left idle even when the close or the stop raises (the error still propagates); when this
+        call's close or its first ``stop()`` raised, a plain ``session.close`` goes with the last ``stop()``, so the
+        relay frees the code at once rather than after its grace (T1)."""
         if self._transport is None:
             return True
-        if self.phase is not Phase.STOPPING:
-            self._finish("")
-        transport, self._transport = self._transport, None
-        # a second stop() keeps the first final message
-        ended = bool(transport.stop(timeout=timeout))
-        self._idle(NOT_CONNECTED)
+        transport, ended, handed_over = self._transport, False, False
+        try:
+            if self.phase is not Phase.STOPPING:
+                self._finish("")
+            handed_over = True  # this call ended the session without raising, or a Stop did before
+        finally:
+            self._transport = None
+            fallback = None
+            if not handed_over and self._connection is not None:
+                fallback = envelope("session.close", reason="USER_STOPPED")
+            try:
+                # only the first stop()'s final message counts: a second one waits
+                ended = bool(transport.stop(fallback, timeout=timeout))
+            finally:
+                self._idle(NOT_CONNECTED)
         return ended
 
     def pump(self, max_events: int = MAX_EVENTS_PER_PUMP) -> PanelView:
@@ -467,7 +552,7 @@ class PanelController:
             # the socket and the session (§11): a live session is closed explicitly, so its code is freed at once.
             fatal = self.phase is Phase.LIVE and message.get("type") == "error"
             close = envelope("session.close", reason="USER_STOPPED") if fatal else None
-            self._finish(end_text(client.close_reason), close)
+            self._finish(self._reason_text(client.close_reason), close)
 
     def _on_disconnected(self, event: Disconnected) -> None:
         client = self._client
@@ -489,7 +574,7 @@ class PanelController:
                 reason = client.close_reason if client.state is SessionState.CLOSED else None
                 if client.state is not SessionState.CLOSED:
                     client.close()  # nothing can be sent any more; forget the token and the code
-                mapped = end_text(reason) if reason not in (None, "CONNECT_FAILED") else ""
+                mapped = self._reason_text(reason) if reason not in (None, "CONNECT_FAILED") else ""
                 detail = mapped or (event.error.guidance if event.error is not None else "")
             if self._user_stopped:
                 status = SESSION_ENDED if detail else NOT_CONNECTED
@@ -502,15 +587,15 @@ class PanelController:
         live = client.state in (SessionState.CREATED, SessionState.ACTIVE)
         client.transport_lost(event.close_code)
         self._observe_live()  # the marks are held; a snapshot in flight is lost (§6.3)
-        if live:  # no resume before SLC-17
+        if live:  # no resume before SLC-37
             self._finish(RESUME_LATER)
             return
         self._connection = None
         self._create_deadline = None
         detail = event.error.guidance if event.error is not None else ""
-        # rounded up, and never "0 s" (a 4008 restart retries after 0–3 s)
-        seconds = max(1, math.ceil(event.retry_in))
-        self._show(f"Relay unreachable — retrying in {seconds} s.", detail=detail)
+        self._show(
+            f"Relay unreachable — retrying in {retry_seconds(event.retry_in)} s.", detail=detail
+        )
 
     # ------------------------------------------------------------------ helpers
 
@@ -679,6 +764,12 @@ class PanelController:
         except Exception as exc:  # noqa: BLE001 — the session is closing; a text must not undo that (T7)
             _log.error("scene: panel not updated (%s)", type(exc).__name__)
 
+    def _reason_text(self, reason: str | None) -> str:
+        """:func:`end_text`, except for the reasons :data:`RECONNECT_END_REASONS` explains while reconnecting."""
+        if self.phase is Phase.RECONNECTING and reason in RECONNECT_END_REASONS:
+            return RECONNECT_END_REASONS[reason]
+        return end_text(reason)
+
     def _join_link(self, code: str) -> tuple[str, str]:
         """``(link, note)`` for the live session: the viewer link on the relay's own host (SLC-11), or no link and a
         note when there is none (too long for a QR code, or a relay that is not at ``/ws``)."""
@@ -691,15 +782,16 @@ class PanelController:
 
     def _show(self, status: str, *, detail: str = "", code: str = "") -> PanelView:
         phase = self.phase
-        note = self._ca_note if phase in (Phase.CONNECTING, Phase.LIVE) else ""
-        link, link_note = self._join_link(code) if phase is Phase.LIVE else ("", "")
+        note = self._ca_note if phase in _RUNNING else ""
+        shown = phase in _SHOWS_CODE
+        link, link_note = self._join_link(code) if shown else ("", "")
         self.view = PanelView(
             status=status,
             detail="\n".join(part for part in (detail or note, link_note) if part),
-            code=code if phase is Phase.LIVE else "",
+            code=code if shown else "",
             link=link,
             start_enabled=phase is Phase.IDLE,
-            stop_enabled=phase in (Phase.CONNECTING, Phase.LIVE),
+            stop_enabled=phase in _RUNNING,
             settings_enabled=phase is Phase.IDLE,
         )
         return self.view

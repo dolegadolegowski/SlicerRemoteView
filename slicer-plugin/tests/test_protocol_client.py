@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import pickle
+import re
 import struct
 import subprocess
 import sys
@@ -1028,11 +1029,82 @@ def test_protocol_client_handle_never_raises(bare, message):
     assert bare.state is SessionState.CREATED
 
 
+def _defs() -> dict:
+    """``defs.schema.json#/definitions`` of the vendored protocol package (what the relay validates against)."""
+    path = Path(schemas.__file__).parent / "schema" / "defs.schema.json"
+    return json.loads(path.read_text(encoding="utf-8"))["definitions"]
+
+
 def test_protocol_client_known_platforms_match_the_schema():
-    defs = json.loads(
-        (Path(schemas.__file__).parent / "schema" / "defs.schema.json").read_text(encoding="utf-8")
-    )["definitions"]
-    assert set(defs["platform"]["enum"]) == protocol_client.KNOWN_PLATFORMS
+    assert set(_defs()["platform"]["enum"]) == protocol_client.KNOWN_PLATFORMS
+
+
+# --------------------------------------------------------------------------- contract bounds (branch audit, SLC-36)
+# The Slicer runtime has no jsonschema: the client's own checks must accept exactly what the vendored schema allows,
+# so a bound widened in a protocol minor fails here instead of making the client drop valid relay messages.
+
+
+def test_protocol_client_enum_bounds_match_the_vendored_schema():
+    defs = _defs()
+    assert tuple(defs["profile"]["enum"]) == protocol_client.PROFILES
+    assert frozenset(defs["gltfExtension"]["enum"]) == protocol_client.ALLOWED_EXTENSIONS
+
+
+def _schema_accepts(definition: dict, value: str) -> bool:
+    """An anchored ``^…$`` schema pattern with ECMA-262 semantics (``$`` never matches before a trailing newline)
+    and the schema's length bounds."""
+    pattern = definition["pattern"]
+    assert pattern.startswith("^") and pattern.endswith("$")
+    return (
+        definition["minLength"] <= len(value) <= definition["maxLength"]
+        and re.fullmatch(pattern[1:-1], value) is not None
+    )
+
+
+@pytest.mark.parametrize(
+    ("definition", "name"),
+    [("token", "_TOKEN"), ("sessionId", "_SESSION_ID"), ("nodeId", "_NODE_ID")],
+)
+def test_protocol_client_string_bounds_match_the_vendored_schema(definition, name):
+    pattern = getattr(protocol_client, name)
+    schema = _defs()[definition]
+    low, high = schema["minLength"], schema["maxLength"]
+    # every ASCII character and a few look-alikes (\uff21 is a full-width A), alone at both length bounds
+    chars = [chr(i) for i in range(0x80)] + ["é", "٣", "\u00a0", "\uff21", "\u2028"]
+    values = [char * length for char in chars for length in {max(low, 1), high}]
+    values += ["A" * length for length in (low - 1, low, high, high + 1) if length >= 0]
+    values.append("A" * low + "\n")
+    for value in values:
+        accepted = pattern.fullmatch(value) is not None
+        assert accepted == _schema_accepts(schema, value), (definition, len(value), value[:1])
+
+
+def _accepts_created(message: dict) -> bool:
+    client = ProtocolClient(make_client_info("5.12.4", "win32"))  # no validator: the runtime path
+    client.start("mobile")
+    client.handle(message)
+    return client.state is SessionState.CREATED and client.invalid_inbound == 0
+
+
+def test_protocol_client_number_bounds_match_the_vendored_schema(bare):
+    defs = _defs()
+    limits = defs["limits"]["properties"]
+    assert set(limits) == set(protocol_client._LIMITS)
+    cases = [(None, "viewerLimit", defs["viewerLimit"])]
+    cases += [("limits", key, spec) for key, spec in limits.items()]
+    for parent, key, spec in cases:
+        low, high = spec["minimum"], spec["maximum"]
+        for value, accepted in ((low - 1, False), (low, True), (high, True), (high + 1, False)):
+            message = _created()
+            (message[parent] if parent else message)[key] = value
+            assert _accepts_created(message) is accepted, (key, value)
+    low, high = defs["viewerLimit"]["minimum"], defs["viewerLimit"]["maximum"]
+    for value, accepted in ((low - 1, False), (low, True), (high, True), (high + 1, False)):
+        before = bare.invalid_inbound
+        bare.handle(
+            envelope.make("viewer.count", viewerCount=1, viewerLimit=value, platforms={"web": 1})
+        )
+        assert (bare.invalid_inbound == before) is accepted, ("viewer.count", value)
 
 
 def test_protocol_client_inbound_checks_cover_every_handler():

@@ -38,7 +38,7 @@ URL = "wss://relay.example.org/ws"
 CODE = "7KQ4X"
 TOKEN = "pt_Mn3Vq8YtK2cR9xLwZaBdE7fGhJ4uP6sTvW1yXoNQ5kA"  # noqa: S105 — the protocol.md §4.2 example token
 SESSION_ID = "sess_01K7Q4XMB2TJ9RD6"
-#: A second session (a re-create after a relay restart may get another code, SLC-17/SLC-38).
+#: A second session (a re-create after a relay restart may get another code, SLC-38).
 OTHER_CODE = "9HJ4M"
 OTHER_SESSION_ID = "sess_01K7Q9ZRB4MP2WX8"
 OTHER_TOKEN = "pt_Zq2Wx7Rb4Mp9Kt3Hv6Nc8Yd1Lf5Gs0Je2Ua7Qo4Xi"  # noqa: S105 — a made-up token of the defs pattern

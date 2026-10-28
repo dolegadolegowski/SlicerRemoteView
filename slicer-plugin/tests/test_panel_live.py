@@ -19,6 +19,7 @@ import weakref
 import pytest
 from mrml_fakes import EVENT_IDS, Scene
 from support import (
+    CODE,
     SESSION_ID,
     TOKEN,
     URL,
@@ -561,6 +562,47 @@ def test_panel_live_a_close_that_fails_still_removes_the_observers(
     rig.pump(1000)
     assert len(FakeTransport.made[0].sent) == sent
     assert leaks(caplog, capfd, *NAMES) == []
+
+
+@pytest.mark.parametrize("fails", ["close", "transport-stop"])
+def test_panel_live_shutdown_stops_the_transport_even_if_the_close_raises(
+    fake, monkeypatch, caplog, capfd, fails
+):
+    """SLC-34 review (SLC-36): module cleanup leaves no transport, observer or pending flush behind, even when the
+    close or the transport's stop raises; the error still reaches ``cleanup()``, which logs its type only."""
+    caplog.set_level(logging.DEBUG)
+    a = MrmlModel(A, name="Doe^John liver")
+    rig = live_rig(a)
+    acked(rig, 1)
+    recolor(a, (0.0, 1.0, 0.0))  # a flush pending
+    transport = FakeTransport.made[0]
+    stops = []
+
+    def boom(*args, **kwargs):
+        stops.append((args[0] if args else None, kwargs.get("timeout")))
+        raise SECRET
+
+    if fails == "close":
+        monkeypatch.setattr(rig.ctl._client, "close", boom)
+    else:
+        monkeypatch.setattr(transport, "stop", boom)
+    with pytest.raises(KeyError):
+        rig.ctl.shutdown(timeout=3.0)
+    if fails == "close":
+        # stopped all the same, with the wait and a plain session.close in place of the client's
+        stops = transport.stops
+        [(fallback, wait)] = stops
+    else:
+        # the close's stop, then the wait with a plain session.close: the transport took neither
+        [(final, first), (fallback, wait)] = stops
+        assert (final["type"], final["reason"], first) == ("session.close", "USER_STOPPED", 0)
+    assert (fallback, wait) == (envelope.make("session.close", reason="USER_STOPPED"), 3.0)
+    assert rig.ctl.phase is Phase.IDLE and not rig.ctl.active
+    assert rig.ctl.view == panel.PanelView(panel.NOT_CONNECTED)
+    assert rig.observers() == 0 and rig.ctl.observer_count == 0
+    assert rig.timer.deadline is None
+    assert rig.ctl.shutdown() is True  # nothing left to stop
+    assert leaks(caplog, capfd, *NAMES, CODE, TOKEN) == []
 
 
 @pytest.mark.parametrize("fails", ["detach", "stop"])
