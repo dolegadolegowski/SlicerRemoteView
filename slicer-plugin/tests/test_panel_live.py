@@ -36,6 +36,8 @@ from support import (
     needs_relay_stub,
     parent_widget,
     pump_while,
+    relay_error,
+    resumed,
     sphere,
     start_relay_stub,
 )
@@ -92,6 +94,7 @@ class Rig:
             platform=sys.platform,
             transport_factory=transport_factory,
             clock=self.timer.clock,
+            wall=self.timer.clock,  # no host clock step can reach the reconnect window
             scene=lambda: MrmlSceneApi(self.scene.by_class, FakeFolders()),
             flush_timer=self.timer,
             watch=watch or self.watch,
@@ -257,13 +260,49 @@ def test_panel_live_end_to_end_with_the_relay_stub(caplog, capfd):
 ENDS = [
     "stop",
     "relay-end",
-    "lost",
+    "reconnect-gave-up",
+    "resume-unauthorized",
+    "stop-while-reconnecting",
     "transport-ended",
     "shutdown",
     "refused-reset",
     "binary-frame",
     "fatal-error",
 ]
+
+
+def end_session(rig: Rig, end: str) -> None:
+    """End a live session in one of the ways of :data:`ENDS`."""
+    ctl = rig.ctl
+    if end == "stop":
+        ctl.stop()
+    elif end == "relay-end":
+        expired = envelope.make("session.expired", sessionId=SESSION_ID, reason="IDLE")
+        deliver(ctl, Received(1, expired))
+    elif end == "reconnect-gave-up":
+        deliver(ctl, Disconnected(1, None, 1.0))
+        rig.pump(180_000)  # the relay's grace and the slack; the pause hold leaves no flush to fire
+    elif end == "resume-unauthorized":
+        deliver(ctl, Disconnected(1, None, 1.0), Connected(2))
+        [resume] = [m for c, m in FakeTransport.made[0].sent if c == 2]
+        deliver(ctl, Received(2, relay_error("UNAUTHORIZED", resume["id"])))
+    elif end == "stop-while-reconnecting":
+        deliver(ctl, Disconnected(1, None, 1.0))
+        ctl.stop()
+    elif end == "transport-ended":
+        error = TransportError(ErrorKind.CLOSED, retryable=False, close_code=4003)
+        deliver(ctl, Disconnected(1, error, None))
+    elif end == "shutdown":
+        ctl.shutdown(timeout=0)
+    elif end == "refused-reset":
+        close_scene(rig)
+        rig.timer.advance(0)
+        refuse(rig, "CAPACITY")
+    elif end == "binary-frame":
+        deliver(ctl, Received(1, b"\x00"))
+    else:
+        fatal = envelope.make("error", code="UNAUTHORIZED", message="x", retryable=False)
+        deliver(ctl, Received(1, fatal))
 
 
 @pytest.mark.parametrize("end", ENDS)
@@ -280,27 +319,7 @@ def test_panel_live_observers_exist_only_while_live(fake, caplog, capfd, end):
     assert rig.observers() == 5 + 4 and ctl.observer_count == 5 + 4
     recolor(a, (0.0, 1.0, 0.0))
     assert rig.timer.deadline is not None  # a flush pending when the session ends
-    if end == "stop":
-        ctl.stop()
-    elif end == "relay-end":
-        expired = envelope.make("session.expired", sessionId=SESSION_ID, reason="IDLE")
-        deliver(ctl, Received(1, expired))
-    elif end == "lost":
-        deliver(ctl, Disconnected(1, None, 1.0))
-    elif end == "transport-ended":
-        error = TransportError(ErrorKind.CLOSED, retryable=False, close_code=4003)
-        deliver(ctl, Disconnected(1, error, None))
-    elif end == "shutdown":
-        ctl.shutdown(timeout=0)
-    elif end == "refused-reset":
-        close_scene(rig)
-        rig.timer.advance(0)
-        refuse(rig, "CAPACITY")
-    elif end == "binary-frame":
-        deliver(ctl, Received(1, b"\x00"))
-    else:
-        fatal = envelope.make("error", code="UNAUTHORIZED", message="x", retryable=False)
-        deliver(ctl, Received(1, fatal))
+    end_session(rig, end)
     assert ctl.phase is not Phase.LIVE
     assert ctl.observer_count == 0 and rig.observers() == 0
     assert rig.timer.deadline is None
@@ -312,7 +331,32 @@ def test_panel_live_observers_exist_only_while_live(fake, caplog, capfd, end):
     ctl.flush_live()
     rig.pump(1000)
     assert len(FakeTransport.made[0].sent) == sent
-    assert leaks(caplog, capfd, *NAMES) == []
+    assert leaks(caplog, capfd, *NAMES, CODE, TOKEN, SESSION_ID) == []
+
+
+def test_panel_live_resume_keeps_the_live_updates_and_observers(fake, caplog, capfd):
+    """SLC-37: while reconnecting the marks wait (no flush, no tick); ``session.resumed`` brings back the same live
+    updates and observers (no second watcher, no second snapshot), and the held change goes out as an update."""
+    caplog.set_level(logging.DEBUG)
+    a = MrmlModel(A, name="Doe^John liver")
+    rig = live_rig(a)
+    acked(rig, 1)
+    ctl, live_updates, observers = rig.ctl, rig.ctl._live, rig.observers()
+    deliver(ctl, Disconnected(1, TransportError(ErrorKind.NETWORK, retryable=True), 0.5))
+    recolor(a, (0.0, 1.0, 0.0))
+    assert rig.timer.deadline is None  # held while reconnecting
+    rig.pump(5000)
+    deliver(ctl, Connected(2))
+    [resume] = [m for c, m in FakeTransport.made[0].sent if c == 2]
+    assert (resume["type"], resume["lastSceneVersion"]) == ("session.resume", 1)
+    deliver(ctl, Received(2, resumed(resume["id"], scene_version=1, snapshot_version=1)))
+    assert ctl.phase is Phase.LIVE and ctl._live is live_updates
+    assert len(rig.watchers) == 1 and rig.observers() == observers
+    rig.pump(150)  # the held change flushes on the new connection
+    sent = [m for c, m in FakeTransport.made[0].sent if c == 2]
+    assert [m["type"] for m in sent] == ["session.resume", "scene.update"]
+    assert (sent[1]["baseVersion"], sent[1]["sceneVersion"]) == (1, 2)
+    assert leaks(caplog, capfd, *NAMES, CODE, TOKEN) == []
 
 
 # --------------------------------------------------------------------------- criterion 3: Start during a batch

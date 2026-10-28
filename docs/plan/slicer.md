@@ -57,8 +57,9 @@ module self-test in Slicer. Rule 10 of `CLAUDE.md` applies: never claim a Slicer
 | SLC-34 | Live scene changes in Slicer: the adapter and manual §6 (split from SLC-32 before it started): `RemoteView.py` — a single-shot `qt.QTimer` for the flush made in `setup()`, slot `onFlushTimer` (type-only error log), `PanelController(flush_timer=self.flushTimer, watch=self.makeWatcher)`, `makeWatcher` building `MrmlEvents` from the `slicer.vtkMRML*` constants and `SceneWatcher(scene=slicer.mrmlScene, nodes_by_class=slicer.util.getNodesByClass, world_matrix=<the bound MrmlSceneApi.world_matrix>)`, a type-only guard on `onPump`, and `cleanup()` stopping both timers, calling `controller.shutdown()` (a failure logged by type only, so Reload finishes) and disconnecting both timers; conftest stubs (`QTimer.setSingleShot`, `start(msec)`, `disconnect`, `fire`, `slicer.mrmlScene`, the eight event constants); manual `docs/testing/slicer.md` §6 (architecture §6, slicer.md §3), closing the `[TODO verify]` items of SLC-31/SLC-33 that need Slicer. Size ≈ 480 changed lines (code ≈ 80, docs ≈ 175). | M2 | SLC-33, SLC-22 | 1. Adapter tests against the stubs: `setup()` makes an inactive single-shot flush timer connected to `onFlushTimer`; nothing observes `slicer.mrmlScene` and `remoteview_core.observers`/`live` are not imported before Start; `makeWatcher` passes the eight constants in their own fields, `slicer.mrmlScene`, `slicer.util.getNodesByClass` and a bound `MrmlSceneApi.world_matrix`; Start, ack, a colour change: the timer starts with 150 ms, the slot fires, a `scene.update` goes out; Stop and `cleanup()` leave no observer; `cleanup()` stops and disconnects both timers and logs only the type when `shutdown()` raises; the flush and pump slots log only the exception type. 2. Manual §6 (NFR-02, FR-11, FR-12): hiding 5 models with one folder eye toggle (or a console loop over `SetVisibility(0)`) gives one `scene.update` [plan correction: five hand clicks cannot fall within the 250 ms window]; an opacity drag gives about 4 updates/s and no snapshot; a smoothed model's new shape is on the viewer about 1 s after the last edit; Close Scene empties the viewer and loading an `.mrb` sends exactly one snapshot; scrolling slice views and 10 s idle after Start send nothing more; `SetHideFromEditors(1)` then `(0)` on a shown model removes it from the viewers and sends it again (SLC-31 [TODO verify]: the flip fires `ModifiedEvent`); Start pressed while the scene is batch processing sends the scene once the batch ends (`IsBatchProcessing` [TODO verify]); with SlicerVirtualReality, turning the VR view on and off marks the models (its view node `IsA` `vtkMRMLViewNode` [TODO verify]); Reload and exit while live leave no observer; no RemoteView log line holds a node name or ID, a session code or a token. | `pytest slicer-plugin -k "panel or skeleton"` · manual: `docs/testing/slicer.md` §6 | done |
 | SLC-35 | Live scene across a resume (split from SLC-17; SLC-32 review): `LiveEventKind.LOST` for a snapshot in flight lost with the connection; no re-sync asked while paused (a drop alone owes nothing); at resume an ack recovered through `session.resumed` gives `ACKED`, otherwise the owed snapshot is a lost-connection re-sync (at once the first time); an error answering the resume is not a scene refusal; a reset owed at the drop whose snapshot has not begun, or made offline, holds the client's updates (`require_snapshot` while paused only) and goes first; a reset's snapshot in flight at the drop is adopted or re-sent, never uploaded twice; `reset_owed` property. | M2 | SLC-17, SLC-29, SLC-32 | 1. Unit (real client): a clean resume sends the held change as one `scene.update`, no `begin`; a lost snapshot re-sent at once, an accepted one acked; a reset owed at resume is the first scene frame and no update names a closed scene's ID (§7.3); a reset's snapshot adopted at resume is not sent again. Size ≈ 275. | `pytest slicer-plugin -k "live and (resume or reset)"` | done |
 | SLC-36 | Prep for the panel's resume (split from SLC-17; SLC-34, SLC-11 and branch-audit follow-ups): `shutdown()` stops the transport in a `finally`; `PanelView` refuses a link without a code; `Phase.RECONNECTING` and `_show`'s phase sets; `_reason_text`; the reconnect texts (fixed English, "a few minutes", the consent sentence); the schema-bounds test. No behaviour change beyond the two follow-ups. | M2 | SLC-34, SLC-11 | 1. Shutdown when the close or the transport's stop raises → transport stopped, phase idle, 0 observers. 2. Texts plain and complete; bounds match the vendored schema. Size ≈ 170. | `pytest slicer-plugin -k "panel or bounds"` | done |
-| SLC-37 | Reconnect in the panel (split from SLC-17): `Phase.RECONNECTING` keeps the code, link and Stop; `session.resume` on `Connected`; back to Live with the same `LiveUpdates` and observers; statuses for a lost connection and a restarting relay (4008, sticky for the outage); the window `min(graceS, 600) + 60 s` after the loss on the monotonic **and** the wall clock (suspend), checked before anything is sent (T1) and the 15 s answer deadline end the session; `UNAUTHORIZED` → "Session lost"; `SESSION_NOT_FOUND` → "ended while offline"; Stop offline ends at once with a text. | M2 | SLC-35, SLC-36, SLC-09 | 1. Panel tests (fake transport, fake clocks): drop → reconnecting with the same code → resume → Live; window boundary at `graceS + 60 s`; a `Connected` after the window or after a wall-clock jump sends nothing; no answer → ended; unauthorized → "Session lost", no `session.close`; Stop offline/resuming; no code or token in logs (T7). Size ≈ 680 (code ≈ 200). | `pytest slicer-plugin -k "panel and resume"` | todo |
-| SLC-38 | Relay restart and the scene's texts across a reconnect (split from SLC-17; SLC-09 and SLC-32 reviews): after `SESSION_NOT_FOUND` **and only when close 4008 was seen in this outage, inside the window**, the panel stops the live updates and sends `session.create{preferredCode: <old code>}` on the same socket (again on the next connection if lost); a new session goes live afresh (versions from 1, new watcher, snapshot v1, §8.4); a different code is shown with a note that stays (T4); texts for a snapshot interrupted by the drop and a closed scene still on the viewers; the old code is never sent after Stop (T1). Gap: a relay crash without 4008 ends the session (report). | M2 | SLC-37 | 1. Criterion 1, panel side: 4008 → resume → `SESSION_NOT_FOUND` → `session.create{preferredCode}` → `created` → `begin` v1, observers attached once; without a 4008, or after the window, no create. 2. `test_panel_live`: lost snapshot re-sent, accepted one not, reset first, a reset in flight adopted once, a reset failing at the first tick after the resume ends the session from the pump. Size ≈ 550. | `pytest slicer-plugin -k "panel and resume"` | todo |
+| SLC-37 | Reconnect in the panel (split from SLC-17): `Phase.RECONNECTING` keeps the code, link and Stop; `session.resume` on `Connected`; back to Live with the same `LiveUpdates` and observers; statuses for a lost connection and a restarting relay (4008, sticky for the outage); the window `min(graceS, 600) + 60 s` after the loss on the monotonic **and** the wall clock (suspend), checked before anything is sent (T1) and the 15 s answer deadline end the session; `UNAUTHORIZED` → "Session lost"; `SESSION_NOT_FOUND` → "ended while offline"; Stop offline ends at once with a text. | M2 | SLC-35, SLC-36, SLC-09 | 1. Panel tests (fake transport, fake clocks): drop → reconnecting with the same code → resume → Live; window boundary at `graceS + 60 s`; a `Connected` after the window or after a wall-clock jump sends nothing; no answer → ended; unauthorized → "Session lost", no `session.close`; Stop offline/resuming; no code or token in logs (T7). Size ≈ 680 (code ≈ 200). | `pytest slicer-plugin -k "panel and resume"` | done |
+| SLC-41 | Date the outage from the connection's last sign of life (SLC-37 review): the transport dates the loss of an open connection on the wall clock (`Disconnected.lost_at`): when its heartbeat noticed, less the wall-clock time its monotonic clock did not see (a sleep, where that clock stops), and no later than the longest silence the heartbeat allows after the last frame received, pongs included (≈ 212 s with a slow uplink's allowance; for a monotonic clock that runs on through a sleep); the panel starts the reconnect window there on both clocks, so a sleep that begins while Live ends the session at the wake with nothing sent (T1); a drop noticed in time keeps today's window, and a main thread that handles a drop late no longer stretches it. | M2 | SLC-37 | 1. Transport: the dating rule (awake; asleep with the monotonic clock stopped or running on; the wall clock back); `lost_at` for a lost connection, refreshed by every frame, none for a failed attempt or a stop. 2. Panel: a drop dated before a 3 h sleep → nothing sent, `RECONNECT_GAVE_UP`, also with a `Connected` in the same tick; the window from the dated loss on both clocks, a loss dated in the future not lengthening it; a later drop of the resume's connection does not move it. Size ≈ 250. | `pytest slicer-plugin -k "loss or lost or sign_of_life or panel_resume"` | todo |
+| SLC-38 | Relay restart and the scene's texts across a reconnect (split from SLC-17; SLC-09 and SLC-32 reviews): after `SESSION_NOT_FOUND` **and only when close 4008 was seen in this outage, inside the window**, the panel stops the live updates and sends `session.create{preferredCode: <old code>}` on the same socket (again on the next connection if lost); a new session goes live afresh (versions from 1, new watcher, snapshot v1, §8.4); a different code is shown with a note that stays (T4); texts for a snapshot interrupted by the drop and a closed scene still on the viewers; the old code is never sent after Stop (T1). Gap: a relay crash without 4008 ends the session (report). | M2 | SLC-37, SLC-41 | 1. Criterion 1, panel side: 4008 → resume → `SESSION_NOT_FOUND` → `session.create{preferredCode}` → `created` → `begin` v1, observers attached once; without a 4008, or after the window, no create. 2. `test_panel_live`: lost snapshot re-sent, accepted one not, reset first, a reset in flight adopted once, a reset failing at the first tick after the resume ends the session from the pump. Size ≈ 550. | `pytest slicer-plugin -k "panel and resume"` | todo |
 | SLC-39 | Resume end to end and manual §7 (split from SLC-17): `relay_stub.mjs` `--grace-ms`, `--ignore-preferred-code`, `--report-sessions` (per handshake: first type, preferredCode none/previous/other, frames as types and versions only) and stdin commands `restart`, `close-publisher`, `pongs on|off|off-until-handshake`, `status`; `NodeProcess` with a reader thread and `command()`; jitter, drop and transport helpers; `docs/testing/slicer.md` §7; report to `tools/fake-slicer`. | M2 | SLC-38 | 1. Stub scenarios: relay restart → Live with the same code within 5 s (worst-case jitter); heartbeat loss → resume, no second snapshot, versions continue; a snapshot cut before its end → re-sent; an ack lost → not re-sent; grace ended → the session ends, no create. 2. Manual §7: Wi-Fi off 40 s → code unchanged, viewers resume (FR-14); sleep → nothing sent at wake. Size ≈ 635. | `pytest slicer-plugin -k resume_e2e` · manual: `docs/testing/slicer.md` §7 | todo |
 | SLC-40 | Idle renewal on panel activity (split from SLC-17; SLC-06 review, branch audit, security review): `session.expiring` validated and recorded; the panel renews automatically once when a panel button was used within 5 min, otherwise (and after that once) shows "Keep session" with a button; scene flushes, reconnects and opening the module are not activity; the client's `auto_renew` default unchanged (report to `release`). | M2 | SLC-37 | 1. Panel tests: renew after a recent click; flushes/reconnects alone → text and button, no renew; second expiring → button; button → `session.renew`; renewed clears it. 2. Manual §7 step 12. Size ≈ 370. | `pytest slicer-plugin -k renew` · manual: `docs/testing/slicer.md` §7 | todo |
 
@@ -302,9 +303,9 @@ module self-test in Slicer. Rule 10 of `CLAUDE.md` applies: never claim a Slicer
   `stop()`) still gets that conservative text — revisit with SLC-17/SLC-18 if testers report it. The opposite gap:
   when the panel ends a live session itself (fatal `error`, binary frame) and its own `session.close` is lost, it
   shows only the reason, not the 2-minute warning (T1; the write must stall for 2 s) — SLC-18 can append it.
-- (SLC-09 review, low) After a relay restart (close `4008`, §9.3) a live session ends with the 2-minute text, but a
-  restarted relay keeps no sessions (§13 step 9); SLC-17 re-creates with `session.create{preferredCode}` per §9.3 and
-  replaces the text.
+- (SLC-09 review, low, *SLC-37: the status says the relay is restarting; the re-create is SLC-38's*) After a relay
+  restart (close `4008`, §9.3) a live session ends with the 2-minute text, but a restarted relay keeps no sessions
+  (§13 step 9); SLC-17 re-creates with `session.create{preferredCode}` per §9.3 and replaces the text.
 - (SLC-09) SLC-09 is ~1,890 changed lines (≈ 350 controller, ≈ 100 adapter, ≈ 215 `.ui` XML, ≈ 20 `ends_session`,
   ≈ 1,070 tests and stubs, ≈ 135 docs) against the ~300-line guideline; *done: SLC-22 (consent, Slicer
   `scene_api`) and SLC-24 (first snapshot) were split before SLC-22 started*; a future panel should land as core +
@@ -660,34 +661,94 @@ module self-test in Slicer. Rule 10 of `CLAUDE.md` applies: never claim a Slicer
   which ≈ 50 the texts; ≈ 300 tests; ≈ 80 docs) against the split's ≈ 170: over rule 3 because of the tests. Reviewed
   in two rounds (round 1: the acceptance lens asked for the texts' wording to be tested; round 2: all approve) plus a
   delta check.
-- (SLC-36, low) For SLC-37: `FINAL_NOT_SENT` (and `RESUME_LATER`, which SLC-37 removes) still says "up to 2 minutes"
-  — the relay's default grace — while the reconnect texts say "a few minutes"; use `RELAY_HOLDS_SESSION` there too
-  when SLC-37 touches the stop path.
-- (SLC-36 review, low) For SLC-37: the relay may still hold the session after `RECONNECT_GAVE_UP` when `graceS` > 600
-  (the window stops at 660 s) and after an automatic end whose `session.close` did not go out (`final_sent` false,
-  e.g. `RESUME_NO_ANSWER` from a relay that stopped answering): add `RELAY_HOLDS_SESSION` there, as `FINAL_NOT_SENT`
-  does for a stop. Replace the hand-set `RECONNECTING` tests (`test_panel_reconnecting_*`) with the real
-  `Disconnected` → `Connected` → `session.resume` path, and pass the code to `_show` on the retry path (today's retry
-  branch shows no code).
+- (SLC-37) Reconnect in the panel: a drop after `session.created` (`Disconnected` with `retry_in`) moves the panel to
+  `RECONNECTING` — the code, its link and Stop stay, the status says the connection was lost (or, after a 4008 for
+  the rest of the outage, that the relay is restarting, without "The code stays the same": T4) with the transport's
+  rounded-up retry delay and guidance — and each `Connected` then sends `session.resume` first (the failure's
+  guidance is cleared then); `session.resumed` goes back to Live with the same `LiveUpdates` and watcher (no
+  `_go_live`, no second snapshot when the relay is up to date: SLC-35). No tick while reconnecting (the live updates
+  are paused). The window `min(graceS, 600) + 60 s` runs from when the panel handles the first drop of the outage, on
+  the monotonic and the wall clock (`wall=time.time`; a backward step of more than 60 s counts as over), and is
+  checked in the pump while no socket is open and in `_on_connected` before anything is sent (T1); after it the
+  session ends with `RECONNECT_GAVE_UP` and nothing is sent — not even `session.close`, which on a new socket would be
+  bound to no session (§3.1, §11: the first message is a create or a resume) and would need a resume that sends the
+  token after the window. [plan correction: the row's "(suspend)" holds for a sleep during the outage; a sleep that
+  begins while Live is reported only after the wake, so its window starts then and a relay that has ended the
+  session answers the resume with `SESSION_NOT_FOUND` → SLC-41.] The 15 s answer deadline (`_answer_deadline`,
+  renamed) also times the resume (`RESUME_NO_ANSWER`, with a `session.close`). Stop while offline ends at once with
+  `STOPPED_OFFLINE`; Stop while resuming sends `session.close`. `RESUME_LATER` is gone; `FINAL_NOT_SENT` uses
+  `RELAY_HOLDS_SESSION`; an end while reconnecting whose `session.close` was lost, and a transport that stops for good
+  while reconnecting, add `RELAY_HOLDS_SESSION`; `RECONNECT_GAVE_UP` says RemoteView stopped the session [plan
+  correction: the SLC-36 text said "the session ended"] and adds `RELAY_HOLDS_SESSION_LONGER` when the relay keeps
+  sessions longer than RemoteView waits (`graceS` > 600), or `RELAY_HOLDS_SESSION` when a resume went out in this
+  outage (if it reached the relay, its grace starts over when that socket is lost) or when the window ended only
+  because the wall clock went back (a forward step reads as a sleep), and neither after a 4008 (a restarted relay
+  keeps no session, §13 step 9); a `session.resumed` whose
+  `sceneVersion` leaves no version for the next snapshot ends the session with `PROTOCOL_VIOLATION` (§8.4). Ends of a
+  live session whose own `session.close` is lost (a fatal error, a binary frame) still show only the reason: SLC-18
+  (SLC-09 review). `_on_disconnected` is split into `_stopped_detail`, `_ended_detail` and `_on_connection_lost` (ruff
+  PLR0912). The hand-set `RECONNECTING` tests of SLC-36 are replaced by the real `Disconnected` → `Connected` →
+  `session.resume` path (`tests/test_panel_resume.py`, both clocks faked; the shared controllers of `test_panel.py`
+  and `test_panel_live.py` fake the wall clock too now); in `test_panel_live.py` the `ENDS` entry "lost" became
+  "reconnect-gave-up", with "resume-unauthorized" and "stop-while-reconnecting" added, every end is also checked for
+  the code, token and session ID (T7), and a resume keeps the same live updates and observers. The SLC-32 equivalent
+  mutant "`observe()` after a connection loss" is now killed in the retry branch; in the final branch it stays
+  equivalent (`_idle` stops the live updates). Manual §2 step 16 now expects the new stop text, and the known gap on a
+  reset not acknowledged at a drop points to SLC-35/SLC-38. Reviewed in one round (three lenses; the acceptance and
+  security lenses' medium on the window's start for a sleep that begins while Live was refuted to low by both
+  verifiers: SLC-41) and two delta checks after the low fixes (round 1: the acceptance lens's medium — SLC-41's
+  planned 25 s cap would end the window early on a slow uplink — fixed in the plan; no warning after a 4008, the
+  warnings' order tested; round 2: all approve, its lows applied — a 4008 without a resume, the `early` threshold,
+  four more leak checks). Mutants: 58 (`panel.py`), 56 killed; equivalent: `observe()` in `_back_live` (the pump's
+  tick right after observes the client too) and in the final `Disconnected` branch. SLC-37 is ~1,075 changed lines
+  (≈ 265 code, ≈ 675 tests, ≈ 135 docs) against the split's ≈ 680: over rule 3 because of the tests, as the split
+  expected; the review's fixes added ≈ 200, mostly tests.
+- (SLC-37 review, low) For SLC-41: the window starts when the panel handles the drop, so a sleep that begins while
+  Live (or a main thread blocked through the outage) sends `session.resume` at the wake. Harmless with a relay whose
+  grace is at most 600 s (it answers `SESSION_NOT_FOUND`; nothing else is sent), but SLC-38's re-create "inside the
+  window" sends the old code, and SLC-39's manual "sleep → nothing sent at wake" needs the fix first. A fixed time
+  after the last frame received (e.g. a ping's 15 s plus its pong's 10 s) would end the window early on a slow
+  uplink, where a healthy connection stays silent for minutes (the pong's deadline grows with the unread bytes,
+  SLC-26): SLC-41 lets the transport date the loss with its own heartbeat's bounds.
+- (SLC-37 review, low) For SLC-38: `LAST_SCENE_VERSION` repeats `protocol_client._UINT32_MAX` and the exhaustion rule
+  of `SceneVersionCounter.allocate`, `RESTART_CLOSE_CODE` repeats `transport._RESTARTING`, and `CREATE_TIMEOUT_S` now
+  also times `session.resume`: one shared constant each (or `SceneVersionCounter.exhausted`), and `ANSWER_TIMEOUT_S`.
+- (SLC-37 review, low) For SLC-38: after a 4008, Stop while offline, a lost `session.close` (an unanswered resume,
+  Stop while resuming) and a transport that stops for good still add `RELAY_HOLDS_SESSION`, although a restarted relay
+  keeps no session (over-warning; the window's end already says nothing then).
+- (SLC-37 review, low, accepted) The relay sweeps ended sessions every 10 s (`ws/server` registry), so it may hold a
+  session up to about 10 s past the window, and `RECONNECT_GAVE_UP` can come that much before the session's end
+  without a warning; a forward wall-clock step during an outage reads as a sleep (no warning either); and a resume
+  that went out still warns when a sleep or a long outage since its socket was lost has outlasted the relay's renewed
+  grace (over-warning, on the safe side).
+- (SLC-36, low, *done in SLC-37*) For SLC-37: `FINAL_NOT_SENT` (and `RESUME_LATER`, which SLC-37 removes) still says
+  "up to 2 minutes" — the relay's default grace — while the reconnect texts say "a few minutes"; use
+  `RELAY_HOLDS_SESSION` there too when SLC-37 touches the stop path.
+- (SLC-36 review, low, *done in SLC-37*) For SLC-37: the relay may still hold the session after `RECONNECT_GAVE_UP`
+  when `graceS` > 600 (the window stops at 660 s) and after an automatic end whose `session.close` did not go out
+  (`final_sent` false, e.g. `RESUME_NO_ANSWER` from a relay that stopped answering): add `RELAY_HOLDS_SESSION` there,
+  as `FINAL_NOT_SENT` does for a stop. Replace the hand-set `RECONNECTING` tests (`test_panel_reconnecting_*`) with
+  the real `Disconnected` → `Connected` → `session.resume` path, and pass the code to `_show` on the retry path
+  (today's retry branch shows no code).
 - (SLC-36 review, low) For SLC-38: after a 4008 the relay's registry is empty and the old code is free until our
   `session.create{preferredCode}` is granted (T4), so the reconnect detail must not say "The code stays the same"
   then: show `RESTARTING_IN` and `RELAY_RESTARTED` instead of `RECONNECT_DETAIL`.
-- (SLC-36 review round 2, low) For SLC-37/SLC-21: "a few minutes" assumes the default grace (120 s); `ttl.graceS` has
-  no maximum, so on a relay set up with a long grace the warning understates how long anyone with the code can still
-  see the scene — show a wording without a duration (e.g. a `RELAY_HOLDS_SESSION_LONGER` text) when `graceS` is well
-  above the default.
+- (SLC-36 review round 2, low, *SLC-37: only `RECONNECT_GAVE_UP` above 600 s; the other texts stay for SLC-21*) For
+  SLC-37/SLC-21: "a few minutes" assumes the default grace (120 s); `ttl.graceS` has no maximum, so on a relay set up
+  with a long grace the warning understates how long anyone with the code can still see the scene — show a wording
+  without a duration (e.g. a `RELAY_HOLDS_SESSION_LONGER` text) when `graceS` is well above the default.
 - (SLC-36 review round 2, low) `shutdown()` after a Stop whose own `stop()` raised sends no fallback close (the phase
   is already `STOPPING`); harmless with `RelayTransport`, whose `stop()` raises only while encoding the final message
   and whose first stop's final message wins — base the fallback on a flag set once the transport took the stop if
   that changes.
-- (SLC-17 review, low) For SLC-37: a relay answering `session.resumed{sceneVersion: 4294967295}` leaves no version for
-  the owed snapshot (every `begin_snapshot` raises), so updates stay held for the rest of the session — map it to a
-  text that says to start a new session. Stale "SLC-17" pointers for the panel's resume: ~~`panel.py` (module
-  docstring, `_on_disconnected`), `test_panel.py`~~ (SLC-36), ~~`test_live.py` ("resumed (SLC-17)")~~ (SLC-35),
-  `test_scene_updates.py`
-  (sets `RESUMING` by hand, `resume()` exists now), `docs/testing/slicer.md` — fix where SLC-35/SLC-37 touch them.
-  `test_transport_answered_pings_keep_the_connection_and_pongs_are_consumed` failed again under load (3 of 13 runs
-  during the review: two pings received 30 ms apart): measure the client's send schedule instead.
+- (SLC-17 review, low, *the `sceneVersion` part done in SLC-37*) For SLC-37: a relay answering
+  `session.resumed{sceneVersion: 4294967295}` leaves no version for the owed snapshot (every `begin_snapshot`
+  raises), so updates stay held for the rest of the session — map it to a text that says to start a new session.
+  Stale "SLC-17" pointers for the panel's resume: ~~`panel.py` (module docstring, `_on_disconnected`),
+  `test_panel.py`~~ (SLC-36), ~~`test_live.py` ("resumed (SLC-17)")~~ (SLC-35), `test_scene_updates.py` (sets
+  `RESUMING` by hand, `resume()` exists now), ~~`docs/testing/slicer.md`~~ (SLC-37) — fix where SLC-35/SLC-37 touch
+  them. `test_transport_answered_pings_keep_the_connection_and_pongs_are_consumed` failed again under load (3 of 13
+  runs during the review: two pings received 30 ms apart): measure the client's send schedule instead.
 - (SLC-32 review, low) For SLC-17: no `LiveEvent` for a snapshot lost with the connection; a reset not acknowledged
   when the connection drops stays on the viewers until the relay's grace ends (≤ 2 min) and the panel says only that
   the connection was lost — add a text with the resume, which must send an owed reset first. *SLC-35:

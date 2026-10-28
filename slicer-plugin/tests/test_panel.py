@@ -50,8 +50,13 @@ UI_FILE = MODULE_DIR / "Resources" / "UI" / "RemoteView.ui"
 
 
 def controller(clock=time.monotonic) -> PanelController:
+    """``clock`` is the wall clock too: no host clock step can reach the reconnect window."""
     return PanelController(
-        slicer_version="5.12.4", platform="win32", transport_factory=FakeTransport, clock=clock
+        slicer_version="5.12.4",
+        platform="win32",
+        transport_factory=FakeTransport,
+        clock=clock,
+        wall=clock,
     )
 
 
@@ -408,11 +413,14 @@ def test_panel_one_controller_runs_many_sessions(fake):
     ctl.stop()
     view = deliver(ctl, Disconnected(1, None, None, final_sent=False))
     assert (view.status, view.detail) == (panel.SESSION_ENDED, panel.FINAL_NOT_SENT)
-    view = live(ctl)  # 4: a drop ends it — the panel's own end, not a lost stop message
+    # 4: a drop outlasts the reconnect window — the panel's own end, not a lost stop message
+    view = live(ctl)
     assert view.code == CODE and view.detail == "" and len(fake.made) == 4
     deliver(ctl, Disconnected(1, TransportError(ErrorKind.NETWORK, retryable=True), 0.5))
+    now[0] += 180  # the relay's grace (120 s) and the slack (60 s)
+    ctl.pump()
     view = deliver(ctl, Disconnected(None, None, None, final_sent=False))
-    assert (view.status, view.detail) == (panel.SESSION_ENDED, panel.RESUME_LATER)
+    assert (view.status, view.detail) == (panel.SESSION_ENDED, panel.RECONNECT_GAVE_UP)
 
 
 def test_panel_shutdown_reports_a_transport_that_did_not_end(fake):
@@ -434,14 +442,12 @@ def test_panel_retry_text_never_says_zero_seconds(fake):
     assert view.status == "Relay unreachable — retrying in 1 s."
 
 
-def test_panel_drop_after_the_session_started_ends_it(fake):
-    """No resume before SLC-37: the session ends instead of silently getting a new code."""
+def test_panel_drop_after_the_session_started_reconnects(fake):
+    """SLC-37: the session waits for a resume with the same code instead of ending (test_panel_resume.py)."""
     ctl = controller()
     live(ctl)
-    deliver(ctl, Disconnected(1, TransportError(ErrorKind.NETWORK, retryable=True), 0.5))
-    assert fake.made[0].stops == [(None, 0)]  # in grace there is no socket for session.close
-    view = deliver(ctl, Disconnected(None, None, None))
-    assert (view.status, view.detail) == (panel.SESSION_ENDED, panel.RESUME_LATER)
+    view = deliver(ctl, Disconnected(1, TransportError(ErrorKind.NETWORK, retryable=True), 0.5))
+    assert ctl.phase is Phase.RECONNECTING and view.code == CODE and fake.made[0].stops == []
 
 
 def test_panel_binary_frame_from_the_relay_stops_the_session(fake):
@@ -588,6 +594,7 @@ def test_panel_texts_are_plain_and_complete():
         panel.RELAY_HOLDS_SESSION,
         panel.RECONNECT_DETAIL,
         panel.RECONNECT_GAVE_UP,
+        panel.RELAY_HOLDS_SESSION_LONGER,
         panel.SESSION_LOST,
         panel.SESSION_GONE_OFFLINE,
         panel.RESUME_NO_ANSWER,
@@ -612,6 +619,11 @@ def test_panel_texts_are_plain_and_complete():
     ):
         assert re.search(r"anyone with the code (can )?still sees?\b", text, re.IGNORECASE)
         assert "a few minutes" in text
+    # SLC-37: a stop whose session.close was lost says so too
+    assert panel.FINAL_NOT_SENT.endswith(panel.RELAY_HOLDS_SESSION)
+    # a relay that keeps sessions longer than RemoteView waits: the same warning, with no duration
+    longer = panel.RELAY_HOLDS_SESSION_LONGER
+    assert re.search(r"anyone with the code (can )?still sees?\b", longer, re.IGNORECASE)
     assert [text for text in reconnect if re.search(r"[0-9]", text)] == []
     # fixed texts: the only placeholder is the seconds of the two retry statuses
     assert [text for text in reconnect if "{" in text or "}" in text] == [
@@ -620,9 +632,8 @@ def test_panel_texts_are_plain_and_complete():
     ]
     assert panel.SESSION_LOST.startswith("Session lost")
     assert "The old code may now belong to another session." in panel.NEW_CODE  # T4
-    assert (
-        "if it is still free" in panel.RELAY_RESTARTED
-    )  # §4.1: preferredCode is granted only then
+    # §4.1: preferredCode is granted only when the code is free
+    assert "if it is still free" in panel.RELAY_RESTARTED
     for text in (
         panel.RECONNECT_GAVE_UP,
         panel.SESSION_LOST,
@@ -654,57 +665,6 @@ def test_panel_view_link_needs_a_code():
         replace(PanelView("Live", code=CODE, link=link), code="")
     # a code alone is fine (no QR code for this relay)
     assert PanelView("Live", code=CODE).link == ""
-
-
-def test_panel_reconnecting_keeps_the_code_link_and_stop(fake):
-    """SLC-36 for SLC-37: while reconnecting the panel keeps the code, its link, Stop and the extra-CA note; Start and
-    the settings stay disabled. The phase is set by hand: nothing reaches it before SLC-37."""
-    ctl = controller()
-    ctl.start(URL, extra_ca_file="/etc/hospital-root.pem")
-    live_view = deliver(ctl, Connected(1), Received(1, created()))
-    assert live_view.link.endswith(f"#{CODE}")
-    ctl.phase = Phase.RECONNECTING
-    assert ctl._show(panel.RECONNECTING, code=CODE) == PanelView(
-        panel.RECONNECTING,
-        detail=panel.EXTRA_CA_IN_USE,
-        code=CODE,
-        link=live_view.link,
-        start_enabled=False,
-        stop_enabled=True,
-        settings_enabled=False,
-    )
-    ctl.phase = Phase.STOPPING  # for contrast: stopping shows none of them
-    assert ctl._show(panel.STOPPING, code=CODE) == PanelView(
-        panel.STOPPING, start_enabled=False, stop_enabled=False, settings_enabled=False
-    )
-
-
-@pytest.mark.parametrize(
-    ("ending", "expected"),
-    [
-        ("error-UNAUTHORIZED", "SESSION_LOST"),
-        ("error-SESSION_NOT_FOUND", "SESSION_GONE_OFFLINE"),
-        ("close-4003", "SESSION_LOST"),
-    ],
-)
-def test_panel_reconnecting_explains_a_refused_resume(fake, ending, expected):
-    """SLC-36 for SLC-37: a relay that refuses the resume ends the session with its reconnect text and no
-    ``session.close`` (the session is gone or no longer ours). The resume is set up by hand until SLC-37 sends it."""
-    ctl = controller()
-    live(ctl)
-    client = ctl._client
-    client.transport_lost(1006)
-    resume_id = client.resume()["id"]
-    ctl.phase = Phase.RECONNECTING
-    if ending == "close-4003":
-        error = TransportError(ErrorKind.CLOSED, retryable=False, close_code=4003)
-        view = deliver(ctl, Disconnected(1, error, None))
-    else:
-        deliver(ctl, Received(1, relay_error(ending.removeprefix("error-"), resume_id)))
-        assert fake.made[0].stops == [(None, 0)]  # nothing to close: no session.close
-        view = deliver(ctl, Disconnected(1, None, None, final_sent=False))
-    assert (view.status, view.detail) == (panel.SESSION_ENDED, getattr(panel, expected))
-    assert not ctl.active and ctl.phase is Phase.IDLE
 
 
 @pytest.mark.parametrize("phase", ["connecting", "live"])

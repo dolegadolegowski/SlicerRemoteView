@@ -260,13 +260,14 @@ Expected results:
   axis error (protocol §7.1, ADR 0005): report it with a screenshot of both.
 - Step 16, first upload: the status stays "Sending the scene · …" for about 46 s (5.8 MB at 1 Mbit/s; snapshots are
   quantised, `KHR_mesh_quantization` — SLC-12), then "Live"; the viewer then shows the five spheres; the panel never
-  shows "Relay unreachable" or "Session ended" on the way, the console shows no reconnect, and the proxy passed about
-  5.8 MB. With the old fixed 10 s deadline the first `ping` (at 15 s)
-  would have been late and the connection cut about 25 s in ("Relay unreachable"). A relay that closes the connection on its own
-  WebSocket ping (SRV-14, report `2026-10-20-slicer-7`) would show as a reconnect here: note it.
+  shows "Relay unreachable", "Connection lost" or "Session ended" on the way, the console shows no reconnect, and the
+  proxy passed about 5.8 MB. With the old fixed 10 s deadline the first `ping` (at 15 s) would have been late and the
+  connection cut about 25 s in ("Relay unreachable"). A relay that closes the connection on its own WebSocket ping
+  (SRV-14, report `2026-10-20-slicer-7`) would show as a reconnect here: note it.
 - Step 16, stop during the upload: the panel leaves "Sending the scene". The stop message waits behind the bytes already
-  written (several MB at 1 Mbit/s), so after 2 s the connection is aborted and the panel says the relay keeps the
-  session for up to 2 minutes; the viewer shows the frozen scene as offline until the relay expires it. Quitting Slicer
+  written (several MB at 1 Mbit/s), so after 2 s the connection is aborted and the panel says the stop message could
+  not be sent and that anyone with the code can still see the last scene until the relay ends the session, after a
+  few minutes (SLC-37); the viewer shows the frozen scene as offline until the relay expires it. Quitting Slicer
   behaves the same and Slicer exits within 3 s. Expected, not a defect (`docs/research/slicer-heartbeat.md`).
 - Throughout: no traceback in the Python console, no session code or token in the console or the application log.
 
@@ -665,8 +666,8 @@ Steps:
     - No publisher token anywhere (a 43+ character `[A-Za-z0-9_-]` string on a RemoteView line).
 
 Known gaps (not failures):
-- A reset not acknowledged when the connection drops stays on the viewers until the relay's grace ends (≤ 2 min;
-  SLC-17).
+- A reset not acknowledged when the connection drops stays on the viewers until the session is resumed (then it
+  goes first, SLC-35) or the relay's grace ends; the panel's text for it is SLC-38's.
 - An error answering an update with a busy code shows "Updating the scene" during the relay's wait (SLC-18).
 - A Close Scene missed off the main thread is not handled as a reset: if the new scene is too large, the closed one
   stays on the viewers, and a snapshot of the closed scene already in flight is not superseded.

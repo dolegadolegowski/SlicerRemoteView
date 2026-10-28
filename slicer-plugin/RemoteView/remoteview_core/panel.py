@@ -13,9 +13,17 @@
   close reasons and error codes are mapped to texts, and an unknown code is shown only as its validated enum value.
   The adapter's labels are plain text (no rich text from anywhere).
 - The session code is shown only while the session runs and is never logged.
-- No resume yet (SLC-37): a connection lost after ``session.created`` ends the session; one lost before it is
-  retried by the transport, which then sends a new ``session.create``. A relay that keeps the socket open but does
-  not answer ``session.create`` within :data:`CREATE_TIMEOUT_S` ends the attempt.
+- A connection lost after ``session.created`` is resumed (SLC-37, §4.3): the panel keeps the code and Stop while the
+  transport reconnects by itself, each new connection starts with ``session.resume``, and ``session.resumed`` brings
+  the session back to Live with the same live updates and observers. The reconnect window — the relay's grace (at
+  most :data:`MAX_GRACE_S`) plus :data:`RECONNECT_SLACK_S` — runs from when the panel learns of the loss, on the
+  monotonic and on the wall clock (a computer that sleeps during the outage); after it nothing is sent (T1). A sleep
+  that begins while Live is reported only after the wake, so its window starts then: a relay that has ended the
+  session answers the resume with ``SESSION_NOT_FOUND`` (SLC-41 dates the loss from the connection's last sign of
+  life). A resume left unanswered for :data:`CREATE_TIMEOUT_S`, a relay that refuses it, or Stop while offline ends
+  the session. A connection lost before ``session.created`` is retried by the transport, which then sends a new
+  ``session.create``; a relay that keeps the socket open but does not answer it within :data:`CREATE_TIMEOUT_S` ends
+  the attempt.
 - With a ``scene`` factory, the first ``session.created`` hands the session to SLC-29's
   :class:`~remoteview_core.live.LiveUpdates` (SLC-32), which sends the first snapshot and every later change. With a
   ``watch`` factory, the observers that mark the changes (SLC-31's ``SceneWatcher``) are attached in the same
@@ -57,9 +65,21 @@ DEFAULT_PROFILE = "mobile"
 MAX_EVENTS_PER_PUMP = 100
 #: How long the module's cleanup waits for ``session.close`` to go out (the transport aborts after 2 s).
 SHUTDOWN_TIMEOUT_S = 3.0
-#: How long the panel waits for ``session.created`` after each ``session.create``. The relay answers at once (§4.1);
-#: the heartbeat alone would keep a relay that answers pings but not the create — and the panel — waiting for ever.
+#: How long the panel waits for ``session.created`` after each ``session.create``, and for ``session.resumed`` after
+#: each ``session.resume``. The relay answers at once (§4.1, §4.3); the heartbeat alone would keep a relay that answers
+#: pings but not the request — and the panel — waiting for ever.
 CREATE_TIMEOUT_S = 15.0
+#: The reconnect window after a lost connection (SLC-37): the relay's grace (``ttl.graceS``, at most MAX_GRACE_S) plus
+#: up to 60 s before the relay notices the drop (§9.1). Then the relay has ended the session, and resuming it later
+#: would publish to nobody (T1). A backward wall-clock step beyond WALL_JUMP_TOLERANCE_S (not an NTP correction) ends
+#: the window too.
+RECONNECT_SLACK_S = 60.0
+MAX_GRACE_S = 600.0
+WALL_JUMP_TOLERANCE_S = 60.0
+#: §9.3: the relay is restarting (its sessions do not survive it, §13 step 9).
+RESTART_CLOSE_CODE = 4008
+#: §8.4: ``sceneVersion`` is a uint32.
+LAST_SCENE_VERSION = 2**32 - 1
 
 NOT_CONNECTED = "Not connected."
 SESSION_ENDED = "Session ended."
@@ -78,18 +98,10 @@ NO_LINK = (
 )
 NO_ANSWER = "The relay did not answer. Check the relay address or try again later."
 VERSION_UNUSABLE = "This Slicer version string cannot be sent to the relay. Please report this."
-RESUME_LATER = (
-    "The connection to the relay was lost: the relay keeps the session for up to 2 minutes, then ends it. Click "
-    "Start session for a new code (automatic resume arrives in a later version)."
-)
 EXTRA_CA_IN_USE = "An additional CA certificate is trusted for this connection."
 PROTOCOL_VIOLATION = (
     "The relay sent data RemoteView does not expect, so the session was stopped. "
     "Please report this."
-)
-FINAL_NOT_SENT = (
-    "The stop message could not be sent in time: the relay keeps the session for up to 2 minutes, "
-    "then ends it."
 )
 #: Reconnecting after a lost connection (SLC-37/SLC-38; protocol §4.3, §9.1). "A few minutes", never a number: the
 #: relay's grace plus up to 60 s before the relay notices the drop (§9.1 heartbeat). While the relay may keep the
@@ -107,8 +119,13 @@ RECONNECT_DETAIL = (
     "minutes."
 )
 RECONNECT_GAVE_UP = (
-    "The connection to the relay was lost for too long, so the session ended. "
+    "The connection to the relay was lost for too long, so RemoteView stopped the session. "
     "Click Start session for a new code."
+)
+#: After RECONNECT_GAVE_UP when the relay keeps sessions longer than RemoteView waits (graceS > MAX_GRACE_S).
+RELAY_HOLDS_SESSION_LONGER = (
+    "The relay keeps sessions longer than RemoteView waits: anyone with the code can still see the "
+    "last scene until the relay ends the session."
 )
 SESSION_LOST = (
     "Session lost: the relay no longer accepts RemoteView for this session. "
@@ -134,6 +151,7 @@ NEW_CODE = (
     "The old code may now belong to another session."
 )
 SCENE_INTERRUPTED = "Sending the scene was interrupted: RemoteView sends it again once reconnected."
+FINAL_NOT_SENT = "The stop message could not be sent in time. " + RELAY_HOLDS_SESSION
 RESET_PENDING = (
     "The scene was closed in Slicer, but anyone with the code still sees it until RemoteView "
     "reconnects, or until the relay ends the session after a few minutes."
@@ -323,12 +341,14 @@ class PanelController:
 
     ``transport_factory`` is called as ``factory(url, events, extra_ca_file=...)`` and defaults to
     :class:`~remoteview_core.transport.RelayTransport` (looked up at Start, so tests can replace it). ``clock``
-    (seconds, monotonic) times the wait for ``session.created``. ``ensure_deps`` (SLC-10) is called once the address is
-    accepted and before the transport starts; it returns a :class:`~remoteview_core.deps.DepsResult` (it may show
-    dialogs and block while pip runs). Without it nothing is installed or checked. ``scene`` returns the scene the
-    snapshots are made of. ``watch(live)`` returns the :class:`Watcher` that marks the scene's changes on ``live``;
-    ``flush_timer`` is the single-shot timer whose timeout calls :meth:`flush_live`. ``watch`` needs both (marks that
-    are never flushed would freeze the viewers silently).
+    (seconds, monotonic) times the wait for ``session.created``/``session.resumed`` and, with ``wall`` (seconds, the
+    wall clock, which also runs while the computer sleeps), the reconnect window. ``ensure_deps`` (SLC-10) is called
+    once the address is accepted and before the transport starts; it returns a
+    :class:`~remoteview_core.deps.DepsResult` (it may show dialogs and block while pip runs). Without it nothing is
+    installed or checked. ``scene`` returns the scene the snapshots are made of. ``watch(live)`` returns the
+    :class:`Watcher` that marks the scene's changes on ``live``; ``flush_timer`` is the single-shot timer whose
+    timeout calls :meth:`flush_live`. ``watch`` needs both (marks that are never flushed would freeze the viewers
+    silently).
     """
 
     def __init__(  # noqa: PLR0913 — keyword-only collaborators, defaults for the application
@@ -343,6 +363,7 @@ class PanelController:
         ensure_deps: Callable[[], DepsResult] | None = None,
         flush_timer: Timer | None = None,
         watch: Callable[[LiveUpdates], Watcher] | None = None,
+        wall: Callable[[], float] = time.time,
     ) -> None:
         if watch is not None and (scene is None or flush_timer is None):
             raise ValueError("watch needs a scene factory and a flush_timer")
@@ -351,6 +372,7 @@ class PanelController:
         self.profile = profile
         self._factory = transport_factory
         self._clock = clock
+        self._wall = wall
         self._scene_factory = scene
         self._ensure_deps = ensure_deps
         self._flush_timer: Timer = flush_timer if flush_timer is not None else _NoTimer()
@@ -368,12 +390,14 @@ class PanelController:
         self._end_detail = ""
         self._user_stopped = False
         self._sent_final = False
+        self._ended_reconnecting = False  # the panel ended the session while reconnecting
         self._was_live = False
         # session.expired/closed arrived while our session.close was on its way
         self._relay_ended = False
         self._ca_note = ""
-        # clock() by which session.created must arrive (checked while CONNECTING only)
-        self._create_deadline: float | None = None
+        # clock() by which session.created or session.resumed must arrive (while connecting or reconnecting)
+        self._answer_deadline: float | None = None
+        self._forget_outage()
         self._scene = ""  # the SCENE_STATES key while no live updates run: "", or "failed" if going live failed
         # why the scene cannot go out now (a fixed text), "" when nothing is wrong
         self._problem = ""
@@ -416,8 +440,10 @@ class PanelController:
         if problem:
             return self._idle(CANNOT_START, problem)
         self._transport, self._events, self._client = transport, events, client
-        self._connection, self._end_detail, self._create_deadline = None, "", None
+        self._connection, self._end_detail, self._answer_deadline = None, "", None
+        self._forget_outage()
         self._user_stopped = self._sent_final = self._was_live = self._relay_ended = False
+        self._ended_reconnecting = False
         self._scene, self._problem, self._too_large, self._notes = "", "", False, ""
         self._accepted = False
         self.phase = Phase.CONNECTING
@@ -451,7 +477,14 @@ class PanelController:
         if self._transport is None or self.phase is Phase.STOPPING:
             return self.view
         self._user_stopped = True
-        self._finish("")
+        client = self._client
+        # offline nothing can carry session.close: the relay keeps the session until its grace ends
+        offline = (
+            self.phase is Phase.RECONNECTING
+            and client is not None
+            and client.state is SessionState.GRACE
+        )
+        self._finish(STOPPED_OFFLINE if offline else "")
         return self.view
 
     def shutdown(self, timeout: float = SHUTDOWN_TIMEOUT_S) -> bool:
@@ -491,9 +524,12 @@ class PanelController:
                 self._on_received(event)
             elif isinstance(event, Disconnected):
                 self._on_disconnected(event)
-        deadline = self._create_deadline
-        if self.phase is Phase.CONNECTING and deadline is not None and self._clock() >= deadline:
-            self._finish(NO_ANSWER)
+        deadline = self._answer_deadline
+        waiting = self.phase in (Phase.CONNECTING, Phase.RECONNECTING)
+        if waiting and deadline is not None and self._clock() >= deadline:
+            self._finish(NO_ANSWER if self.phase is Phase.CONNECTING else RESUME_NO_ANSWER)
+        elif self.phase is Phase.RECONNECTING and self._connection is None and self._window_over():
+            self._give_up()
         if self.phase is Phase.LIVE:
             self._tick_live()
         # the tick may have ended the session (a closed scene not cleared, §7.3)
@@ -513,12 +549,15 @@ class PanelController:
     # ------------------------------------------------------------------ transport events
 
     def _on_connected(self, event: Connected) -> None:
-        if self.phase is not Phase.CONNECTING or self._client is None:
+        client = self._client
+        if client is None or self.phase not in (Phase.CONNECTING, Phase.RECONNECTING):
             return
         self._connection = event.connection
-        if self._client.state in (SessionState.IDLE, SessionState.CLOSED):
-            self._send(self._client.start(self.profile))
-            self._create_deadline = self._clock() + CREATE_TIMEOUT_S
+        if self.phase is Phase.RECONNECTING:
+            self._resume(client)
+        elif client.state in (SessionState.IDLE, SessionState.CLOSED):
+            self._send(client.start(self.profile))
+            self._answer_deadline = self._clock() + CREATE_TIMEOUT_S
             self._show(WAITING)
 
     def _on_received(self, event: Received) -> None:
@@ -534,13 +573,15 @@ class PanelController:
         if not isinstance(message, dict):  # §3.2: no binary frames to a publisher
             self._finish(PROTOCOL_VIOLATION)
             return
-        for reply in client.handle(message):  # an ack's held updates go out first (§6.2)
+        # an ack's (or a resume's) held updates go out first (§6.2)
+        for reply in client.handle(message):
             self._send(reply)
         if client.state in (SessionState.CREATED, SessionState.ACTIVE):
-            first = self.phase is not Phase.LIVE
-            self.phase = Phase.LIVE
-            self._was_live = True
-            if first:
+            if self.phase is Phase.RECONNECTING:
+                self._back_live(client)
+            elif self.phase is not Phase.LIVE:
+                self.phase = Phase.LIVE
+                self._was_live = True
                 self._go_live(client)
             else:
                 self._observe_live()  # an ack, a refusal, an error answering an update; may end the session
@@ -555,46 +596,141 @@ class PanelController:
             self._finish(self._reason_text(client.close_reason), close)
 
     def _on_disconnected(self, event: Disconnected) -> None:
-        client = self._client
-        if event.retry_in is None:  # the transport has ended for good
+        client, retry_in = self._client, event.retry_in
+        if retry_in is None:  # the transport has ended for good
             self._transport = None
-            detail = self._end_detail
             if self.phase is Phase.STOPPING:
-                if (
-                    self._user_stopped
-                    and self._sent_final
-                    and not event.final_sent
-                    and not self._relay_ended
-                ):
-                    detail = FINAL_NOT_SENT
+                detail = self._stopped_detail(event)
             elif client is not None:
-                # it stopped by itself: certificate, proxy, HTTP status, close code
-                client.transport_lost(event.close_code)
-                self._observe_live()
-                reason = client.close_reason if client.state is SessionState.CLOSED else None
-                if client.state is not SessionState.CLOSED:
-                    client.close()  # nothing can be sent any more; forget the token and the code
-                mapped = self._reason_text(reason) if reason not in (None, "CONNECT_FAILED") else ""
-                detail = mapped or (event.error.guidance if event.error is not None else "")
+                detail = self._ended_detail(client, event)
+            else:
+                detail = self._end_detail
             if self._user_stopped:
                 status = SESSION_ENDED if detail else NOT_CONNECTED
             else:
                 status = SESSION_ENDED if self._was_live else CANNOT_START
             self._idle(status, detail)
-            return
-        if client is None or self.phase is Phase.STOPPING:
-            return
-        live = client.state in (SessionState.CREATED, SessionState.ACTIVE)
+        elif client is not None and self.phase is not Phase.STOPPING:
+            self._on_connection_lost(client, event, retry_in)
+
+    def _stopped_detail(self, event: Disconnected) -> str:
+        """Why a session the panel stopped ended, and whether the relay may still hold it (its close was lost)."""
+        detail = self._end_detail
+        if self._sent_final and not event.final_sent and not self._relay_ended:
+            if self._user_stopped:
+                return FINAL_NOT_SENT
+            # ended while reconnecting (e.g. a resume left unanswered): the relay may still hold it (§9.1)
+            if self._ended_reconnecting:
+                return "\n".join(part for part in (detail, RELAY_HOLDS_SESSION) if part)
+        return detail
+
+    def _ended_detail(self, client: ProtocolClient, event: Disconnected) -> str:
+        """The transport stopped by itself (certificate, proxy, HTTP status, close code): why, for the panel."""
+        reconnecting = self.phase is Phase.RECONNECTING
         client.transport_lost(event.close_code)
-        self._observe_live()  # the marks are held; a snapshot in flight is lost (§6.3)
-        if live:  # no resume before SLC-37
-            self._finish(RESUME_LATER)
+        self._observe_live()
+        reason = client.close_reason if client.state is SessionState.CLOSED else None
+        if client.state is not SessionState.CLOSED:
+            client.close()  # nothing can be sent any more; forget the token and the code
+        mapped = self._reason_text(reason) if reason not in (None, "CONNECT_FAILED") else ""
+        detail = mapped or (event.error.guidance if event.error is not None else "")
+        if reconnecting and reason is None:  # the relay still holds the session (§9.1)
+            detail = "\n".join(part for part in (detail, RELAY_HOLDS_SESSION) if part)
+        return detail
+
+    def _on_connection_lost(
+        self, client: ProtocolClient, event: Disconnected, retry_in: float
+    ) -> None:
+        """The transport retries: before the session exists a new ``session.create`` follows; after, a resume."""
+        # CREATED/ACTIVE/RESUMING → GRACE (§9.1); a create left unanswered → CLOSED, sent again on the next connection
+        client.transport_lost(event.close_code)
+        self._observe_live()  # the marks are held; a snapshot in flight is lost (§6.3, SLC-35)
+        self._connection, self._answer_deadline = None, None
+        guidance = event.error.guidance if event.error is not None else ""
+        if self.phase is Phase.CONNECTING:
+            retrying = f"Relay unreachable — retrying in {retry_seconds(retry_in)} s."
+            self._show(retrying, detail=guidance)
             return
-        self._connection = None
-        self._create_deadline = None
-        detail = event.error.guidance if event.error is not None else ""
+        if self.phase is Phase.LIVE:  # the first drop of this outage
+            self.phase = Phase.RECONNECTING
+            self._lost_at, self._lost_wall = self._clock(), self._wall()
+            ttl: Any = client.ttl  # set by session.created, checked there
+            self._grace_s = float(ttl["graceS"])
+            self._window_s = min(self._grace_s, MAX_GRACE_S) + RECONNECT_SLACK_S
+        # sticky for the outage: a refused retry after it does not make it a plain loss
+        self._restart_seen = self._restart_seen or event.close_code == RESTART_CLOSE_CODE
+        status = RESTARTING_IN if self._restart_seen else RECONNECTING_IN
+        self._reconnect_status = status.format(seconds=retry_seconds(retry_in))
+        self._guidance = guidance
+        self._show_reconnecting()
+
+    # ------------------------------------------------------------------ reconnecting (SLC-37)
+
+    def _forget_outage(self) -> None:
+        """No connection lost, or the session is back: no window, restart or resume flag, status or guidance."""
+        self._lost_at = self._lost_wall = self._window_s = self._grace_s = 0.0
+        self._restart_seen = self._resume_sent = False
+        self._reconnect_status = self._guidance = ""
+
+    def _window_over(self) -> bool:
+        """The reconnect window has passed on either clock, or the wall clock went back by more than a correction."""
+        wall = self._wall() - self._lost_wall
+        return (
+            max(self._clock() - self._lost_at, wall) >= self._window_s
+            or wall < -WALL_JUMP_TOLERANCE_S
+        )
+
+    def _resume(self, client: ProtocolClient) -> None:
+        """A new connection while reconnecting: ``session.resume`` first (§4.3), unless the window is over (T1)."""
+        if self._window_over():
+            self._give_up()
+            return
+        self._send(client.resume())
+        # the relay may hold the session again from here: its grace starts over when this socket is lost
+        self._resume_sent = True
+        self._answer_deadline = self._clock() + CREATE_TIMEOUT_S
+        # connected: the failure's guidance is past
+        self._reconnect_status, self._guidance = RECONNECTING, ""
+        self._show_reconnecting()
+
+    def _give_up(self) -> None:
+        """The reconnect window is over: the session ends and nothing is sent (T1). Not even ``session.close``: on a
+        new socket it would be bound to no session (the first message is ``session.create`` or ``session.resume``,
+        §3.1, §11), and a resume first would send the token after the window. The relay has ended the session by now;
+        the text warns when it may not have: it keeps sessions longer than RemoteView waits, a resume went out in this
+        outage (if it reached the relay, its grace starts over when that socket is lost), or the window ended only
+        because the wall clock went back. A forward step reads as a sleep; a restarted relay (4008) keeps no session
+        (§13 step 9)."""
+        _log.info("panel: reconnect window over")
+        # the window has not passed on either clock: it ended because the wall clock went back
+        early = max(self._clock() - self._lost_at, self._wall() - self._lost_wall) < self._window_s
+        if self._restart_seen:
+            warning = ""
+        elif self._grace_s > MAX_GRACE_S:
+            warning = RELAY_HOLDS_SESSION_LONGER
+        elif self._resume_sent or early:
+            warning = RELAY_HOLDS_SESSION
+        else:
+            warning = ""
+        self._finish("\n".join(part for part in (RECONNECT_GAVE_UP, warning) if part))
+
+    def _back_live(self, client: ProtocolClient) -> None:
+        """``session.resumed``: the same session goes on, with the same live updates and observers (§4.3)."""
+        if client.versions.last >= LAST_SCENE_VERSION:
+            # no version left for the owed snapshot (§8.4): the relay's sceneVersion cannot be ours
+            self._finish(PROTOCOL_VIOLATION)
+            return
+        self.phase = Phase.LIVE
+        self._forget_outage()
+        self._observe_live()  # leaves the pause: an owed snapshot goes from the next tick or flush (SLC-35)
+
+    def _show_reconnecting(self) -> None:
+        client: Any = self._client  # never None while reconnecting
+        # after a 4008 the relay keeps no session: the code may be free until the session is created again (T4)
+        detail = "" if self._restart_seen else RECONNECT_DETAIL
+        parts = (self._ca_note, self._guidance, detail)
         self._show(
-            f"Relay unreachable — retrying in {retry_seconds(event.retry_in)} s.", detail=detail
+            self._reconnect_status, detail="\n".join(p for p in parts if p), code=client.code or ""
         )
 
     # ------------------------------------------------------------------ helpers
@@ -754,6 +890,7 @@ class PanelController:
             final = (client.close() if client is not None else None) or close
             self._sent_final = final is not None and self._connection is not None
             self._end_detail = detail
+            self._ended_reconnecting = self.phase is Phase.RECONNECTING
             self.phase = Phase.STOPPING
             if self._transport is not None:
                 self._transport.stop(final if self._sent_final else None, timeout=0)
