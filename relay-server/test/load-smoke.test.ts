@@ -1,5 +1,8 @@
+import { decodeChunkHeader } from "@slicerremoteview/shared";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_SMOKE, runLoadSmoke, smokeOptions } from "../scripts/load-smoke.js";
+import { loadGlb, resolveFixture } from "../../tools/fake-slicer/src/index.js";
+import { DEFAULT_SMOKE, runLoadSmoke, sendPaced, smokeOptions } from "../scripts/load-smoke.js";
+import type { PacingViewer } from "../scripts/load-smoke.js";
 
 /** Whether a process with this pid (a negative one: process group) still exists. */
 function alive(pid: number): boolean {
@@ -10,6 +13,93 @@ function alive(pid: number): boolean {
     return false;
   }
 }
+
+/** A viewer for `sendPaced` that holds as many chunks as the test gives it. */
+class FakeViewer implements PacingViewer {
+  held = 0;
+  waits = 0;
+  #recheck = (): void => {};
+  chunksOf(): number {
+    return this.held;
+  }
+  until(probe: () => boolean, withinMs = Infinity): Promise<boolean> {
+    this.waits += 1;
+    return new Promise((resolve) => {
+      const timer = withinMs < Infinity ? setTimeout(() => resolve(false), withinMs) : undefined;
+      const check = (): void => {
+        if (!probe()) return void (this.#recheck = check);
+        clearTimeout(timer);
+        resolve(true);
+      };
+      check();
+    });
+  }
+  give(chunks: number): void {
+    this.held = chunks;
+    this.#recheck();
+  }
+}
+
+describe("sendPaced (SRV-30, report 2026-10-27-release-1)", () => {
+  const plan = async () => ({
+    glb: await loadGlb(resolveFixture("large-synthetic.glb")), // 4.7 MiB: chunks 0–4
+    sceneVersion: 7,
+    chunkSize: 1_048_576,
+    profile: "mobile" as const,
+  });
+  /** What went out, in order: message types and chunk indexes. */
+  const recorder = () => {
+    const sent: (string | number)[] = [];
+    const send = async (frame: string | Uint8Array): Promise<void> => {
+      if (typeof frame === "string") sent.push((JSON.parse(frame) as { type: string }).type);
+      else {
+        const header = decodeChunkHeader(frame);
+        if (!header.ok || header.value.sceneVersion !== 7) throw new Error("bad chunk");
+        sent.push(header.value.chunkIndex);
+      }
+    };
+    return { sent, send };
+  };
+  let ids = 0;
+  const nextId = (): string => `p-${++ids}`;
+  const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 20));
+
+  it("sends chunk i only once each paced viewer holds chunks 0 … i−2, then end", async () => {
+    const { sent, send } = recorder();
+    const reading = new FakeViewer();
+    const slow = new FakeViewer();
+    const done = sendPaced(send, await plan(), nextId, [reading, slow], 60_000);
+    reading.give(5); // every chunk as soon as it is sent
+    await settle();
+    expect(sent).toEqual(["scene.snapshot.begin", 0, 1]); // chunk 2 waits for chunk 0 at `slow`
+    for (const held of [1, 2]) {
+      slow.give(held);
+      await settle();
+      expect(sent.at(-1)).toBe(held + 1);
+    }
+    slow.give(3); // chunk 4, the last, then end
+    expect(await done).toBe(0); // nobody dropped from the pace
+    expect(sent).toEqual(["scene.snapshot.begin", 0, 1, 2, 3, 4, "scene.snapshot.end"]);
+  });
+
+  it("a viewer behind for `waitMs`, or whose stream is over before `end`, is not paced and counted", async () => {
+    const { sent, send } = recorder();
+    const reading = new FakeViewer();
+    const stuck = new FakeViewer();
+    const over = new FakeViewer(); // an abort, or a `chunksOf` stuck at `Infinity`
+    reading.give(5);
+    over.give(Infinity);
+    expect(await sendPaced(send, await plan(), nextId, [reading, stuck, over], 50)).toBe(2);
+    expect(sent).toEqual(["scene.snapshot.begin", 0, 1, 2, 3, 4, "scene.snapshot.end"]);
+    expect(stuck.waits).toBe(3); // chunks 0 and 1 at once, chunk 2 timed out: not asked again
+    expect(reading.waits).toBe(5);
+    expect(over.waits).toBe(0);
+
+    const alone = recorder();
+    expect(await sendPaced(alone.send, await plan(), nextId, [])).toBe(0);
+    expect(alone.sent).toHaveLength(7);
+  });
+});
 
 describe("scripts/load-smoke.ts (SRV-21)", () => {
   it("parses its options onto the defaults and refuses values it cannot use", () => {
@@ -49,6 +139,9 @@ describe("scripts/load-smoke.ts (SRV-21)", () => {
       [3, 0],
     ]);
     expect(result.phase2.at(-1)).toMatchObject({ viewersStreamed: 2, viewersDeferred: 1 });
+    // Every viewer waited for kept the pace (the real `Viewer` takes part: chunk count and wake).
+    const cycles = [...result.phase1, ...result.phase2];
+    expect(cycles.filter((c) => c.viewersUnpaced !== 0)).toEqual([]);
     expect(result.stoppedViewerRecovered).toBe(true);
     expect(ownGroup).toBe(true);
     expect(alive(pid)).toBe(false); // the relay is gone with the run
@@ -60,11 +153,15 @@ describe("scripts/load-smoke.ts (SRV-21)", () => {
       runLoadSmoke({
         ...DEFAULT_SMOKE,
         viewers: 3,
-        fixture: "asymmetric-2nodes.glb", // loads at once, so the spawn comes before the timeout
-        runTimeoutMs: 500, // while the relay is still starting
+        // 3.4 KB: it loads at once, so the spawn comes before the timeout, and it never reaches the
+        // soft watermark, so phase 2 runs until the timeout — starting, joining or cycling, however
+        // fast the machine (report `2026-10-27-release-1`).
+        fixture: "asymmetric-2nodes.glb",
+        maxDeferCycles: Infinity,
+        runTimeoutMs: 2_000,
         onRelay: (r) => (pid = r),
       }),
-    ).rejects.toThrow(/no result within 500 ms/);
+    ).rejects.toThrow(/no result within 2000 ms/);
     expect(pid).toBeGreaterThan(0);
     expect(alive(pid)).toBe(false);
   }, 30_000);

@@ -187,30 +187,35 @@ free port) with the test-only preload `scripts/memory-probe.ts` (`--expose-gc`; 
 memory figures as one JSON line — nothing of it is in `src/` or the image). All sockets come from one address: a run
 makes at most 21 upgrades (30 a minute are allowed), and its viewers join one after another, each join with the right
 code giving its attempt back (`RateLimiter.joinSucceeded`, ADR 0008). The publisher plays the fixture with
-fake-slicer's snapshot playback (`loadGlb`, `sendSnapshot` from `tools/fake-slicer/src`, PRO-14) in the script's own
-process, so each cycle starts once every viewer is ready. It prints the relay's memory before the first snapshot and
-one line per cycle, and exits 1 when a check fails:
+fake-slicer's helpers (`loadGlb`, `snapshotBegin`, `sendFrame` from `tools/fake-slicer/src`, PRO-14) in the script's own
+process, so each cycle starts once every viewer is ready, and paces its chunks by the viewers it waits for
+(`sendPaced`, SRV-30): chunk i goes out once each of them holds chunks 0 … i−2, so the relay holds at most one chunk
+(≤ 1 MiB) for a reading viewer when the next arrives — below the 4 MiB soft watermark, however much the loopback
+socket buffers take (on macOS the unpaced publisher got reading viewers deferred, report
+`docs/testing/reports/2026-10-27-release-1.md`). A viewer still behind after 5 s is no longer waited for in that
+snapshot, nor is one whose stream is over before `end`, and either fails the run. It prints the relay's memory before
+the first snapshot and one line per cycle, and exits 1 when a check fails:
 
 - every cycle, from `scene.snapshot.begin` to the last viewer holding the whole GLB (its `end`, or `ready` plus the
   HTTP download; SHA-256 and `X-Scene-Version` checked) ≤ `--max-fanout-ms` (5,000), every viewer streamed
-  (criterion 1, NFR-05 scaled);
+  (criterion 1, NFR-05 scaled), and every viewer waited for keeps the pace (in phase 2 as well);
 - after a full GC, the relay's live buffers (`arrayBuffers`) grow by less than `--max-growth-factor` (2) × the snapshot
   from before the first cycle to after the last, and hold less than two snapshots after every cycle (criterion 2,
   NFR-06). RSS is printed, not gated: even after a GC it swings by up to about three snapshots between cycles;
-- then one viewer stops reading; cycles go on (at most 30) until the relay defers it (`scene.snapshot.ack`
-  `viewersDeferred`) — it alone: every earlier cycle streams all viewers, the deferring one all the others — and the
-  others stay within min(`--max-fanout-ms`, max(2 × the slowest phase-1 cycle, that + 1 s)); reading again, it holds
-  the last snapshot via `ready` and HTTP (criterion 3, FR-24). On loopback the kernel queues tens of MiB for a socket
-  that reads nothing before the relay's own queue reaches the 4 MiB soft watermark, so this takes 2–10 cycles (and a
-  `--fixture` smaller than that watermark is never deferred).
+- then one viewer stops reading (the pace no longer waits for it); cycles go on (at most 30) until the relay defers
+  it (`scene.snapshot.ack` `viewersDeferred`) — it alone: every earlier cycle streams all viewers, the deferring one
+  all the others — and the others stay within min(`--max-fanout-ms`, max(2 × the slowest phase-1 cycle, that + 1 s));
+  reading again, it holds the last snapshot via `ready` and HTTP (criterion 3, FR-24). On loopback the kernel queues
+  tens of MiB for a socket that reads nothing before the relay's own queue reaches the 4 MiB soft watermark, so this
+  takes 2–10 cycles (and a `--fixture` smaller than that watermark is never deferred).
 
 Every wait fails at once when a socket closes, the relay sends an `error`, a hash or a download is wrong, or the relay
 exits; a run gives up after 120 s. The relay and every socket are taken down at the end of every run, failed or timed
 out. The relay has its own process group, so a Ctrl-C reaches only the smoke; whenever the smoke's process dies, the
 relay's stdin pipe ends and the probe kills the relay (`SIGKILL`: the relay's own exit could hang flushing its log to
 the smoke's closed pipe). Nothing printed carries the session code or a token. `test/load-smoke.test.ts` runs a small
-version (3 viewers) and timed-out runs in the normal suite. `RELAY_TEST_FAST_TIMERS` is not set: no relay timer
-bounds these checks (SRV-29, report `docs/testing/reports/2026-10-27-server-6.md`).
+version (3 viewers), timed-out runs and `sendPaced` with fake viewers in the normal suite. `RELAY_TEST_FAST_TIMERS` is
+not set: no relay timer bounds these checks (SRV-29, report `docs/testing/reports/2026-10-27-server-6.md`).
 
 ## Test with fake-slicer
 

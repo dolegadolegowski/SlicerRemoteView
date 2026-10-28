@@ -6,8 +6,10 @@
  *
  * The relay runs as a child (`src/index.ts`, `NODE_ENV=test`) so its memory is its own, with the
  * test-only preload `memory-probe.ts` (a full GC and the memory figures on `SIGUSR2`). The publisher
- * plays the fixture with fake-slicer's snapshot playback (`tools/fake-slicer`, PRO-14) in this
- * process, so each cycle starts once every viewer is ready. Per cycle it measures the time from
+ * plays the fixture with fake-slicer's frames (`tools/fake-slicer`, PRO-14) in this process, so each
+ * cycle starts once every viewer is ready, and paces its chunks by the viewers it waits for: the relay
+ * then never holds more than one chunk for a reading viewer, whatever the loopback socket buffers take
+ * (report `2026-10-27-release-1`, `sendPaced`). Per cycle it measures the time from
  * `scene.snapshot.begin` to the last viewer holding the whole GLB: its `scene.snapshot.end`, or for
  * a deferred viewer its `scene.snapshot.ready` plus the HTTP download (§6.4, §6.5) — SHA-256 and
  * version checked.
@@ -31,18 +33,22 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { WebSocket } from "ws";
 import type { RawData } from "ws";
-import { LIMITS, decodeChunkHeader } from "@slicerremoteview/shared";
+import { LIMITS, chunkify, decodeChunkHeader, encodeChunkFrame } from "@slicerremoteview/shared";
 import {
   envelope,
   loadGlb,
   resolveFixture,
-  sendSnapshot,
+  sendFrame,
+  snapshotBegin,
 } from "../../tools/fake-slicer/src/index.js";
-import type { LoadedGlb } from "../../tools/fake-slicer/src/index.js";
+import type { LoadedGlb, SnapshotPlan } from "../../tools/fake-slicer/src/index.js";
 import { ENV_VARIABLES, PLATFORM_INPUTS } from "../src/config.js";
 
 /** `relay-server/`, the relay's working directory. */
 const RELAY_DIR = fileURLToPath(new URL("..", import.meta.url));
+
+/** How long `sendPaced` waits for a viewer to keep up before it no longer paces by it. */
+const PACE_WAIT_MS = 5_000;
 
 export interface SmokeOptions {
   viewers: number;
@@ -54,7 +60,11 @@ export interface SmokeOptions {
   /** Larger than the 4 MiB soft watermark, or phase 2 never defers the stopped viewer. */
   fixture: string;
   chunkSize: number;
-  /** Phase 2 runs at least one and at most this many cycles until the stopped viewer is deferred. */
+  /**
+   * Phase 2 runs at least one and at most this many cycles until the stopped viewer is deferred
+   * (`Infinity`: until it is — with a fixture below the watermark, until the run times out, or,
+   * after about 60 s, until the relay's heartbeat closes the stopped viewer, which answers no ping).
+   */
   maxDeferCycles: number;
   /** The run gives up after this long; a stuck viewer must not hang CI. */
   runTimeoutMs: number;
@@ -85,6 +95,8 @@ export interface CycleResult {
   fanoutMs: number;
   viewersStreamed: number;
   viewersDeferred: number;
+  /** Viewers `sendPaced` could not pace (5 s behind, or stream over early); 0 is a pass. */
+  viewersUnpaced: number;
   /** The relay's memory right after the cycle, after a full GC. */
   memory: Memory;
 }
@@ -100,14 +112,22 @@ export interface SmokeResult {
   failures: string[];
 }
 
+/** What `sendPaced` needs of a viewer (`Viewer`; the tests pass their own). */
+export interface PacingViewer {
+  chunksOf(version: number): number;
+  until(probe: () => boolean, withinMs?: number): Promise<boolean>;
+}
+
 /** One viewer: joined by code, it collects each snapshot it is sent (stream or HTTP). */
-class Viewer {
+class Viewer implements PacingViewer {
   /** sceneVersion → when it held the whole GLB, and how it came. */
   readonly done = new Map<number, { at: number; via: "end" | "ready" }>();
   #token = "";
   /** The first thing that went wrong: every wait fails with it from then on. */
   #failure: string | undefined;
   #streams = new Map<number, Uint8Array[]>();
+  /** Versions whose stream is over for it: `end`, `abort` or `ready` came. */
+  #over = new Set<number>();
   #waiters: (() => void)[] = [];
 
   private constructor(
@@ -146,16 +166,36 @@ class Viewer {
     return viewer;
   }
 
-  /** Resolves when `probe()` holds, re-checked after every message; rejects once anything failed. */
-  until(probe: () => boolean): Promise<void> {
+  /**
+   * Resolves `true` when `probe()` holds, re-checked after every message, or `false` once `withinMs`
+   * has passed; rejects once anything failed.
+   */
+  until(probe: () => boolean, withinMs = Infinity): Promise<boolean> {
     return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer =
+        withinMs < Infinity
+          ? setTimeout(() => {
+              settled = true;
+              resolve(false);
+            }, withinMs)
+          : undefined;
       const check = (): void => {
+        if (settled) return; // timed out: dropped at this wake
         if (this.#failure !== undefined) reject(new Error(this.#failure));
-        else if (probe()) resolve();
-        else this.#waiters.push(check);
+        else if (probe()) resolve(true);
+        else return void this.#waiters.push(check);
+        settled = true;
+        clearTimeout(timer);
       };
       check();
     });
+  }
+
+  /** The chunks of `version` it has received; `Infinity` once that stream is over for it. */
+  chunksOf(version: number): number {
+    if (this.#over.has(version)) return Infinity;
+    return this.#streams.get(version)?.length ?? 0;
   }
 
   #wake(): void {
@@ -183,7 +223,7 @@ class Viewer {
       const header = decodeChunkHeader(bytes);
       if (!header.ok) return this.#fail(`bad chunk header (${header.error.field})`);
       this.#streams.get(header.value.sceneVersion)?.push(header.value.payload);
-      return;
+      return this.#wake(); // the publisher's pace waits on chunks
     }
     const message = JSON.parse(bytes.toString()) as Record<string, unknown>;
     const version = message.sceneVersion as number;
@@ -199,14 +239,17 @@ class Viewer {
       case "scene.snapshot.end": {
         const parts = this.#streams.get(version) ?? [];
         this.#streams.delete(version);
+        this.#over.add(version);
         this.#held(version, Buffer.concat(parts), "end");
         break;
       }
       case "scene.snapshot.abort":
         this.#streams.delete(version);
+        this.#over.add(version);
         break;
       case "scene.snapshot.ready":
         this.#streams.delete(version); // a stream cut short by the deferral
+        this.#over.add(version);
         this.#download(version).catch((error: unknown) =>
           this.#fail(`GET /api/scene/${version}: ${(error as Error).message}`),
         );
@@ -224,6 +267,42 @@ class Viewer {
       return this.#fail(`GET /api/scene/${version}: another version`);
     this.#held(version, new Uint8Array(await response.arrayBuffer()), "ready");
   }
+}
+
+/**
+ * `begin`, the chunks and `end` of one snapshot, paced by `pace`: chunk i goes out once each of
+ * those viewers holds chunks 0 … i−2 of this version, so when chunk i reaches the relay it holds at
+ * most chunk i−1 for that viewer — below the 4 MiB soft watermark (§3.3; `chunkify` makes chunks of
+ * 1 MiB at most, §6.2), and no reading viewer is deferred (§6.4, §6.5), however much the loopback
+ * socket buffers take, as long as each keeps within `waitMs` of the pace (report
+ * `2026-10-27-release-1`). A viewer that falls further behind no longer paces this snapshot (the
+ * relay may have cut its stream: `ready` only comes after `end`), nor does one whose stream is over
+ * before `end` — an abort, or a `chunksOf` that would never hold the pace back. Resolves with how
+ * many viewers it could not pace.
+ */
+export async function sendPaced(
+  send: (frame: string | Uint8Array) => Promise<void>,
+  plan: SnapshotPlan,
+  nextId: () => string,
+  pace: Iterable<PacingViewer>,
+  waitMs = PACE_WAIT_MS,
+): Promise<number> {
+  const { glb, sceneVersion, chunkSize } = plan;
+  await send(snapshotBegin(plan, nextId()));
+  const pacing = new Set(pace);
+  const paced = pacing.size;
+  for (const { chunkIndex, payload } of chunkify(glb.bytes, chunkSize)) {
+    await Promise.all(
+      [...pacing].map(async (viewer) => {
+        const ahead = (): boolean => viewer.chunksOf(sceneVersion) >= chunkIndex - 1;
+        const over = viewer.chunksOf(sceneVersion) === Infinity;
+        if (over || !(await viewer.until(ahead, waitMs))) pacing.delete(viewer);
+      }),
+    );
+    await send(encodeChunkFrame({ sceneVersion, chunkIndex }, payload));
+  }
+  await send(envelope("scene.snapshot.end", nextId(), { sceneVersion, sha256: glb.sha256 }));
+  return paced - pacing.size;
 }
 
 /** What the run must take down on every path: the relay process and every socket. */
@@ -393,21 +472,29 @@ async function smoke(options: SmokeOptions, resources: Resources): Promise<Smoke
     sceneVersion += 1;
     const version = sceneVersion;
     const started = performance.now();
-    await sendSnapshot(
-      publisher,
+    const unpaced = await sendPaced(
+      (frame) => sendFrame(publisher, frame),
       { glb, sceneVersion: version, chunkSize: options.chunkSize, profile: "mobile" },
       nextId,
+      waitFor,
     );
     const ack = await next("scene.snapshot.ack");
     if (ack.sceneVersion !== version)
       throw new Error(`ack for ${String(ack.sceneVersion)}, not ${version}`);
     await Promise.all(waitFor.map((viewer) => viewer.until(() => viewer.done.has(version))));
     const last = Math.max(...waitFor.map((viewer) => viewer.done.get(version)!.at));
+    // Each viewer waited for reads: one the pace let go (`PACE_WAIT_MS` behind, or its stream over
+    // before `end`) would leave the run to the socket buffers again — a failure in either phase.
+    if (unpaced > 0)
+      failures.push(
+        `cycle ${version}: ${unpaced} viewer(s) not paced (behind or stream over early)`,
+      );
     return {
       sceneVersion: version,
       fanoutMs: Math.round(last - started),
       viewersStreamed: ack.viewersStreamed as number,
       viewersDeferred: ack.viewersDeferred as number,
+      viewersUnpaced: unpaced,
       memory: await memory(),
     };
   };
