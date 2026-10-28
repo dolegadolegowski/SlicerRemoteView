@@ -19,9 +19,11 @@ Slicer adapter in ``RemoteView.py``, SLC-09/SLC-22; tests use a fake) and return
 
 A node that cannot be exported never aborts the snapshot: it is left out and reported in
 :attr:`CollectedScene.skipped` with a :class:`SkipReason` — no triangles (empty, points or lines only), a non-linear
-world transform the scene cannot hand over for baking, invalid or duplicate IDs (with *Hide node names* also IDs not
-of the generated shape), non-finite data (also after a bake), cells that reference missing points or are not
-stored as integers (checked before any VTK filter runs: the filters do not bounds-check point IDs).
+world transform the scene cannot hand over for baking, duplicate IDs and IDs that are not what Slicer generates
+(protocol v1.1 §7.3, in both modes; SLC-35 exports such nodes under an ``m_<n>`` alias from
+:class:`remoteview_core.ids.SceneIds` instead of skipping them), non-finite data (also after a bake), cells that
+reference missing points or are not stored as integers (checked before any VTK filter runs: the filters do not
+bounds-check point IDs).
 
 Main thread only (VTK). No Slicer or Qt import: the VTK classes come from ``vtkmodules``, which Slicer 5.12 and the
 ``vtk`` wheel provide identically (``docs/research/slicer-collect.md``).
@@ -30,7 +32,6 @@ Main thread only (VTK). No Slicer or Qt import: the VTK classes come from ``vtkm
 from __future__ import annotations
 
 import enum
-import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -51,7 +52,8 @@ from vtkmodules.vtkCommonTransforms import vtkAbstractTransform, vtkTransform
 from vtkmodules.vtkFiltersCore import vtkPolyDataNormals, vtkTriangleFilter
 
 from remoteview_core.coords import ras_matrix_to_gltf, ras_to_gltf_normals, ras_to_gltf_points
-from remoteview_core.glb_writer import NODE_ID_PATTERN, Entity, is_exportable_matrix
+from remoteview_core.glb_writer import Entity, is_exportable_matrix
+from remoteview_core.ids import is_generated_id
 from remoteview_core.names import NameAssigner
 
 
@@ -107,9 +109,10 @@ class SkipReason(enum.Enum):
 class SkippedNode:
     """A node left out of the snapshot; ``node_id`` is ``""`` when the ID itself was invalid. ``index`` is the
     node's position in ``visible_model_nodes()`` so the panel can still show which node it was (local only, never
-    sent; not part of equality)."""
+    sent; not part of equality). The repr shows the reason and the index only: a segment's ``nodeId`` may carry a
+    verbatim, name-derived segment ID (T7), and a repr can reach a log."""
 
-    node_id: str
+    node_id: str = field(repr=False)
     reason: SkipReason
     index: int = field(default=-1, compare=False)
     #: ``no-triangles`` and ``invalid-geometry`` only: the bake of the node's transform made a mesh that passes the
@@ -442,22 +445,19 @@ def transform_to_bake(world: Any, scene_api: SceneApi, node: Any) -> vtkAbstract
     return transform if isinstance(transform, vtkAbstractTransform) else None
 
 
-#: The IDs Slicer generates for model nodes (``vtkMRMLModelNode4``: class name + counter, research note §3). With
-#: *Hide node names* only IDs of this shape are exported: ``SetID`` and a hand-edited ``.mrml`` accept any string,
-#: and an ID is repeated in every ``scene.update`` (T7).
-_GENERATED_ID = re.compile(r"vtkMRMLModelNode[0-9]{1,10}")
-
-
 def valid_model_id(node_id: Any, *, anonymize: bool) -> bool:
-    """The ID rules of an exported model: §3.3 shape, no ``/`` (segments use it), not ``root``; with *Hide node
-    names* only Slicer's generated IDs (T7)."""
-    valid = (
-        isinstance(node_id, str)
-        and NODE_ID_PATTERN.fullmatch(node_id) is not None
-        and "/" not in node_id
-        and node_id != "root"
-    )
-    return valid and (not anonymize or _GENERATED_ID.fullmatch(node_id) is not None)
+    """The ID rule of an exported model (protocol v1.1 §7.3): an ID of the shape Slicer generates
+    (``vtkMRMLModelNode4``: class name + counter, research note §3), in both modes — ``SetID`` and a hand-edited
+    ``.mrml`` accept any string, and an ID is repeated in every ``scene.update`` (T7). ``anonymize`` no longer
+    changes the rule (until SLC-27 it widened the shown-names rule to any §3.3 ID without ``/``) and stays for the
+    callers' signature.
+
+    **To be removed in SLC-35**: the alias registry :class:`remoteview_core.ids.SceneIds` then exports such a node
+    as ``m_<n>`` instead of skipping it; kept this commit for :func:`collect_scene` and ``changes._shown``, which
+    SLC-35 rewires.
+    """
+    del anonymize
+    return is_generated_id(node_id)
 
 
 def raw_name(name: Any) -> str | bytes | None:

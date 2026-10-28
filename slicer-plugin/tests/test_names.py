@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from pygltflib import GLTF2
 
-from remoteview_core import names
+from remoteview_core import glb_writer, names
 from remoteview_core.glb_writer import (
     FORBIDDEN_NAME_CATEGORIES,
     Entity,
@@ -135,6 +135,21 @@ def test_names_random_inputs_always_satisfy_the_writer():
         name.encode("utf-8")  # no lone surrogate survives (it would fail to encode)
 
 
+def test_names_count_utf16_units_with_the_writers_counter(monkeypatch):
+    """SLC-27 (report 2026-10-27-protocol-2 item 4): one UTF-16 counter — the writer's ``utf16_length`` — for the
+    sanitiser's cut and the writer's check; ``names`` no longer has one of its own."""
+    assert not hasattr(names, "_utf16_units")
+    calls: list[str] = []
+
+    def counting(text: str) -> int:
+        calls.append(text)
+        return glb_writer.utf16_length(text)
+
+    monkeypatch.setattr(names, "utf16_length", counting)
+    assert sanitize_name("x" * 63 + "\U0001f600") == "x" * 63
+    assert calls and "".join(calls).startswith("x" * 63 + "\U0001f600")
+
+
 def test_names_bytes_from_vtk_are_decoded():
     """VTK's Python wrapping returns bytes for a name that is not valid UTF-8 (e.g. a legacy cp1250 file)."""
     assert sanitize_name(b"Liver") == "Liver"
@@ -174,10 +189,13 @@ def test_names_assigner_numbers_per_kind_in_export_order():
         shown.assign("volume", "x")
 
 
-def _segment(number: int, name: str) -> Entity:
+def _segment(number: int, name: str, *, anonymize: bool = False) -> Entity:
+    """A segment as SLC-35's collection will build it: verbatim ``Segment_<n>`` with names shown, the alias
+    ``s_<n>`` without ``segmentId`` under *Hide node names* (§7.3, ``remoteview_core.ids``)."""
     mrml_id = "vtkMRMLSegmentationNode1"
+    tail = f"s_{number}" if anonymize else f"Segment_{number}"
     return Entity(
-        node_id=f"{mrml_id}/Segment_{number}",
+        node_id=f"{mrml_id}/{tail}",
         kind="segment",
         name=name,
         positions=np.array([[0.0, 0.0, 0.0], [0.01, 0.0, 0.0], [0.0, 0.0, -0.01]]),
@@ -187,7 +205,7 @@ def _segment(number: int, name: str) -> Entity:
         opacity=1.0,
         visible=True,
         mrml_id=mrml_id,
-        segment_id=f"Segment_{number}",
+        segment_id=None if anonymize else f"Segment_{number}",
     )
 
 
@@ -215,8 +233,8 @@ def test_names_assigned_names_are_accepted_by_the_writer(anonymize):
         _model(f"vtkMRMLModelNode{i + 1}", assigner.assign("model", n)) for i, n in enumerate(raw)
     ]
     entities += [
-        _segment(1, assigner.assign("segment", "Wątroba Jana Kowalskiego")),
-        _segment(2, assigner.assign("segment", "Tumor")),
+        _segment(1, assigner.assign("segment", "Wątroba Jana Kowalskiego"), anonymize=anonymize),
+        _segment(2, assigner.assign("segment", "Tumor"), anonymize=anonymize),
     ]
     root = RootExtras(
         scene_version=1, profile="mobile", slicer_version="5.12.4", anonymized_names=anonymize

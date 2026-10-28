@@ -19,6 +19,13 @@ Pure function from exported entities to the bytes of one glTF 2.0 binary contain
   root node alone with a 4-byte zero BIN chunk, so the "exactly one buffer" rule of §7.1 still holds.
 - Display names (possibly PHI, threat T7) appear only where §7.2–7.3 require them: ``T.name`` and
   ``T.extras.name``; meshes, materials and ``M`` nodes carry no name.
+- Identity (protocol v1.1 §7.3, :mod:`remoteview_core.ids`): ``mrmlId`` is a generated MRML ID or an ``m_<n>``
+  alias; a model's ``nodeId`` is its ``mrmlId``; a segment's is ``<mrmlId>/<segmentId>`` verbatim (then
+  ``extras.segmentId`` equals the tail) or ``<mrmlId>/s_<n>`` (then ``segmentId`` is the raw ID, omitted under
+  ``anonymizedNames``). With ``anonymizedNames: true`` a verbatim segment ID or a present ``segmentId`` is rejected:
+  the GLB JSON then holds constants, aliases, generated IDs and ``Model <n>``/``Segment <n>`` only. A
+  :class:`GlbWriteError` names the entity's position (``entities[3]``), never its ID (a verbatim segment ID may be
+  name-derived) or name, and the repr of an :class:`Entity` shows neither (a repr can reach a log).
 
 Inputs are already in glTF space (metres, +Y up — convert with :mod:`remoteview_core.coords`). The output is a
 deterministic function of the input (byte-identical across runs; ADR 0005 consequences). Pure Python + numpy:
@@ -40,6 +47,7 @@ from numpy.typing import NDArray
 
 from remoteview_core import __version__
 from remoteview_core.coords import gltf_matrix_column_major, is_trs_decomposable
+from remoteview_core.ids import MODEL_ALIAS, SEGMENT_ALIAS, SEGMENT_ID, is_generated_id
 
 GLB_MAGIC = 0x46546C67  # "glTF"
 GLB_VERSION = 2
@@ -70,8 +78,8 @@ ROOT_NAME = "SlicerRemoteView"
 PROFILES = ("mobile", "quest2", "quest3")
 #: §3.3 ``nodeId`` grammar (used with ``fullmatch``: ``$`` would also accept a trailing newline).
 NODE_ID_PATTERN = re.compile(r"[A-Za-z0-9_./:-]{1,128}")
-#: §7.3: names are sanitised (trimmed, ≤ 64 characters) and contain no control, format (bidi/zero-width),
-#: surrogate, private-use, unassigned or line/paragraph-separator characters.
+#: §7.3: names are sanitised (trimmed, ≤ 64 UTF-16 code units — the length JavaScript and C# report) and contain
+#: no control, format (bidi/zero-width), surrogate, private-use, unassigned or line/paragraph-separator characters.
 MAX_NAME_LENGTH = 64
 #: Unicode categories a sanitised name never contains; ``names.sanitize_name`` (SLC-23) removes exactly these.
 FORBIDDEN_NAME_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})
@@ -91,9 +99,11 @@ class Entity:
     ``triangle_count`` (§7.3 ``triangleCount``) is derived from ``indices``.
     """
 
-    node_id: str
+    # repr=False: a repr in a log line or traceback must not carry the (possibly PHI) name or the geometry, nor an
+    # ID — a verbatim segment ID, and the nodeId built from it, may be name-derived (T7), and MRML IDs stay out of
+    # logs like in changes.SentScene. The repr shows the kind and the appearance only.
+    node_id: str = field(repr=False)
     kind: EntityKind
-    # repr=False: a repr in a log line or traceback must not carry the (possibly PHI) name or the geometry (T7)
     name: str = field(repr=False)
     positions: NDArray[Any] = field(repr=False)
     normals: NDArray[Any] = field(repr=False)
@@ -101,8 +111,8 @@ class Entity:
     color: tuple[float, float, float]
     opacity: float
     visible: bool
-    mrml_id: str
-    segment_id: str | None = None
+    mrml_id: str = field(repr=False)
+    segment_id: str | None = field(default=None, repr=False)
     matrix: NDArray[Any] | None = field(default=None, repr=False)
     baked: bool = False
 
@@ -154,39 +164,40 @@ def _check_unit_float(value: Any, what: str) -> float:
 
 
 def _validated_arrays(
-    e: Entity,
+    e: Entity, index: int
 ) -> tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.uint32], NDArray[np.float64]]:
     """``(positions, normals, indices)`` as written, plus the positions in float64 (what quantisation starts from)."""
+    where = f"entities[{index}]"
     try:
         positions = np.asarray(e.positions)
         normals = np.asarray(e.normals)
         indices = np.asarray(e.indices)
     except (TypeError, ValueError):  # ragged nested sequences
-        raise GlbWriteError(f"{e.node_id}: positions, normals and indices must be arrays") from None
+        raise GlbWriteError(f"{where}: positions, normals and indices must be arrays") from None
     for what, arr in (("positions", positions), ("normals", normals)):
         if not (np.issubdtype(arr.dtype, np.floating) or np.issubdtype(arr.dtype, np.integer)):
-            raise GlbWriteError(f"{e.node_id}: {what} must be real numbers")
+            raise GlbWriteError(f"{where}: {what} must be real numbers")
     if positions.ndim != 2 or positions.shape[1] != 3 or positions.shape[0] == 0:
-        raise GlbWriteError(f"{e.node_id}: positions must have shape (n>0, 3)")
+        raise GlbWriteError(f"{where}: positions must have shape (n>0, 3)")
     if normals.shape != positions.shape:
-        raise GlbWriteError(f"{e.node_id}: normals must have the same shape as positions")
+        raise GlbWriteError(f"{where}: normals must have the same shape as positions")
     if indices.ndim != 2 or indices.shape[1] != 3 or indices.shape[0] == 0:
-        raise GlbWriteError(f"{e.node_id}: indices must have shape (m>0, 3)")
+        raise GlbWriteError(f"{where}: indices must have shape (m>0, 3)")
     if not np.issubdtype(indices.dtype, np.integer):
-        raise GlbWriteError(f"{e.node_id}: indices must be integers")
+        raise GlbWriteError(f"{where}: indices must be integers")
     vertex_count = positions.shape[0]
     if vertex_count >= 2**32 - 1:
-        raise GlbWriteError(f"{e.node_id}: too many vertices for UNSIGNED_INT indices")
+        raise GlbWriteError(f"{where}: too many vertices for UNSIGNED_INT indices")
     if indices.min() < 0 or indices.max() >= vertex_count:
-        raise GlbWriteError(f"{e.node_id}: index out of range")
+        raise GlbWriteError(f"{where}: index out of range")
     # Overflow to inf is reported below as GlbWriteError, not as a numpy warning.
     with np.errstate(over="ignore", invalid="ignore"):
         p32 = positions.astype("<f4")
         n32 = normals.astype("<f4")
     if not (np.all(np.isfinite(p32)) and np.all(np.isfinite(n32))):
-        raise GlbWriteError(f"{e.node_id}: positions/normals must be finite float32 values")
+        raise GlbWriteError(f"{where}: positions/normals must be finite float32 values")
     if not np.allclose(np.linalg.norm(n32.astype(np.float64), axis=1), 1.0, rtol=0, atol=1e-4):
-        raise GlbWriteError(f"{e.node_id}: normals must have unit length (§7.4)")
+        raise GlbWriteError(f"{where}: normals must have unit length (§7.4)")
     exact = np.asarray(positions, dtype=np.float64)  # no copy when the input is already float64
     return p32, n32, indices.astype("<u4"), exact
 
@@ -195,48 +206,85 @@ def _valid_id(value: Any) -> bool:
     return isinstance(value, str) and NODE_ID_PATTERN.fullmatch(value) is not None
 
 
-def is_valid_name(name: Any) -> bool:
-    """A sanitised display name (§7.3): a string, trimmed, ≤ 64 characters, no :data:`FORBIDDEN_NAME_CATEGORIES`."""
-    return (
-        isinstance(name, str)
-        and len(name) <= MAX_NAME_LENGTH
-        and name == name.strip()
-        and not any(unicodedata.category(ch) in FORBIDDEN_NAME_CATEGORIES for ch in name)
+def _valid_mrml_id(value: Any) -> bool:
+    """§7.3: a generated MRML ID or an ``m_<n>`` alias (both inside the §3.3 grammar, neither holds ``/``)."""
+    return is_generated_id(value) or (
+        isinstance(value, str) and MODEL_ALIAS.fullmatch(value) is not None
     )
 
 
-def _validate_identity(e: Entity, seen: set[str], anonymized: bool) -> None:
+def utf16_length(name: str) -> int:
+    """The number of UTF-16 code units ``name`` takes — the length JavaScript and C# report (§3.3, §7.3). Counted per
+    code point (an astral character is a surrogate pair), never by encoding: a lone surrogate counts one unit instead of
+    raising ``UnicodeEncodeError``."""
+    return sum(2 if ord(ch) > 0xFFFF else 1 for ch in name)
+
+
+def is_valid_name(name: Any) -> bool:
+    """A sanitised display name (§7.3): a string without :data:`FORBIDDEN_NAME_CATEGORIES` (checked first, so a
+    lone surrogate is simply ``False``), at most :data:`MAX_NAME_LENGTH` UTF-16 code units, trimmed."""
+    return (
+        isinstance(name, str)
+        and not any(unicodedata.category(ch) in FORBIDDEN_NAME_CATEGORIES for ch in name)
+        and utf16_length(name) <= MAX_NAME_LENGTH
+        and name == name.strip()
+    )
+
+
+def _validate_segment_identity(e: Entity, where: str, anonymized: bool) -> None:
+    """§7.3 for ``kind == "segment"``: ``nodeId`` is ``<mrmlId>/<tail>``; an alias tail ``s_<n>`` carries the raw
+    ``segmentId`` (omitted under ``anonymizedNames``), a verbatim tail is inside :data:`SEGMENT_ID`, equals
+    ``segmentId`` and never appears under ``anonymizedNames``."""
+    prefix = f"{e.mrml_id}/"
+    tail = e.node_id[len(prefix) :] if e.node_id.startswith(prefix) else ""
+    if not tail:
+        raise GlbWriteError(
+            f"{where}: a segment's nodeId is '<mrmlId>/<segmentId or alias>' (§7.3)"
+        )
+    if SEGMENT_ALIAS.fullmatch(tail) is not None:
+        if anonymized:
+            if e.segment_id is not None:
+                raise GlbWriteError(f"{where}: with anonymised names segmentId is omitted (§7.3)")
+        elif not isinstance(e.segment_id, str):
+            raise GlbWriteError(f"{where}: an aliased segment carries its raw segmentId (§7.3)")
+        return
+    if anonymized:
+        raise GlbWriteError(f"{where}: with anonymised names a segment's nodeId is an alias (§7.3)")
+    if SEGMENT_ID.fullmatch(tail) is None or e.segment_id != tail:
+        raise GlbWriteError(
+            f"{where}: a verbatim segment nodeId is '<mrmlId>/<segmentId>' with the segmentId inside "
+            "[A-Za-z0-9_.:-] (§7.3)"
+        )
+
+
+def _validate_identity(e: Entity, index: int, seen: set[str], anonymized: bool) -> None:
+    where = f"entities[{index}]"
     if not _valid_id(e.node_id):
-        raise GlbWriteError("nodeId must match [A-Za-z0-9_./:-]{1,128} (§3.3)")
+        raise GlbWriteError(f"{where}: nodeId must match [A-Za-z0-9_./:-]{{1,128}} (§3.3)")
     if e.node_id in seen:
-        raise GlbWriteError(f"duplicate nodeId {e.node_id}")
+        raise GlbWriteError(f"{where}: duplicate nodeId")
     if e.node_id == "root":
-        raise GlbWriteError("nodeId 'root' is reserved for the root node (§7.1)")
+        raise GlbWriteError(f"{where}: nodeId 'root' is reserved for the root node (§7.1)")
     seen.add(e.node_id)
-    if not _valid_id(e.mrml_id) or "/" in e.mrml_id:
-        raise GlbWriteError(f"{e.node_id}: mrmlId must be an MRML node ID")
+    if not _valid_mrml_id(e.mrml_id):
+        raise GlbWriteError(
+            f"{where}: mrmlId must be a generated MRML node ID or an m_<n> alias (§7.3)"
+        )
     if e.kind == "model":
         if e.segment_id is not None or e.node_id != e.mrml_id:
-            raise GlbWriteError(
-                f"{e.node_id}: a model's nodeId is its MRML ID and it has no segmentId"
-            )
+            raise GlbWriteError(f"{where}: a model's nodeId is its MRML ID and it has no segmentId")
     elif e.kind == "segment":
-        if (
-            not isinstance(e.segment_id, str)
-            or not e.segment_id
-            or e.node_id != f"{e.mrml_id}/{e.segment_id}"
-        ):
-            raise GlbWriteError(f"{e.node_id}: a segment's nodeId is '<mrmlId>/<segmentId>' (§7.3)")
+        _validate_segment_identity(e, where, anonymized)
     else:
-        raise GlbWriteError(f"{e.node_id}: kind must be 'model' or 'segment'")
+        raise GlbWriteError(f"{where}: kind must be 'model' or 'segment'")
     if not is_valid_name(e.name):
         raise GlbWriteError(
-            f"{e.node_id}: name must be sanitised (no control/format characters, trimmed, ≤ 64)"
+            f"{where}: name must be sanitised (no control/format characters, trimmed, ≤ 64 UTF-16 units)"
         )
     if anonymized and not _ANONYMOUS_NAME.fullmatch(e.name):
         # anonymizedNames: true promises viewers that no display name left Slicer (§7.3, T7)
         raise GlbWriteError(
-            f"{e.node_id}: with anonymised names every name is 'Model <n>'/'Segment <n>'"
+            f"{where}: with anonymised names every name is 'Model <n>'/'Segment <n>'"
         )
 
 
@@ -259,32 +307,33 @@ def is_exportable_matrix(matrix: Any) -> bool:
     return bool(np.all(np.isfinite(m32))) and is_trs_decomposable(m) and is_trs_decomposable(m32)
 
 
-def _validate_appearance(e: Entity) -> None:
+def _validate_appearance(e: Entity, index: int) -> None:
+    where = f"entities[{index}]"
     if (
         not isinstance(e.color, (tuple, list, np.ndarray))
         or np.ndim(e.color) != 1
         or len(e.color) != 3
     ):
-        raise GlbWriteError(f"{e.node_id}: color must be [r, g, b]")
+        raise GlbWriteError(f"{where}: color must be [r, g, b]")
     for i, c in enumerate(e.color):
-        _check_unit_float(c, f"{e.node_id}: color[{i}]")
-    _check_unit_float(e.opacity, f"{e.node_id}: opacity")
+        _check_unit_float(c, f"{where}: color[{i}]")
+    _check_unit_float(e.opacity, f"{where}: opacity")
     if not _is_bool(e.visible) or not _is_bool(e.baked):
-        raise GlbWriteError(f"{e.node_id}: visible and baked must be booleans")
+        raise GlbWriteError(f"{where}: visible and baked must be booleans")
     if e.matrix is not None:
         try:
             m = np.asarray(e.matrix, dtype=np.float64)
         except (TypeError, ValueError):
-            raise GlbWriteError(f"{e.node_id}: matrix must be a finite 4x4 array") from None
+            raise GlbWriteError(f"{where}: matrix must be a finite 4x4 array") from None
         if m.shape != (4, 4) or not np.all(np.isfinite(m)):
-            raise GlbWriteError(f"{e.node_id}: matrix must be a finite 4x4 array")
+            raise GlbWriteError(f"{where}: matrix must be a finite 4x4 array")
         if not np.all(np.isfinite(_as_float32(m))):
-            raise GlbWriteError(f"{e.node_id}: matrix must be a finite 4x4 array in float32")
+            raise GlbWriteError(f"{where}: matrix must be a finite 4x4 array in float32")
         if not is_exportable_matrix(m):
             # glTF node.matrix must decompose into TRS; sheared transforms are baked instead (SLC-13, report slicer-4)
-            raise GlbWriteError(f"{e.node_id}: matrix must be affine without shear (TRS)")
+            raise GlbWriteError(f"{where}: matrix must be affine without shear (TRS)")
         if e.baked and not np.array_equal(m, np.eye(4)):
-            raise GlbWriteError(f"{e.node_id}: a baked entity has an identity matrix (§7.3)")
+            raise GlbWriteError(f"{where}: a baked entity has an identity matrix (§7.3)")
 
 
 def _validate_root(root: RootExtras) -> None:
@@ -418,9 +467,9 @@ def write_glb(
     entities = tuple(entities)  # validated and written from the same snapshot of the input
     _validate_root(root_extras)
     seen: set[str] = set()
-    for e in entities:
-        _validate_identity(e, seen, bool(root_extras.anonymized_names))
-        _validate_appearance(e)
+    for index, e in enumerate(entities):
+        _validate_identity(e, index, seen, bool(root_extras.anonymized_names))
+        _validate_appearance(e, index)
 
     bin_chunk = _Bin()
     buffer_views: list[dict[str, Any]] = []
@@ -444,8 +493,8 @@ def write_glb(
         accessors.append(accessor)
         return len(accessors) - 1
 
-    for e in entities:
-        positions, normals, indices, exact = _validated_arrays(e)
+    for index, e in enumerate(entities):
+        positions, normals, indices, exact = _validated_arrays(e, index)
         vertex_count = positions.shape[0]
         position_accessor, normal_accessor, dequantize = _vertex_attributes(
             positions,

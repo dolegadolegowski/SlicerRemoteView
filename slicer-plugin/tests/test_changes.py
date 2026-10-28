@@ -325,34 +325,52 @@ def test_changes_a_reset_survives_a_scene_that_cannot_be_listed():
 
 
 def test_changes_hide_node_names_switched_needs_a_snapshot():
-    """The viewers' scene was made under the other setting: its IDs and names follow other rules (T7)."""
+    """The viewers' scene was made under the other setting: its names follow other rules (T7). Since SLC-27 a
+    hand-set ID is skipped in both modes (protocol v1.1 §7.3; SLC-35 aliases it), so a switch changes no ID — the
+    hand-set one is never updated, removed or announced either way."""
     scene = LiveScene(
         {"id": "vtkMRMLModelNode4"},
-        {"id": "Doe_John_liver"},
-        {"id": "Doe_Jane_kidney", "visible": False},  # hidden at the named export: not held
+        {"id": "vtkMRMLModelNode5"},
+        {"id": "vtkMRMLModelNode6", "visible": False},  # hidden at the named export: not held
+        {"id": "Doe_John_liver"},  # hand-set: skipped in both modes
     )
     named = exported(scene)
-    assert "Doe_John_liver" in named and not named.anonymized
+    assert "vtkMRMLModelNode5" in named and "Doe_John_liver" not in named and not named.anonymized
+    scene.node("vtkMRMLModelNode5")["opacity"] = 0.5
+    scene.node("vtkMRMLModelNode6")["visible"] = True
     scene.node("Doe_John_liver")["opacity"] = 0.5
-    scene.node("Doe_Jane_kidney")["visible"] = True
-    # switched on: no hand-set ID is updated, removed or announced — neither the held one nor the new one
-    marks = (("Doe_John_liver", Change.APPEARANCE), ("Doe_Jane_kidney", Change.APPEARANCE))
-    assert plan_of(scene, named, *marks, anonymize=True) == Plan(snapshot=True)
-    # a reset in the same flush is not lost to the switch
+    # switched on: nothing is updated or removed, the scene is exported again; the node that became visible is
+    # announced (a generated ID), the hand-set one is not
+    marks = (
+        ("vtkMRMLModelNode5", Change.APPEARANCE),
+        ("vtkMRMLModelNode6", Change.APPEARANCE),
+        ("Doe_John_liver", Change.APPEARANCE),
+    )
+    assert plan_of(scene, named, *marks, anonymize=True) == Plan(
+        snapshot=True, added=(("vtkMRMLModelNode6", "model"),)
+    )
+    # a reset in the same flush is not lost to the switch; the hand-set ID is not announced
     reset = plan_of(scene, named, *marks, anonymize=True, reset=True)
-    assert reset == Plan(snapshot=True, reset=True, added=(("vtkMRMLModelNode4", "model"),))
-    scene.node("Doe_Jane_kidney")["visible"] = False
+    assert reset == Plan(
+        snapshot=True,
+        reset=True,
+        added=(
+            ("vtkMRMLModelNode4", "model"),
+            ("vtkMRMLModelNode5", "model"),
+            ("vtkMRMLModelNode6", "model"),
+        ),
+    )
     anonymous = exported(scene, anonymize=True)
     assert "Doe_John_liver" not in anonymous and anonymous.anonymized
-    # switched off: the hand-set ID is exported again, so announced
+    # switched off: exported again; every shown node is held already, so nothing is announced
     plan = plan_of(scene, anonymous, ("vtkMRMLModelNode4", Change.APPEARANCE))
-    assert plan == Plan(snapshot=True, added=(("Doe_John_liver", "model"),))
+    assert plan == Plan(snapshot=True)
     # a node the export left out is not announced on a switch either (the hint lists nodes that will come)
-    scene.add("vtkMRMLModelNode6", mesh=LINE)
+    scene.add("vtkMRMLModelNode7", mesh=LINE)
     anonymous = exported(scene, anonymize=True)
-    assert "vtkMRMLModelNode6" in anonymous.skipped
+    assert "vtkMRMLModelNode7" in anonymous.skipped
     plan = plan_of(scene, anonymous, ("vtkMRMLModelNode4", Change.APPEARANCE))
-    assert plan == Plan(snapshot=True, added=(("Doe_John_liver", "model"),))
+    assert plan == Plan(snapshot=True)
 
 
 # --------------------------------------------------------------------------- hidden in Slicer
@@ -807,22 +825,22 @@ def test_changes_hide_node_names_keeps_hand_set_ids_off_the_wire():
 def test_changes_reprs_show_no_node_id_or_name(caplog):
     caplog.set_level(logging.DEBUG)
     scene = LiveScene(
-        {"id": "Doe_John_liver", "name": "Doe^John liver"},
-        {"id": "Doe_Jane_kidney"},
-        {"id": "Doe_Joe_vessel", "mesh": LINE},  # left out: in sent.skipped
+        {"id": "vtkMRMLModelNode1", "name": "Doe^John liver"},
+        {"id": "vtkMRMLModelNode2", "name": "Doe^Jane kidney"},
+        {"id": "vtkMRMLModelNode3", "mesh": LINE},  # left out: in sent.skipped
     )
     sent = exported(scene)
-    scene.node("Doe_John_liver")["opacity"] = 0.5
-    scene.remove("Doe_Jane_kidney")
+    scene.node("vtkMRMLModelNode1")["opacity"] = 0.5
+    scene.remove("vtkMRMLModelNode2")
     plan = plan_of(
-        scene, sent, ("Doe_John_liver", Change.APPEARANCE), ("Doe_Jane_kidney", Change.REMOVED)
+        scene, sent, ("vtkMRMLModelNode1", Change.APPEARANCE), ("vtkMRMLModelNode2", Change.REMOVED)
     )
     assert plan.changes and plan.removed and len(sent.skipped) == 1
-    texts = [repr(plan), repr(sent), repr(sent.get("Doe_John_liver")), repr(sent.skipped)]
+    texts = [repr(plan), repr(sent), repr(sent.get("vtkMRMLModelNode1")), repr(sent.skipped)]
     logging.getLogger("test").info(
-        "%s %s %s %s", plan, sent, sent.get("Doe_John_liver"), sent.skipped
+        "%s %s %s %s", plan, sent, sent.get("vtkMRMLModelNode1"), sent.skipped
     )
-    assert not any("Doe" in t for t in [*texts, caplog.text])
+    assert not any("Doe" in t or "vtkMRMLModelNode" in t for t in [*texts, caplog.text])
 
 
 class _Broken(LiveScene):
@@ -881,11 +899,11 @@ def test_changes_a_node_the_adapter_cannot_read_is_left_to_the_export(
     failing, props, held, flags, error
 ):
     """The export reads it again and reports it if it still fails; the flush goes on (no exception with an ID)."""
-    scene = _Broken({"id": "Doe_John_liver", **props}, {"id": "vtkMRMLModelNode5"}, error=error)
+    scene = _Broken({"id": "vtkMRMLModelNode4", **props}, {"id": "vtkMRMLModelNode5"}, error=error)
     sent = exported(scene)
-    assert ("Doe_John_liver" in sent) is held
+    assert ("vtkMRMLModelNode4" in sent) is held
     scene.failing = failing
-    assert plan_of(scene, sent, ("Doe_John_liver", flags)) == Plan(snapshot=True)
+    assert plan_of(scene, sent, ("vtkMRMLModelNode4", flags)) == Plan(snapshot=True)
 
 
 @pytest.mark.parametrize("error", ADAPTER_ERRORS)

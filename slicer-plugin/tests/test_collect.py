@@ -602,6 +602,8 @@ def test_collect_skips_nodes_without_triangles_and_keeps_the_rest():
         (FakeNode("root", None), SkipReason.INVALID_NODE_ID, ""),
         (FakeNode(42, None), SkipReason.INVALID_NODE_ID, ""),
         (FakeNode("x" * 129, None), SkipReason.INVALID_NODE_ID, ""),
+        (FakeNode("Sphere", None), SkipReason.INVALID_NODE_ID, ""),  # §7.3 v1.1: not generated
+        (FakeNode(b"vtkMRMLModelNode1", None), SkipReason.INVALID_NODE_ID, ""),
         (
             FakeNode("vtkMRMLModelNode9", None, color=(np.nan, 0, 0)),
             SkipReason.INVALID_DISPLAY,
@@ -816,8 +818,10 @@ def test_collect_malformed_adapter_values_never_abort():
     )
 
 
-def test_collect_hide_node_names_exports_only_generated_ids():
-    """With Hide node names a hand-edited ID (which could carry a name) never leaves the PC (T7)."""
+@pytest.mark.parametrize("anonymize", [False, True])
+def test_collect_exports_only_generated_ids(anonymize):
+    """Protocol v1.1 §7.3 (SLC-27): a hand-edited ID (which could carry a name) never leaves the PC in either mode
+    (T7) — skipped and reported here, exported as ``m_<n>`` once SLC-35 wires the alias registry in."""
     hand_edited = [
         "Kowalski.Jan.1950-01-01",
         "KowalskiJan19500101",
@@ -825,20 +829,39 @@ def test_collect_hide_node_names_exports_only_generated_ids():
         "vtkMRMLModelNode7Kowalski",
         "vtkMRMLModelNodeKowalski",
         "vtkMRMLModelNode7.Jan",
-        "vtkMRMLModelNode12345678901",  # 11 digits: longer than Slicer's counter
+        "Sphere",
     ]
+    generated = [
+        "vtkMRMLModelNode7",
+        "vtkMRMLModelNode12345678901",
+    ]  # the contract has no digit cap
     scene = FakeScene(
         *(FakeNode(node_id, _sphere(), name="Jan Kowalski") for node_id in hand_edited),
-        FakeNode("vtkMRMLModelNode7", _cube(), name="Jan Kowalski"),
+        *(FakeNode(node_id, _cube(), name="Jan Kowalski") for node_id in generated),
     )
-    hidden = collect_scene(scene, anonymize_names=True)
-    assert [(e.node_id, e.name) for e in hidden.entities] == [("vtkMRMLModelNode7", "Model 1")]
-    assert hidden.skipped == (SkippedNode("", SkipReason.INVALID_NODE_ID),) * len(hand_edited)
-    assert [s.index for s in hidden.skipped] == list(range(len(hand_edited)))
-    glb = write_glb(hidden.entities, _root(True))
-    assert b"Kowalski" not in glb and b"Jan" not in glb
-    shown = collect_scene(scene)
-    assert [e.node_id for e in shown.entities] == [*hand_edited, "vtkMRMLModelNode7"]
+    collected = collect_scene(scene, anonymize_names=anonymize)
+    names = ["Model 1", "Model 2"] if anonymize else ["Jan Kowalski", "Jan Kowalski"]
+    assert [(e.node_id, e.name) for e in collected.entities] == list(
+        zip(generated, names, strict=True)
+    )
+    assert collected.skipped == (SkippedNode("", SkipReason.INVALID_NODE_ID),) * len(hand_edited)
+    assert [s.index for s in collected.skipped] == list(range(len(hand_edited)))
+    # a CollectedScene lists every Entity and SkippedNode: its repr, which can reach a log, shows no ID or name (T7)
+    text = repr(collected)
+    assert "Kowalski" not in text and "vtkMRMLModelNode" not in text and "Sphere" not in text
+    glb = write_glb(collected.entities, _root(anonymize))
+    assert b"Kowalski.Jan" not in glb and b"Sphere" not in glb
+    if anonymize:
+        assert b"Kowalski" not in glb and b"Jan" not in glb
+
+
+def test_collect_skipped_node_repr_hides_the_id():
+    """A verbatim segment ID may be name-derived (T7): the repr, which can reach a log, shows the reason and
+    the position only."""
+    text = repr(SkippedNode("Liver_DoeJohn", SkipReason.NO_TRIANGLES, 2))
+    assert "Liver_DoeJohn" not in text and "Doe" not in text
+    assert "NO_TRIANGLES" in text and "index=2" in text
+    assert SkippedNode("Liver_DoeJohn", SkipReason.NO_TRIANGLES, 2).node_id == "Liver_DoeJohn"
 
 
 def test_collect_duplicate_ids_and_non_finite_points_are_skipped():
