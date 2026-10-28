@@ -480,3 +480,34 @@ def test_mrml_scene_adapter_uses_slicers_functions(import_remote_view, slicer_st
     monkeypatch.setattr(slicer, "vtkMRMLFolderDisplayNode", FakeFolders(), raising=False)
     api = import_remote_view().RemoteViewLogic().sceneApi()
     assert api.visible_model_nodes() == [model]
+
+
+# --------------------------------------------------------------------------- SLC-36 (the SLC-35 review)
+
+
+def test_mrml_scene_segment_ref_repr_hides_the_segment_id():
+    """SLC-36 passes handles into the classifier: a raw segment ID may be PHI (T7)."""
+    handle = SegmentRef(segmentation(), "Liver_DoeJohn")
+    assert repr(handle) == "SegmentRef(node=<FakeSegmentation>, segment_id=<hidden>)"
+    assert "Liver_DoeJohn" not in repr([handle]) and handle.segment_id == "Liver_DoeJohn"
+
+
+class _BrokenVisibilityDisplay(FakeSegDisplay):
+    def GetSegmentVisibility3D(self, segment_id):  # noqa: N802
+        if segment_id == "Segment_1":
+            raise TypeError("GetSegmentVisibility3D() takes 2 arguments")
+        return super().GetSegmentVisibility3D(segment_id)
+
+
+def test_mrml_scene_a_segment_whose_visibility_binding_fails_is_listed_as_invalid_display(caplog):
+    """The listing's per-segment getters are guarded like the display properties: one segment is reported, the
+    rest of the scene ships."""
+    node = segmentation(display=_BrokenVisibilityDisplay(opacity_3d=0.5))
+    api, _ = scene([], segmentations=[node])
+    with caplog.at_level(logging.DEBUG):
+        collected = collect_scene(api)
+    assert [e.node_id for e in collected.entities] == [f"{SEG}/Segment_2"]
+    assert [(s.node_id, s.reason) for s in collected.skipped] == [
+        (f"{SEG}/Segment_1", SkipReason.INVALID_DISPLAY)
+    ]
+    assert "TypeError" in caplog.text and "Segment_1" not in caplog.text

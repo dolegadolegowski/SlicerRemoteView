@@ -375,11 +375,26 @@ class LiveScene:
     def node(self, node_id: str) -> dict:
         return next(n for n in self.nodes if n["id"] == node_id)
 
+    def segment(self, node_id: str, segment_id) -> dict:
+        return next(n for n in self.nodes if n["id"] == node_id and n.get("segment") == segment_id)
+
+    def place(self, node_id: str, **props) -> None:
+        """Set ``props`` on every dict of the node ``node_id`` — a segmentation node's ``world``/``warp`` are shared by
+        all its segments (their transform is the node's, SLC-13)."""
+        for node in self.nodes:
+            if node["id"] == node_id:
+                node.update(props)
+
     def add(self, node_id: str, **props) -> None:
         self.nodes.append({**self._defaults(), "id": node_id, **props})
 
-    def remove(self, node_id: str) -> None:
-        self.nodes = [n for n in self.nodes if n["id"] != node_id]
+    def remove(self, node_id: str, segment_id=None) -> None:
+        """Remove the node, or one segment of it when ``segment_id`` is given."""
+        self.nodes = [
+            n
+            for n in self.nodes
+            if n["id"] != node_id or (segment_id is not None and n.get("segment") != segment_id)
+        ]
 
     def visible_model_nodes(self):
         return [n for n in self.nodes if n["visible"] and "segment" not in n]
@@ -720,6 +735,50 @@ class FakeSegmentation:
 
     def GetSegmentation(self):  # noqa: N802
         return self.segmentation
+
+
+class MrmlSegmentation(FakeSegmentation, vtkObject):
+    """A segmentation node read by both the scene adapter (the export) and the observers (VTK's own event dispatch),
+    like :class:`MrmlModel`: ``segments`` holds :class:`FakeSegment` objects with a sphere each by default, under one
+    :class:`FakeSegDisplay`. :meth:`fire` invokes a ``vtkSegmentation`` event by Slicer's attribute name or the
+    watcher's field name, with the segment ID as call data or without (NULL)."""
+
+    def __init__(self, node_id, **kw):
+        kw.setdefault("displays", [FakeSegDisplay()])
+        if "segments" not in kw:
+            kw["segments"] = [
+                FakeSegment("Segment_1", name="Liver", polydata=sphere(8)),
+                FakeSegment("Segment_2", name="Spleen", polydata=sphere(8)),
+            ]
+        FakeSegmentation.__init__(self, node_id, **kw)
+        self.in_scene = True
+
+    def IsA(self, name):  # noqa: N802 — MRML's names
+        return int(name == self.cls)
+
+    def GetScene(self):  # noqa: N802
+        return object() if self.in_scene else None
+
+    def add_segment(self, segment, *, fire=True):
+        """Append ``segment`` and (unless ``fire`` is false) invoke ``SegmentAdded`` with its ID."""
+        self.segmentation.segments.append(segment)
+        if fire:
+            self.fire("SegmentAdded", segment.segment_id)
+
+    def remove_segment(self, segment_id, *, fire=True):
+        self.segmentation.segments = [
+            s for s in self.segmentation.segments if s.segment_id != segment_id
+        ]
+        if fire:
+            self.fire("SegmentRemoved", segment_id)
+
+    def fire(self, name: str, segment_id=None) -> None:
+        from mrml_fakes import event_id  # noqa: PLC0415 — test modules on the same path
+
+        if segment_id is None:
+            self.InvokeEvent(event_id(name))
+        else:
+            self.InvokeEvent(event_id(name), segment_id)
 
 
 class FakeFolders:

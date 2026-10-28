@@ -9,13 +9,22 @@ one :class:`Drained` set (SLC-16 turns it into ``scene.update`` / ``scene.nodeRe
   viewers four times a second (NFR-02: ≤ 500 ms from Slicer to the viewers);
 - a mesh change, a new node or a rename (all need a re-export) waits :data:`GEOMETRY_MS` (750 ms; protocol §8.1:
   500–1000 ms; segment editing fires mesh events continuously), at most :data:`GEOMETRY_MAX_MS` after the first;
+- the cap counts **per node** from that node's first pending mark (the flush is due when the oldest one's cap runs
+  out), and a repeated ``geometry`` mark on a node already pending ``geometry`` in this flush re-bases that node's
+  entry — only that one (SLC-36, a plan correction of SLC-15): painting one segment (every brush stroke ends in
+  ``RepresentationModified``) or smoothing one model exports once, 750 ms after the last stroke, instead of a
+  full-scene re-export every 2 s on the main thread (ADR 0005 Consequences; SLC-28 still todo), while a mark on any
+  other node made during the burst — a segment hidden, a slider moved — still leaves within :data:`GEOMETRY_MAX_MS` of
+  *its* mark (NFR-02), taking the burst's node with it. A new flag on the burst's node is not a repeat either. A script
+  that edits one mesh every < 750 ms for ever never exports until it stops (SLC-18 may add a "send now");
 - while Slicer runs a batch process (a scene close, import or restore always runs inside one) nothing is flushed: the
   marks are kept and flushed once when the last hold ends (``EndBatchProcessEvent``; SLC-29's controller also holds
   while a snapshot is in flight or the connection is lost);
 - a closed scene (``EndCloseEvent``) drops every mark and flushes a reset: the next scene is a new snapshot.
 
 One timer serves both: while a re-export is pending, appearance changes wait with it (at most
-:data:`GEOMETRY_MAX_MS`) — the re-exported snapshot carries them anyway.
+:data:`GEOMETRY_MAX_MS` after their own mark, a burst on another node notwithstanding) — the re-exported snapshot
+carries them anyway.
 
 Pure logic: the timer and the clock are injected (``qt.QTimer`` and ``time.monotonic`` in Slicer, fakes in tests). Main
 thread only, like the observers that call it.
@@ -52,6 +61,8 @@ class Change(enum.Flag):
 
 #: The changes that need a re-export (a new mesh, an added node, a rename), hence the longer wait.
 SLOW = Change.GEOMETRY | Change.ADDED | Change.NAME
+#: The key of a pending reset in ``Debouncer``'s first-mark table (node IDs are non-empty strings).
+_RESET = None
 
 
 @dataclass(frozen=True)
@@ -78,13 +89,17 @@ class DirtySet:
         self._union = Change(0)
         self._reset = False
 
-    def mark(self, node_id: str, flags: Change) -> None:
+    def mark(self, node_id: str, flags: Change) -> bool:
+        """Add ``flags`` to the node's pending ones; ``True`` when every one of them was already pending (a repeated
+        mark), which :class:`Debouncer` uses for its re-base rule."""
         if not isinstance(node_id, str) or not isinstance(flags, Change):
             raise TypeError("mark needs a str node ID and Change flags")
         if not node_id or not flags:
             raise ValueError("mark needs a node ID and at least one change")
-        self._changes[node_id] = self._changes.get(node_id, Change(0)) | flags
+        before = self._changes.get(node_id, Change(0))
+        self._changes[node_id] = before | flags
         self._union |= flags
+        return before & flags == flags
 
     def reset(self) -> None:
         """The scene was closed: forget every mark and remember the reset."""
@@ -134,7 +149,9 @@ class Debouncer:
         self._on_flush = on_flush
         self._clock = clock
         self._dirty = DirtySet()
-        self._first_mark: float | None = None
+        # when each pending node (or the reset, under _RESET) was first marked in this window: the cap of the whole
+        # set counts from the oldest entry; a repeated geometry mark re-bases its own node's entry only
+        self._since: dict[str | None, float] = {}
         self._holds = 0
         self._handoff = False  # the last release started the timer at 0 ms
 
@@ -149,13 +166,24 @@ class Debouncer:
         return bool(self._dirty)
 
     def mark(self, node_id: str, flags: Change) -> None:
-        self._dirty.mark(node_id, flags)
-        self._schedule()
+        repeated = self._dirty.mark(node_id, flags)
+        now = self._clock()
+        if repeated and flags & Change.GEOMETRY:
+            # the same mesh edited again (a brush stroke, a smoothing drag): this node's cap counts from here; the
+            # other pending nodes keep theirs
+            self._since[node_id] = now
+        else:
+            self._since.setdefault(node_id, now)
+        self._schedule(now)
 
     def reset(self) -> None:
-        """The scene was closed (``EndCloseEvent``)."""
+        """The scene was closed (``EndCloseEvent``): the marks made before it are dropped, so the reset itself is now
+        the oldest pending change."""
         self._dirty.reset()
-        self._schedule()
+        now = self._clock()
+        self._since.clear()
+        self._since[_RESET] = now
+        self._schedule(now)
 
     def hold(self) -> None:
         """``StartBatchProcessEvent`` (or another hold): keep the marks until the matching :meth:`release`."""
@@ -179,27 +207,26 @@ class Debouncer:
         self._handoff = False
         if self.held or not self._dirty:
             return
-        self._first_mark = None
-        self._on_flush(self._dirty.drain())
+        drained = self._dirty.drain()
+        self._since.clear()  # before on_flush: a mark it makes opens the next window
+        self._on_flush(drained)
 
     def stop(self) -> None:
         """The session ended or the module is unloaded: forget everything; nothing is flushed."""
         self._timer.stop()
         self._dirty = DirtySet()
-        self._first_mark = None
+        self._since.clear()
         self._holds = 0
         self._handoff = False
 
-    def _schedule(self) -> None:
+    def _schedule(self, now: float) -> None:
         if self.held or self._handoff:
             return
-        now = self._clock()
-        if self._first_mark is None:
-            self._first_mark = now
         slow = bool(self._dirty.pending() & SLOW)
         quiet, longest = (
             (GEOMETRY_MS, GEOMETRY_MAX_MS) if slow else (APPEARANCE_MS, APPEARANCE_MAX_MS)
         )
-        left = longest - (now - self._first_mark) * 1000.0
+        oldest = min(self._since.values(), default=now)
+        left = longest - (now - oldest) * 1000.0
         # a main thread that was busy longer than the longest wait: flush as soon as control returns to the event loop
         self._timer.start(max(0, round(min(quiet, left))))

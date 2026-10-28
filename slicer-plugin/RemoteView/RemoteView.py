@@ -238,6 +238,13 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
             display_modified=slicer.vtkMRMLDisplayableNode.DisplayModifiedEvent,
             mesh_modified=slicer.vtkMRMLModelNode.MeshModifiedEvent,
             transform_modified=slicer.vtkMRMLTransformableNode.TransformModifiedEvent,
+            # vtkSegmentation's events, forwarded by every segmentation node (SLC-36; [TODO verify] the attributes
+            # exist and read 62102 62103 62104 62101 62105 — manual §13 step 1, SLC-37)
+            segment_added=slicer.vtkSegmentation.SegmentAdded,
+            segment_removed=slicer.vtkSegmentation.SegmentRemoved,
+            segment_modified=slicer.vtkSegmentation.SegmentModified,
+            representation_modified=slicer.vtkSegmentation.RepresentationModified,
+            representation_names_modified=slicer.vtkSegmentation.ContainedRepresentationNamesModified,
         )
         return SceneWatcher(
             sink,

@@ -151,15 +151,130 @@ def test_debounce_geometry_extends_the_wait_to_750_ms(setup):
     ],
 )
 def test_debounce_continuous_marks_still_flush_after_the_longest_wait(setup, flags, longest):
-    """A slider dragged for 3 s: the viewers still get an update every ``longest`` ms (NFR-02)."""
+    """A slider dragged for 3 s: the viewers still get an update every ``longest`` ms (NFR-02). The geometry case
+    marks a different node each time: a repeated ``geometry`` mark on one node re-bases the cap instead (SLC-36,
+    below)."""
     timer, debouncer, flushed = setup
-    for _ in range(600):  # 6 s: at least two windows even for geometry
-        debouncer.mark("vtkMRMLModelNode4", flags)
+    for i in range(600):  # 6 s: at least two windows even for geometry
+        node = f"vtkMRMLModelNode{i}" if flags & Change.GEOMETRY else "vtkMRMLModelNode4"
+        debouncer.mark(node, flags)
         timer.advance(10)
     times = [at for at, _ in flushed]
     assert times[0] == longest and len(times) >= 2
     assert all(b - a <= longest + 10 for a, b in itertools.pairwise(times))
     assert len(times) >= 6_000 // (longest + 10)
+
+
+# --------------------------------------------------------------------------- SLC-36: segment-editing bursts
+
+
+def test_debounce_repeated_geometry_marks_on_one_node_flush_once_after_the_last(setup):
+    """Painting one segment (every brush stroke ends in ``RepresentationModified``) or smoothing one model for 6 s:
+    one flush, 750 ms after the last stroke — not a full-scene re-export every 2 s (plan correction, SLC-36)."""
+    timer, debouncer, flushed = setup
+    for _ in range(12):  # 0, 500, … 5500 ms
+        debouncer.mark("vtkMRMLSegmentationNode1/Segment_1", Change.GEOMETRY)
+        timer.advance(500)
+    assert flushed == []  # 6 s of strokes: nothing yet (the old cap flushed at 2 s)
+    timer.advance(GEOMETRY_MS - 500 - 1)
+    assert flushed == []
+    timer.advance(1)
+    [(at, drained)] = flushed
+    assert at == 5_500 + GEOMETRY_MS
+    assert dict(drained.changes) == {"vtkMRMLSegmentationNode1/Segment_1": Change.GEOMETRY}
+    timer.advance(5_000)
+    assert len(flushed) == 1
+
+
+def test_debounce_the_cap_holds_while_new_nodes_or_flags_keep_arriving(setup):
+    """Geometry marks on different nodes every 500 ms: the 2 s cap of the oldest flushes what is pending; a repeated
+    mark that adds a new flag to its node is not a repeat either."""
+    timer, debouncer, flushed = setup
+    for i in range(
+        5
+    ):  # A at 0, B at 500, C at 1000, D at 1500 → the cap at 2000; E at 2000 opens a new window
+        debouncer.mark(f"vtkMRMLModelNode{i}", Change.GEOMETRY)
+        timer.advance(500)
+    [(at, drained)] = flushed
+    assert at == GEOMETRY_MAX_MS and len(drained.changes) == 4
+    flushed.clear()
+    timer.advance(5_000)
+    [(at, drained)] = flushed
+    assert at == 2_000 + GEOMETRY_MS and list(drained.changes) == ["vtkMRMLModelNode4"]
+    flushed.clear()
+    # the same node, geometry then geometry|appearance then geometry: only the pure repeats re-base
+    start = timer.now
+    debouncer.mark("vtkMRMLModelNode9", Change.GEOMETRY)
+    timer.advance(500)
+    debouncer.mark(
+        "vtkMRMLModelNode9", Change.GEOMETRY | Change.APPEARANCE
+    )  # a new flag: no re-base
+    timer.advance(500)
+    debouncer.mark("vtkMRMLModelNode9", Change.GEOMETRY | Change.APPEARANCE)  # a repeat: re-based
+    timer.advance(500)
+    debouncer.mark("vtkMRMLModelNode9", Change.GEOMETRY)  # a repeat: re-based again
+    timer.advance(5_000)
+    [(at, _)] = flushed
+    assert at == start + 1_500 + GEOMETRY_MS
+
+
+def test_debounce_a_mark_on_another_node_during_a_burst_flushes_within_its_own_cap(setup):
+    """NFR-02 under the re-base rule: a segment hidden in Slicer (one appearance mark) while another segment is being
+    painted for 6 s leaves within 2 s of its own mark, with the burst's node — the re-base counts per node, so the
+    burst postpones nothing but its own cap."""
+    timer, debouncer, flushed = setup
+    debouncer.mark("vtkMRMLSegmentationNode1/Segment_1", Change.GEOMETRY)  # at 0
+    timer.advance(100)
+    debouncer.mark("vtkMRMLSegmentationNode1/Segment_2", Change.APPEARANCE)  # at 100: hidden
+    timer.advance(400)
+    for _ in range(11):  # strokes at 500, 1000, … 5500 ms
+        debouncer.mark("vtkMRMLSegmentationNode1/Segment_1", Change.GEOMETRY)
+        timer.advance(500)
+    timer.advance(5_000)
+    assert [(at, dict(d.changes)) for at, d in flushed] == [
+        (
+            100 + GEOMETRY_MAX_MS,  # 2 s after the hidden segment's mark, not after the burst
+            {
+                "vtkMRMLSegmentationNode1/Segment_1": Change.GEOMETRY,
+                "vtkMRMLSegmentationNode1/Segment_2": Change.APPEARANCE,
+            },
+        ),
+        (5_500 + GEOMETRY_MS, {"vtkMRMLSegmentationNode1/Segment_1": Change.GEOMETRY}),
+    ]
+
+
+def test_debounce_a_reset_counts_from_itself(setup):
+    """The marks before a close are dropped with it, so the cap of the reset counts from the close."""
+    timer, debouncer, flushed = setup
+    # the slow lane: nothing flushed before the close
+    debouncer.mark("vtkMRMLModelNode4", Change.GEOMETRY)
+    timer.advance(200)
+    debouncer.reset()
+    # not the 50 ms left of the dropped mark's fast-lane cap
+    assert timer.starts[-1] == APPEARANCE_MS
+    timer.advance(APPEARANCE_MS)
+    [(at, drained)] = flushed
+    assert at == 200 + APPEARANCE_MS and drained.reset and dict(drained.changes) == {}
+
+
+def test_debounce_dirty_set_mark_says_whether_the_flags_were_pending():
+    dirty = DirtySet()
+    assert dirty.mark("vtkMRMLModelNode4", Change.GEOMETRY) is False
+    assert dirty.mark("vtkMRMLModelNode4", Change.GEOMETRY) is True
+    assert dirty.mark("vtkMRMLModelNode4", Change.GEOMETRY | Change.APPEARANCE) is False
+    assert dirty.mark("vtkMRMLModelNode4", Change.APPEARANCE) is True
+    assert dirty.mark("vtkMRMLModelNode5", Change.GEOMETRY) is False
+    dirty.drain()
+    assert dirty.mark("vtkMRMLModelNode4", Change.GEOMETRY) is False  # a new window
+
+
+def test_debounce_repeated_appearance_marks_do_not_re_base(setup):
+    """Only ``geometry`` re-bases: a slider dragged on one node still updates the viewers every 250 ms."""
+    timer, debouncer, flushed = setup
+    for _ in range(30):
+        debouncer.mark("vtkMRMLModelNode4", Change.APPEARANCE | Change.TRANSFORM)
+        timer.advance(50)
+    assert [at for at, _ in flushed] == [250, 500, 750, 1_000, 1_250, 1_500]
 
 
 def test_debounce_removal_and_transform_are_fast_adding_is_slow(setup):

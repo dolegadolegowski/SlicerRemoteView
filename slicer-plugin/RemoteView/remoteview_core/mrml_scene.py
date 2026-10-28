@@ -92,10 +92,14 @@ _BINDING_ERRORS = (TypeError, ValueError, AttributeError)
 
 class SegmentRef(NamedTuple):
     """One shown segment: its segmentation node and its raw segment ID (``str``, or ``bytes`` for an ID that is not
-    UTF-8), exactly as ``GetSegmentIDs()`` returned it — the only form the display getters are asked with."""
+    UTF-8), exactly as ``GetSegmentIDs()`` returned it — the only form the display getters are asked with. The repr
+    shows neither (a raw segment ID may be PHI, T7; SLC-36 passes handles into the classifier)."""
 
     node: Any
     segment_id: Any
+
+    def __repr__(self) -> str:
+        return f"SegmentRef(node=<{type(self.node).__name__}>, segment_id=<hidden>)"
 
 
 class MrmlSceneApi:
@@ -134,9 +138,16 @@ class MrmlSceneApi:
             if not display.GetDisplayRepresentationName3D():
                 continue  # Show 3D off: nothing is drawn, nothing is converted
             for segment_id in self._segment_ids(node):
-                if display.GetSegmentVisibility(segment_id) and display.GetSegmentVisibility3D(
-                    segment_id
-                ):
+                try:
+                    shown = display.GetSegmentVisibility(
+                        segment_id
+                    ) and display.GetSegmentVisibility3D(segment_id)
+                except _BINDING_ERRORS as exc:
+                    # one segment's binding fails (SLC-35 review): list it anyway, so display_props reports it as
+                    # invalid-display and the rest of the scene ships; type only (T7)
+                    _log.error("mrml_scene: segment visibility not read (%s)", type(exc).__name__)
+                    shown = True
+                if shown:
                     handles.append(SegmentRef(node, segment_id))
         return handles
 
