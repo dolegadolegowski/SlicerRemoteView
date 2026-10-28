@@ -38,6 +38,10 @@ URL = "wss://relay.example.org/ws"
 CODE = "7KQ4X"
 TOKEN = "pt_Mn3Vq8YtK2cR9xLwZaBdE7fGhJ4uP6sTvW1yXoNQ5kA"  # noqa: S105 — the protocol.md §4.2 example token
 SESSION_ID = "sess_01K7Q4XMB2TJ9RD6"
+#: A second session (a re-create after a relay restart may get another code, SLC-17/SLC-38).
+OTHER_CODE = "9HJ4M"
+OTHER_SESSION_ID = "sess_01K7Q9ZRB4MP2WX8"
+OTHER_TOKEN = "pt_Zq2Wx7Rb4Mp9Kt3Hv6Nc8Yd1Lf5Gs0Je2Ua7Qo4Xi"  # noqa: S105 — a made-up token of the defs pattern
 LIMITS = {
     "maxSnapshotBytes": 67_108_864,
     "maxChunkBytes": 1_048_576,
@@ -242,18 +246,66 @@ class FakeTransport:
         return True
 
 
-def created(reply_to: str = "p-1", *, code: str = CODE, **limits: int) -> dict:
+def ttl(grace_s: int = 120) -> dict:
+    """``ttl`` of ``session.created``/``session.resumed``/``session.renewed`` (defs.schema.json)."""
+    return {"graceS": grace_s, "idleS": 1800, "maxLifetimeS": 43200, "expiresAt": 1792281600120}
+
+
+def created(
+    reply_to: str = "p-1",
+    *,
+    code: str = CODE,
+    session_id: str = SESSION_ID,
+    token: str = TOKEN,
+    grace_s: int = 120,
+    **limits: int,
+) -> dict:
     """``session.created`` (protocol §4.2); ``limits`` override the announced ``limits``."""
     return envelope.make(
         "session.created",
         reply_to=reply_to,
-        sessionId=SESSION_ID,
+        sessionId=session_id,
         code=code,
-        publisherToken=TOKEN,
+        publisherToken=token,
         viewerLimit=20,
-        ttl={"graceS": 120, "idleS": 1800, "maxLifetimeS": 43200, "expiresAt": 1792281600120},
+        ttl=ttl(grace_s),
         limits={**LIMITS, **limits},
     )
+
+
+def resumed(  # noqa: PLR0913
+    reply_to: str | None,
+    *,
+    scene_version: int,
+    snapshot_version: int | None,
+    viewer_count: int = 0,
+    code: str = CODE,
+    session_id: str = SESSION_ID,
+    grace_s: int = 120,
+) -> dict:
+    """``session.resumed`` (protocol §4.3)."""
+    return envelope.make(
+        "session.resumed",
+        reply_to=reply_to,
+        sessionId=session_id,
+        code=code,
+        sceneVersion=scene_version,
+        snapshotVersion=snapshot_version,
+        viewerCount=viewer_count,
+        ttl=ttl(grace_s),
+    )
+
+
+def relay_error(
+    code: str, reply_to: str | None = None, *, retryable: bool = False, **details
+) -> dict:
+    """A relay ``error`` (protocol §9.2) with a fixed free text."""
+    message = envelope.make(
+        "error", reply_to=reply_to, code=code, message=f"{code} for test", retryable=retryable
+    )
+    if details:
+        message["details"] = details
+    return message
 
 
 def live_client(profile: str = "mobile", *, validate=None, **limits: int) -> ProtocolClient:

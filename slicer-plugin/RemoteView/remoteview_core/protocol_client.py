@@ -12,7 +12,16 @@ States (``SessionState``)::
     idle ──start()──▶ connecting ──session.created──▶ created ──begin_snapshot()──▶ active
                           │                              │                            │
                           └─ error (CAPACITY, …) ─▶ closed ◀─ close() / session.expired / fatal error
-    created/active ──transport_lost()──▶ grace ──(SLC-17: session.resume)──▶ resuming ──▶ active
+    created/active ──transport_lost()──▶ grace ──resume()──▶ resuming ──session.resumed──▶ created/active
+    resuming ─error SESSION_NOT_FOUND─▶ closed (the caller may fall back to start(profile, old code), with the
+                                               code it read before handle(): closing forgets it)
+    resuming ─UNAUTHORIZED / 4003─▶ closed        resuming ─transport_lost()─▶ grace
+
+Resume (§4.3, SLC-17): a drop owes a snapshot until ``session.resumed`` shows the relay holds our last snapshot and our
+last version; a snapshot in flight at the drop is owed unless ``snapshotVersion`` names it (§6.3, §13 step 10) — the
+relay's ``sceneVersion`` may be a maximum over the versions announced to it (§4.3 does not say), so it alone proves
+nothing. Versions continue
+from the larger of ours and the relay's (§6.2, §8.4); a fallback ``session.create`` restarts them at 1.
 
 Scene updates (§8, SLC-16): :meth:`ProtocolClient.send_changes`, :meth:`~ProtocolClient.send_removed` and
 :meth:`~ProtocolClient.announce_added` build ``scene.update``/``scene.nodeRemoved``/``scene.nodeAdded`` on the shared
@@ -446,6 +455,45 @@ def _valid_created(m: Mapping[str, Any]) -> bool:
     )
 
 
+def _valid_resumed(m: Mapping[str, Any]) -> bool:
+    snapshot = m.get("snapshotVersion", 0)
+    return (
+        _matches(m.get("sessionId"), _SESSION_ID)
+        and isinstance(m.get("code"), str)
+        and alphabet.is_code(m["code"])
+        and _uint(m.get("sceneVersion"))
+        and (snapshot is None or (_uint(snapshot, 1) and snapshot <= m["sceneVersion"]))
+        and _uint(m.get("viewerCount"))
+        and _valid_ttl(m.get("ttl"))
+    )
+
+
+def resume_plan(
+    last: int,
+    snapshot_version: int | None,
+    lost: int | None,
+    relay_scene: int,
+    relay_snap: int | None,
+) -> tuple[int | None, bool, int]:
+    """What ``session.resumed`` means to the publisher (§4.3, §6.2, §6.3, §8.4): ``(adopted, consistent, continue_at)``.
+
+    ``last`` is our highest ``sceneVersion``, ``snapshot_version`` our last acknowledged snapshot, ``lost`` the
+    snapshot in flight at the drop (or ``None``); ``relay_scene``/``relay_snap`` are the relay's ``sceneVersion`` and
+    ``snapshotVersion``. A lost snapshot the relay holds is *adopted* (its ack was lost with the connection). The resume
+    is *consistent* — nothing is owed — only when the relay holds our current snapshot, our last version, and no
+    snapshot was cut by the drop: the relay's ``sceneVersion`` may be a maximum over the versions announced to it (a
+    ``begin`` counts), so it alone proves nothing. Versions continue from the larger of ours and the relay's: every
+    ``begin`` must be above every version used (§6.2) and the publisher continues from the relay's value (§8.4)."""
+    adopted = lost if lost is not None and relay_snap == lost else None
+    current = adopted if adopted is not None else snapshot_version
+    # in flight at the drop, and the relay does not hold it (§6.3)
+    cut = lost is not None and adopted is None
+    consistent = (
+        not cut and relay_snap is not None and relay_snap == current and relay_scene == last
+    )
+    return adopted, consistent, max(last, relay_scene)
+
+
 def _valid_viewer_count(m: Mapping[str, Any]) -> bool:
     platforms = m.get("platforms")
     return (
@@ -493,6 +541,7 @@ def _valid_session_end(m: Mapping[str, Any]) -> bool:
 _INBOUND_CHECKS: Mapping[str, Callable[[Mapping[str, Any]], bool]] = MappingProxyType(
     {
         "session.created": _valid_created,
+        "session.resumed": _valid_resumed,
         "session.expiring": lambda m: True,  # nothing is read from it
         "session.renewed": lambda m: _valid_ttl(m.get("ttl")),
         "viewer.count": _valid_viewer_count,
@@ -562,6 +611,11 @@ class ProtocolClient:
         self._epoch = 0
         self._pending_create_id: str | None = None
         self._pending_ping_id: str | None = None
+        #: Resume (SLC-17): a snapshot is owed only because the connection dropped; the snapshot in flight at the first
+        #: drop of this outage (the relay may still hold it); the ID of the session.resume waiting for its answer.
+        self._loss_resync = False
+        self._lost_snapshot: int | None = None
+        self._pending_resume_id: str | None = None
         self.versions.reset()
 
     def __repr__(self) -> str:  # no code, no token (T4, T6)
@@ -576,16 +630,16 @@ class ProtocolClient:
     @property
     def snapshot_needed(self) -> bool:
         """The viewers can only be brought up to date by a new snapshot (§8.1 re-sync): the relay refused a snapshot or
-        an update sent after the last ``begin``, the connection dropped, ``scene.nodeAdded`` was sent and its snapshot
-        did not begin yet (§8.2), or the caller asked for one (:meth:`require_snapshot`). :meth:`begin_snapshot`
-        clears it."""
-        return self._snapshot_needed
+        an update sent after the last ``begin``, ``scene.nodeAdded`` was sent and its snapshot did not begin yet
+        (§8.2), or the caller asked for one (:meth:`require_snapshot`); and from a drop until ``session.resumed`` shows
+        the relay is up to date (§4.3). :meth:`begin_snapshot` clears it."""
+        return self._snapshot_needed or self._loss_resync
 
     @property
     def updates_held(self) -> bool:
         """Changes and removals are held now (see the module docstring)."""
         return (
-            self._snapshot_needed
+            self.snapshot_needed
             or self.snapshot_in_flight is not None
             or self.snapshot_version is None
         )
@@ -630,6 +684,33 @@ class ProtocolClient:
         self.profile = profile
         self.state = SessionState.CONNECTING
         _log.info("session: connecting")
+        return message
+
+    def resume(self) -> dict[str, Any]:
+        """``grace`` → ``resuming``; returns ``session.resume`` (§4.3), the first message on a new connection.
+
+        ``lastSceneVersion`` is the highest ``sceneVersion`` sent, not the last acknowledged one. The token is revealed
+        only into the returned message (T4)."""
+        if (
+            self.state is not SessionState.GRACE
+            or self.session_id is None
+            or self._publisher_token is None
+        ):
+            raise ProtocolStateError(f"cannot resume a session in state {self.state.value}")
+        message_id = self._id()
+        message = self._out(
+            envelope(
+                "session.resume",
+                message_id,
+                sessionId=self.session_id,
+                publisherToken=self._publisher_token.reveal(),
+                clientInfo=dict(self.client_info),
+                lastSceneVersion=self.versions.last,
+            )
+        )
+        self._pending_resume_id = message_id
+        self.state = SessionState.RESUMING
+        _log.info("session: resuming")
         return message
 
     def begin_snapshot(
@@ -680,6 +761,7 @@ class ProtocolClient:
         self._held_changes.clear()
         self._held_removed.clear()
         self._snapshot_needed = False
+        self._loss_resync = False
         self._epoch = self._next_id
         return messages
 
@@ -881,18 +963,21 @@ class ProtocolClient:
         return message
 
     def transport_lost(self, close_code: int | None = None) -> None:
-        """The socket closed without our ``session.close``: ``created``/``active`` → ``grace`` (§9.1; resume is
-        SLC-17), or ``closed`` for the terminal close codes of §9.3 (:data:`TERMINAL_CLOSE_CODES`: 4003 forgets the
-        token, 4011 means another connection took the session over)."""
+        """The socket closed without our ``session.close``: ``created``/``active``/``resuming`` → ``grace`` (§9.1;
+        :meth:`resume` on the next connection), or ``closed`` for the terminal close codes of §9.3
+        (:data:`TERMINAL_CLOSE_CODES`: 4003 forgets the token, 4011 means another connection took the session over)."""
         reason = TERMINAL_CLOSE_CODES.get(close_code) if close_code is not None else None
         if reason is not None and self.state not in (SessionState.IDLE, SessionState.CLOSED):
             self._close(reason)
         elif self.state in (SessionState.CREATED, SessionState.ACTIVE, SessionState.RESUMING):
-            self.snapshot_in_flight = None  # the relay discards a partial snapshot (§6.3)
+            if self.snapshot_in_flight is not None:
+                # the relay may hold it complete (its ack lost with the socket) or discard it (§6.3): the resume says
+                self._lost_snapshot = self.snapshot_in_flight
+            self.snapshot_in_flight = None
             self._snapshot_ids = frozenset()
             self._pending_ping_id = None
-            # messages on the way may be lost: a snapshot after the resume (SLC-17 may compare versions instead)
-            self._snapshot_needed = True
+            # messages on the way may be lost: a snapshot is owed until session.resumed shows the relay is up to date
+            self._loss_resync = True
             self.state = SessionState.GRACE
         elif self.state is SessionState.CONNECTING:
             self._close("CONNECT_FAILED")
@@ -929,7 +1014,9 @@ class ProtocolClient:
         self.state = SessionState.CLOSED
         self.close_reason = reason
         self._publisher_token = None
-        # an ended session's code must not stay on screen or be reused as preferredCode
+        # an ended session's code must not stay on screen or be reused as preferredCode — the one exception is the
+        # §4.3 fallback after SESSION_NOT_FOUND, for which the caller keeps its own copy of the code (SLC-38: only
+        # after a close 4008 in the same outage, inside the reconnect window, never after Stop; T1)
         self.code = None
         self.snapshot_in_flight = None
         self._snapshot_ids = frozenset()
@@ -938,6 +1025,7 @@ class ProtocolClient:
         self._held_changes.clear()
         self._held_removed.clear()
         self._snapshot_needed = False
+        self._loss_resync = False
         _log.info("session: closed (%s)", reason)
 
     # ------------------------------------------------------------------ inbound
@@ -995,6 +1083,36 @@ class ProtocolClient:
         _log.info("session: created")
         return []
 
+    def _on_resumed(self, m: Mapping[str, Any]) -> list[dict[str, Any]]:
+        if self.state is not SessionState.RESUMING:
+            return []
+        if (
+            ("replyTo" in m and m["replyTo"] != self._pending_resume_id)
+            or m["sessionId"] != self.session_id
+            or m["code"] != self.code
+        ):
+            return self._invalid("session.resumed")  # another session's answer (T11)
+        adopted, consistent, continue_at = resume_plan(
+            self.versions.last,
+            self.snapshot_version,
+            self._lost_snapshot,
+            m["sceneVersion"],
+            m["snapshotVersion"],
+        )
+        if adopted is not None:  # its ack was lost with the connection
+            self.snapshot_version = self.accepted_version = adopted
+        self.versions.continue_from(continue_at)
+        self.ttl = dict(m["ttl"])
+        self.viewer_count = m["viewerCount"]
+        self._pending_resume_id = None
+        self._lost_snapshot = None
+        # a need from before the drop or set while offline stays in _snapshot_needed
+        self._loss_resync = not consistent
+        self.state = SessionState.ACTIVE if self.versions.last > 0 else SessionState.CREATED
+        _log.info("session: resumed" if consistent else "session: resumed, snapshot needed")
+        # the changes held behind an ack lost with the connection go out on top of the snapshot (§6.2)
+        return [] if self.updates_held else self._release_held()
+
     def _on_expiring(self, m: Mapping[str, Any]) -> list[dict[str, Any]]:
         if self.auto_renew and self.state in (SessionState.CREATED, SessionState.ACTIVE):
             return [self.build_session_renew()]
@@ -1033,6 +1151,13 @@ class ProtocolClient:
             if reply_to is None or reply_to == self._pending_create_id:
                 # session.create refused (CAPACITY, RATE_LIMITED, …); the relay closes the socket
                 self._close(code)
+        elif (
+            self.state is SessionState.RESUMING
+            and code == "SESSION_NOT_FOUND"
+            and reply_to in (None, self._pending_resume_id)
+        ):
+            # §4.3: the relay no longer knows the session; the caller may fall back to session.create{preferredCode}
+            self._close(code)
         elif code in _FATAL_ERRORS:
             self._close(code)
         elif self.snapshot_in_flight is not None and (
@@ -1068,6 +1193,7 @@ class ProtocolClient:
     ] = MappingProxyType(
         {
             "session.created": _on_created,
+            "session.resumed": _on_resumed,
             "session.expiring": _on_expiring,
             "session.renewed": _on_renewed,
             "viewer.count": _on_viewer_count,
