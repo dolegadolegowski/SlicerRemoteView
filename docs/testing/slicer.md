@@ -667,7 +667,7 @@ Steps:
 
 Known gaps (not failures):
 - A reset not acknowledged when the connection drops stays on the viewers until the session is resumed (then it
-  goes first, SLC-35) or the relay's grace ends; the panel's text for it is SLC-38's.
+  goes first, SLC-35) or the relay's grace ends; the panel says so while reconnecting (SLC-38).
 - An error answering an update with a busy code shows "Updating the scene" during the relay's wait (SLC-18).
 - A Close Scene missed off the main thread is not handled as a reset: if the new scene is too large, the closed one
   stays on the viewers, and a snapshot of the closed scene already in flight is not superseded.

@@ -20,6 +20,8 @@ import pytest
 from mrml_fakes import EVENT_IDS, Scene
 from support import (
     CODE,
+    OTHER_SESSION_ID,
+    OTHER_TOKEN,
     SESSION_ID,
     TOKEN,
     URL,
@@ -59,7 +61,7 @@ from remoteview_core.transport import (
 from remoteview_protocol import envelope
 
 EVENTS = MrmlEvents(**EVENT_IDS)
-A, B = "vtkMRMLModelNode4", "vtkMRMLModelNode5"
+A, B, C = "vtkMRMLModelNode4", "vtkMRMLModelNode5", "vtkMRMLModelNode6"
 #: T7 needles: the models are named "Doe^John …", and a traceback must never be printed
 NAMES = ("Doe", "vtkMRMLModelNode", "Traceback")
 SECRET = KeyError(f"{A} Doe^John")
@@ -357,6 +359,244 @@ def test_panel_live_resume_keeps_the_live_updates_and_observers(fake, caplog, ca
     assert [m["type"] for m in sent] == ["session.resume", "scene.update"]
     assert (sent[1]["baseVersion"], sent[1]["sceneVersion"]) == (1, 2)
     assert leaks(caplog, capfd, *NAMES, CODE, TOKEN) == []
+
+
+# --------------------------------------------------------------------------- SLC-38: the scene across a reconnect
+
+NETWORK = TransportError(ErrorKind.NETWORK, retryable=True)
+
+
+def sent_on(connection: int) -> list:
+    return [m for c, m in FakeTransport.made[0].sent if c == connection]
+
+
+def begins_on(connection: int) -> list[dict]:
+    return [
+        m
+        for m in sent_on(connection)
+        if isinstance(m, dict) and m["type"] == "scene.snapshot.begin"
+    ]
+
+
+def reconnect(rig: Rig, error=NETWORK) -> str:
+    """The connection drops, the transport reconnects as connection 2: the ``session.resume`` id."""
+    deliver(rig.ctl, Disconnected(1, error, 0.5), Connected(2))
+    [resume] = sent_on(2)
+    assert resume["type"] == "session.resume"
+    return resume["id"]
+
+
+def snapshot_in_flight(rig: Rig) -> int:
+    """A model added after the first ack: its snapshot begins and is not acknowledged."""
+    rig.add(MrmlModel(B, name="Doe^John kidney"))
+    rig.pump(1000)
+    begin = rig.begins()[-1]
+    assert begin["sceneVersion"] > 1
+    return begin["sceneVersion"]
+
+
+def test_panel_live_resume_snapshot_lost_with_the_connection_is_sent_again(fake, caplog, capfd):
+    caplog.set_level(logging.DEBUG)
+    rig = live_rig(MrmlModel(A, name="Doe^John liver"))
+    acked(rig, 1)
+    version = snapshot_in_flight(rig)
+    view = deliver(rig.ctl, Disconnected(1, NETWORK, 0.5))
+    assert panel.SCENE_INTERRUPTED in view.detail
+    resume_id = reconnect(rig)
+    deliver(rig.ctl, Received(2, resumed(resume_id, scene_version=version, snapshot_version=1)))
+    [begin] = begins_on(2)
+    assert begin["sceneVersion"] == version + 1  # sent again at once, on a new version (§6.2)
+    assert rig.ctl.view.status.startswith(panel.SCENE_STATES["updating"])
+    view = deliver(rig.ctl, Received(2, ack(version + 1)))
+    assert view.status.startswith(panel.SCENE_STATES["live"])
+    view = deliver(rig.ctl, Disconnected(2, NETWORK, 0.5))  # a later drop with nothing in flight
+    assert panel.SCENE_INTERRUPTED not in view.detail
+    assert leaks(caplog, capfd, *NAMES, CODE, TOKEN) == []
+
+
+def test_panel_live_resume_a_lost_snapshot_that_cannot_be_prepared_again_is_not_said_to_follow(
+    fake, monkeypatch, caplog, capfd
+):
+    """The re-export fails after the resume: the scene's problem is said, and a later drop no longer promises it."""
+    caplog.set_level(logging.DEBUG)
+    rig = live_rig(MrmlModel(A, name="Doe^John liver"))
+    acked(rig, 1)
+    version = snapshot_in_flight(rig)
+    deliver(rig.ctl, Disconnected(1, NETWORK, 0.5))
+    resume_id = reconnect(rig)
+
+    def boom(name):
+        raise SECRET
+
+    monkeypatch.setattr(rig.scene, "by_class", boom)
+    deliver(rig.ctl, Received(2, resumed(resume_id, scene_version=version, snapshot_version=1)))
+    rig.pump(1000)
+    assert begins_on(2) == [] and panel.SCENE_FAILED in rig.ctl.view.detail
+    view = deliver(rig.ctl, Disconnected(2, NETWORK, 0.5))
+    assert panel.SCENE_INTERRUPTED not in view.detail
+    assert leaks(caplog, capfd, *NAMES, CODE, TOKEN) == []
+
+
+def test_panel_live_resume_a_lost_snapshot_too_large_to_send_again_is_not_said_to_follow(fake):
+    """A model added while offline makes the owed snapshot too large: the size is said, not the interruption."""
+    rig = live_rig(
+        MrmlModel(A, polydata=sphere(64)), limits={"maxSnapshotBytes": limit_for_one(64)}
+    )
+    acked(rig, 1)
+    version = snapshot_in_flight(rig)
+    deliver(rig.ctl, Disconnected(1, NETWORK, 0.5))
+    rig.add(MrmlModel(C, polydata=sphere(64)))
+    resume_id = reconnect(rig)
+    deliver(rig.ctl, Received(2, resumed(resume_id, scene_version=version, snapshot_version=1)))
+    rig.pump(1000)
+    assert begins_on(2) == [] and rig.ctl.view.detail.endswith(panel.HIDE_MODELS)
+    view = deliver(rig.ctl, Disconnected(2, NETWORK, 0.5))
+    assert panel.SCENE_INTERRUPTED not in view.detail
+
+
+def test_panel_live_resume_a_new_start_forgets_a_lost_snapshot(fake):
+    """The next session starts while Slicer is busy (its first snapshot waits, no live event yet) and drops: nothing
+    of the last session's lost snapshot is said."""
+    rig = live_rig(MrmlModel(A, name="Doe^John liver"))
+    acked(rig, 1)
+    snapshot_in_flight(rig)
+    deliver(rig.ctl, Disconnected(1, NETWORK, 0.5))
+    rig.ctl.stop()
+    deliver(rig.ctl, Disconnected(None, None, None))
+    rig.scene.batch = True
+    rig.ctl.start(URL)
+    deliver(rig.ctl, Connected(1), Received(1, created()))
+    view = deliver(rig.ctl, Disconnected(1, NETWORK, 0.5))  # nothing in flight
+    assert rig.ctl.phase is panel.Phase.RECONNECTING and panel.SCENE_INTERRUPTED not in view.detail
+
+
+def test_panel_live_resume_snapshot_acked_while_offline_is_not_sent_again(fake):
+    rig = live_rig(MrmlModel(A, name="Doe^John liver"))
+    acked(rig, 1)
+    version = snapshot_in_flight(rig)
+    deliver(rig.ctl, Disconnected(1, NETWORK, 0.5))
+    resume_id = reconnect(rig)
+    view = deliver(
+        rig.ctl, Received(2, resumed(resume_id, scene_version=version, snapshot_version=version))
+    )
+    assert [m["type"] for m in sent_on(2)] == ["session.resume"]  # only its ack was lost
+    assert view.status.startswith(panel.SCENE_STATES["live"])
+    # the ack cleared it: a later drop does not say it
+    view = deliver(rig.ctl, Disconnected(2, NETWORK, 0.5))
+    assert panel.SCENE_INTERRUPTED not in view.detail
+
+
+def test_panel_live_resume_reset_owed_at_a_drop_goes_first(fake):
+    """§7.3: a scene closed just before the drop is cleared off the viewers first, and the panel says it is still on
+    them while reconnecting."""
+    rig = live_rig(MrmlModel(A, name="Doe^John liver"))
+    acked(rig, 1)
+    close_scene(rig)  # its flush has not run yet
+    view = deliver(rig.ctl, Disconnected(1, NETWORK, 0.5))
+    assert panel.RESET_PENDING in view.detail
+    resume_id = reconnect(rig)
+    deliver(rig.ctl, Received(2, resumed(resume_id, scene_version=1, snapshot_version=1)))
+    rig.pump(0)
+    frames = [m["type"] for m in sent_on(2) if isinstance(m, dict)]
+    assert frames[:2] == ["session.resume", "scene.snapshot.begin"]
+
+
+def test_panel_live_resume_reset_in_flight_is_adopted_once(fake):
+    """A reset whose ack was lost with the connection: the relay holds it (§4.3), so it is adopted, not sent again,
+    and nothing about it is said once Live."""
+    rig = live_rig(MrmlModel(A, name="Doe^John liver"))
+    acked(rig, 1)
+    close_scene(rig)
+    rig.timer.advance(0)  # the reset's snapshot begins
+    reset_version = rig.begins()[-1]["sceneVersion"]
+    view = deliver(rig.ctl, Disconnected(1, NETWORK, 0.5))
+    assert panel.RESET_PENDING in view.detail and panel.SCENE_INTERRUPTED in view.detail
+    resume_id = reconnect(rig)
+    answer = resumed(resume_id, scene_version=reset_version, snapshot_version=reset_version)
+    deliver(rig.ctl, Received(2, answer))
+    rig.pump(1000)
+    assert begins_on(2) == []
+    assert rig.ctl.view.status.startswith(panel.SCENE_STATES["live"])
+    view = deliver(rig.ctl, Disconnected(2, NETWORK, 0.5))
+    assert panel.RESET_PENDING not in view.detail and panel.SCENE_INTERRUPTED not in view.detail
+
+
+def test_panel_live_resume_a_scene_closed_while_offline_is_said_at_the_next_tick(fake):
+    rig = live_rig(MrmlModel(A, name="Doe^John liver"))
+    acked(rig, 1)
+    deliver(rig.ctl, Disconnected(1, NETWORK, 30.0))
+    close_scene(rig)  # the reset is owed at once; nothing flushes while paused
+    assert panel.RESET_PENDING not in rig.ctl.view.detail
+    view = rig.ctl.pump()  # no transport event for up to 30 s: the tick says it
+    assert panel.RESET_PENDING in view.detail and rig.ctl.phase is panel.Phase.RECONNECTING
+
+
+def test_panel_live_resume_after_a_restart_the_closed_scene_is_not_said_to_be_on_the_relay(fake):
+    """§13 step 9: a restarted relay keeps no scene, so a closed scene owed at a 4008 is not said to be visible to
+    anyone with the code; the restart is."""
+    rig = live_rig(MrmlModel(A, name="Doe^John liver"))
+    acked(rig, 1)
+    close_scene(rig)
+    restart = TransportError(ErrorKind.CLOSED, retryable=True, close_code=4008)
+    view = deliver(rig.ctl, Disconnected(1, restart, 0.0))
+    assert panel.RELAY_RESTARTED in view.detail and panel.RESET_PENDING not in view.detail
+
+
+def test_panel_live_resume_reset_failing_at_the_first_tick_ends_the_session(
+    fake, monkeypatch, caplog, capfd
+):
+    """A reset whose snapshot was cut by the drop goes again at the first tick after the resume; when it cannot be
+    sent the session ends from the pump, and no scene text replaces "Stopping…"."""
+    caplog.set_level(logging.DEBUG)
+    rig = live_rig(MrmlModel(A, name="Doe^John liver"))
+    acked(rig, 1)
+    close_scene(rig)
+    rig.timer.advance(0)  # the reset's snapshot begins
+    reset_version = rig.begins()[-1]["sceneVersion"]
+    deliver(rig.ctl, Disconnected(1, NETWORK, 0.5))
+    resume_id = reconnect(rig)
+    transport = FakeTransport.made[0]
+    real = transport.send
+
+    def send(frame, *, connection):
+        if isinstance(frame, dict) and frame["type"] == "scene.snapshot.begin":
+            raise OSError(f"socket {A} Doe^John")
+        return real(frame, connection=connection)
+
+    monkeypatch.setattr(transport, "send", send)
+    answer = resumed(resume_id, scene_version=reset_version, snapshot_version=1)
+    view = deliver(rig.ctl, Received(2, answer))
+    assert view.status == panel.STOPPING and rig.observers() == 0
+    view = deliver(rig.ctl, Disconnected(2, None, None, final_sent=True))
+    assert (view.status, view.detail) == (panel.SESSION_ENDED, live.RESET_NOT_SENT)
+    assert leaks(caplog, capfd, *NAMES) == []
+
+
+@pytest.mark.parametrize(
+    "session_id", [OTHER_SESSION_ID, SESSION_ID], ids=["another-id", "same-id"]
+)
+def test_panel_live_resume_recreate_replaces_the_observers_once(fake, caplog, capfd, session_id):
+    """§4.3, §9.3, §8.4: after a relay restart the re-created session gets new live updates and one new watcher (none
+    in between), and its first snapshot is version 1 — even from a relay that repeats the old session ID."""
+    caplog.set_level(logging.DEBUG)
+    rig = live_rig(MrmlModel(A, name="Doe^John liver"))
+    acked(rig, 1)
+    observers = rig.observers()
+    restart = TransportError(ErrorKind.CLOSED, retryable=True, close_code=4008)
+    resume_id = reconnect(rig, restart)
+    deliver(rig.ctl, Received(2, relay_error("SESSION_NOT_FOUND", resume_id)))
+    create = sent_on(2)[-1]
+    assert create["type"] == "session.create"
+    assert rig.observers() == 0 and rig.ctl.observer_count == 0
+    again = created(create["id"], session_id=session_id, token=OTHER_TOKEN)
+    view = deliver(rig.ctl, Received(2, again))
+    assert len(rig.watchers) == 2 and rig.observers() == observers
+    [begin] = begins_on(2)
+    assert begin["sceneVersion"] == 1
+    assert view.status.startswith(panel.SCENE_STATES["sending"]) and view.code == CODE
+    assert (
+        leaks(caplog, capfd, *NAMES, CODE, TOKEN, OTHER_TOKEN, SESSION_ID, OTHER_SESSION_ID) == []
+    )
 
 
 # --------------------------------------------------------------------------- criterion 3: Start during a batch

@@ -16,6 +16,9 @@ import sys
 import pytest
 from support import (
     CODE,
+    OTHER_CODE,
+    OTHER_SESSION_ID,
+    OTHER_TOKEN,
     SESSION_ID,
     TOKEN,
     URL,
@@ -40,6 +43,8 @@ from remoteview_core.transport import (
 from remoteview_protocol import envelope, schemas
 
 SECRETS = (CODE, TOKEN, SESSION_ID)
+#: SLC-38: a re-created session has its own ID and token, and maybe another code
+ALL_SECRETS = (*SECRETS, OTHER_CODE, OTHER_SESSION_ID, OTHER_TOKEN)
 NETWORK = TransportError(ErrorKind.NETWORK, retryable=True)
 HEARTBEAT = TransportError(ErrorKind.HEARTBEAT, retryable=True)
 RESTART = TransportError(ErrorKind.CLOSED, retryable=True, close_code=4008)
@@ -170,7 +175,8 @@ def test_panel_resume_restart_says_the_relay_restarts(fake, clocks):
     live(ctl)
     view = deliver(ctl, Disconnected(1, RESTART, 0.0))
     assert view.status == "The relay is restarting — reconnecting in 1 s."
-    assert panel.RECONNECT_DETAIL not in view.detail and view.code == CODE
+    # not "The code stays the same" (SLC-38): the relay may have freed it until the session is created again
+    assert view.detail == f"{RESTART.guidance}\n{panel.RELAY_RESTARTED}" and view.code == CODE
 
 
 def test_panel_resume_restart_is_sticky_for_the_outage(fake, clocks):
@@ -182,7 +188,7 @@ def test_panel_resume_restart_is_sticky_for_the_outage(fake, clocks):
     refused = TransportError(ErrorKind.REFUSED, retryable=True)
     view = deliver(ctl, Disconnected(None, refused, 0.6))
     assert view.status == "The relay is restarting — reconnecting in 1 s."
-    assert view.detail == refused.guidance
+    assert view.detail == f"{refused.guidance}\n{panel.RELAY_RESTARTED}"
     deliver(ctl, Connected(2))
     deliver(ctl, Received(2, up_to_date(2)))
     view = deliver(ctl, Disconnected(2, NETWORK, 1.5))
@@ -601,3 +607,227 @@ def test_panel_resume_shutdown_while_reconnecting(fake, clocks, caplog, capfd):
     assert fake.made[0].stops == [(None, 0), (None, 0)]  # no socket: nothing to send
     assert ctl.phase is Phase.IDLE and ctl.view == PanelView(panel.NOT_CONNECTED)
     assert leaks(caplog, capfd, *SECRETS) == []
+
+
+# --------------------------------------------------------------------------- SLC-38: the relay restarted
+
+
+def restarted(ctl: PanelController, *, connection: int = 2) -> dict:
+    """A 4008, the transport reconnects, the relay no longer knows the session: the fallback create it gets."""
+    deliver(ctl, Disconnected(connection - 1, RESTART, 0.0), Connected(connection))
+    deliver(ctl, Received(connection, relay_error("SESSION_NOT_FOUND", resume_id(connection))))
+    return sent(connection)[-1]
+
+
+def created_again(create: dict, *, code: str = CODE) -> dict:
+    return created(create["id"], code=code, session_id=OTHER_SESSION_ID, token=OTHER_TOKEN)
+
+
+def test_panel_resume_restart_recreates_with_the_previous_code(fake, clocks, caplog, capfd):
+    """§4.3, §9.3: after a 4008 the panel creates the session again on the same socket, asking for its code."""
+    caplog.set_level(logging.DEBUG)
+    ctl = controller(clocks)
+    live_view = live(ctl)
+    create = restarted(ctl)
+    assert (create["type"], create["preferredCode"]) == ("session.create", CODE)
+    assert schemas.validate_message(create, None, schemas.compile_schemas()) == []
+    # the old code until created
+    assert (ctl.view.status, ctl.view.code) == (panel.RECONNECTING, CODE)
+    assert ctl.view.detail == panel.RELAY_RESTARTED
+    view = deliver(ctl, Received(2, created_again(create)))
+    assert ctl.phase is Phase.LIVE and (view.code, view.link) == (CODE, live_view.link)
+    assert panel.NEW_CODE not in view.detail
+    assert leaks(caplog, capfd, *ALL_SECRETS) == []
+
+
+def test_panel_resume_recreate_with_another_code_says_so(fake, clocks, caplog, capfd):
+    """T4: the viewers must be given the new code, and the old one may now be someone else's: said until the end."""
+    caplog.set_level(logging.DEBUG)
+    ctl = controller(clocks)
+    live(ctl)
+    view = deliver(ctl, Received(2, created_again(restarted(ctl), code=OTHER_CODE)))
+    assert view.code == OTHER_CODE and view.link.endswith(f"#{OTHER_CODE}")
+    assert panel.NEW_CODE in view.detail and CODE not in view.link
+    clocks.advance(600)
+    view = deliver(
+        ctl,
+        Received(
+            2, envelope.make("viewer.count", viewerCount=1, viewerLimit=20, platforms={"web": 1})
+        ),
+    )
+    assert panel.NEW_CODE in view.detail
+    # a second restart that keeps the new code: the viewers may still hold the first one
+    create = restarted(ctl, connection=3)  # its create is on its way
+    assert ctl.view.code == OTHER_CODE and panel.NEW_CODE in ctl.view.detail
+    assert (create["type"], create["preferredCode"]) == ("session.create", OTHER_CODE)
+    view = deliver(ctl, Received(3, created_again(create, code=OTHER_CODE)))
+    assert ctl.phase is Phase.LIVE and view.code == OTHER_CODE and panel.NEW_CODE in view.detail
+    assert leaks(caplog, capfd, *ALL_SECRETS) == []
+
+
+def test_panel_resume_a_recreated_session_resumes_as_itself(fake, clocks, caplog, capfd):
+    """A drop after the re-create resumes the new session (its ID and token), keeps the note, and a new Start forgets
+    it (T4, T1)."""
+    caplog.set_level(logging.DEBUG)
+    ctl = controller(clocks)
+    live(ctl)
+    deliver(ctl, Received(2, created_again(restarted(ctl), code=OTHER_CODE)))
+    assert ctl._preferred_code == ""  # the first code is not kept once the new session is Live (T1)
+    view = deliver(ctl, Disconnected(2, NETWORK, 0.6))
+    assert (view.code, view.status) == (OTHER_CODE, "Connection lost — reconnecting in 1 s.")
+    # said while reconnecting too (T4)
+    assert view.detail == f"{panel.NEW_CODE}\n{NETWORK.guidance}\n{panel.RECONNECT_DETAIL}"
+    assert panel.NEW_CODE in deliver(ctl, Connected(3)).detail
+    [resume] = sent(3)
+    assert resume["type"] == "session.resume"
+    assert (resume["sessionId"], resume["publisherToken"]) == (OTHER_SESSION_ID, OTHER_TOKEN)
+    view = deliver(ctl, Received(3, up_to_date(3, code=OTHER_CODE, session_id=OTHER_SESSION_ID)))
+    assert ctl.phase is Phase.LIVE and view.code == OTHER_CODE and panel.NEW_CODE in view.detail
+    ctl.stop()
+    deliver(ctl, Disconnected(3, None, None, final_sent=True))
+    view = live(ctl)
+    assert view.code == CODE and panel.NEW_CODE not in view.detail
+    assert leaks(caplog, capfd, *ALL_SECRETS) == []
+
+
+@pytest.mark.parametrize("when", ["live", "resuming", "offline"])
+def test_panel_resume_stop_after_a_recreate_warns_again(fake, clocks, when):
+    """The re-created session is on the relay: once it is Live, a lost close or Stop while offline says so again, and
+    a later plain drop is not a restart."""
+    ctl = controller(clocks)
+    live(ctl)
+    deliver(ctl, Received(2, created_again(restarted(ctl))))
+    if when != "live":
+        view = deliver(ctl, Disconnected(2, NETWORK, 0.6))
+        assert view.status == "Connection lost — reconnecting in 1 s."
+    if when == "resuming":
+        deliver(ctl, Connected(3))
+    ctl.stop()
+    connection = {"live": 2, "resuming": 3, "offline": None}[when]
+    view = deliver(ctl, Disconnected(connection, None, None, final_sent=False))
+    expected = panel.STOPPED_OFFLINE if when == "offline" else panel.FINAL_NOT_SENT
+    assert (view.status, view.detail) == (panel.SESSION_ENDED, expected)
+
+
+def test_panel_resume_drop_during_the_fallback_create_keeps_the_code(fake, clocks, caplog, capfd):
+    caplog.set_level(logging.DEBUG)
+    ctl = controller(clocks)
+    live(ctl)
+    restarted(ctl)
+    view = deliver(ctl, Disconnected(2, NETWORK, 0.6))
+    assert ctl.phase is Phase.RECONNECTING and view.code == CODE
+    assert view.status == "The relay is restarting — reconnecting in 1 s."  # still the same outage
+    deliver(ctl, Connected(3))
+    [create] = sent(3)  # created again, never resumed: the old session is gone
+    assert (create["type"], create["preferredCode"]) == ("session.create", CODE)
+    assert leaks(caplog, capfd, *SECRETS) == []
+
+
+@pytest.mark.parametrize("code", ["CAPACITY", "RATE_LIMITED", "SESSION_NOT_FOUND", "UNAUTHORIZED"])
+def test_panel_resume_refused_fallback_create_ends(fake, clocks, caplog, capfd, code):
+    """R1 item 8: no retry loop; the refusal's text — never the texts of a refused resume, which say the relay may
+    still hold the session — and a new Start asks for no code (T1)."""
+    caplog.set_level(logging.DEBUG)
+    ctl = controller(clocks)
+    live(ctl)
+    create = restarted(ctl)
+    deliver(ctl, Received(2, relay_error(code, create["id"], retryable=True)))
+    assert [m["type"] for m in sent(2)] == ["session.resume", "session.create"]
+    view = deliver(ctl, Disconnected(2, None, None, final_sent=False))
+    assert (view.status, view.detail) == (panel.SESSION_ENDED, panel.end_text(code))
+    assert panel.RELAY_HOLDS_SESSION not in view.detail
+    assert ctl._preferred_code == ""  # not kept once the session is over (T1)
+    ctl.start(URL)
+    deliver(ctl, Connected(1))
+    [create] = sent(1)
+    assert create["type"] == "session.create" and create.get("preferredCode") is None
+    assert leaks(caplog, capfd, *SECRETS) == []
+
+
+@pytest.mark.parametrize("close_code", [1001, 1006])
+def test_panel_resume_session_not_found_without_a_restart_never_recreates(fake, clocks, close_code):
+    """Without a 4008 the session expired while offline; its code may already belong to another session."""
+    ctl = controller(clocks)
+    live(ctl)
+    lost = TransportError(ErrorKind.CLOSED, retryable=True, close_code=close_code)
+    deliver(ctl, Disconnected(1, lost, 0.6), Connected(2))
+    deliver(ctl, Received(2, relay_error("SESSION_NOT_FOUND", resume_id(2))))
+    assert [m["type"] for m in sent(2)] == ["session.resume"]
+    view = deliver(ctl, Disconnected(2, None, None, final_sent=False))
+    assert (view.status, view.detail) == (panel.SESSION_ENDED, panel.SESSION_GONE_OFFLINE)
+
+
+def test_panel_resume_unauthorized_after_a_restart_creates_nothing(fake, clocks):
+    """Only SESSION_NOT_FOUND says the restarted relay lost the session; a relay that refuses the token knows it
+    (§9.2), so nothing is created and the text says it may still hold it."""
+    ctl = controller(clocks)
+    live(ctl)
+    deliver(ctl, Disconnected(1, RESTART, 0.0), Connected(2))
+    deliver(ctl, Received(2, relay_error("UNAUTHORIZED", resume_id(2))))
+    assert [m["type"] for m in sent(2)] == ["session.resume"]
+    view = deliver(ctl, Disconnected(2, None, None, final_sent=False))
+    assert (view.status, view.detail) == (panel.SESSION_ENDED, panel.SESSION_LOST)
+
+
+def test_panel_resume_restart_after_the_window_does_not_recreate(fake, clocks):
+    """T1: a SESSION_NOT_FOUND that arrives after the window (the computer slept) creates nothing."""
+    ctl = controller(clocks)
+    live(ctl)
+    deliver(ctl, Disconnected(1, RESTART, 0.0), Connected(2))
+    clocks.wall += 3600
+    deliver(ctl, Received(2, relay_error("SESSION_NOT_FOUND", resume_id(2))))
+    assert [m["type"] for m in sent(2)] == ["session.resume"]
+    view = deliver(ctl, Disconnected(2, None, None, final_sent=False))
+    assert (view.status, view.detail) == (panel.SESSION_ENDED, panel.SESSION_GONE_OFFLINE)
+
+
+def test_panel_resume_after_a_restart_no_text_says_the_relay_holds_the_session(fake, clocks):
+    """§13 step 9: a restarted relay keeps no session, so Stop while offline, a transport that gives up and the end of
+    the window say nothing about anyone still seeing the scene."""
+    ctl = controller(clocks)
+    live(ctl, grace_s=5000)
+    deliver(ctl, Disconnected(1, RESTART, 0.0))
+    ctl.stop()
+    assert deliver(ctl, Disconnected(None, None, None)) == PanelView(panel.NOT_CONNECTED)
+
+    ctl = controller(clocks)
+    live(ctl)
+    deliver(ctl, Disconnected(1, RESTART, 0.0))
+    error = TlsError(ErrorKind.TLS_CERTIFICATE, retryable=False, verify_code=20)
+    assert deliver(ctl, Disconnected(None, error, None)).detail == error.guidance
+
+    ctl = controller(clocks)
+    live(ctl, grace_s=5000)
+    deliver(ctl, Disconnected(1, RESTART, 0.0))
+    clocks.advance(660)
+    ctl.pump()
+    view = deliver(ctl, Disconnected(None, None, None))
+    assert view.detail == panel.RECONNECT_GAVE_UP
+
+    # Stop with a lost session.close, while resuming and during the fallback create
+    for create in (False, True):
+        ctl = controller(clocks)
+        live(ctl)
+        if create:
+            restarted(ctl)
+        else:
+            deliver(ctl, Disconnected(1, RESTART, 0.0), Connected(2))
+        ctl.stop()
+        view = deliver(ctl, Disconnected(2, None, None, final_sent=False))
+        assert view == PanelView(panel.NOT_CONNECTED)
+
+
+def test_panel_resume_recreate_unanswered_ends_without_the_warning(fake, clocks):
+    """A fallback create left unanswered for its own 15 s: its session.close, if lost, leaves no scene behind (nothing
+    was sent)."""
+    ctl = controller(clocks)
+    live(ctl)
+    deliver(ctl, Disconnected(1, RESTART, 0.0), Connected(2))
+    clocks.advance(10)  # the resume's answer comes late: the create gets a deadline of its own
+    deliver(ctl, Received(2, relay_error("SESSION_NOT_FOUND", resume_id(2))))
+    clocks.advance(14.9)
+    assert ctl.pump().status == panel.RECONNECTING
+    clocks.advance(0.1)
+    ctl.pump()
+    view = deliver(ctl, Disconnected(2, None, None, final_sent=False))
+    assert (view.status, view.detail) == (panel.SESSION_ENDED, panel.RESUME_NO_ANSWER)
