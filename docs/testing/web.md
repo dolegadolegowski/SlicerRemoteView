@@ -68,6 +68,27 @@ The publisher shows a QR of `https://<host>/j#<CODE>` (Slicer FR-04, or make one
 5. Type `O` or `1`. **Expect:** the cell is marked invalid with the ADR 0008 hint.
 6. Pinch-zoom the code entry page. **Expect:** the page zooms (it stays zoomable for low vision).
 
+### Activity line (WEB-24)
+
+1. With a presenter sharing and two other phones joined, open the viewer URL on a third phone. **Expect:** under
+   the form "Active sessions: 1 · Viewers: 2" ("Aktywne sesje: 1 · Widzowie: 2" in Polish); the page still does not
+   scroll on an iPhone SE-sized screen.
+2. Join on the third phone. **Expect:** the line disappears as soon as Join is tapped and stays away while the
+   phone is joined or waits for the scene. On a fourth phone on the home page it reads "Viewers: 3" within 30 s.
+3. Leave on the third phone (WEB-22). **Expect:** the line is back at once with fresh counts — "Viewers: 2", or
+   "Viewers: 3" until the next read within 30 s if that first read reached the relay before the leave did; the fourth
+   phone shows "Viewers: 2" within 30 s.
+4. Switch the language (WEB-21). **Expect:** the line switches at once.
+5. Stop the presenter's session in Slicer. **Expect:** the two phones that were in it are back on the code entry
+   with the line at once ("Active sessions: 0 · Viewers: 0"); the fourth phone shows the same within 30 s.
+6. On the fourth phone (home page), open another site in the same tab, then go Back. **Expect:** the line is back at
+   once with fresh counts.
+7. Share again in Slicer and join on the third phone; open another site in the same tab, then go Back (WEB-14).
+   **Expect:** the session is joined again by the code (the page came from the back/forward cache); the line stays
+   away while it is joined. Leave. **Expect:** the line is back.
+8. On the fourth phone (home page), turn on airplane mode and wait 30 s. **Expect:** the line disappears; it comes
+   back within 30 s after airplane mode is off.
+
 ### Language (WEB-21)
 
 1. With the iPhone set to English, open the viewer. **Expect:** English texts and a **Polski** button at the top

@@ -11,7 +11,7 @@
 import type { LangStore } from "../i18n/lang";
 import { detectLang, t } from "../i18n/strings";
 import type { Lang } from "../i18n/strings";
-import type { Connection } from "../protocol/connection";
+import type { Connection, ConnectionState } from "../protocol/connection";
 import type { Reconnect } from "../protocol/reconnect";
 import type { Applied } from "../render/apply-update";
 import type { SceneModel, SceneModelStore } from "../render/scene-model";
@@ -42,6 +42,17 @@ export interface ScreensOptions {
   readonly downloading?: () => boolean;
   /** The UI language (WEB-21); without it the browser's, and the status bar has no language switch. */
   readonly lang?: Pick<LangStore, "lang" | "set" | "onChange">;
+}
+
+/**
+ * A session is live, joining or retried without the user (WEB-14): the scene or the busy code entry is shown, not the
+ * idle entry. Also decides where the activity line runs (WEB-24, `main.ts`).
+ */
+export function sessionLive(
+  state: ConnectionState,
+  session: Pick<Reconnect, "willRetry">,
+): boolean {
+  return state.kind === "connecting" || state.kind === "connected" || session.willRetry(state);
 }
 
 /** Starts a WebXR session on `host`; `true` once it runs, then `ended()` when it is over (WEB-19). */
@@ -307,10 +318,7 @@ export function bindScreens(options: ScreensOptions): Screens {
     paintStatus();
   });
 
-  const isLive = () => {
-    const state = connection.state;
-    return state.kind === "connecting" || state.kind === "connected" || session.willRetry(state);
-  };
+  const isLive = () => sessionLive(connection.state, session);
 
   function leave(): void {
     if (!isLive()) return;
