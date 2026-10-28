@@ -22,6 +22,8 @@ export interface CodeEntryOptions {
   readonly lang?: Lang;
   /** The language switch (WEB-21), in the title row after the title (it costs no height on a short screen). */
   readonly languageToggle?: HTMLElement;
+  /** Last in the form, under everything else: the activity line (WEB-24). */
+  readonly footer?: HTMLElement;
 }
 
 export interface CodeEntry {
@@ -120,6 +122,7 @@ export function createCodeEntry(options: CodeEntryOptions): CodeEntry {
   }
   form.append(head, lead, group, message, join, status);
   if (onLeave) form.append(leave);
+  if (options.footer) form.append(options.footer);
 
   /** The texts that do not depend on the state. */
   function label(): void {

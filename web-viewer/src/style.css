@@ -200,6 +200,14 @@ body {
   text-align: center;
 }
 
+/* Activity line (WEB-24): relay-wide counts under the form, quieter than the status line. */
+.code-entry__activity {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.875rem;
+  text-align: center;
+}
+
 /* 3D viewer (WEB-08): the canvas fills the dynamic viewport, also under a notch (viewport-fit=cover); only the
    canvas blocks browser gestures (touch-action: none), the page keeps native zoom elsewhere (WCAG). */
 .viewer {
