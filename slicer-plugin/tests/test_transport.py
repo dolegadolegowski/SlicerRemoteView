@@ -699,6 +699,165 @@ def test_transport_heartbeat_of_an_idle_connection_is_the_protocols_pong_timeout
     assert 0.45 <= time.monotonic() - started < 0.8
 
 
+# --------------------------------------------------------------------------- SLC-41: when a connection was lost
+
+
+class OffsetClocks:
+    """The transport's ``(monotonic, wall)`` clocks, moved by ``offsets``: a sleep moves the wall clock alone where
+    the monotonic clock stops during it (Linux, macOS), or both where it runs on (Windows; see
+    ``docs/research/slicer-sleep-clocks.md``)."""
+
+    def __init__(self) -> None:
+        self.offsets = (0.0, 0.0)
+
+    def clocks(self):
+        return (lambda: time.monotonic() + self.offsets[0], lambda: time.time() + self.offsets[1])
+
+
+@pytest.mark.parametrize(
+    ("alive", "now", "lost"),
+    [
+        ((100.0, 1000.0), (125.0, 1025.0), 1025.0),  # no sleep: when the heartbeat noticed
+        ((100.0, 1000.0), (125.0, 4625.0), 1025.0),  # an hour asleep, the monotonic clock stopped
+        # it ran on: no later than the bound after the last frame
+        ((100.0, 1000.0), (3700.0, 4600.0), 1300.0),
+        # the wall clock went back: when the heartbeat noticed
+        ((100.0, 1000.0), (125.0, 965.0), 965.0),
+    ],
+)
+def test_transport_loss_time(alive, now, lost):
+    assert transport.loss_time(alive, now, 300.0) == lost
+
+
+def test_transport_max_silence_adds_up_the_heartbeats_waits():
+    """A ping held back by a send, its pong's deadline with the unread allowance, and that deadline's check held
+    back by another send (≈ 212 s with the protocol's settings); each transport uses its own settings."""
+    quarter = transport.MAX_UNREAD_BYTES / 4  # the unread allowance takes 4 s at this uplink
+    assert transport.max_silence(1.0, 2.0, 3.0, quarter) == 1.0 + 3.0 + 2.0 + 4.0 + 3.0
+    assert 210 < transport.MAX_SILENCE_S < 215
+    tuned = RelayTransport(
+        "wss://relay.example.org/ws",
+        queue.Queue(),
+        ping_interval=1.0,
+        pong_timeout=2.0,
+        send_timeout=3.0,
+        min_uplink=quarter,
+    )
+    assert tuned._max_silence == 13.0
+
+
+def test_transport_dates_with_the_monotonic_and_the_wall_clock():
+    assert RelayTransport("wss://relay.example.org/ws", queue.Queue())._clocks == (
+        time.monotonic,
+        time.time,
+    )
+
+
+@pytest.mark.parametrize("sleep", [None, "monotonic-stopped", "monotonic-ran-on"])
+def test_transport_dates_a_lost_connection(relay, make_transport, sleep):
+    """Without a sleep (the transport's own clocks) the loss is when the transport noticed it; after an hour asleep,
+    the same where the monotonic clock stopped, and the longest silence after the opening where it ran on."""
+    clocks = OffsetClocks()
+    server = relay("echo")
+    opened = time.time()
+    options = {} if sleep is None else {"clocks": clocks.clocks()}
+    _, events = make_transport(server.url(), sleep=recording_sleep([], real_after=2), **options)
+    next_event(events, Connected)
+    connected = time.time()
+    clocks.offsets = (3600.0 if sleep == "monotonic-ran-on" else 0.0, 3600.0)
+    before = time.time()
+    server.shutdown()
+    lost_at = next_event(events, Disconnected).lost_at
+    if sleep == "monotonic-ran-on":
+        assert opened + transport.MAX_SILENCE_S <= lost_at <= connected + transport.MAX_SILENCE_S
+    else:
+        assert before <= lost_at <= time.time()
+    assert next_event(events, Disconnected).lost_at is None  # a failed attempt lost no connection
+
+
+def test_transport_each_frame_is_a_sign_of_life(relay, make_transport):
+    clocks = OffsetClocks()
+    server = relay("echo")
+    client, events = make_transport(
+        server.url(), clocks=clocks.clocks(), sleep=recording_sleep([], real_after=1)
+    )
+    connection = next_event(events, Connected).connection
+    clocks.offsets = (3600.0, 3600.0)  # an hour on, on both clocks
+    sent = time.time() + 3600
+    assert client.send({"type": "session.create"}, connection=connection)
+    next_event(events, Received)  # the echo: alive an hour after the opening
+    server.shutdown()
+    lost_at = next_event(events, Disconnected).lost_at
+    assert sent <= lost_at <= time.time() + 3600  # not MAX_SILENCE_S after the opening
+
+
+def test_transport_a_pong_is_a_sign_of_life(relay, make_transport):
+    """An idle session receives pongs only: each one counts."""
+    clocks = OffsetClocks()
+    server = relay("pong")
+    client, events = make_transport(
+        server.url(),
+        clocks=clocks.clocks(),
+        ping_interval=0.1,
+        sleep=recording_sleep([], real_after=1),
+    )
+    connection = next_event(events, Connected).connection
+    assert client.send({"type": "session.create"}, connection=connection)  # pings follow it (§3.1)
+    wait_until(lambda: len(server.ping_times()) >= 1)
+    clocks.offsets = (3600.0, 3600.0)  # an hour on, on both clocks
+    changed = time.time() + 3600
+    seen = len(server.ping_times())
+    # ping seen + 2 goes out only after the pong of ping seen + 1, which the relay sent after the change
+    wait_until(lambda: len(server.ping_times()) >= seen + 2)
+    server.shutdown()
+    assert changed <= next_event(events, Disconnected).lost_at <= time.time() + 3600
+
+
+def test_transport_a_send_is_no_sign_of_life(relay, make_transport):
+    """Only frames received count: the pings sent after a sleep do not hide it."""
+    clocks = OffsetClocks()
+    server = relay("silent")
+    client, events = make_transport(
+        server.url(),
+        clocks=clocks.clocks(),
+        ping_interval=0.1,
+        pong_timeout=0.3,
+        sleep=recording_sleep([], real_after=1),
+    )
+    connection = next_event(events, Connected).connection
+    asleep = time.time()
+    clocks.offsets = (0.0, 3600.0)  # an hour asleep, the monotonic clock stopped
+    assert client.send({"type": "session.create"}, connection=connection)  # unanswered pings follow
+    assert asleep <= next_event(events, Disconnected).lost_at <= time.time()
+
+
+def test_transport_dates_a_slow_uplink_loss_when_it_is_noticed(relay, make_transport):
+    """A ping waiting behind a snapshot keeps a healthy connection silent for longer than a ping and its pong
+    (SLC-26): a loss noticed then is dated when it was noticed, not a ping and a pong after the last frame."""
+    _server, client, events, connection = connect_and_create(
+        relay, make_transport, "slow-silent", read_bytes_per_s=2_000_000, sleep=recording_sleep([])
+    )
+    sent = time.time()
+    assert client.send(CHUNK, connection=connection)
+    drop = next_event(events, Disconnected, timeout=5)
+    assert drop.error.kind is ErrorKind.HEARTBEAT
+    # noticed ≈ 1.2 s after the chunk (test_transport_heartbeat_still_ends_a_peer_that_reads_but_never_answers)
+    assert sent + 1.0 <= drop.lost_at <= time.time()
+
+
+def test_transport_a_failing_clock_still_ends_the_socket(relay, make_transport):
+    """An injected clock that raises between the opening and the first frame: the socket is aborted, not left
+    open, and the transport stops."""
+
+    def broken() -> float:
+        raise RuntimeError
+
+    server = relay("echo")
+    _, events = make_transport(server.url(), clocks=(broken, time.time))
+    assert next_event(events, Disconnected).retry_in is None
+    wait_until(lambda: server.client_close_codes)  # aborted: the relay saw the socket end
+
+
 def test_transport_discard_queued_drops_the_waiting_frames_of_one_connection():
     events: queue.Queue = queue.Queue()
     client = RelayTransport("wss://relay.example.org/ws", events)
@@ -999,6 +1158,8 @@ def test_transport_terminal_close_codes_stop_reconnecting(relay, make_transport,
     )
     drop = next_event(events, Disconnected)
     assert (drop.error.kind, drop.close_code, drop.retry_in) == (ErrorKind.CLOSED, code, None)
+    # a lost connection is dated even when the transport stops (SLC-41)
+    assert drop.lost_at is not None
     client._thread.join(5)
     assert not client.running and server.connections == 1
 

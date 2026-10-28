@@ -15,15 +15,17 @@
 - The session code is shown only while the session runs and is never logged.
 - A connection lost after ``session.created`` is resumed (SLC-37, §4.3): the panel keeps the code and Stop while the
   transport reconnects by itself, each new connection starts with ``session.resume``, and ``session.resumed`` brings
-  the session back to Live with the same live updates and observers. The reconnect window — the relay's grace (at
-  most :data:`MAX_GRACE_S`) plus :data:`RECONNECT_SLACK_S` — runs from when the panel learns of the loss, on the
-  monotonic and on the wall clock (a computer that sleeps during the outage); after it nothing is sent (T1). A sleep
-  that begins while Live is reported only after the wake, so its window starts then: a relay that has ended the
-  session answers the resume with ``SESSION_NOT_FOUND`` (SLC-41 dates the loss from the connection's last sign of
-  life). A resume left unanswered for :data:`CREATE_TIMEOUT_S`, a relay that refuses it, or Stop while offline ends
-  the session. A connection lost before ``session.created`` is retried by the transport, which then sends a new
-  ``session.create``; a relay that keeps the socket open but does not answer it within :data:`CREATE_TIMEOUT_S` ends
-  the attempt.
+  the session back to Live with the same live updates and observers. The reconnect window — the relay's grace (at most
+  :data:`MAX_GRACE_S`) plus :data:`RECONNECT_SLACK_S` — runs from when the transport says the connection was lost
+  (``Disconnected.lost_at``, SLC-41: before the wake for a computer that slept while Live — on Windows only after a
+  sleep longer than about ``MAX_SILENCE_S``), on the monotonic and on the wall clock (a computer that sleeps during
+  the outage); after it nothing is sent (T1). So a sleep that begins while Live and outlasts the window ends the
+  session once the drop is reported after the wake — on Windows, whose monotonic clock runs on through a sleep, only
+  one longer than about ``MAX_SILENCE_S`` plus the window; a shorter sleep resumes, and a relay that has ended the
+  session answers ``SESSION_NOT_FOUND``. A resume left unanswered for :data:`CREATE_TIMEOUT_S`, a relay that refuses
+  it, or Stop while offline ends the session. A connection lost before ``session.created`` is retried by the
+  transport, which then sends a new ``session.create``; a relay that keeps the socket open but does not answer it
+  within :data:`CREATE_TIMEOUT_S` ends the attempt.
 - With a ``scene`` factory, the first ``session.created`` hands the session to SLC-29's
   :class:`~remoteview_core.live.LiveUpdates` (SLC-32), which sends the first snapshot and every later change. With a
   ``watch`` factory, the observers that mark the changes (SLC-31's ``SceneWatcher``) are attached in the same
@@ -342,10 +344,10 @@ class PanelController:
     ``transport_factory`` is called as ``factory(url, events, extra_ca_file=...)`` and defaults to
     :class:`~remoteview_core.transport.RelayTransport` (looked up at Start, so tests can replace it). ``clock``
     (seconds, monotonic) times the wait for ``session.created``/``session.resumed`` and, with ``wall`` (seconds, the
-    wall clock, which also runs while the computer sleeps), the reconnect window. ``ensure_deps`` (SLC-10) is called
-    once the address is accepted and before the transport starts; it returns a
-    :class:`~remoteview_core.deps.DepsResult` (it may show dialogs and block while pip runs). Without it nothing is
-    installed or checked. ``scene`` returns the scene the snapshots are made of. ``watch(live)`` returns the
+    wall clock, which also runs while the computer sleeps; the clock of ``Disconnected.lost_at``), the reconnect
+    window. ``ensure_deps`` (SLC-10) is called once the address is accepted and before the transport starts; it
+    returns a :class:`~remoteview_core.deps.DepsResult` (it may show dialogs and block while pip runs). Without it
+    nothing is installed or checked. ``scene`` returns the scene the snapshots are made of. ``watch(live)`` returns the
     :class:`Watcher` that marks the scene's changes on ``live``; ``flush_timer`` is the single-shot timer whose
     timeout calls :meth:`flush_live`. ``watch`` needs both (marks that are never flushed would freeze the viewers
     silently).
@@ -653,7 +655,12 @@ class PanelController:
             return
         if self.phase is Phase.LIVE:  # the first drop of this outage
             self.phase = Phase.RECONNECTING
-            self._lost_at, self._lost_wall = self._clock(), self._wall()
+            # from when the transport lost the connection: before the wake if the computer slept (SLC-41)
+            now, wall = self._clock(), self._wall()
+            age = 0.0 if event.lost_at is None else max(0.0, wall - event.lost_at)
+            self._lost_at, self._lost_wall = now - age, wall - age
+            # a backward step counts from here: a dated loss must not widen its tolerance
+            self._handled_wall = wall
             ttl: Any = client.ttl  # set by session.created, checked there
             self._grace_s = float(ttl["graceS"])
             self._window_s = min(self._grace_s, MAX_GRACE_S) + RECONNECT_SLACK_S
@@ -668,16 +675,16 @@ class PanelController:
 
     def _forget_outage(self) -> None:
         """No connection lost, or the session is back: no window, restart or resume flag, status or guidance."""
-        self._lost_at = self._lost_wall = self._window_s = self._grace_s = 0.0
+        self._lost_at = self._lost_wall = self._handled_wall = self._window_s = self._grace_s = 0.0
         self._restart_seen = self._resume_sent = False
         self._reconnect_status = self._guidance = ""
 
     def _window_over(self) -> bool:
         """The reconnect window has passed on either clock, or the wall clock went back by more than a correction."""
-        wall = self._wall() - self._lost_wall
+        wall = self._wall()
         return (
-            max(self._clock() - self._lost_at, wall) >= self._window_s
-            or wall < -WALL_JUMP_TOLERANCE_S
+            max(self._clock() - self._lost_at, wall - self._lost_wall) >= self._window_s
+            or wall - self._handled_wall < -WALL_JUMP_TOLERANCE_S
         )
 
     def _resume(self, client: ProtocolClient) -> None:

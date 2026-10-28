@@ -41,6 +41,7 @@ from remoteview_protocol import envelope, schemas
 
 SECRETS = (CODE, TOKEN, SESSION_ID)
 NETWORK = TransportError(ErrorKind.NETWORK, retryable=True)
+HEARTBEAT = TransportError(ErrorKind.HEARTBEAT, retryable=True)
 RESTART = TransportError(ErrorKind.CLOSED, retryable=True, close_code=4008)
 GAVE_UP_HELD = f"{panel.RECONNECT_GAVE_UP}\n{panel.RELAY_HOLDS_SESSION}"
 GAVE_UP_LONGER = f"{panel.RECONNECT_GAVE_UP}\n{panel.RELAY_HOLDS_SESSION_LONGER}"
@@ -419,6 +420,94 @@ def test_panel_resume_after_a_restart_a_clock_reset_warns_nothing(fake, clocks):
     assert sent(2) == [] and ctl.phase is Phase.STOPPING
     view = deliver(ctl, Disconnected(2, None, None, final_sent=False))
     assert view.detail == panel.RECONNECT_GAVE_UP
+
+
+@pytest.mark.usefixtures("fake")
+@pytest.mark.parametrize(
+    ("grace_s", "connected"), [(120, False), (120, True), (600, False), (600, True)]
+)
+def test_panel_resume_sleep_while_live_ends_the_session_at_the_wake(
+    clocks, caplog, capfd, grace_s, connected
+):
+    """SLC-41: a computer that slept while Live. The transport reports the drop after the wake, dated before it:
+    the window is over at once, and nothing is sent, not even on a connection made in the same tick (T1)."""
+    caplog.set_level(logging.DEBUG)
+    ctl = controller(clocks)
+    live(ctl, grace_s=grace_s)
+    # the heartbeat would have noticed 20 s in, had the computer not slept for 3 h
+    lost_at = clocks.wall + 20
+    clocks.mono += 25  # the monotonic clock stopped during the sleep
+    clocks.wall += 3 * 3600 + 25
+    deliver(ctl, Disconnected(1, HEARTBEAT, 0.6, lost_at=lost_at), *[Connected(2)] * connected)
+    assert ctl.phase is Phase.STOPPING and sent(2) == []
+    assert FakeTransport.made[0].stops == [(None, 0)]  # nothing sent (T1)
+    view = deliver(ctl, Disconnected(None, None, None))
+    assert (view.status, view.detail) == (panel.SESSION_ENDED, panel.RECONNECT_GAVE_UP)
+    assert leaks(caplog, capfd, *SECRETS) == []
+
+
+@pytest.mark.parametrize(
+    ("dated", "moved", "over"),
+    [
+        # dated: the loss, from now (a busy main thread handles the drop late); moved: (monotonic, wall) seconds after
+        (-20.0, (159.9, 159.9), False),
+        (-20.0, (160.0, 160.0), True),
+        # the wall clock corrected back: the monotonic clock runs from the loss too
+        (-20.0, (160.0, 100.0), True),
+        # a sleep in the outage: the wall clock runs from the loss too
+        (-20.0, (100.0, 160.0), True),
+        (0.0, (179.9, 179.9), False),
+        # dated after now (the wall clock went back meanwhile): from now
+        (30.0, (179.9, 179.9), False),
+        (30.0, (180.0, 180.0), True),
+    ],
+)
+def test_panel_resume_window_runs_from_the_transports_loss(fake, clocks, dated, moved, over):
+    ctl = controller(clocks)
+    live(ctl)
+    deliver(ctl, Disconnected(1, NETWORK, 0.6, lost_at=clocks.wall + dated))
+    clocks.mono += moved[0]
+    clocks.wall += moved[1]
+    ctl.pump()
+    assert ctl.phase is (Phase.STOPPING if over else Phase.RECONNECTING)
+
+
+@pytest.mark.parametrize(("step", "over"), [(-61.0, True), (-60.0, False)])
+def test_panel_resume_a_dated_loss_keeps_the_backward_step_tolerance(fake, clocks, step, over):
+    """A wall clock that goes back is measured from when the panel handled the drop, not from the dated loss: more
+    than 60 s back ends the window, as without the dating."""
+    ctl = controller(clocks)
+    live(ctl)
+    deliver(ctl, Disconnected(1, NETWORK, 0.6, lost_at=clocks.wall - 100))
+    clocks.wall += step
+    ctl.pump()
+    assert ctl.phase is (Phase.STOPPING if over else Phase.RECONNECTING)
+    if over:  # 100 s of a 180 s window: the relay may still hold the session, and the text says so
+        assert deliver(ctl, Disconnected(None, None, None)).detail == GAVE_UP_HELD
+
+
+def test_panel_resume_a_later_drop_keeps_the_backward_step_anchor(fake, clocks):
+    """A failed attempt after the wall clock went back does not move the point the step is measured from."""
+    ctl = controller(clocks)
+    live(ctl)
+    deliver(ctl, Disconnected(1, NETWORK, 0.6))
+    clocks.wall -= 61
+    deliver(ctl, Disconnected(None, NETWORK, 4.0))
+    assert ctl.phase is Phase.STOPPING
+
+
+def test_panel_resume_only_the_first_drop_dates_the_outage(fake, clocks):
+    """A resume's connection lost later does not move the window, however its loss is dated."""
+    ctl = controller(clocks)
+    live(ctl)
+    deliver(ctl, Disconnected(1, NETWORK, 0.6), Connected(2))
+    deliver(ctl, Disconnected(2, NETWORK, 0.6, lost_at=clocks.wall - 3600))
+    clocks.advance(179.9)
+    ctl.pump()
+    assert ctl.phase is Phase.RECONNECTING
+    clocks.advance(0.1)
+    ctl.pump()
+    assert ctl.phase is Phase.STOPPING
 
 
 def test_panel_resume_window_waits_while_a_socket_is_open(fake, clocks):

@@ -20,6 +20,11 @@ thread talks to it only through a ``queue.Queue`` of events (:class:`Connected`,
   connection; a peer that reads and never answers is ended after at most ``pong_timeout`` + :data:`MAX_UNREAD_BYTES` /
   :data:`MIN_UPLINK_BYTES_PER_S` (≈ 77 s), one that stops reading by ``send_timeout``. The deadline is checked between
   sends only, so one blocked ``send()`` can hold it back by up to ``send_timeout``.
+- A lost connection is dated (SLC-41): ``Disconnected.lost_at`` is when the transport noticed the loss (the
+  heartbeat, a read or send error, a close), less the wall-clock time its monotonic clock did not see, and no later
+  than :data:`MAX_SILENCE_S` after the connection's last frame. The first part dates a sleep where that clock stops
+  during it (Linux, macOS); the second, where it runs on (Windows, Python 3.12), dates only a sleep longer than about
+  :data:`MAX_SILENCE_S` (``docs/research/slicer-sleep-clocks.md``). The panel's reconnect window starts there (T1).
 - Reconnect: exponential backoff 0.5 s → 30 s with ±20 % jitter (0–3 s after ``4008``; after ``4005``/``4006`` at
   least the ``retryAfterS`` of the relay's last ``error`` on that connection, §9.3). Errors the user has to fix
   (certificate, proxy, HTTP 3xx/4xx) and the close codes of :data:`NO_RECONNECT_CLOSE_CODES` stop the transport.
@@ -50,6 +55,7 @@ import socket
 import ssl
 import stat
 import threading
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -217,12 +223,15 @@ class Disconnected:
     attempt, or ``None`` when the transport has stopped — after :meth:`RelayTransport.stop` (``error`` is ``None``)
     or because of ``error``. The last event of every transport is a ``Disconnected`` with ``retry_in`` ``None``.
     ``final_sent`` (stop only): the final message of ``stop(final)`` was written; if not, the relay saw a drop and
-    keeps the session for its grace period (§9.1)."""
+    keeps the session for its grace period (§9.1). ``lost_at`` (an open connection lost to ``error``, else ``None``):
+    the wall-clock time it was lost by — before this event if the computer slept (on Windows only after a sleep
+    longer than about :data:`MAX_SILENCE_S`; :func:`loss_time`, SLC-41)."""
 
     connection: int | None
     error: TransportError | None
     retry_in: float | None
     final_sent: bool = False
+    lost_at: float | None = None
 
     @property
     def close_code(self) -> int | None:
@@ -232,6 +241,30 @@ class Disconnected:
 
 Event = Connected | Received | Disconnected
 Frame = Mapping[str, Any] | str | bytes | bytearray | memoryview
+
+
+def loss_time(alive: tuple[float, float], now: tuple[float, float], bound: float) -> float:
+    """When a connection last heard from at ``alive`` and found lost at ``now`` (both ``(monotonic, wall)`` clock
+    readings) was lost, on the wall clock: ``now`` less the wall time the monotonic clock did not see (a sleep, where it
+    stops), and no later than ``bound`` (:func:`max_silence`) after ``alive`` (where it runs on through a sleep)."""
+    unseen = max(0.0, (now[1] - alive[1]) - (now[0] - alive[0]))
+    return min(now[1] - unseen, alive[1] + bound)
+
+
+def max_silence(
+    ping_interval: float, pong_timeout: float, send_timeout: float, min_uplink: float
+) -> float:
+    """The longest an open connection can stay silent before the heartbeat ends it: a send that holds back the next
+    ping, the pong's deadline with the unread allowance, and a send that holds back the check of that deadline. It
+    holds once the connection's first text message is out (before it no ping goes, and the relay closes the socket
+    within 10 s, §3.1) and while the transport's event loop runs (a starved loop is dated by this bound)."""
+    return (
+        ping_interval + send_timeout + pong_timeout + MAX_UNREAD_BYTES / min_uplink + send_timeout
+    )
+
+
+#: :func:`max_silence` with the protocol's settings (≈ 212 s).
+MAX_SILENCE_S = max_silence(PING_INTERVAL_S, PONG_TIMEOUT_S, SEND_TIMEOUT_S, MIN_UPLINK_BYTES_PER_S)
 
 
 class _HeartbeatTimeoutError(Exception):
@@ -397,8 +430,8 @@ class RelayTransport:
     certificates (or one DER certificate) trusted in addition to the defaults, read once, here: ``OSError`` if it
     cannot be read, ``ValueError`` if it holds no usable certificate.
     ``use_proxy=False`` ignores the system proxy settings (tests).
-    ``ping_interval``, ``pong_timeout``, ``send_timeout``, ``min_uplink``, ``sleep`` (the backoff wait) and ``rng``
-    exist for tests.
+    ``ping_interval``, ``pong_timeout``, ``send_timeout``, ``min_uplink``, ``sleep`` (the backoff wait), ``rng`` and
+    ``clocks`` (the ``(monotonic, wall)`` clocks that date a lost connection) exist for tests.
     """
 
     def __init__(  # noqa: PLR0913 — tuning knobs are keyword-only and default to the protocol values
@@ -414,6 +447,7 @@ class RelayTransport:
         min_uplink: float = MIN_UPLINK_BYTES_PER_S,
         sleep: Callable[[float], Awaitable[None]] | None = None,
         rng: random.Random | None = None,
+        clocks: tuple[Callable[[], float], Callable[[], float]] | None = None,
     ) -> None:
         self.url = check_relay_url(url)
         self._events = events
@@ -429,6 +463,8 @@ class RelayTransport:
         self._min_uplink = min_uplink
         self._sleep = sleep or asyncio.sleep
         self._rng = rng or random.SystemRandom()
+        self._clocks = clocks or (time.monotonic, time.time)
+        self._max_silence = max_silence(ping_interval, pong_timeout, send_timeout, min_uplink)
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._connect: Any = None
@@ -447,6 +483,8 @@ class RelayTransport:
         #: that was, on the loop's clock).
         self._written = self._ping_mark = self._confirmed = 0
         self._confirmed_at = 0.0
+        #: The open connection's last sign of life — its opening or its last frame — on both clocks (SLC-41).
+        self._alive = (0.0, 0.0)
         #: Inbound text frames that were not a JSON object, and frames dropped because their connection had ended
         #: (counts only; their content is never logged).
         self.dropped_inbound = 0
@@ -579,10 +617,14 @@ class RelayTransport:
                     if self._ws is not None:
                         connections += 1
                         current, opened_at = connections, loop.time()
+                        self._alive = self._now()
                         self._emit(Connected(current))
                         error = await self._serve(self._ws, current)
                 except Exception as exc:  # noqa: BLE001 — every failure becomes a classified TransportError
                     error = classify(exc)
+                    # opened, then something failed before _serve could end it
+                    if self._ws is not None:
+                        self._ws.transport.abort()
                 finally:
                     self._ws = None
                     # frames queued for the connection that has just ended
@@ -592,7 +634,10 @@ class RelayTransport:
                     break
                 lived = loop.time() - opened_at if current is not None else 0.0
                 delay, failures = self._backoff(error, failures, lived)
-                self._emit(Disconnected(current, error, delay))
+                lost_at = None
+                if current is not None:
+                    lost_at = loss_time(self._alive, self._now(), self._max_silence)
+                self._emit(Disconnected(current, error, delay, lost_at=lost_at))
                 current = None
                 if delay is None:
                     return
@@ -603,6 +648,9 @@ class RelayTransport:
             self._emit(
                 Disconnected(None, TransportError(ErrorKind.INTERNAL, retryable=False), None)
             )
+
+    def _now(self) -> tuple[float, float]:
+        return self._clocks[0](), self._clocks[1]()
 
     def _backoff(
         self, error: TransportError, failures: int, lived: float
@@ -694,6 +742,7 @@ class RelayTransport:
 
     async def _read(self, ws: Any, connection: int) -> None:
         async for frame in ws:  # ends on a normal close, raises ConnectionClosedError otherwise
+            self._alive = self._now()
             if not isinstance(frame, str):
                 self._emit(Received(connection, bytes(frame)))
                 continue
