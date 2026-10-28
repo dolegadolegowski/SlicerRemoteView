@@ -119,16 +119,11 @@ def test_panel_snapshot_reports_models_left_out(fake):
 
 
 def test_panel_snapshot_warns_about_the_device_profiles_budgets(fake, monkeypatch):
-    """SLC-14 (NFR-03): a scene above the profile's recommended size is sent with a warning; a model no filter could
+    """SLC-14 (NFR-03): a scene above the profile's recommended size is sent with a warning; a model nothing could
     simplify is sent whole and counted."""
-    from vtkmodules.vtkFiltersCore import vtkTriangleFilter  # noqa: PLC0415
-
     from remoteview_core import decimate, snapshot  # noqa: PLC0415
 
-    def unusable(reduction):
-        return vtkTriangleFilter()  # a "decimation" that keeps every triangle
-
-    monkeypatch.setattr(decimate, "FILTERS", (unusable,))
+    monkeypatch.setattr(decimate, "decimate_entity", lambda entity, target, **kw: None)
     small = decimate.Budget(
         total_triangles=500_000, node_triangles=50, target_bytes=1_000
     )  # sphere(8): 96

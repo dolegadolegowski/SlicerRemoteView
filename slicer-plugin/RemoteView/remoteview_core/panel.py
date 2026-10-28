@@ -184,7 +184,7 @@ def scene_refused_text(code: str | None) -> str:
 
 
 def budget_text(snapshot: Snapshot) -> str:
-    """What the device profile's budgets left over (SLC-14, §7.5, NFR-03): nodes no filter could simplify, and a scene
+    """What the device profile's budgets left over (SLC-14, §7.5, NFR-03): nodes nothing could simplify, and a scene
     above the profile's recommended size (sent anyway — the warning, not a refusal). Empty when the scene fits."""
     parts = []
     if snapshot.unreduced:

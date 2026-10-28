@@ -21,9 +21,13 @@ from typing import Any, ClassVar
 
 import numpy as np
 import pytest
+from vtkmodules.util.numpy_support import numpy_to_vtk
 from vtkmodules.vtkCommonCore import vtkObject
+from vtkmodules.vtkCommonDataModel import vtkImageData
+from vtkmodules.vtkFiltersGeneral import vtkDiscreteFlyingEdges3D
 from vtkmodules.vtkFiltersSources import vtkSphereSource
 
+from remoteview_core.glb_writer import Entity
 from remoteview_core.protocol_client import ProtocolClient, SessionState, make_client_info
 from remoteview_core.transport import check_relay_url
 from remoteview_core.vendored import chunk_header
@@ -341,6 +345,56 @@ class FakeScene:
 
     def world_transform(self, node):
         return None
+
+
+def flying_edges(mask, spacing: float):
+    """The ``vtkDiscreteFlyingEdges3D`` surface of a boolean ``(z, y, x)`` labelmap with isotropic ``spacing`` (mm),
+    unsmoothed, like a segmentation's closed surface before Slicer's smoothing."""
+    image = vtkImageData()
+    image.SetDimensions(*mask.shape[::-1])
+    image.SetSpacing(spacing, spacing, spacing)
+    image.GetPointData().SetScalars(
+        numpy_to_vtk(np.ascontiguousarray(mask, dtype=np.uint8).ravel(), deep=True)
+    )
+    surface = vtkDiscreteFlyingEdges3D()
+    surface.SetInputData(image)
+    surface.SetValue(0, 1)
+    surface.Update()
+    return surface.GetOutput()
+
+
+def mesh_entity(positions, triangles, normals=None) -> Entity:
+    """A model entity over ``positions``/``triangles`` (glTF metres; +Y normals unless given), for decimation tests
+    that build their mesh directly."""
+    positions = np.asarray(positions, dtype=np.float64)
+    if normals is None:
+        normals = np.tile([0.0, 1.0, 0.0], (len(positions), 1))
+    return Entity(
+        node_id="vtkMRMLModelNode4",
+        kind="model",
+        name="Mesh",
+        positions=positions,
+        normals=np.asarray(normals, dtype=np.float64),
+        indices=np.asarray(triangles, dtype=np.int64).reshape(-1, 3),
+        color=(0.5, 0.5, 0.5),
+        opacity=1.0,
+        visible=True,
+        mrml_id="vtkMRMLModelNode4",
+    )
+
+
+def face_normals(positions, triangles):
+    """The unnormalised face normal (winding) of every triangle."""
+    p, t = np.asarray(positions), np.asarray(triangles)
+    return np.cross(p[t[:, 1]] - p[t[:, 0]], p[t[:, 2]] - p[t[:, 0]])
+
+
+def normal_opposes_face(entity) -> float:
+    """The share of triangles whose mean vertex normal opposes their face normal: they shade dark, or vanish under
+    the viewer's back-face culling (the GLB material is ``doubleSided`` false)."""
+    mean = np.asarray(entity.normals)[entity.indices].mean(axis=1)
+    face = face_normals(entity.positions, entity.indices)
+    return float(np.mean(np.einsum("ij,ij->i", mean, face) < 0))
 
 
 @functools.cache

@@ -8,8 +8,9 @@ one code path for both), in glTF space:
 - geometry: a **deep copy** of the node's points (same precision), polygons and strips only (the user's data is
   never touched — ADR 0005 §3; no attribute arrays, vertices or lines) → ``vtkTriangleFilter`` → triangles with a
   repeated vertex dropped → the bake, if any (below) → triangles without area dropped → ``vtkPolyDataNormals``
-  (``SplittingOff``, ``ConsistencyOn``) → owned numpy arrays without the points no triangle uses; positions/normals
-  converted with :mod:`remoteview_core.coords` (RAS mm → glTF m, +Y up);
+  (``SplittingOff``; ``ConsistencyOn`` when the winding is not already consistent and the mesh is not a
+  non-manifold fan) → owned numpy arrays without the points no triangle uses; positions/normals converted with
+  :mod:`remoteview_core.coords` (RAS mm → glTF m, +Y up);
 - transform: a linear world matrix becomes ``T.matrix = C·M·C⁻¹`` (protocol §7.2), identity becomes no matrix; a
   world transform that is not linear, or linear with shear (glTF ``node.matrix`` must be TRS), is **baked** into the
   vertices instead (SLC-13, protocol §7.3 ``baked: true``, identity ``T.matrix``) — the 3D view applies it the same way,
@@ -57,6 +58,7 @@ from vtkmodules.vtkCommonDataModel import vtkCellArray, vtkPolyData
 from vtkmodules.vtkCommonTransforms import vtkAbstractTransform, vtkTransform
 from vtkmodules.vtkFiltersCore import vtkPolyDataNormals, vtkTriangleFilter
 
+from remoteview_core.clustering import edge_work
 from remoteview_core.coords import ras_matrix_to_gltf, ras_to_gltf_normals, ras_to_gltf_points
 from remoteview_core.glb_writer import Entity, is_exportable_matrix
 from remoteview_core.ids import SceneIds
@@ -353,12 +355,12 @@ def polydata_from_triangles(
 
 
 def mesh_from_triangles(
-    positions: NDArray[np.float64], triangles: NDArray[np.int64]
+    positions: NDArray[np.float64], triangles: NDArray[np.int64], *, orient: bool = True
 ) -> Mesh | None:
     """The :class:`Mesh` of ``triangles`` over ``positions`` with point normals computed as for a collected node (same
     frame as the input), or ``None`` when no triangle with an area is left. Triangles that repeat a vertex or reference
     a missing point are dropped. A point normal can be zero (normals that cancel out): callers that write it directly
-    must check."""
+    must check. ``orient=False`` keeps the given winding (no ``ConsistencyOn``; decimate's last step, SLC-41)."""
     triangles = np.asarray(triangles, dtype=np.int64).reshape(-1, 3)
     positions = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
     a, b, c = triangles.T
@@ -366,11 +368,47 @@ def mesh_from_triangles(
     triangles = triangles[in_range & (a != b) & (b != c) & (a != c)]
     if len(triangles) == 0:
         return None
-    return _with_normals(polydata_from_triangles(positions, triangles).GetPoints(), triangles)
+    return _with_normals(
+        polydata_from_triangles(positions, triangles).GetPoints(), triangles, orient=orient
+    )
 
 
-def _with_normals(points: vtkPoints, triangles: NDArray[np.int64]) -> Mesh | None:
-    """The pipeline's last steps: drop triangles without area, compute the point normals, drop unused points."""
+def _consistently_wound(triangles: NDArray[np.int64]) -> bool:
+    """No directed edge appears twice: every edge then has at most two triangles, traversed in opposite directions,
+    and ``vtkOrientPolyData`` (what ``ConsistencyOn`` runs) would turn nothing over. True for no triangle."""
+    if len(triangles) == 0:
+        return True
+    n = int(triangles.max()) + 1
+    key = triangles.ravel() * n + triangles[:, [1, 2, 0]].ravel()
+    key.sort()
+    return not bool(np.any(key[1:] == key[:-1]))
+
+
+#: ``ConsistencyOn`` is skipped on a non-manifold fan, a mesh whose
+#: :func:`~remoteview_core.clustering.edge_work` is above both ``ORIENT_WORK`` and ``ORIENT_WORK_PER_TRIANGLE`` per
+#: triangle: ``vtkOrientPolyData`` calls ``GetCellEdgeNeighbors`` on every edge it crosses, so on a fan its time grows
+#: with the cube of the page count (3,000 pages on one spine: 172 s natively, about 1 s per 4e9). An ordinary mesh
+#: measures 106-148 per triangle whatever its size, so a large one is still re-oriented when it needs it (a sphere of
+#: 20.2M triangles with a reversed patch, 118 per triangle: 7.15 s natively; with the absolute bound alone, every mesh
+#: above about 15M triangles kept a reversed patch, SLC-41 review). A mesh consistently wound skips it anyway (SLC-41).
+ORIENT_WORK = 2e9
+ORIENT_WORK_PER_TRIANGLE = 1_000.0
+
+
+def _orientable(triangles: NDArray[np.int64]) -> bool:
+    """Whether ``ConsistencyOn`` should run: the winding is not consistent and the mesh is not a non-manifold fan
+    (:data:`ORIENT_WORK`)."""
+    if _consistently_wound(triangles):
+        return False
+    work = edge_work(triangles)
+    return work <= ORIENT_WORK or work <= ORIENT_WORK_PER_TRIANGLE * len(triangles)
+
+
+def _with_normals(
+    points: vtkPoints, triangles: NDArray[np.int64], *, orient: bool = True
+) -> Mesh | None:
+    """The pipeline's last steps: drop triangles without area, compute the point normals (re-orienting the
+    triangles consistently if ``orient``), drop unused points."""
     # A triangle without area (collinear points, or flattened by a baked transform) has no normal of its own: as the
     # lowest-ID triangle it would seed ConsistencyOn with an arbitrary winding and turn the real ones over, and a
     # point only it uses would get a zero normal. It is invisible, so it goes.
@@ -387,7 +425,11 @@ def _with_normals(points: vtkPoints, triangles: NDArray[np.int64]) -> Mesh | Non
     clean.SetPolys(_cell_array(triangles))
     normals = vtkPolyDataNormals()
     normals.SplittingOff()  # no duplicated points along feature edges (§7.4)
-    normals.ConsistencyOn()
+    # ConsistencyOn runs vtkOrientPolyData (vtkPolyDataNormals.cxx#L245-L255, v9.6.0). On a mesh whose winding is
+    # already consistent it turns nothing over, so it is skipped: same output, 4.87 s -> 2.8 s on 16M triangles; on a
+    # non-manifold fan, where it is unbounded (ORIENT_WORK), the given winding is kept (docs/research/slicer-decimate.md
+    # § SLC-41).
+    normals.SetConsistency(orient and _orientable(triangles))
     normals.AutoOrientNormalsOff()
     normals.ComputePointNormalsOn()
     normals.ComputeCellNormalsOff()

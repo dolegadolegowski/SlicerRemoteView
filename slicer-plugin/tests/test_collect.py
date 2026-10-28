@@ -6,6 +6,7 @@ import hashlib
 import itertools
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from support import (
     FakeSegmentation,
     FakeView,
     LiveScene,
+    flying_edges,
     glb_strings,
     manifest,
 )
@@ -1472,3 +1474,103 @@ def test_collect_output_always_writes():
         for anonymize in (False, True):
             collected = collect_scene(FakeScene(*nodes), anonymize_names=anonymize)
             write_glb(collected.entities, _root(collected.anonymized_names))
+
+
+# ------------------------------------------------------------------------ winding check before ConsistencyOn (SLC-41)
+
+
+def _mesh_arrays(mesh) -> tuple:
+    return mesh.positions, mesh.triangles, mesh.normals
+
+
+def test_collect_consistent_winding_skips_orientation_with_the_same_result(monkeypatch):
+    """``ConsistencyOn`` runs only when a directed edge repeats; on a consistently wound mesh it would turn nothing
+    over, so skipping it gives the same mesh (16M triangles: 4.87 s → 2.82 s)."""
+    mask = np.zeros((12, 20, 24), dtype=bool)
+    mask[2:10, 3:17, 4:20] = True
+    mask[5:8, 6:14, 8:16] = False  # a cavity: a second, inner surface
+    for polydata in (_sphere(resolution=24), flying_edges(mask, 0.5)):
+        skipped = mesh_from_polydata(polydata)
+        with monkeypatch.context() as patch:
+            patch.setattr(collect, "_consistently_wound", lambda triangles: False)
+            oriented = mesh_from_polydata(polydata)
+        assert collect._consistently_wound(skipped.triangles)
+        for mine, theirs in zip(_mesh_arrays(skipped), _mesh_arrays(oriented), strict=True):
+            np.testing.assert_array_equal(mine, theirs)
+    # one triangle reversed: not consistent, and re-oriented as before
+    mesh = mesh_from_polydata(_sphere(resolution=24))
+    reversed_one = mesh.triangles.copy()
+    reversed_one[7] = reversed_one[7][::-1]
+    assert not collect._consistently_wound(reversed_one)
+    repaired = collect.mesh_from_triangles(mesh.positions, reversed_one)
+    np.testing.assert_array_equal(repaired.triangles, mesh.triangles)
+    # three triangles on one edge: a directed edge repeats
+    assert not collect._consistently_wound(np.array([[0, 1, 2], [1, 0, 3], [0, 1, 4]]))
+    assert collect._consistently_wound(np.empty((0, 3), dtype=np.int64))
+    # orient=False keeps a deliberately reversed triangle reversed
+    kept = collect.mesh_from_triangles(mesh.positions, reversed_one, orient=False)
+    np.testing.assert_array_equal(kept.triangles, reversed_one)
+
+
+def _consistency_flags(monkeypatch) -> list:
+    """Records the ``SetConsistency`` argument of every ``vtkPolyDataNormals`` collect makes."""
+    flags: list = []
+
+    class Spy(collect.vtkPolyDataNormals):
+        def SetConsistency(self, value):  # noqa: N802
+            flags.append(bool(value))
+            super().SetConsistency(value)
+
+    monkeypatch.setattr(collect, "vtkPolyDataNormals", Spy)
+    return flags
+
+
+def test_collect_skips_orientation_when_it_is_not_needed_or_unbounded(monkeypatch):
+    """``ConsistencyOn`` is off on a consistently wound mesh and on a non-manifold fan whose re-orientation would be
+    unbounded (``vtkOrientPolyData`` on 3,000 pages sharing one spine: 172 s), on otherwise."""
+    flags = _consistency_flags(monkeypatch)
+    mesh_from_polydata(_sphere(resolution=24))
+    assert flags == [False]
+    mesh = mesh_from_polydata(_sphere(resolution=24))
+    reversed_one = mesh.triangles.copy()
+    reversed_one[7] = reversed_one[7][::-1]
+    flags.clear()
+    collect.mesh_from_triangles(mesh.positions, reversed_one)
+    assert flags == [True]
+    # 3,000 pages of two triangles sharing the spine edge (0, 1): a directed edge repeats, edge_work 5.4e10
+    pages = 3_000
+    angle = np.pi * np.arange(pages) / pages
+    tips = np.c_[np.cos(angle), np.sin(angle), np.zeros(pages)] * 10.0
+    positions = np.vstack(
+        [[0.0, 0.0, 0.0], [0.0, 0.0, 10.0], tips, tips + np.array([0.0, 0.0, 10.0])]
+    )
+    tip = 2 + np.arange(pages)
+    triangles = np.vstack(
+        [
+            np.c_[np.zeros(pages, int), tip, tip + pages],
+            np.c_[np.zeros(pages, int), tip + pages, np.ones(pages, int)],
+        ]
+    )
+    assert collect.edge_work(triangles) > collect.ORIENT_WORK
+    flags.clear()
+    start = time.perf_counter()
+    fanned = collect.mesh_from_triangles(positions, triangles)
+    assert time.perf_counter() - start < 2.0
+    assert flags == [False] and len(fanned.triangles) == 2 * pages
+
+
+def test_collect_orients_an_ordinary_mesh_above_the_absolute_work_bound(monkeypatch):
+    """The fan rule is per triangle too: an ordinary mesh (106-148 per triangle) above ``ORIENT_WORK`` — about 15M
+    triangles — is still re-oriented, where the absolute bound alone kept a reversed patch (a 20M-triangle sphere:
+    4.9 % of the decimated output faced inward, SLC-41 review). Simulated by lowering the bound."""
+    flags = _consistency_flags(monkeypatch)
+    mesh = mesh_from_polydata(_sphere(resolution=24))
+    reversed_patch = mesh.triangles.copy()
+    reversed_patch[7:12] = reversed_patch[7:12, ::-1]
+    monkeypatch.setattr(collect, "ORIENT_WORK", 1.0)
+    work = collect.edge_work(reversed_patch)
+    assert collect.ORIENT_WORK < work <= collect.ORIENT_WORK_PER_TRIANGLE * len(reversed_patch)
+    flags.clear()
+    repaired = collect.mesh_from_triangles(mesh.positions, reversed_patch)
+    assert flags == [True]
+    np.testing.assert_array_equal(repaired.triangles, mesh.triangles)
