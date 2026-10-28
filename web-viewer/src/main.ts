@@ -1,7 +1,7 @@
 // Entry point: wires the modules. Joining by code (WEB-03/04) or `/j#CODE` (WEB-11), snapshots over the WebSocket
 // stream (WEB-05) or HTTP (WEB-06), the scene model (WEB-07), the viewer (WEB-08), live updates (WEB-12),
 // reconnecting (WEB-14), the status bar (WEB-15), the wake lock and the renderer test hook (WEB-16), the language
-// switch (WEB-21), Leave (WEB-22), WebXR on Meta Quest Browser (WEB-19);
+// switch (WEB-21), Leave (WEB-22), WebXR on Meta Quest Browser (WEB-19), the activity line on the code entry (WEB-24);
 // `ui/screens.ts` decides which screen is visible.
 import { browserStorage, createLangStore } from "./i18n/lang";
 import { createConnection, endsSession } from "./protocol/connection";
@@ -17,11 +17,12 @@ import { bindModelLifecycle } from "./render/model-lifecycle";
 import { createSceneModelStore } from "./render/scene-model";
 import { describeState } from "./state/errors";
 import type { Description } from "./state/errors";
+import { createActivity } from "./ui/activity";
 import { createCodeEntry } from "./ui/code-entry";
 import { startFromDeepLink, takeDeepLink } from "./ui/deep-link";
 import { startDevOverlay } from "./ui/dev-overlay";
 import { createLangToggle } from "./ui/lang-toggle";
-import { bindScreens } from "./ui/screens";
+import { bindScreens, sessionLive } from "./ui/screens";
 import { bindWakeLock } from "./ui/wake-lock";
 import { t } from "./i18n/strings";
 import { quest2Concern } from "./xr/budget";
@@ -40,6 +41,11 @@ if (app) {
   const device = currentDevice();
   const maxSnapshotBytes = snapshotLimit(device.profile);
   const connection = createConnection({ clientInfo: device, maxSnapshotBytes });
+  // Set while the page is being left, before Reconnect listens (WEB-24): its `pagehide` leaves the session (WEB-14),
+  // and the activity line must not start a read then — Chromium would not keep the page in the back/forward cache,
+  // and the code, kept in memory only, would be lost with it.
+  let leaving = false;
+  window.addEventListener("pagehide", () => (leaving = true));
   const session = createReconnect(connection); // memory only: the code and the token (CLAUDE.md rule 6)
   // A closed state the reconnect logic retries (e.g. the code not re-created yet after a relay restart) keeps the
   // scene, the token and the versions; the new session's `viewer.joined` replaces them (WEB-14).
@@ -104,11 +110,26 @@ if (app) {
   connection.onMessage("scene.snapshot.abort", (m) => {
     if (m.reason !== "SUPERSEDED") screens.updating(false);
   });
+  // How many sessions are open and how many viewers use them (WEB-24): while the code entry is the user's own
+  // screen, i.e. no session is live, joining or retrying (`sessionLive`, the rule `screens.ts` shows the entry by).
+  const activity = createActivity({ lang: langs.lang });
+  langs.onChange((lang) => activity.setLang(lang));
+  const atHome = (state: ConnectionState) => !sessionLive(state, session);
+  connection.on("state", (state) =>
+    atHome(state) && !leaving ? activity.start() : activity.stop(),
+  );
+  window.addEventListener("pagehide", () => activity.stop()); // no read on its way into the cache
+  window.addEventListener("pageshow", () => {
+    leaving = false;
+    // Back from the cache on the code entry: fresh counts (a session left on `pagehide` joins again first).
+    if (atHome(connection.state)) activity.start();
+  });
   const entry = createCodeEntry({
     onJoin: (code) => screens.join(code),
     onLeave: () => screens.leave(), // WEB-22
     lang: langs.lang,
     languageToggle: createLangToggle(langs, { className: "code-entry__lang" }).element,
+    footer: activity.element,
   });
   const screens = bindScreens({
     app,
@@ -177,6 +198,7 @@ if (app) {
 
   app.append(entry.element);
   if (!startFromDeepLink(link, entry, screens)) entry.focus();
+  if (atHome(connection.state)) activity.start(); // after a deep link's join: no read for a page that joins at once
   // A link opened again in this tab only changes the fragment (no reload): take it the same way.
   window.addEventListener("hashchange", () => startFromDeepLink(takeDeepLink(), entry, screens));
   app.dataset["ready"] = "true";

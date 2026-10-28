@@ -71,6 +71,24 @@ client" below.
 connection layer is wired through `onJoin` in `src/main.ts`. Unit tests:
 `test/ui/code-entry.test.ts`; device E2E: `e2e/code-entry.spec.ts`.
 
+### Activity line (WEB-24)
+
+`src/ui/activity.ts` is the last line of the code entry (its `footer` slot): "Active sessions: 3 · Viewers: 12", the
+relay-wide counts of `GET /healthz` (§10, SRV-31), like the in-session viewer count of the status bar. `main.ts` runs it
+only while no session is live, joining or retrying — the states in which `screens.ts` shows the idle code entry — so a
+relay-wide "Viewers" never sits under a session's Leave button. It is not started while the page is being left
+(`pagehide`, where Reconnect leaves the session): a read then would keep Chromium from putting the page into the
+back/forward cache, and WEB-14's rejoin by the in-memory code would be lost; `pageshow` starts it again on the idle
+entry. A page opened from a `/j#CODE` link joins first, so it reads nothing. Started, it reads `/healthz` of the page's
+own origin (`no-store`, no credentials, no redirect, 10 s timeout) at once, then every 30 s while the page is visible,
+and at once when the page becomes visible again; stopped, it hides the line and drops an answer still on its way, so the
+counts from before a session are never shown after it. A read sends no code, token, cookie or body — only what the
+browser adds to any request (IP address, User-Agent), which the Railway edge logs (§10): one line per open home page
+every 30 s. The line is hidden unless the relay gives both counts as whole numbers (a draining `503`, offline, an older
+relay without `viewers`). Not a live region. `npm run dev` proxies `/healthz` to the local relay; under `vite preview`
+(the E2E server) it falls through to `index.html` and the line stays hidden unless a spec routes it. Unit tests:
+`test/ui/activity.test.ts`; device E2E: `e2e/activity.spec.ts`.
+
 ### Connection client (WEB-04)
 
 `src/protocol/connection.ts` is one WebSocket's lifetime (no DOM, no three.js); reconnecting is `reconnect.ts` (WEB-14).

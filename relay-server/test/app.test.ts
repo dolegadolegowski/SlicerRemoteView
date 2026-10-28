@@ -15,8 +15,10 @@ import { RELAY_VERSION } from "../src/version.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 
-describe("GET /healthz (SRV-01, §10)", () => {
-  it("answers 200 with exactly {status, uptimeS, sessions, version} within 100 ms", async () => {
+const stubPeer = { send: () => {}, forward: () => {}, bufferedAmount: 0, close: () => {} };
+
+describe("GET /healthz (SRV-01, SRV-31, §10)", () => {
+  it("answers 200 with exactly {status, uptimeS, sessions, viewers, version} within 100 ms", async () => {
     const clock = new ManualClock();
     const registry = new Registry({ ...loadConfig({}), clock });
     for (let i = 0; i < 3; i++) registry.createSession("mobile");
@@ -29,13 +31,38 @@ describe("GET /healthz (SRV-01, §10)", () => {
     expect(performance.now() - started).toBeLessThan(100);
     expect(res.statusCode).toBe(200);
     expect(res.headers["content-type"]).toMatch(/^application\/json/);
-    expect(res.json()).toEqual({ status: "ok", uptimeS: 12, sessions: 3, version: RELAY_VERSION });
+    expect(res.json()).toEqual({
+      status: "ok",
+      uptimeS: 12,
+      sessions: 3,
+      viewers: 0,
+      version: RELAY_VERSION,
+    });
     await app.close();
   });
 
-  it("reports 0 sessions on a fresh relay", async () => {
+  it("reports 0 sessions and 0 viewers on a fresh relay", async () => {
     const app = await buildApp();
-    expect((await app.inject("/healthz")).json()).toMatchObject({ sessions: 0 });
+    expect((await app.inject("/healthz")).json()).toMatchObject({ sessions: 0, viewers: 0 });
+    await app.close();
+  });
+
+  it("counts the viewer sockets open across all sessions, not a socket that closed (kept for a rejoin) (SRV-31)", async () => {
+    const registry = new Registry({ ...loadConfig({}), clock: new ManualClock() });
+    const a = registry.createSession("mobile").session;
+    const b = registry.createSession("mobile").session;
+    registry.createSession("mobile"); // a session nobody watches
+    for (let i = 0; i < 3; i++) registry.addViewer(a, { ...stubPeer }, "web");
+    const { viewer } = registry.addViewer(b, { ...stubPeer }, "quest3");
+    registry.addViewer(b, { ...stubPeer }, "web");
+    const app = await buildApp({ registry });
+    const counts = async () => {
+      const { sessions, viewers } = (await app.inject("/healthz")).json<Record<string, number>>();
+      return { sessions, viewers };
+    };
+    expect(await counts()).toEqual({ sessions: 3, viewers: 5 });
+    registry.viewerDisconnected(b, viewer); // its socket closed: kept for a rejoin, not counted
+    expect(await counts()).toEqual({ sessions: 3, viewers: 4 });
     await app.close();
   });
 });

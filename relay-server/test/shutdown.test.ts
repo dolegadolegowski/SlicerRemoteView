@@ -198,6 +198,14 @@ describe("draining in process", () => {
     const health = await relay.app.inject({ method: "GET", url: "/healthz" });
     expect(health.statusCode).toBe(503);
     expect(health.json()).toMatchObject({ status: "draining", sessions: 0 });
+    // The same keys as `200` (SRV-31): the 503 body carries `viewers` too.
+    expect(Object.keys(health.json() as object).sort()).toEqual([
+      "sessions",
+      "status",
+      "uptimeS",
+      "version",
+      "viewers",
+    ]);
     // The Origin check still comes first (FR-33): a foreign page learns nothing about the drain.
     await expect(
       connectClient(relay.url, { Origin: "https://evil.example.com" }),

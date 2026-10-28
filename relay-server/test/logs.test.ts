@@ -264,13 +264,19 @@ describe("a whole session at trace level leaves no secret in the logs (SRV-18, F
 });
 
 describe("GET /healthz stays status-only (SRV-18 criterion 3)", () => {
-  it("exactly {status, uptimeS, sessions, version}: no heap, rss or memory figures", async () => {
+  it("exactly {status, uptimeS, sessions, viewers, version}: no heap, rss or memory figures", async () => {
     const app = await buildApp();
     try {
       const res = await app.inject({ method: "GET", url: "/healthz" });
       expect(res.statusCode).toBe(200);
       const body = res.json() as Record<string, unknown>;
-      expect(Object.keys(body).sort()).toEqual(["sessions", "status", "uptimeS", "version"]);
+      expect(Object.keys(body).sort()).toEqual([
+        "sessions",
+        "status",
+        "uptimeS",
+        "version",
+        "viewers", // SRV-31: relay-wide, like `sessions`
+      ]);
       expect(res.body).not.toMatch(/heap|rss|memory/i);
     } finally {
       await app.close();
