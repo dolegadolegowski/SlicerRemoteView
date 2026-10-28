@@ -17,6 +17,7 @@ set(MODULE_PYTHON_SCRIPTS
   remoteview_core/decimate.py
   remoteview_core/deps.py
   remoteview_core/glb_writer.py
+  remoteview_core/ids.py
   remoteview_core/links.py
   remoteview_core/live.py
   remoteview_core/mrml_scene.py

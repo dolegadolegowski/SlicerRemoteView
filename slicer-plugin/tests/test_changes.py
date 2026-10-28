@@ -28,6 +28,7 @@ from remoteview_core.collect import SkipReason, collect_scene, polydata_from_tri
 from remoteview_core.coords import gltf_matrix_column_major, ras_matrix_to_gltf
 from remoteview_core.debounce import Change, DirtySet, Drained
 from remoteview_core.glb_writer import RootExtras, write_glb
+from remoteview_core.ids import SceneIds
 from remoteview_core.protocol_client import NodeChange
 from remoteview_core.snapshot import SnapshotTooLargeError, build_snapshot
 from remoteview_protocol import schemas
@@ -66,9 +67,12 @@ def warp() -> vtkTransform:
     return t
 
 
-def exported(scene: LiveScene, *, anonymize: bool = False) -> SentScene:
-    """The viewers' scene after an export of ``scene`` (what ``Snapshot.sent`` holds)."""
-    collected = collect_scene(scene, anonymize_names=anonymize)
+def exported(
+    scene: LiveScene, *, anonymize: bool = False, ids: SceneIds | None = None
+) -> SentScene:
+    """The viewers' scene after an export of ``scene`` (what ``Snapshot.sent`` holds); ``ids`` is the session's
+    registry when the scene holds IDs the export aliases."""
+    collected = collect_scene(scene, anonymize_names=anonymize, ids=ids)
     return SentScene.from_export(
         collected.entities, collected.skipped, anonymized=collected.anonymized_names
     )
@@ -84,9 +88,33 @@ def drained(*marks: tuple[str, Change], reset: bool = False) -> Drained:
 
 
 def plan_of(
-    scene: LiveScene, sent: SentScene, *marks, anonymize: bool = False, reset: bool = False
+    scene: LiveScene,
+    sent: SentScene,
+    *marks,
+    anonymize: bool = False,
+    reset: bool = False,
+    ids: SceneIds | None = None,
 ) -> Plan:
-    return classify(drained(*marks, reset=reset), scene, sent, anonymize_names=anonymize)
+    """``classify`` with the marks already resolved (as ``LiveUpdates`` hands them over) and a fresh registry unless
+    the test shares one with its export."""
+    return classify(
+        drained(*marks, reset=reset),
+        scene,
+        sent,
+        anonymize_names=anonymize,
+        ids=ids if ids is not None else SceneIds(),
+    )
+
+
+SEG = "vtkMRMLSegmentationNode1"
+
+
+def segmented(*segments: str, **props) -> LiveScene:
+    """A scene of one model and the segments ``segments`` of the segmentation node ``SEG`` (``props`` on each)."""
+    return LiveScene(
+        {"id": "vtkMRMLModelNode4"},
+        *({"id": SEG, "segment": s, "name": f"Segment {s}", **props} for s in segments),
+    )
 
 
 # --------------------------------------------------------------------------- criterion 1: updates
@@ -309,12 +337,31 @@ def test_changes_a_closed_scene_is_forgotten_with_its_ids():
     assert plan_of(LiveScene(), exported(scene), reset=True) == Plan(snapshot=True, reset=True)
 
 
-def test_changes_a_reset_under_hide_node_names_announces_generated_ids_only():
-    """T7: the new scene's hand-set, name-derived ID never reaches scene.nodeAdded."""
-    sent = exported(LiveScene({"id": "vtkMRMLModelNode4"}), anonymize=True)
-    new = LiveScene({"id": "vtkMRMLModelNode4"}, {"id": "Doe_John_liver"})
-    plan = plan_of(new, sent, ("Doe_John_liver", Change.ADDED), anonymize=True, reset=True)
-    assert plan == Plan(snapshot=True, reset=True, added=(("vtkMRMLModelNode4", "model"),))
+def test_changes_a_reset_under_hide_node_names_announces_aliases_never_raw_ids():
+    """T7: the new scene's hand-set, name-derived ID reaches scene.nodeAdded as its ``m_<n>`` alias only (the alias
+    the export gives it, §7.3) — and a segment of the new scene with kind ``segment``."""
+    ids = SceneIds()
+    sent = exported(LiveScene({"id": "vtkMRMLModelNode4"}), anonymize=True, ids=ids)
+    new = LiveScene(
+        {"id": "vtkMRMLModelNode4"},
+        {"id": "Doe_John_liver"},
+        {"id": SEG, "segment": "Liver_DoeJohn"},
+    )
+    plan = plan_of(new, sent, ("m_1", Change.ADDED), anonymize=True, reset=True, ids=ids)
+    assert plan == Plan(
+        snapshot=True,
+        reset=True,
+        added=(("vtkMRMLModelNode4", "model"), ("m_1", "model"), (f"{SEG}/s_1", "segment")),
+    )
+    # the alias once issued is kept with names shown again (§7.3); a fresh session exports the ID verbatim
+    shown = plan_of(new, sent, reset=True, ids=ids, anonymize=False)
+    assert shown.added[2] == (f"{SEG}/s_1", "segment")
+    fresh = plan_of(new, exported(new), reset=True)
+    assert fresh.added == (
+        ("vtkMRMLModelNode4", "model"),
+        ("m_1", "model"),
+        (f"{SEG}/Liver_DoeJohn", "segment"),
+    )
 
 
 def test_changes_a_reset_survives_a_scene_that_cannot_be_listed():
@@ -325,34 +372,55 @@ def test_changes_a_reset_survives_a_scene_that_cannot_be_listed():
 
 
 def test_changes_hide_node_names_switched_needs_a_snapshot():
-    """The viewers' scene was made under the other setting: its IDs and names follow other rules (T7)."""
+    """The viewers' scene was made under the other setting: its names follow other rules (T7). Since SLC-35 a
+    hand-set ID is exported as ``m_<n>`` in both modes (protocol v1.1 §7.3), so a switch changes no model ID — the
+    hand-set one is addressed under its alias either way, never under its raw ID."""
+    ids = SceneIds()
     scene = LiveScene(
         {"id": "vtkMRMLModelNode4"},
-        {"id": "Doe_John_liver"},
-        {"id": "Doe_Jane_kidney", "visible": False},  # hidden at the named export: not held
+        {"id": "vtkMRMLModelNode5"},
+        {"id": "vtkMRMLModelNode6", "visible": False},  # hidden at the named export: not held
+        {"id": "Doe_John_liver"},  # hand-set: held as m_1 in both modes, never under its raw ID
     )
-    named = exported(scene)
-    assert "Doe_John_liver" in named and not named.anonymized
+    named = exported(scene, ids=ids)
+    assert "vtkMRMLModelNode5" in named and "Doe_John_liver" not in named and not named.anonymized
+    assert "m_1" in named
+    scene.node("vtkMRMLModelNode5")["opacity"] = 0.5
+    scene.node("vtkMRMLModelNode6")["visible"] = True
     scene.node("Doe_John_liver")["opacity"] = 0.5
-    scene.node("Doe_Jane_kidney")["visible"] = True
-    # switched on: no hand-set ID is updated, removed or announced — neither the held one nor the new one
-    marks = (("Doe_John_liver", Change.APPEARANCE), ("Doe_Jane_kidney", Change.APPEARANCE))
-    assert plan_of(scene, named, *marks, anonymize=True) == Plan(snapshot=True)
-    # a reset in the same flush is not lost to the switch
-    reset = plan_of(scene, named, *marks, anonymize=True, reset=True)
-    assert reset == Plan(snapshot=True, reset=True, added=(("vtkMRMLModelNode4", "model"),))
-    scene.node("Doe_Jane_kidney")["visible"] = False
-    anonymous = exported(scene, anonymize=True)
+    # switched on: nothing is updated or removed, the scene is exported again; the node that became visible is
+    # announced (a generated ID), the aliased one is held already
+    marks = (
+        ("vtkMRMLModelNode5", Change.APPEARANCE),
+        ("vtkMRMLModelNode6", Change.APPEARANCE),
+        ("m_1", Change.APPEARANCE),
+    )
+    assert plan_of(scene, named, *marks, anonymize=True, ids=ids) == Plan(
+        snapshot=True, added=(("vtkMRMLModelNode6", "model"),)
+    )
+    # a reset in the same flush is not lost to the switch; the hand-set ID is announced as its alias
+    reset = plan_of(scene, named, *marks, anonymize=True, reset=True, ids=ids)
+    assert reset == Plan(
+        snapshot=True,
+        reset=True,
+        added=(
+            ("vtkMRMLModelNode4", "model"),
+            ("vtkMRMLModelNode5", "model"),
+            ("vtkMRMLModelNode6", "model"),
+            ("m_1", "model"),
+        ),
+    )
+    anonymous = exported(scene, anonymize=True, ids=ids)
     assert "Doe_John_liver" not in anonymous and anonymous.anonymized
-    # switched off: the hand-set ID is exported again, so announced
-    plan = plan_of(scene, anonymous, ("vtkMRMLModelNode4", Change.APPEARANCE))
-    assert plan == Plan(snapshot=True, added=(("Doe_John_liver", "model"),))
+    # switched off: exported again; every shown node is held already, so nothing is announced
+    plan = plan_of(scene, anonymous, ("vtkMRMLModelNode4", Change.APPEARANCE), ids=ids)
+    assert plan == Plan(snapshot=True)
     # a node the export left out is not announced on a switch either (the hint lists nodes that will come)
-    scene.add("vtkMRMLModelNode6", mesh=LINE)
-    anonymous = exported(scene, anonymize=True)
-    assert "vtkMRMLModelNode6" in anonymous.skipped
-    plan = plan_of(scene, anonymous, ("vtkMRMLModelNode4", Change.APPEARANCE))
-    assert plan == Plan(snapshot=True, added=(("Doe_John_liver", "model"),))
+    scene.add("vtkMRMLModelNode7", mesh=LINE)
+    anonymous = exported(scene, anonymize=True, ids=ids)
+    assert "vtkMRMLModelNode7" in anonymous.skipped
+    plan = plan_of(scene, anonymous, ("vtkMRMLModelNode4", Change.APPEARANCE), ids=ids)
+    assert plan == Plan(snapshot=True)
 
 
 # --------------------------------------------------------------------------- hidden in Slicer
@@ -466,22 +534,147 @@ def test_changes_a_hidden_node_whose_mesh_or_pose_changed_is_removed(flags):
     )
 
 
-@pytest.mark.parametrize(
-    "flags", [Change.APPEARANCE, Change.ADDED | Change.REMOVED, Change.REMOVED]
-)
-def test_changes_a_hidden_segment_is_left_to_the_export(flags):
-    """SLC-27 IDs are not read by the classifier yet: a held node of another kind is never hidden or removed by a
-    guess."""
-    sent = SentScene(
-        {
-            "vtkMRMLSegmentationNode1/Segment_1": SentNode(
-                "segment", (0.0, 1.0, 0.0), 1.0, True, IDENTITY
-            )
-        },
-        anonymized=False,
+# --------------------------------------------------------------------------- segments (SLC-36)
+
+
+def test_changes_a_held_segment_hidden_in_slicer_follows_the_model_rules():
+    """SLC-36: the SLC-30 placeholder (a held node of another kind → re-export) is gone — a hidden segment gets
+    ``visible: false``, one whose mesh or pose changed meanwhile goes."""
+    scene = segmented("Segment_1", "Segment_2")
+    sent = exported(scene)
+    first = f"{SEG}/Segment_1"
+    assert sent.get(first).kind == "segment" and sent.get(first).visible
+    scene.segment(SEG, "Segment_1")["visible"] = False
+    plan = plan_of(scene, sent, (first, Change.APPEARANCE))
+    assert plan == Plan(changes=(NodeChange(first, visible=False),))  # not Plan(snapshot=True)
+    assert plan_of(scene, sent, (first, Change.GEOMETRY)) == Plan(removed=(first,))
+    assert plan_of(scene, sent, (first, Change.TRANSFORM)) == Plan(removed=(first,))
+    assert plan_of(scene, sent, (first, Change.NAME)) == Plan(removed=(first,))
+    # a segment removed in Slicer: scene.nodeRemoved
+    scene.remove(SEG, "Segment_2")
+    second = f"{SEG}/Segment_2"
+    assert plan_of(scene, sent, (second, Change.REMOVED)) == Plan(removed=(second,))
+    sent.apply(plan_of(scene, sent, (first, Change.APPEARANCE), (second, Change.REMOVED)))
+    assert second not in sent and sent.get(first).visible is False
+    assert plan_of(scene, sent, (first, Change.APPEARANCE)) == Plan()  # still hidden
+
+
+def test_changes_a_held_segment_is_updated_like_a_model():
+    scene = segmented("Segment_1", "Segment_2")
+    sent = exported(scene)
+    first, second = f"{SEG}/Segment_1", f"{SEG}/Segment_2"
+    scene.segment(SEG, "Segment_1")["color"] = (0.1, 0.9, 0.2)
+    scene.segment(SEG, "Segment_2")["opacity"] = 0.5
+    plan = plan_of(scene, sent, (first, Change.APPEARANCE), (second, Change.APPEARANCE))
+    assert plan == Plan(
+        changes=(NodeChange(first, color=(0.1, 0.9, 0.2)), NodeChange(second, opacity=0.5))
     )
-    plan = plan_of(LiveScene(), sent, ("vtkMRMLSegmentationNode1/Segment_1", flags))
-    assert plan == Plan(snapshot=True)
+    # the segmentation node moved under a linear transform: one matrix per segment, the one the writer writes
+    scene.place(SEG, world=moved(10.0, -4.0, 2.5))
+    plan = plan_of(scene, sent, (first, Change.TRANSFORM), (second, Change.TRANSFORM))
+    assert plan == Plan(
+        changes=(
+            NodeChange(first, matrix=gltf(moved(10.0, -4.0, 2.5))),
+            NodeChange(second, matrix=gltf(moved(10.0, -4.0, 2.5))),
+        )
+    )
+    entity = next(e for e in collect_scene(scene).entities if e.node_id == first)
+    document = GLTF2.load_from_bytes(write_glb([entity], ROOT))
+    assert list(plan.changes[0].matrix) == document.nodes[document.nodes[0].children[0]].matrix
+    # the model's mark in the same flush is untouched
+    scene.node("vtkMRMLModelNode4")["opacity"] = 0.25
+    plan = plan_of(scene, sent, ("vtkMRMLModelNode4", Change.APPEARANCE), (first, Change.TRANSFORM))
+    assert [c.node_id for c in plan.changes] == ["vtkMRMLModelNode4", first]
+
+
+def test_changes_a_baked_segment_and_a_renamed_one_re_export():
+    scene = segmented("Segment_1", world=SHEAR)
+    sent = exported(scene)
+    first = f"{SEG}/Segment_1"
+    assert sent.get(first).matrix is None  # baked
+    scene.place(SEG, world=SHEAR @ moved(1.0))
+    assert plan_of(scene, sent, (first, Change.TRANSFORM)) == Plan(snapshot=True)
+    # colour of a baked segment: an update
+    scene.segment(SEG, "Segment_1")["color"] = (0.0, 0.0, 1.0)
+    assert plan_of(scene, sent, (first, Change.APPEARANCE)) == Plan(
+        changes=(NodeChange(first, color=(0.0, 0.0, 1.0)),)
+    )
+    # a rename re-exports — not under Hide node names (the viewers show "Segment 1" anyway)
+    plain = segmented("Segment_1")
+    named, anonymous = exported(plain), exported(plain, anonymize=True)
+    plain.segment(SEG, "Segment_1")["name"] = "Liver Smith"
+    assert plan_of(plain, named, (first, Change.NAME)) == Plan(snapshot=True)
+    assert plan_of(plain, anonymous, (f"{SEG}/s_1", Change.NAME), anonymize=True) == Plan()
+
+
+def test_changes_a_new_shown_segment_is_announced_with_its_kind():
+    scene = segmented("Segment_1")
+    sent = exported(scene)
+    scene.nodes.append({**LiveScene._defaults(), "id": SEG, "segment": "Segment_2"})
+    second = f"{SEG}/Segment_2"
+    plan = plan_of(scene, sent, (second, Change.ADDED))
+    assert plan == Plan(snapshot=True, added=((second, "segment"),))  # kind no longer hard-coded
+    # hidden at the export, shown later: a new node too (hidden segments are not exported, SLC-35)
+    scene.segment(SEG, "Segment_2")["visible"] = False
+    sent = exported(scene)
+    assert second not in sent
+    scene.segment(SEG, "Segment_2")["visible"] = True
+    assert plan_of(scene, sent, (second, Change.APPEARANCE)) == Plan(
+        snapshot=True, added=((second, "segment"),)
+    )
+    # a reset lists models as models and segments as segments
+    plan = plan_of(scene, sent, reset=True)
+    assert plan == Plan(
+        snapshot=True,
+        reset=True,
+        added=(
+            ("vtkMRMLModelNode4", "model"),
+            (f"{SEG}/Segment_1", "segment"),
+            (second, "segment"),
+        ),
+    )
+
+
+def test_changes_a_segment_the_export_left_out_follows_the_lift_rules():
+    """A segment without triangles (a planar contour, an empty segment): re-exported only with a mesh that passes."""
+    scene = segmented("Segment_1", "Segment_2")
+    scene.segment(SEG, "Segment_2")["mesh"] = LINE
+    sent = exported(scene)
+    second = f"{SEG}/Segment_2"
+    assert sent.skipped == {second: SkipInfo(SkipReason.NO_TRIANGLES)}
+    assert plan_of(scene, sent, (second, Change.APPEARANCE | Change.TRANSFORM)) == Plan()
+    assert plan_of(scene, sent, (second, Change.GEOMETRY)) == Plan()  # still a line
+    scene.segment(SEG, "Segment_2")["mesh"] = MESH
+    assert plan_of(scene, sent, (second, Change.GEOMETRY)) == Plan(snapshot=True)
+
+
+def test_changes_shown_entities_are_listed_through_the_sessions_registry():
+    """A model ``Sphere`` is shown as ``m_1`` — the same alias the export used, because it is the same registry; a
+    mark on ``m_1`` (what ``LiveUpdates`` resolves the observers' raw ID to) is classified like any other."""
+    ids = SceneIds()
+    scene = LiveScene({"id": "Sphere"}, {"id": SEG, "segment": "left lung"})
+    sent = exported(scene, ids=ids)
+    assert "m_1" in sent and f"{SEG}/s_1" in sent and "Sphere" not in sent
+    scene.node("Sphere")["color"] = (0.0, 0.0, 1.0)
+    assert plan_of(scene, sent, ("m_1", Change.APPEARANCE), ids=ids) == Plan(
+        changes=(NodeChange("m_1", color=(0.0, 0.0, 1.0)),)
+    )
+    scene.segment(SEG, "left lung")["opacity"] = 0.5
+    assert plan_of(scene, sent, (f"{SEG}/s_1", Change.APPEARANCE), ids=ids) == Plan(
+        changes=(NodeChange(f"{SEG}/s_1", opacity=0.5),)
+    )
+    # a fresh registry would number the same here, but the raw IDs are not shown under their own names
+    assert plan_of(scene, sent, ("Sphere", Change.APPEARANCE), ids=ids) == Plan()
+    assert plan_of(scene, sent, (f"{SEG}/left lung", Change.APPEARANCE), ids=ids) == Plan()
+
+
+def test_changes_the_registry_is_required():
+    with pytest.raises(TypeError):
+        classify(drained(), LiveScene(), SentScene(anonymized=False), anonymize_names=False)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        classify(
+            drained(), LiveScene(), SentScene(anonymized=False), anonymize_names=False, ids=None
+        )
 
 
 # --------------------------------------------------------------------------- nodes the export left out
@@ -772,10 +965,76 @@ def test_changes_a_rename_needs_a_snapshot_only_when_the_exported_name_changes(
 
 
 @pytest.mark.parametrize("flags", [*Change, Change.ADDED | Change.REMOVED])
-def test_changes_an_id_in_neither_scene_is_dropped(flags):
+def test_changes_a_generated_id_in_neither_scene_is_dropped(flags):
     scene = LiveScene({"id": "vtkMRMLModelNode4"})
     sent = exported(scene)
-    assert plan_of(scene, sent, ("Doe_John_liver", flags)) == Plan()
+    assert plan_of(scene, sent, ("vtkMRMLModelNode9", flags)) == Plan()
+
+
+@pytest.mark.parametrize("anonymize", [False, True])
+@pytest.mark.parametrize("flags", [*Change, Change.ADDED | Change.REMOVED])
+def test_changes_an_unresolved_raw_id_in_neither_scene_is_dropped(flags, anonymize):
+    """The marks ``classify`` gets are resolved by ``LiveUpdates`` (SLC-36); a raw hand-set ID is in neither the
+    scene (listed under its alias) nor the viewers' scene — nothing is sent, nothing is exported (T7). The SLC-35
+    interim re-export for such IDs is gone."""
+    scene = LiveScene({"id": "vtkMRMLModelNode4"})
+    sent = exported(scene, anonymize=anonymize)
+    assert plan_of(scene, sent, ("Doe_John_liver", flags), anonymize=anonymize) == Plan()
+
+
+@pytest.mark.parametrize("anonymize", [False, True])
+@pytest.mark.parametrize(
+    ("change", "flags", "expected"),
+    [
+        ("hidden", Change.APPEARANCE, Plan(changes=(NodeChange("m_1", visible=False),))),
+        (
+            "recoloured",
+            Change.APPEARANCE,
+            Plan(changes=(NodeChange("m_1", color=(0.0, 0.0, 1.0)),)),
+        ),
+        ("new-mesh", Change.APPEARANCE | Change.GEOMETRY, Plan(snapshot=True)),
+        ("moved", Change.TRANSFORM, Plan(changes=(NodeChange("m_1", matrix=gltf(moved(3.0))),))),
+        (
+            "renamed",
+            Change.NAME,
+            None,
+        ),  # a snapshot with names shown, nothing under Hide node names
+        ("removed", Change.REMOVED, Plan(removed=("m_1",))),
+        ("readded", Change.ADDED | Change.REMOVED, Plan(snapshot=True)),
+    ],
+)
+def test_changes_marks_resolved_to_a_models_alias_classify_like_a_generated_id(
+    change, flags, expected, anonymize
+):
+    """A model with a hand-set MRML ID is exported as ``m_1`` (ids.py) in both modes; ``LiveUpdates`` resolves the
+    observers' raw ``Sphere`` to ``m_1`` through the same registry (SLC-36), so hiding, recolouring, moving or
+    deleting it is the same cheap update a generated node gets — and the alias is the only ID on the wire (T7)."""
+    ids = SceneIds()
+    scene = LiveScene({"id": "Sphere"}, {"id": "vtkMRMLModelNode2"})
+    sent = exported(scene, anonymize=anonymize, ids=ids)
+    assert "m_1" in sent and "Sphere" not in sent and "vtkMRMLModelNode2" in sent
+    if change == "removed":
+        scene.remove("Sphere")
+    else:
+        scene.node("Sphere").update(
+            {
+                "hidden": {"visible": False},
+                "recoloured": {"color": (0.0, 0.0, 1.0)},
+                "new-mesh": {"mesh": sphere(4)},
+                "moved": {"world": moved(3.0)},
+                "renamed": {"name": "Liver segment 8"},
+                "readded": {},
+            }[change]
+        )
+    plan = plan_of(scene, sent, ("m_1", flags), anonymize=anonymize, ids=ids)
+    if expected is None:
+        expected = Plan() if anonymize else Plan(snapshot=True)
+    assert plan == expected and plan.added == ()
+    # the same change of the generated node gives the same plan shape (the alias is the only difference)
+    if change == "hidden":
+        scene.node("vtkMRMLModelNode2")["visible"] = False
+        plan = plan_of(scene, sent, ("vtkMRMLModelNode2", flags), anonymize=anonymize, ids=ids)
+        assert plan == Plan(changes=(NodeChange("vtkMRMLModelNode2", visible=False),))
 
 
 def test_changes_added_and_removed_follows_the_scene():
@@ -792,37 +1051,41 @@ def test_changes_added_and_removed_follows_the_scene():
 
 
 def test_changes_hide_node_names_keeps_hand_set_ids_off_the_wire():
-    """With *Hide node names* only generated IDs are exported (collect): a hand-set ID is not the viewers' to know."""
+    """A hand-set ID is exported as ``m_1`` in both modes (SLC-35): it is not the viewers' to know — its resolved
+    marks address the alias, an unresolved raw one is dropped, and a new hand-set node is announced as its alias."""
+    ids = SceneIds()
     scene = LiveScene({"id": "vtkMRMLModelNode4"}, {"id": "Doe_John_liver"})
-    sent = exported(scene, anonymize=True)
-    assert "Doe_John_liver" not in sent
+    sent = exported(scene, anonymize=True, ids=ids)
+    assert "Doe_John_liver" not in sent and "m_1" in sent
     scene.node("Doe_John_liver")["color"] = (0.0, 0.0, 1.0)
     for flags in (Change.APPEARANCE | Change.GEOMETRY, Change.ADDED, Change.REMOVED, Change.NAME):
-        assert plan_of(scene, sent, ("Doe_John_liver", flags), anonymize=True) == Plan()
-    scene.add("vtkMRMLModelNode9")
-    plan = plan_of(scene, sent, ("vtkMRMLModelNode9", Change.ADDED), anonymize=True)
-    assert plan.added == (("vtkMRMLModelNode9", "model"),)  # never the hand-set ID
+        assert plan_of(scene, sent, ("Doe_John_liver", flags), anonymize=True, ids=ids) == Plan()
+    plan = plan_of(scene, sent, ("m_1", Change.APPEARANCE), anonymize=True, ids=ids)
+    assert plan == Plan(changes=(NodeChange("m_1", color=(0.0, 0.0, 1.0)),))
+    scene.add("Doe_Jane_kidney")
+    plan = plan_of(scene, sent, ("m_2", Change.ADDED), anonymize=True, ids=ids)
+    assert plan.added == (("m_2", "model"),)  # never the hand-set ID
 
 
 def test_changes_reprs_show_no_node_id_or_name(caplog):
     caplog.set_level(logging.DEBUG)
     scene = LiveScene(
-        {"id": "Doe_John_liver", "name": "Doe^John liver"},
-        {"id": "Doe_Jane_kidney"},
-        {"id": "Doe_Joe_vessel", "mesh": LINE},  # left out: in sent.skipped
+        {"id": "vtkMRMLModelNode1", "name": "Doe^John liver"},
+        {"id": "vtkMRMLModelNode2", "name": "Doe^Jane kidney"},
+        {"id": "vtkMRMLModelNode3", "mesh": LINE},  # left out: in sent.skipped
     )
     sent = exported(scene)
-    scene.node("Doe_John_liver")["opacity"] = 0.5
-    scene.remove("Doe_Jane_kidney")
+    scene.node("vtkMRMLModelNode1")["opacity"] = 0.5
+    scene.remove("vtkMRMLModelNode2")
     plan = plan_of(
-        scene, sent, ("Doe_John_liver", Change.APPEARANCE), ("Doe_Jane_kidney", Change.REMOVED)
+        scene, sent, ("vtkMRMLModelNode1", Change.APPEARANCE), ("vtkMRMLModelNode2", Change.REMOVED)
     )
     assert plan.changes and plan.removed and len(sent.skipped) == 1
-    texts = [repr(plan), repr(sent), repr(sent.get("Doe_John_liver")), repr(sent.skipped)]
+    texts = [repr(plan), repr(sent), repr(sent.get("vtkMRMLModelNode1")), repr(sent.skipped)]
     logging.getLogger("test").info(
-        "%s %s %s %s", plan, sent, sent.get("Doe_John_liver"), sent.skipped
+        "%s %s %s %s", plan, sent, sent.get("vtkMRMLModelNode1"), sent.skipped
     )
-    assert not any("Doe" in t for t in [*texts, caplog.text])
+    assert not any("Doe" in t or "vtkMRMLModelNode" in t for t in [*texts, caplog.text])
 
 
 class _Broken(LiveScene):
@@ -881,11 +1144,11 @@ def test_changes_a_node_the_adapter_cannot_read_is_left_to_the_export(
     failing, props, held, flags, error
 ):
     """The export reads it again and reports it if it still fails; the flush goes on (no exception with an ID)."""
-    scene = _Broken({"id": "Doe_John_liver", **props}, {"id": "vtkMRMLModelNode5"}, error=error)
+    scene = _Broken({"id": "vtkMRMLModelNode4", **props}, {"id": "vtkMRMLModelNode5"}, error=error)
     sent = exported(scene)
-    assert ("Doe_John_liver" in sent) is held
+    assert ("vtkMRMLModelNode4" in sent) is held
     scene.failing = failing
-    assert plan_of(scene, sent, ("Doe_John_liver", flags)) == Plan(snapshot=True)
+    assert plan_of(scene, sent, ("vtkMRMLModelNode4", flags)) == Plan(snapshot=True)
 
 
 @pytest.mark.parametrize("error", ADAPTER_ERRORS)
@@ -900,7 +1163,7 @@ def test_changes_a_scene_that_cannot_be_listed_raises_without_an_id(error):
 
 def test_changes_hide_node_names_is_required():
     with pytest.raises(TypeError):
-        classify(drained(), LiveScene(), SentScene(anonymized=False))  # type: ignore[call-arg]
+        classify(drained(), LiveScene(), SentScene(anonymized=False), ids=SceneIds())  # type: ignore[call-arg]
 
 
 # --------------------------------------------------------------------------- the viewers' scene

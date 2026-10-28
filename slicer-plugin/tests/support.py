@@ -307,7 +307,8 @@ def sphere(resolution: int = 16):
 
 
 class FakeScene:
-    """A :class:`~remoteview_core.collect.SceneApi` over plain dicts (the MRML adapter is SLC-22's)."""
+    """A :class:`~remoteview_core.collect.SceneApi` over plain dicts (the MRML adapter is SLC-22's). A dict with a
+    ``"segment"`` key (the raw segment ID) is a segment of the segmentation node ``id``; the others are models."""
 
     def __init__(self, *nodes: dict) -> None:
         self.nodes = list(nodes)
@@ -315,10 +316,16 @@ class FakeScene:
 
     def visible_model_nodes(self):
         self.asked += 1
-        return self.nodes
+        return [n for n in self.nodes if "segment" not in n]
+
+    def visible_segments(self):
+        return [n for n in self.nodes if "segment" in n]
 
     def node_id(self, node):
         return node["id"]
+
+    def segment_identity(self, node):
+        return node["id"], node["segment"]
 
     def name(self, node):
         return node.get("name", "Liver")
@@ -345,8 +352,9 @@ def small_sphere():
 class LiveScene:
     """A :class:`~remoteview_core.collect.SceneApi` whose nodes change between calls, like a live MRML scene: each
     node is a dict with ``id``, ``name``, ``color``, ``opacity``, ``visible`` (shown in 3D), ``world`` (RAS matrix,
-    ``None`` for a non-linear chain), ``warp`` (that chain's transform, or ``None``) and ``mesh``. ``meshes`` counts
-    the mesh reads (the classifier makes none; it may count cells of a node left out without triangles)."""
+    ``None`` for a non-linear chain), ``warp`` (that chain's transform, or ``None``) and ``mesh``; a dict with a
+    ``"segment"`` key (the raw segment ID) is a segment of the segmentation node ``id``. ``meshes`` counts the mesh
+    reads (the classifier makes none; it may count cells of a node left out without triangles)."""
 
     def __init__(self, *nodes: dict) -> None:
         self.nodes = [{**self._defaults(), **n} for n in nodes]
@@ -367,17 +375,38 @@ class LiveScene:
     def node(self, node_id: str) -> dict:
         return next(n for n in self.nodes if n["id"] == node_id)
 
+    def segment(self, node_id: str, segment_id) -> dict:
+        return next(n for n in self.nodes if n["id"] == node_id and n.get("segment") == segment_id)
+
+    def place(self, node_id: str, **props) -> None:
+        """Set ``props`` on every dict of the node ``node_id`` — a segmentation node's ``world``/``warp`` are shared by
+        all its segments (their transform is the node's, SLC-13)."""
+        for node in self.nodes:
+            if node["id"] == node_id:
+                node.update(props)
+
     def add(self, node_id: str, **props) -> None:
         self.nodes.append({**self._defaults(), "id": node_id, **props})
 
-    def remove(self, node_id: str) -> None:
-        self.nodes = [n for n in self.nodes if n["id"] != node_id]
+    def remove(self, node_id: str, segment_id=None) -> None:
+        """Remove the node, or one segment of it when ``segment_id`` is given."""
+        self.nodes = [
+            n
+            for n in self.nodes
+            if n["id"] != node_id or (segment_id is not None and n.get("segment") != segment_id)
+        ]
 
     def visible_model_nodes(self):
-        return [n for n in self.nodes if n["visible"]]
+        return [n for n in self.nodes if n["visible"] and "segment" not in n]
+
+    def visible_segments(self):
+        return [n for n in self.nodes if n["visible"] and "segment" in n]
 
     def node_id(self, node):
         return node["id"]
+
+    def segment_identity(self, node):
+        return node["id"], node["segment"]
 
     def name(self, node):
         return node["name"]
@@ -541,8 +570,219 @@ class MrmlView(FakeView):
         return int(name == "vtkMRMLViewNode")
 
 
+SEGMENTATION_DISPLAY = ("vtkMRMLSegmentationDisplayNode", "vtkMRMLDisplayNode", "vtkMRMLNode")
+
+
+class FakeSegment:
+    """One ``vtkSegment``: its name, stored colour and the polydata of its 3D representation."""
+
+    def __init__(self, segment_id, *, name="Liver", color=(0.5, 0.2, 0.1), polydata=None):
+        self.segment_id, self.segment_name, self.color, self.mesh = (
+            segment_id,
+            name,
+            color,
+            polydata,
+        )
+
+    def GetName(self):  # noqa: N802
+        return self.segment_name
+
+    def GetColor(self):  # noqa: N802
+        return self.color
+
+
+class FakeVtkSegmentation:
+    """``vtkSegmentation``: the segments in order, their 3D representation read-only; ``created`` records every
+    ``CreateRepresentation`` call (the exporter must make none)."""
+
+    def __init__(self, segments=()):
+        self.segments = list(segments)
+        self.created: list[str] = []
+        self.representation_reads: list[tuple] = []
+
+    def GetSegmentIDs(self):  # noqa: N802
+        return tuple(s.segment_id for s in self.segments)
+
+    def GetNumberOfSegments(self):  # noqa: N802
+        return len(self.segments)
+
+    def GetNthSegmentID(self, index):  # noqa: N802
+        return self.segments[index].segment_id
+
+    def GetSegment(self, segment_id):  # noqa: N802
+        return next((s for s in self.segments if s.segment_id == segment_id), None)
+
+    def GetSegmentRepresentation(self, segment_id, name):  # noqa: N802
+        self.representation_reads.append((segment_id, name))
+        segment = self.GetSegment(segment_id)
+        return None if segment is None else segment.mesh
+
+    def CreateRepresentation(self, name):  # noqa: N802
+        self.created.append(name)
+        return True
+
+
+class FakeSegDisplay:
+    """A ``vtkMRMLSegmentationDisplayNode``: the node-level properties plus ``per_segment[sid]`` dicts with
+    ``visible``, ``visible_3d``, ``opacity_3d`` and ``override_color`` (what ``GetSegmentColor`` returns; the
+    one-argument ``vtkVector3d`` overload, as a 3-sequence). ``IsA`` walks ``classes`` like VTK's hierarchy."""
+
+    def __init__(  # noqa: PLR0913 — one keyword per MRML property
+        self,
+        classes=SEGMENTATION_DISPLAY,
+        *,
+        visible=1,
+        visible_3d=1,
+        opacity=1.0,
+        opacity_3d=1.0,
+        views=(),
+        folders_apply=True,
+        representation_3d="Closed surface",
+        per_segment=None,
+    ):
+        self.classes, self.visible, self.visible_3d = classes, visible, visible_3d
+        self.opacity, self.opacity_3d, self.views = opacity, opacity_3d, views
+        self.folders_apply, self.representation_3d = folders_apply, representation_3d
+        self.per_segment = dict(per_segment or {})
+        self.asked: list[Any] = []  # the IDs the per-segment getters were asked with
+
+    def _props(self, segment_id):
+        self.asked.append(segment_id)
+        return self.per_segment.get(segment_id, {})
+
+    def IsA(self, name):  # noqa: N802 — MRML's names
+        return int(name in self.classes)
+
+    def GetVisibility(self):  # noqa: N802
+        return self.visible
+
+    def GetVisibility3D(self):  # noqa: N802
+        return self.visible_3d
+
+    def GetOpacity(self):  # noqa: N802
+        return self.opacity
+
+    def GetOpacity3D(self):  # noqa: N802
+        return self.opacity_3d
+
+    def GetNumberOfViewNodeIDs(self):  # noqa: N802
+        return len(self.views)
+
+    def IsDisplayableInView(self, view_id):  # noqa: N802
+        return not self.views or view_id in self.views
+
+    def GetFolderDisplayOverrideAllowed(self):  # noqa: N802
+        return self.folders_apply
+
+    def GetDisplayRepresentationName3D(self):  # noqa: N802
+        return self.representation_3d
+
+    def GetSegmentVisibility(self, segment_id):  # noqa: N802
+        return int(self._props(segment_id).get("visible", 1))
+
+    def GetSegmentVisibility3D(self, segment_id):  # noqa: N802
+        return int(self._props(segment_id).get("visible_3d", 1))
+
+    def GetSegmentOpacity3D(self, segment_id):  # noqa: N802
+        return self._props(segment_id).get("opacity_3d", 1.0)
+
+    def GetSegmentColor(self, segment_id):  # noqa: N802 — the one-argument overload only
+        return self._props(segment_id).get("override_color", (0.5, 0.2, 0.1))
+
+
+class FakeSegmentation:
+    """A ``vtkMRMLSegmentationNode`` as the adapter reads it."""
+
+    def __init__(  # noqa: PLR0913
+        self,
+        node_id,
+        *,
+        name="Segmentation",
+        cls="vtkMRMLSegmentationNode",
+        hidden_from_editors=0,
+        displays=(),
+        transform=None,
+        segments=(),
+    ):
+        self.node_id, self.node_name, self.cls = node_id, name, cls
+        self.hidden_from_editors, self.displays, self.transform = (
+            hidden_from_editors,
+            list(displays),
+            transform,
+        )
+        self.segmentation = FakeVtkSegmentation(segments)
+
+    def GetID(self):  # noqa: N802
+        return self.node_id
+
+    def GetName(self):  # noqa: N802
+        return self.node_name
+
+    def GetClassName(self):  # noqa: N802
+        return self.cls
+
+    def GetHideFromEditors(self):  # noqa: N802
+        return self.hidden_from_editors
+
+    def GetNumberOfDisplayNodes(self):  # noqa: N802
+        return len(self.displays)
+
+    def GetNthDisplayNode(self, index):  # noqa: N802
+        return self.displays[index]
+
+    def GetParentTransformNode(self):  # noqa: N802
+        return self.transform
+
+    def GetSegmentation(self):  # noqa: N802
+        return self.segmentation
+
+
+class MrmlSegmentation(FakeSegmentation, vtkObject):
+    """A segmentation node read by both the scene adapter (the export) and the observers (VTK's own event dispatch),
+    like :class:`MrmlModel`: ``segments`` holds :class:`FakeSegment` objects with a sphere each by default, under one
+    :class:`FakeSegDisplay`. :meth:`fire` invokes a ``vtkSegmentation`` event by Slicer's attribute name or the
+    watcher's field name, with the segment ID as call data or without (NULL)."""
+
+    def __init__(self, node_id, **kw):
+        kw.setdefault("displays", [FakeSegDisplay()])
+        if "segments" not in kw:
+            kw["segments"] = [
+                FakeSegment("Segment_1", name="Liver", polydata=sphere(8)),
+                FakeSegment("Segment_2", name="Spleen", polydata=sphere(8)),
+            ]
+        FakeSegmentation.__init__(self, node_id, **kw)
+        self.in_scene = True
+
+    def IsA(self, name):  # noqa: N802 — MRML's names
+        return int(name == self.cls)
+
+    def GetScene(self):  # noqa: N802
+        return object() if self.in_scene else None
+
+    def add_segment(self, segment, *, fire=True):
+        """Append ``segment`` and (unless ``fire`` is false) invoke ``SegmentAdded`` with its ID."""
+        self.segmentation.segments.append(segment)
+        if fire:
+            self.fire("SegmentAdded", segment.segment_id)
+
+    def remove_segment(self, segment_id, *, fire=True):
+        self.segmentation.segments = [
+            s for s in self.segmentation.segments if s.segment_id != segment_id
+        ]
+        if fire:
+            self.fire("SegmentRemoved", segment_id)
+
+    def fire(self, name: str, segment_id=None) -> None:
+        from mrml_fakes import event_id  # noqa: PLC0415 — test modules on the same path
+
+        if segment_id is None:
+            self.InvokeEvent(event_id(name))
+        else:
+            self.InvokeEvent(event_id(name), segment_id)
+
+
 class FakeFolders:
-    """``slicer.vtkMRMLFolderDisplayNode``'s static methods, per model node."""
+    """``slicer.vtkMRMLFolderDisplayNode``'s static methods, per model or segmentation node."""
 
     def __init__(self, hidden=(), opacity=None, overriding=None):
         self.hidden, self.opacity, self.overriding = set(hidden), opacity or {}, overriding or {}
@@ -576,9 +816,42 @@ def reassemble(frames: list) -> tuple[dict, bytes, dict]:
     return begin, bytes(glb), end
 
 
-def root_extras(glb: bytes) -> dict:
+def glb_json(glb: bytes) -> dict:
+    """The parsed JSON chunk of a GLB."""
     json_length, json_type = struct.unpack_from("<II", glb, 12)
     assert json_type == 0x4E4F534A
-    document = json.loads(glb[20 : 20 + json_length])
+    return json.loads(glb[20 : 20 + json_length])
+
+
+def glb_strings(glb: bytes) -> list[str]:
+    """Every string value (and key) anywhere in the JSON chunk — what §7.3's anonymised-names promise is about."""
+    found: list[str] = []
+
+    def walk(value) -> None:
+        if isinstance(value, str):
+            found.append(value)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                found.append(key)
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(glb_json(glb))
+    return found
+
+
+def root_extras(glb: bytes) -> dict:
+    document = glb_json(glb)
     [root] = [n for n in document["nodes"] if n.get("name") == "SlicerRemoteView"]
     return root["extras"]
+
+
+def manifest(glb: bytes) -> list[dict]:
+    """The ``T.extras`` of every exported node (§7.3), in file order."""
+    return [
+        n["extras"]
+        for n in glb_json(glb)["nodes"]
+        if n.get("name") != "SlicerRemoteView" and "nodeId" in n.get("extras", {})
+    ]

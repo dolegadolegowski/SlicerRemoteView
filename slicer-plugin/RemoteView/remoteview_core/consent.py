@@ -45,11 +45,12 @@ def consent_text(url: str) -> str:
     transport = UNENCRYPTED if url.strip().startswith("ws://") else ENCRYPTED
     return (
         f"When you click Start session, RemoteView sends to {relay}: the complete surface meshes of the models "
-        "shown in the 3D view (clipping is not applied; no images or volumes), their names and MRML node IDs, their "
-        "colours, opacity, visibility and position, and the Slicer, RemoteView and operating-system versions. While "
-        "the session runs, RemoteView also sends every change to them (models shown, added or renamed later, and any "
-        "scene you open or load) until you click Stop session. Hiding, deleting or renaming a model does not take back "
-        "what was already sent: the relay keeps the last scene it received for viewers who join later until the "
-        "scene is sent again or the session ends. Anyone who has the session code can view the scene while the "
-        f"session runs. {transport}"
+        "and segments shown in the 3D view (segments as Slicer's 3D view shows them — clipping is not applied; no "
+        "images or volumes), their names, MRML node IDs and segment IDs, their colours, opacity, visibility and "
+        "position, and the Slicer, RemoteView and operating-system versions. While the session runs, RemoteView also "
+        "sends every change to them (models and segments shown, added or renamed later, and any scene you open or "
+        "load) until you click Stop session. Hiding, deleting or renaming a model or segment does not take back what "
+        "was already sent: the relay keeps the last scene it received for viewers who join later until the scene is "
+        "sent again or the session ends. Anyone who has the session code can view the scene while the session runs. "
+        f"{transport}"
     )

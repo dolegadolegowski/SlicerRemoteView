@@ -23,6 +23,7 @@ from support import (
     ack,
     created,
     deliver,
+    manifest,
     needs_relay_stub,
     parent_widget,
     pump_while,
@@ -34,6 +35,7 @@ from support import (
 )
 
 from remoteview_core import panel
+from remoteview_core.ids import SceneIds
 from remoteview_core.panel import PanelController, Phase
 from remoteview_core.snapshot import SnapshotTooLargeError
 from remoteview_core.transport import Connected, Disconnected, Received, RelayTransport
@@ -105,10 +107,13 @@ def test_panel_snapshot_reports_models_left_out(fake):
     ctl = controller(scene)
     ctl.start(URL)
     view = deliver(ctl, Connected(1), Received(1, created()))
-    assert view.detail == "2 models shown in 3D could not be shared."
-    assert deliver(ctl, Received(1, ack(1))).detail == "2 models shown in 3D could not be shared."
+    assert view.detail == "2 models or segments shown in 3D could not be shared."
     assert (
-        panel.skipped_text(1) == "1 model shown in 3D could not be shared."
+        deliver(ctl, Received(1, ack(1))).detail
+        == "2 models or segments shown in 3D could not be shared."
+    )
+    assert (
+        panel.skipped_text(1) == "1 model or segments shown in 3D could not be shared."
         and panel.skipped_text(0) == ""
     )
 
@@ -138,12 +143,12 @@ def test_panel_snapshot_warns_about_the_device_profiles_budgets(fake, monkeypatc
     ctl.start(URL)
     view = deliver(ctl, Connected(1), Received(1, created()))
     assert view.detail.startswith(
-        "1 model shown in 3D could not be shared. 1 model could not be simplified for the device profile and is "
-        "sent whole. The scene is "
+        "1 model or segments shown in 3D could not be shared. 1 model or segments could not be simplified for "
+        "the device profile and is sent whole. The scene is "
     )
     assert view.detail.endswith(
-        " MB, more than the 0.0 MB recommended for the device profile: viewers may load it slowly. Hide models in "
-        "3D to make it smaller."
+        " MB, more than the 0.0 MB recommended for the device profile: viewers may load it slowly. Hide models or "
+        "segments in 3D to make it smaller."
     )
     assert (
         view.status == "Sending the scene · no viewers yet."
@@ -165,7 +170,7 @@ def test_panel_budget_text_counts_and_rounds():
 
     assert panel.budget_text(snap()) == ""
     assert panel.budget_text(snap(unreduced=("a", "b"))) == (
-        "2 models could not be simplified for the device profile and are sent whole."
+        "2 models or segments could not be simplified for the device profile and are sent whole."
     )
     text = panel.budget_text(snap(byte_length=33_554_433, target_bytes=33_554_432))  # one byte over
     assert (
@@ -216,7 +221,7 @@ def test_panel_snapshot_too_large_keeps_the_session(fake):
         view.detail.startswith("The scene is too large to send (")
         and "this relay accepts" in view.detail
         and view.detail.endswith(
-            "Hide models in 3D, then stop and start the session."
+            "Hide models or segments in 3D, then stop and start the session."
         )  # one action, NFR-23/31
     )
     assert view.detail.endswith(" " + panel.HIDE_MODELS_AND_RESTART)
@@ -228,7 +233,8 @@ def test_panel_snapshot_too_large_keeps_the_session(fake):
 @pytest.mark.parametrize(
     ("code", "answers", "detail", "again_after"),
     [("PAYLOAD_TOO_LARGE", "begin",
-      "The relay refused the scene as too large. Hide models in 3D, then stop and start the session.", None),
+      "The relay refused the scene as too large. Hide models or segments in 3D, then stop and start the session.",
+      None),
      ("CAPACITY", "begin",
       "The relay has no room for the scene right now. RemoteView tries again automatically.", 2.0),
      ("CHECKSUM_MISMATCH", "end",
@@ -295,6 +301,33 @@ def test_panel_snapshot_state_starts_over_with_each_session(fake):
     view = deliver(ctl, Connected(1), Received(1, created()))
     assert view.status == "Sending the scene · no viewers yet." and view.detail == ""
     assert kinds(fake.made[1])[:2] == ["session.create", "scene.snapshot.begin"]
+
+
+def test_panel_snapshot_owns_one_alias_registry_per_session(fake):
+    """SLC-35 (§7.3, D-a): the panel hands ``LiveUpdates`` a ``SceneIds`` of its own — one per ``session.create``, so a
+    Stop → Start may renumber while every export within a session reuses the aliases it issued."""
+    seg = "vtkMRMLSegmentationNode1"
+
+    def scene():
+        return FakeScene(
+            {"id": seg, "segment": "left lung", "mesh": sphere(8)},
+            {"id": seg, "segment": "Tumor(1)", "mesh": sphere(8)},
+        )
+
+    ctl = controller(scene)
+    ctl.start(URL)
+    deliver(ctl, Connected(1), Received(1, created()))
+    first = ctl._live.ids
+    assert isinstance(first, SceneIds)
+    _, glb, _ = reassemble([m for _, m in fake.made[0].sent[1:]])
+    assert [m["nodeId"] for m in manifest(glb)] == [f"{seg}/s_1", f"{seg}/s_2"]
+    # the export used this very registry: the tumour's alias is already s_2 here (an untouched one would say s_1)
+    assert first.segment_node_id(seg, "Tumor(1)", anonymize=False) == f"{seg}/s_2"
+    ctl.stop()
+    deliver(ctl, Disconnected(1, None, None, final_sent=True))
+    ctl.start(URL)
+    deliver(ctl, Connected(1), Received(1, created()))
+    assert ctl._live.ids is not first and isinstance(ctl._live.ids, SceneIds)
 
 
 def test_panel_snapshot_carries_the_slicer_version(fake):
@@ -402,7 +435,11 @@ def test_panel_snapshot_adapter_sends_the_mrml_scene(
 ):
     # MrmlModel: since SLC-34 the adapter's watcher observes the model (a FakeModel cannot be observed)
     model = MrmlModel("vtkMRMLModelNode4", displays=[FakeDisplay()], polydata=sphere(8))
-    nodes = {"vtkMRMLModelNode": [model], "vtkMRMLViewNode": [FakeView("vtkMRMLViewNode1")]}
+    nodes = {
+        "vtkMRMLModelNode": [model],
+        "vtkMRMLSegmentationNode": [],
+        "vtkMRMLViewNode": [FakeView("vtkMRMLViewNode1")],
+    }
     monkeypatch.setattr(slicer_stubs["slicer"], "vtkMRMLFolderDisplayNode", FakeFolders())
     monkeypatch.setattr(slicer_stubs["slicer"].util, "getNodesByClass", nodes.__getitem__)
     monkeypatch.setattr(panel, "RelayTransport", FakeTransport)

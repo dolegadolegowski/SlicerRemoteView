@@ -730,6 +730,313 @@ Expected results:
 |---|---|---|---|---|
 | | | | | |
 
+## §13 Segments (SLC-27, SLC-35, SLC-36, SLC-37; US-02, FR-06, FR-64, ADR 0005 §6, protocol v1.1 §7.3, T7)
+
+Preconditions: §2's setup. Relay (a) with the update report (`node slicer-plugin/tests/relay_stub.mjs --port 8787
+--report-updates`, one stub run per step as in §6: start the stub, click *Start session*, do the step, click *Stop
+session*, end the stub's input; every step expects `violations == []`, closes `1` and no traceback in the Python
+console) and, for the visual checks, relay (b) or (c) with a viewer joined. Write down every session code shown; step 13
+searches the logs for them. Paste §5's helpers (`model`, `linear`, `bend`) and §6's (`every`) once, then these:
+
+```python
+import gc, json, struct, threading, time, weakref
+import RemoteView
+from remoteview_core.collect import collect_scene
+from remoteview_core.glb_writer import RootExtras, write_glb
+from remoteview_core.ids import SceneIds
+w = slicer.modules.RemoteViewWidget            # open the module once first
+api = RemoteView.RemoteViewLogic.sceneApi()
+ids = SceneIds()                               # one registry for every export() below, like a session's
+def export(anonymize=False):                   # what one snapshot would hold (nothing is sent)
+    scene = collect_scene(api, anonymize_names=anonymize, ids=ids)
+    for e in scene.entities:
+        print(e.kind, e.node_id, e.segment_id, repr(e.name), [round(c, 3) for c in e.color],
+              round(e.opacity, 3), e.baked)
+    print("skipped:", [(s.index, s.reason.value) for s in scene.skipped])
+    return scene
+def glb_text(scene):                           # the JSON chunk of the GLB such a snapshot would carry, and its size
+    glb = write_glb(scene.entities, RootExtras(scene_version=1, profile="mobile",
+                    slicer_version=slicer.app.applicationVersion, anonymized_names=scene.anonymized_names),
+                    quantize=True)
+    print(f"{len(glb)} bytes")
+    return glb[20:20 + struct.unpack_from("<I", glb, 12)[0]].decode("utf-8")
+def exact(cls):
+    return len([n for n in slicer.util.getNodesByClass(cls) if n.GetClassName() == cls])
+def expected_observers():                      # 5 scene + 4 per model + 8 per segmentation (slice-view models too)
+    return 5 + 4 * exact("vtkMRMLModelNode") + 8 * exact("vtkMRMLSegmentationNode")
+```
+
+Scene for the steps (unless a step says otherwise): *Sample Data → MRHead*; in *Segment Editor* add a segmentation
+named `Doe^John seg` with two segments, `Doe^John brain` and `Doe^John skull`, each painted with a few brush strokes
+(*Paint*, sphere brush; any shape); click **Show 3D** (on). Then `seg = slicer.util.getNode("Doe^John seg");
+d = seg.GetDisplayNode(); sids = seg.GetSegmentation().GetSegmentIDs()`. The medical-data rule (CLAUDE.md rule 6) is
+about the module's output: the console lines printed here are the tester's own and show IDs and names on purpose.
+
+Steps:
+
+1. **Bindings** (no session; SLC-36/SLC-37 `[TODO verify]`). Record every value.
+   1. `print(slicer.vtkSegmentation.SegmentAdded, slicer.vtkSegmentation.SegmentRemoved,
+      slicer.vtkSegmentation.SegmentModified, slicer.vtkSegmentation.RepresentationModified,
+      slicer.vtkSegmentation.ContainedRepresentationNamesModified, slicer.vtkSegmentation.SourceRepresentationModified,
+      slicer.vtkSegmentation.SegmentsOrderModified)`. Expected: `62102 62103 62104 62101 62105 62100 62106`
+      (`Libs/vtkSegmentationCore/vtkSegmentation.h`, an enum from 62100 in declaration order). Different numbers are
+      fine as long as every attribute exists — the adapter reads the attributes; a missing one makes *Start* fail with
+      an `AttributeError` by design.
+   2. `print(type(sids), [type(s) for s in sids], sids)`. Expected: a `tuple` of `str`, two IDs like `Segment_1`.
+   3. `c = d.GetSegmentColor(sids[0]); print(type(c).__name__, len(c), tuple(c))`. Expected: `vtkVector3d 3 (r, g, b)`
+      in 0–1 (the one-argument overload the adapter uses).
+   4. `print(repr(d.GetDisplayRepresentationName3D()))`, then click *Show 3D* off, run it again, click it on again.
+      Expected: `'Closed surface'`, `''`, `'Closed surface'`.
+   5. `print(slicer.vtkMRMLFolderDisplayNode.GetOverridingHierarchyDisplayNode(seg),
+      slicer.vtkMRMLFolderDisplayNode.GetHierarchyVisibility(seg), slicer.vtkMRMLFolderDisplayNode.GetHierarchyOpacity(seg))`.
+      Expected: `None True 1.0` (callable from Python for a segmentation node; `None` while it is in no folder).
+   6. Call data of a typed handler on the segmentation **node** (the watcher's `calldata_type(VTK_STRING)`): run as one
+      block
+
+      ```python
+      from vtkmodules.util.misc import calldata_type
+      from vtkmodules.vtkCommonCore import VTK_STRING
+      seen = []
+      @calldata_type(VTK_STRING)
+      def probe(caller, event, calldata=None):
+          seen.append((event, type(calldata).__name__, calldata))
+      tag = seg.AddObserver(slicer.vtkSegmentation.SegmentModified, probe)
+      seg.GetSegmentation().GetSegment(sids[0]).SetName(seg.GetSegmentation().GetSegment(sids[0]).GetName())
+      seg.GetSegmentation().GetSegment(sids[0]).Modified()           # immediate path
+      wasModifying = seg.StartModify(); seg.GetSegmentation().GetSegment(sids[1]).Modified(); seg.EndModify(wasModifying)
+      seg.RemoveObserver(tag); print(seen)
+      ```
+
+      Expected: at least one entry `('NoEvent', 'str', '<the ID of sids[0]>')` from the immediate path, and for the
+      deferred one an entry whose call data is `None` (`'NoneType'`) — or a `str` if Slicer forwards the ID; record
+      which. Nothing is raised either way.
+2. **Wiring and the first snapshot** (US-02, FR-06). Relay (b)/(c) with a viewer, and the stub for the counts.
+   1. Click *Start*. Wait for "Live".
+   2. Run `w.controller.observer_count == expected_observers(), w.controller.observer_count`.
+   3. Run `export()`.
+   4. Click *Stop*.
+
+   Expected:
+   - The viewer shows both segments where MRHead's head is, in Slicer's segment colours and fully opaque, and lists
+     them under their names `Doe^John brain`/`Doe^John skull` (the panel: "Live").
+   - Step 2 prints `(True, n)`: 8 observers per segmentation node.
+   - Step 3 prints two `segment` lines with nodeIds `vtkMRMLSegmentationNode<k>/<segment ID>`, `segment_id` = the
+     ID, the two names, the segment colours as in *Segment Editor*, opacity `1.0`, `False` (not baked), then
+     `skipped: []`; the stub shows `v1:` only and updates `[]`.
+3. **Show 3D off and on** (`ContainedRepresentationNamesModified` → geometry; a segment no longer shown is removed).
+   1. Click *Start*. Wait for "Live".
+   2. Click *Show 3D* (off), wait 2 s.
+   3. Click *Show 3D* (on), wait 2 s.
+
+   Expected: updates `[["scene.nodeRemoved",2,1],["scene.nodeAdded",3,2]]`, snapshots `v1: v4:`; the viewer empties
+   within about 1 s of the click, then shows both segments again (a segment shown again is a new node — the cost of
+   leaving hidden segments out, report `2026-10-28-slicer-1`).
+4. **A segment's eye** (FR-11, cheap updates for a held segment).
+   1. Click *Start*. Wait for "Live".
+   2. In *Segment Editor*'s table close the eye of `Doe^John skull`, wait 1 s, open it again.
+
+   Expected: updates `[["scene.update",2,1],["scene.update",3,2]]`, `v1:` only; the viewer hides and shows the skull
+   within 0.5 s each (hidden **after** the export: `visible: false`, no snapshot).
+5. **Hidden at export time, and `Opacity3D` 0** (the privacy default and its cost, report `2026-10-28-slicer-1`).
+   1. Close the eye of `Doe^John skull`. Click *Start*. Wait for "Live".
+   2. Open the eye, wait 2 s.
+   3. In *Segmentations → Display*, set *Opacity 3D* of the segmentation to 0, wait 2 s; set it back to 1, wait 2 s.
+   4. Add a model next to it: `m = model((0, 0, 0), "Doe^John sphere")`, wait 2 s, then
+      `m.GetDisplayNode().SetOpacity(0)`, wait 2 s.
+
+   Expected (one stub run for the whole step: the versions below add up to updates `[["scene.nodeAdded",2,1],
+   ["scene.update",4,3],["scene.update",5,4],["scene.nodeAdded",6,5],["scene.update",8,7]]` and snapshots
+   `v1: v3: v7:`):
+   - Step 1: `v1:` with one segment (the brain); the viewer shows no skull. Step 2: `["scene.nodeAdded",2,1]` and a
+     snapshot `v3:` with both — a segment hidden at export time is a new node later (a full snapshot), not a
+     `visible: true`.
+   - Step 3: the segmentation at `Opacity3D` 0 is "not shown" (`vtkMRMLSegmentationsDisplayableManager3D::vtkInternal::
+     IsVisible`), but the viewers hold both segments and the mark is appearance only (`DisplayModifiedEvent`), so this
+     is step 4's lane, not a removal: `["scene.update",4,3]` with `visible: false` for both segments, then
+     `["scene.update",5,4]` with `visible: true` for both; no `scene.nodeRemoved`, no snapshot; the viewer hides and
+     shows both segments within 0.5 s each. Models and segmentations differ at opacity 0 **at export time only**: a
+     segmentation at `Opacity3D` 0 is left out of a snapshot (hidden-at-export, the cost of step 2), a model at
+     opacity 0 is exported.
+   - Step 4: the model arrives with `["scene.nodeAdded",6,5]` + a snapshot `v7:`; at opacity 0 it stays on the viewers
+     (`["scene.update",8,7]` with `opacity: 0`) — as Slicer's displayable managers do, a model at opacity 0 is drawn
+     (invisibly) and a segmentation is not (`release` decides both, `2026-10-20-slicer-5` and `2026-10-28-slicer-1`).
+6. **Four-factor opacity and the folder override on screen** (ADR 0005 Decision 6, `[TODO verify]`; relay (b)/(c)).
+   Compare the viewer, Slicer's 3D view and `export()` after each sub-step; record the printed opacity and colour.
+   1. (a) In *Segment Editor* set the opacity of `Doe^John brain` to 0.5 (*Segmentations → Display → Advanced* per
+      segment, *Opacity 3D*) and the segmentation's *Opacity 3D* to 0.8. Run `export()`.
+
+      Expected: the brain's opacity prints `0.4` (0.5 × 0.8 × 1.0 × 1.0), the skull's `0.8`; the viewer and Slicer's
+      3D view look alike (both translucent, the brain more so).
+   2. (b) In *Data*, create a folder, move `Doe^John seg` into it, right-click the folder → *Edit properties* (or the
+      folder's display node in Python: `f = slicer.vtkMRMLFolderDisplayNode.GetOverridingHierarchyDisplayNode(seg)`
+      after *Apply color to all children* is enabled) and set the folder's **opacity** to 0.5. Run `export()` and
+      `print(f.GetOpacity(), slicer.vtkMRMLFolderDisplayNode.GetHierarchyOpacity(seg), d.GetFolderDisplayOverrideAllowed())`.
+
+      Expected: the adapter copies the displayable manager's arithmetic — hierarchy opacity × segment × `Opacity3D` ×
+      the generic (folder) display node's opacity — so the brain prints `0.1` (0.5 × 0.5 × 0.8 × 0.5): the folder's
+      opacity enters **twice**. Look at Slicer's 3D view: if the brain looks like 0.1 (nearly invisible) the double
+      count is what Slicer draws and the export matches; if it looks like 0.2, Slicer counts it once — record it either
+      way and report it (`2026-10-28-slicer-1` names it). The viewer shows what `export()` printed.
+   3. (c) Enable *Apply color to all children* on the folder with a distinct colour (e.g. yellow), then run
+      `d.SetFolderDisplayOverrideAllowed(0); export()`.
+
+      Expected: the opacity factors of the folder are gone (the brain prints `0.4` again) but the **colour** printed is
+      the folder's yellow — the colour branch of `UpdateDisplayNodePipeline` is not gated by
+      `GetFolderDisplayOverrideAllowed`. Look at Slicer's 3D view: if both segments are yellow the export matches; if
+      they keep their own colours, record it and report it (the adapter would then need the gate for segments too).
+      Afterwards `d.SetFolderDisplayOverrideAllowed(1)`, move the segmentation out of the folder, set both opacities
+      back to 1.
+7. **A colour change** (NFR-02; the stub).
+   1. Click *Start*. Wait for "Live".
+   2. In *Segment Editor*, double-click the colour of `Doe^John brain` and choose another colour; wait 1 s.
+   3. Run `every(50, 40, lambda i: d.SetSegmentOpacity3D(sids[1], 0.2 + 0.8 * abs((i % 20) / 20 - 0.5)))`; wait for
+      `every: T s`.
+
+   Expected: step 2 gives `[["scene.update",2,1]]` and `v1:` only — a `SegmentModified(id)` is an appearance change,
+   never a snapshot; the viewer shows the new colour within 0.5 s. Step 3 adds between `4·T − 1` and `4·T + 2`
+   `scene.update` (the fast lane, `APPEARANCE_MAX_MS` 250) and still no snapshot.
+8. **Hide node names: aliases, never a raw ID** (protocol v1.1 §7.3, reports `2026-10-18-slicer-3`,
+   `2026-10-19-slicer-3`, T7). *Hide node names* has no panel toggle yet (SLC-18); the live controller's switch is used.
+   1. Run, as one line each: `s = seg.GetSegmentation(); s.AddEmptySegment("left lung", "Doe^John lung");
+      s.AddEmptySegment("Läsion", "Doe^John lesion"); s.AddEmptySegment("Tumor(1)", "Doe^John tumour");
+      s.AddEmptySegment("x" * 110, "Doe^John long"); s.AddEmptySegment("s_1", "Doe^John s1")`, then paint one or two
+      strokes into each of the five new segments (an empty segment has no surface, step 12).
+   2. Run `shown = export(); text = glb_text(shown)`.
+   3. Run `hidden = export(anonymize=True); text2 = glb_text(hidden); print([n for n in ("left lung", "Läsion",
+      "Tumor(1)", "x" * 110, "s_1", "Doe", "brain", "skull", "Segment_", "S_") if n in text2])`.
+   4. Click *Start*. Wait for "Live". Run `w.controller._live.set_anonymize_names(True)`, wait 2 s; then
+      `w.controller._live.set_anonymize_names(False)`, wait 2 s. Click *Stop*.
+
+   Expected:
+   - Step 2: the two painted segments keep `<mrmlId>/<ID>` with `segment_id` = the ID; `left lung`, `Läsion`,
+     `Tumor(1)`, the 110-character ID and `s_1` print as `<mrmlId>/s_1` … `/s_5` (in this order) with `segment_id` =
+     the raw ID and the given names; `skipped: []`; `text` holds every raw ID (as `extras.segmentId`) and name.
+   - Step 3: every segment is `<mrmlId>/s_<n>` — the five keep `s_1` … `s_5`, the two painted ones get `s_6`, `s_7`
+     (an alias once issued is never reissued or shadowed) —, `segment_id` prints `None`, names are `Segment 1` …
+     `Segment 7`; the list printed is `[]`: no raw ID or name anywhere in the JSON chunk.
+   - Step 4: one new snapshot `v2:` after the switch on and one `v3:` after the switch off (no `scene.update` for
+     them); `len(glb_text(export()))` afterwards is unchanged and `export()` shows the aliases of step 3 kept for the
+     five and for the two painted ones (`s_6`, `s_7` with `segment_id` revealed again) — the alias survives the
+     switch-off (§7.3).
+9. **`AddEmptySegment` while live: exactly one snapshot per change; reads inside `NodeAddedEvent` write nothing**
+   (SLC-36 `[TODO verify]`: an export's own display getters may fire a deferred `SegmentModified(NULL)`).
+   1. Click *Start*. Wait for "Live".
+   2. Run `sid = s.AddEmptySegment("", "Doe^John added")`, wait 3 s, then paint a stroke into it, wait 2 s.
+   3. Run as one block (a probe on a private observer, no session needed, but harmless while live):
+
+      ```python
+      marks = []
+      def probe(caller, event, calldata=None):
+          node = calldata
+          if node is not None and node.IsA("vtkMRMLSegmentationNode"):
+              before = (node.GetMTime(), node.GetSegmentation().GetMTime(), slicer.mrmlScene.GetMTime())
+              sids2 = node.GetSegmentation().GetSegmentIDs()
+              names = [node.GetSegmentation().GetSegment(i).GetName() for i in sids2]
+              after = (node.GetMTime(), node.GetSegmentation().GetMTime(), slicer.mrmlScene.GetMTime())
+              marks.append((sids2, names, before == after))
+      from vtkmodules.util.misc import calldata_type
+      from vtkmodules.vtkCommonCore import VTK_OBJECT
+      probe = calldata_type(VTK_OBJECT)(probe)
+      tag = slicer.mrmlScene.AddObserver(slicer.vtkMRMLScene.NodeAddedEvent, probe)
+      n2 = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Doe^John seg 2")
+      slicer.mrmlScene.RemoveObserver(tag); print(marks)
+      ```
+
+   Expected:
+   - Step 2: the empty segment costs a snapshot it is not in: `SegmentAdded` of a segment the viewers do not hold is
+     a re-export, and `v2:` holds the two painted segments only — the new one is left out as `no-triangles` (the
+     panel says one model or segment shown in 3D could not be shared); only exported entities are announced, so no
+     `scene.nodeAdded`. The stroke (`RepresentationModified`) lifts a skip reason the classifier does not trust
+     without the export (`no-triangles` is re-checked there), so it is one more plain snapshot `v3:` with all three
+     segments — again no `scene.nodeAdded`. Over the step: updates `[]`, snapshots `v1: v2: v3:` — **not**
+     `v1: v2: v3: v4:` (a deferred `SegmentModified(NULL)` fired by the export's own getters marks appearance only,
+     which changes nothing); a fourth snapshot is the failure this step is for — report it.
+   - Step 3: `[((), [], True)]` — `GetSegmentIDs()` and `GetSegment(id).GetName()` inside `NodeAddedEvent` changed no
+     MTime (the watcher reads them there). The new empty segmentation sends nothing (no segments); remove it:
+     `slicer.mrmlScene.RemoveNode(n2)`.
+10. **Painting: one export per quiet period, export time, GLB size** (ADR 0005 Consequences, plan Follow-ups;
+    SLC-28 brings the per-node ticks). Two sub-steps.
+    1. Click *Start*. Wait for "Live". Paint `Doe^John skull` continuously for about 20 s (`T`), without pausing
+       longer than half a second; stop painting and note when the status returns to "Live". Then wait 5 s.
+
+       Expected: `v1:` and **one** `v2:` — about 750 ms after the last stroke — and no `scene.update`; while painting
+       nothing is exported (every stroke ends in `RepresentationModified` and re-bases the 2 s cap). Record: the
+       number of snapshots (more than one means a pause ≥ 750 ms between strokes, or a Slicer event the rule does not
+       cover — report it), how long "Updating the scene" showed (the export time), and whether the 3D view stuttered
+       during or after painting (the main-thread stall).
+    2. Size (relay (a) needed only for the time): *Sample Data → CTChest*, *Segment Editor → Threshold* a bone segment
+       (≥ 200 HU) and a soft-tissue segment (−200…200 HU), *Show 3D* on; then on MRHead's scene a brain threshold
+       (≥ 50). For each run `t = time.monotonic(); text = glb_text(export()); print(f"{time.monotonic() - t:.1f} s")`.
+
+       Expected: the GLB size and the time are printed; record both (the 64 MiB question of architecture §10). The
+       panel shows the budget warning only above the profile's recommended size (§14).
+11. **A Latin-1 segment ID** (`bytes` from VTK; SLC-27 `[TODO verify]`). `[TODO verify]` that VTK accepts `bytes` for a
+    `std::string` argument; if `AddEmptySegment` refuses it, the case cannot arise from Python — record that instead.
+    1. `rid = s.AddEmptySegment("L\xe4sion".encode("latin-1"), "Doe^John latin"); print(repr(rid),
+       [repr(i) for i in s.GetSegmentIDs()])`, then paint a stroke into the new segment (select it in the table).
+    2. Run `export()`.
+    3. Click *Start*. Wait for "Live". Run `s.GetSegment(rid).Modified()` (a `SegmentModified` with the raw ID as call
+       data), wait 1 s. Click *Stop*. Look at the Python console and the Error Log.
+
+    Expected:
+    - Step 1: the ID comes back as `bytes` (`b'L\xe4sion'`) or as a `str` with U+FFFD/the original letter — record
+      which; nothing is raised.
+    - Step 2: the segment is `<mrmlId>/s_<n>` (a `bytes` ID is always aliased) with `segment_id` `'L�sion'`
+      (decoded with U+FFFD) and its name; `skipped: []`.
+    - Step 3: nothing from `remoteview_core` or `RemoteView.py` beyond at most one type-only line; if the VTK wrapper
+      fails to decode the call data it reports a `UnicodeDecodeError` to stderr with a byte and a position, never the
+      ID — record whether any line shows the raw bytes. Afterwards `s.RemoveSegment(rid)`.
+12. **Empty segments, planar contours and a *HideFromEditors* flip** (SLC-36 `[TODO verify]`).
+    1. `s.AddEmptySegment("", "Doe^John empty")` (no strokes). Click *Start*. Wait for "Live".
+    2. `seg.SetHideFromEditors(1)`, wait 2 s; `seg.SetHideFromEditors(0)`, wait 2 s. Click *Stop*.
+    3. N/A without SlicerRT: load a planar-contour segmentation (an RT structure set), *Show 3D* on with *Planar
+       contour* as the 3D representation, and run `export()`.
+
+    Expected:
+    - Step 1: the painted segments are on the viewer; the empty one is left out (`export()` reports it as
+      `no-triangles`, the panel says one model or segment shown in 3D could not be shared); the snapshot still goes.
+    - Step 2: `[["scene.nodeRemoved",2,1],["scene.nodeAdded",3,2]]`, snapshots `v1: v4:` — the flip fires
+      `ModifiedEvent` on the segmentation node. If nothing happens at `(1)`, report it.
+    - Step 3: every planar-contour segment prints as `no-triangles` (polylines are not exported — an accepted
+      difference), the rest of the scene ships.
+13. **Logs** (T7, rule 6). Search the application log file and the Error Log window (not the console window) for
+    `Doe`, `Traceback`, `vtkMRMLSegmentationNode`, every segment ID printed in steps 1, 8 and 11 (`left lung`,
+    `Läsion`, `Tumor(1)`, `s_1`, `xxxxxxxxxx`, `L\xe4sion`), and every session code written down during §13. Expected:
+    - None of them is on a line from `remoteview_core` or `RemoteView.py`; hits on lines Slicer wrote or on echoed
+      console commands are allowed.
+    - No `vtkError`/`vtkWarning` line with a segment ID that the module's reads caused (an unknown ID passed to
+      `GetSegmentVisibility`/`GetSegmentColor` logs one with the ID — the adapter passes only IDs it just read from
+      `GetSegmentIDs()`; a `vtkError` here means a race the §13 scene exposed: report it).
+    - No publisher token anywhere (a 43+ character `[A-Za-z0-9_-]` string on a RemoteView line).
+14. **Transforms** (SLC-13 for segmentations; FR-06, FR-12).
+    1. `t = linear(np.eye(4).tolist(), "Move"); seg.SetAndObserveTransformNodeID(t.GetID())`. Click *Start*. Wait for
+       "Live".
+    2. Drag "Move"'s LR slider in *Transforms* for about 3 s.
+    3. `t.SetAndObserveTransformNodeID(bend.GetID())` (§5's thin-plate spline), wait 2 s; run `export()`.
+    4. Drag the slider again for about 3 s. Click *Stop*.
+
+    Expected:
+    - Step 2: `scene.update` only (one `matrix` per segment, about 4/s), no snapshot; both segments follow on the
+      viewer.
+    - Step 3: one snapshot; `export()` prints `True` (baked) for both segments and the viewer shows them bent as
+      Slicer's 3D view does.
+    - Step 4: snapshots at most about every 2 s while dragging and one about 750 ms after the last change (a baked
+      node takes the slow lane) — no `scene.update` for the segments.
+
+Known gaps (not failures):
+- A segment hidden at export time and shown later costs a full snapshot (step 5 sub-step 2; a segmentation whose
+  `Opacity3D` drops to 0 while live is the cheap `visible: false`, sub-step 3); `release` may reverse the privacy
+  default for models and segments (`2026-10-20-slicer-5`, `2026-10-28-slicer-1`).
+- An empty segment added while live costs a snapshot it is not in, and its first stroke another (step 9); the viewers
+  learn of it from the second one, without a `scene.nodeAdded`.
+- Continuous painting exports the whole scene once per quiet period on the main thread (step 10); SLC-28 brings
+  per-node preparation. A script editing a mesh every < 750 ms for ever never exports until it stops.
+- Planar contours are not exported (`no-triangles`).
+
+| Date | Slicer version | OS | Result | Tester |
+|---|---|---|---|---|
+| | | | | |
+
 ## §14 Decimation to the device profile (SLC-14; FR-10, NFR-03, protocol §7.5)
 
 Preconditions: §2's setup with relay (b) or (c) and a viewer joined. The panel uses the `mobile` profile (500k

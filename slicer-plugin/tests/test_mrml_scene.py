@@ -1,6 +1,9 @@
-"""SLC-22: the Slicer scene adapter against fake MRML nodes (the calls of docs/research/slicer-scene.md)."""
+"""SLC-22, SLC-35: the Slicer scene adapter against fake MRML nodes (the calls of docs/research/slicer-scene.md for
+models; v5.12.4 ``vtkMRMLSegmentationsDisplayableManager3D::vtkInternal`` for segments)."""
 
 from __future__ import annotations
+
+import logging
 
 import numpy as np
 import pytest
@@ -10,22 +13,27 @@ from support import (
     FakeDisplay,
     FakeFolders,
     FakeModel,
+    FakeSegDisplay,
+    FakeSegment,
+    FakeSegmentation,
     FakeView,
 )
 from support import (
     FakeMrmlTransform as FakeTransform,
 )
+from vtkmodules.vtkCommonDataModel import vtkPolyData
 from vtkmodules.vtkCommonTransforms import vtkGeneralTransform, vtkTransform
-from vtkmodules.vtkFiltersSources import vtkSphereSource
+from vtkmodules.vtkFiltersSources import vtkLineSource, vtkSphereSource
 
-from remoteview_core.collect import collect_scene
-from remoteview_core.mrml_scene import MrmlSceneApi
+from remoteview_core.collect import SkipReason, collect_scene
+from remoteview_core.mrml_scene import INVALID_DISPLAY_PROPS, MrmlSceneApi, SegmentRef
 
 
-def scene(models, folders=None, views=("vtkMRMLViewNode1",)):
+def scene(models, folders=None, views=("vtkMRMLViewNode1",), segmentations=()):
     """``nodes_by_class`` like ``slicer.util.getNodesByClass``: subclasses included, scene order."""
     by_class = {
         "vtkMRMLModelNode": list(models),
+        "vtkMRMLSegmentationNode": list(segmentations),
         "vtkMRMLViewNode": [FakeView(v) for v in views],
     }
     asked = []
@@ -212,14 +220,294 @@ def test_mrml_scene_feeds_collect_scene():
     ]
 
 
+# --------------------------------------------------------------------------- segments (SLC-35)
+
+SEG = "vtkMRMLSegmentationNode1"
+
+
+def segmentation(node_id=SEG, *, display=None, segments=None, **kw) -> FakeSegmentation:
+    """A segmentation with ``Segment_1`` (3D opacity 0.8, colour red) and ``Segment_2`` (0.6, green), both with a
+    sphere as their closed-surface representation, under a display node at 3D opacity 0.5."""
+    if display is None:
+        display = FakeSegDisplay(
+            opacity_3d=0.5,
+            per_segment={
+                "Segment_1": {"opacity_3d": 0.8, "override_color": (1.0, 0.0, 0.0)},
+                "Segment_2": {"opacity_3d": 0.6, "override_color": (0.0, 1.0, 0.0)},
+            },
+        )
+    if segments is None:
+        segments = [
+            FakeSegment("Segment_1", name="Liver", polydata=sphere()),
+            FakeSegment("Segment_2", name="Spleen", polydata=sphere()),
+        ]
+    return FakeSegmentation(node_id, displays=[display], segments=segments, **kw)
+
+
+def handles(api, node) -> list[SegmentRef]:
+    return [h for h in api.visible_segments() if h.node is node]
+
+
+def test_mrml_scene_lists_shown_segments_in_slicers_order_after_the_models():
+    node = segmentation()
+    api, asked = scene([], segmentations=[node])
+    assert api.visible_segments() == [SegmentRef(node, "Segment_1"), SegmentRef(node, "Segment_2")]
+    assert api.segment_identity(SegmentRef(node, "Segment_2")) == (SEG, "Segment_2")
+    assert api.name(SegmentRef(node, "Segment_2")) == "Spleen"
+    assert "vtkMRMLSegmentationNode" in asked
+    # the display getters were asked only with IDs GetSegmentIDs() returned (an unknown one logs a vtkError)
+    assert set(node.displays[0].asked) <= {"Segment_1", "Segment_2"}
+
+
+def test_mrml_scene_segment_opacity_is_the_four_factor_product_without_a_folder():
+    """(a) ``hier_op (1.0) × GetSegmentOpacity3D × GetOpacity3D × display.GetOpacity``."""
+    node = segmentation()
+    api, _ = scene([], segmentations=[node])
+    first, second = handles(api, node)
+    assert api.display_props(first) == ((1.0, 0.0, 0.0), pytest.approx(0.8 * 0.5 * 1.0), True)
+    assert api.display_props(second) == ((0.0, 1.0, 0.0), pytest.approx(0.6 * 0.5 * 1.0), True)
+    node.displays[0].opacity = 0.5  # the generic display node's own opacity is the fourth factor
+    assert api.display_props(first)[1] == pytest.approx(0.8 * 0.5 * 0.5)
+
+
+def test_mrml_scene_segment_opacity_and_colour_under_an_overriding_folder():
+    """(b) override allowed: the folder's opacity enters as the hierarchy opacity and again as the generic display
+    node's — what ``UpdateDisplayNodePipeline`` reads (``[TODO verify]`` on screen, manual §13 step 6b); the folder's
+    colour replaces the segment's."""
+    node = segmentation()
+    branch = FakeDisplay(color=(0.0, 0.0, 1.0), opacity=0.5)
+    folders = FakeFolders(opacity={SEG: 0.5}, overriding={SEG: branch})
+    api, _ = scene([], folders, segmentations=[node])
+    first, _ = handles(api, node)
+    assert api.display_props(first) == ((0.0, 0.0, 1.0), pytest.approx(0.5 * 0.8 * 0.5 * 0.5), True)
+
+
+def test_mrml_scene_folder_colour_applies_even_when_the_display_node_opts_out():
+    """(c) ``GetFolderDisplayOverrideAllowed`` false: the folders are ignored for opacity and visibility, but the DM's
+    colour branch is not gated — the folder colour still applies (unlike the model path of the same adapter)."""
+    display = FakeSegDisplay(
+        opacity_3d=0.5,
+        folders_apply=False,
+        per_segment={"Segment_1": {"opacity_3d": 0.8, "override_color": (1.0, 0.0, 0.0)}},
+    )
+    node = segmentation(display=display, segments=[FakeSegment("Segment_1", polydata=sphere())])
+    branch = FakeDisplay(color=(0.0, 0.0, 1.0), opacity=0.5)
+    folders = FakeFolders(opacity={SEG: 0.5}, hidden={SEG}, overriding={SEG: branch})
+    api, _ = scene([], folders, segmentations=[node])
+    [first] = handles(api, node)  # the hidden folder is ignored too
+    assert api.display_props(first) == ((0.0, 0.0, 1.0), pytest.approx(0.8 * 0.5 * 1.0), True)
+    # the model path keeps its gated reading: an opted-out model ignores the folder's colour
+    model = FakeModel("vtkMRMLModelNode1", displays=[FakeDisplay(folders_apply=False)])
+    folders.overriding["vtkMRMLModelNode1"] = branch
+    api, _ = scene([model], folders)
+    assert api.display_props(model)[0] == (1.0, 0.5, 0.25)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "show-3d-off",
+        "opacity-3d-zero",
+        "eye-closed",
+        "not-3d",
+        "hidden-folder",
+        "hidden-from-editors",
+        "no-3d-view",
+        "subclass",
+        "no-display",
+    ],
+)
+def test_mrml_scene_a_segmentation_that_is_not_drawn_yields_nothing(case):
+    kw: dict = {}
+    display_kw: dict = {}
+    views = ("vtkMRMLViewNode1",)
+    folders = FakeFolders()
+    if case == "show-3d-off":
+        display_kw = {"representation_3d": ""}
+    elif case == "opacity-3d-zero":
+        display_kw = {"opacity_3d": 0.0}  # IsVisible: unlike a model at opacity 0
+    elif case == "eye-closed":
+        display_kw = {"visible": 0}
+    elif case == "not-3d":
+        display_kw = {"visible_3d": 0}
+    elif case == "hidden-folder":
+        folders = FakeFolders(hidden={SEG})
+    elif case == "hidden-from-editors":
+        kw = {"hidden_from_editors": 1}
+    elif case == "no-3d-view":
+        views = ()
+    elif case == "subclass":
+        kw = {"cls": "vtkMRMLSomeSegmentationNode"}
+    display = FakeSegDisplay(**({"opacity_3d": 0.5} | display_kw))
+    node = segmentation(display=display, **kw)
+    if case == "no-display":
+        node.displays = []
+    api, _ = scene([], folders, views=views, segmentations=[node])
+    assert api.visible_segments() == []
+    assert node.segmentation.created == []  # never converted
+    if case in ("opacity-3d-zero", "eye-closed", "not-3d", "hidden-folder", "no-3d-view"):
+        # the display rules also say so for a held segment (SLC-36 reads them); the node-level filters (class,
+        # hidden from editors) and Show 3D are the list's business, not the display node's
+        assert api.display_props(SegmentRef(node, "Segment_1"))[2] is False
+    if case == "no-display":
+        assert api.display_props(SegmentRef(node, "Segment_1")) == ((0.0, 0.0, 0.0), 0.0, False)
+
+
+def test_mrml_scene_a_hidden_segment_is_left_out_and_its_sibling_listed():
+    display = FakeSegDisplay(
+        opacity_3d=0.5,
+        per_segment={"Segment_1": {"visible_3d": 0}, "Segment_2": {"opacity_3d": 0.6}},
+    )
+    node = segmentation(display=display)
+    api, _ = scene([], segmentations=[node])
+    assert api.visible_segments() == [SegmentRef(node, "Segment_2")]
+    assert api.display_props(SegmentRef(node, "Segment_1"))[2] is False
+    display.per_segment["Segment_1"] = {"visible": 0}
+    assert api.visible_segments() == [SegmentRef(node, "Segment_2")]
+    # a hidden folder with override allowed hides every segment; not allowed, they are listed
+    folders = FakeFolders(hidden={SEG})
+    api, _ = scene([], folders, segmentations=[node])
+    assert api.visible_segments() == []
+    display.folders_apply = False
+    assert api.visible_segments() == [SegmentRef(node, "Segment_2")]
+
+
+def test_mrml_scene_segment_geometry_is_the_live_representation_never_created():
+    mesh = sphere()
+    node = segmentation(
+        segments=[FakeSegment("Segment_1", polydata=mesh), FakeSegment("Segment_2")]
+    )
+    api, _ = scene([], segmentations=[node])
+    first, second = handles(api, node)
+    assert api.polydata(first) is mesh  # identity: the DM's polydata, not a copy
+    assert api.polydata(second) is None  # no representation yet
+    assert node.segmentation.representation_reads == [
+        ("Segment_1", "Closed surface"),
+        ("Segment_2", "Closed surface"),
+    ]
+    assert node.segmentation.created == []
+    assert not hasattr(node, "CreateClosedSurfaceRepresentation") or node.created == []
+    collected = collect_scene(api)
+    assert [(e.node_id, e.kind, e.mrml_id, e.segment_id) for e in collected.entities] == [
+        (f"{SEG}/Segment_1", "segment", SEG, "Segment_1")
+    ]
+    assert [(s.node_id, s.reason, s.index) for s in collected.skipped] == [
+        (f"{SEG}/Segment_2", SkipReason.NO_TRIANGLES, 1)
+    ]
+    # an empty polydata and a planar contour (lines) are no-triangles too; Show 3D switched off since the list was
+    # read gives no mesh
+    line = vtkLineSource()
+    line.Update()
+    node.segmentation.segments[1].mesh = line.GetOutput()
+    node.segmentation.segments[0].mesh = vtkPolyData()
+    assert [s.reason for s in collect_scene(api).skipped] == [SkipReason.NO_TRIANGLES] * 2
+    node.displays[0].representation_3d = ""
+    assert api.polydata(first) is None
+    assert node.segmentation.created == []
+
+
+def test_mrml_scene_segment_transform_is_the_nodes_like_a_model():
+    linear = FakeTransform([[1, 0, 0, 10], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
+    node = segmentation(transform=linear)
+    api, _ = scene([], segmentations=[node])
+    first, second = handles(api, node)
+    assert np.array_equal(api.world_matrix(first), linear.matrix)
+    assert np.array_equal(api.world_matrix(second), linear.matrix)
+    warped = segmentation(
+        "vtkMRMLSegmentationNode2", transform=FakeTransform(None, warp=_shift(1, 2, 3))
+    )
+    api, _ = scene([], segmentations=[warped])
+    [first, _] = handles(api, warped)
+    assert api.world_matrix(first) is None
+    assert api.world_transform(first).TransformPoint(0.0, 0.0, 0.0) == pytest.approx(
+        (1.0, 2.0, 3.0)
+    )
+    assert api.world_transform(SegmentRef(segmentation("vtkMRMLSegmentationNode3"), "x")) is None
+
+
+class _BrokenColorDisplay(FakeSegDisplay):
+    def GetSegmentColor(self, segment_id):  # noqa: N802
+        if segment_id == "Segment_1":
+            raise TypeError(
+                "GetSegmentColor() takes 2 arguments"
+            )  # a binding other than the one probed
+        return super().GetSegmentColor(segment_id)
+
+
+def test_mrml_scene_a_segment_whose_colour_binding_fails_is_invalid_display_only(caplog):
+    display = _BrokenColorDisplay(
+        opacity_3d=0.5,
+        per_segment={"Segment_1": {"opacity_3d": 0.8}, "Segment_2": {"opacity_3d": 0.6}},
+    )
+    node = segmentation(display=display)
+    model = FakeModel("vtkMRMLModelNode1", displays=[FakeDisplay()], polydata=sphere())
+    api, _ = scene([model], segmentations=[node])
+    first, second = handles(api, node)
+    with caplog.at_level(logging.DEBUG):
+        props = api.display_props(first)
+    assert props == INVALID_DISPLAY_PROPS and props[1] != props[1]  # NaN opacity
+    assert api.display_props(second)[1] == pytest.approx(0.3)
+    assert (
+        "TypeError" in caplog.text and "Segment_1" not in caplog.text and "Liver" not in caplog.text
+    )
+    collected = collect_scene(api)
+    assert [e.node_id for e in collected.entities] == ["vtkMRMLModelNode1", f"{SEG}/Segment_2"]
+    assert [(s.node_id, s.reason) for s in collected.skipped] == [
+        (f"{SEG}/Segment_1", SkipReason.INVALID_DISPLAY)
+    ]
+
+
+@pytest.mark.parametrize("bad", [(1.0, 0.0), (1.0, 0.0, float("nan")), "red"])
+def test_mrml_scene_a_colour_that_is_not_three_finite_floats_is_invalid_display(bad):
+    display = FakeSegDisplay(per_segment={"Segment_1": {"override_color": bad}})
+    node = segmentation(display=display, segments=[FakeSegment("Segment_1", polydata=sphere())])
+    api, _ = scene([], segmentations=[node])
+    assert api.display_props(SegmentRef(node, "Segment_1")) == INVALID_DISPLAY_PROPS
+
+
 # --------------------------------------------------------------------------- the module logic builds it from Slicer
 
 
 def test_mrml_scene_adapter_uses_slicers_functions(import_remote_view, slicer_stubs, monkeypatch):
     model = FakeModel("vtkMRMLModelNode4", displays=[FakeDisplay()])
-    nodes = {"vtkMRMLModelNode": [model], "vtkMRMLViewNode": [FakeView("vtkMRMLViewNode1")]}
+    nodes = {
+        "vtkMRMLModelNode": [model],
+        "vtkMRMLSegmentationNode": [],
+        "vtkMRMLViewNode": [FakeView("vtkMRMLViewNode1")],
+    }
     slicer = slicer_stubs["slicer"]
     monkeypatch.setattr(slicer.util, "getNodesByClass", nodes.__getitem__, raising=False)
     monkeypatch.setattr(slicer, "vtkMRMLFolderDisplayNode", FakeFolders(), raising=False)
     api = import_remote_view().RemoteViewLogic().sceneApi()
     assert api.visible_model_nodes() == [model]
+
+
+# --------------------------------------------------------------------------- SLC-36 (the SLC-35 review)
+
+
+def test_mrml_scene_segment_ref_repr_hides_the_segment_id():
+    """SLC-36 passes handles into the classifier: a raw segment ID may be PHI (T7)."""
+    handle = SegmentRef(segmentation(), "Liver_DoeJohn")
+    assert repr(handle) == "SegmentRef(node=<FakeSegmentation>, segment_id=<hidden>)"
+    assert "Liver_DoeJohn" not in repr([handle]) and handle.segment_id == "Liver_DoeJohn"
+
+
+class _BrokenVisibilityDisplay(FakeSegDisplay):
+    def GetSegmentVisibility3D(self, segment_id):  # noqa: N802
+        if segment_id == "Segment_1":
+            raise TypeError("GetSegmentVisibility3D() takes 2 arguments")
+        return super().GetSegmentVisibility3D(segment_id)
+
+
+def test_mrml_scene_a_segment_whose_visibility_binding_fails_is_listed_as_invalid_display(caplog):
+    """The listing's per-segment getters are guarded like the display properties: one segment is reported, the
+    rest of the scene ships."""
+    node = segmentation(display=_BrokenVisibilityDisplay(opacity_3d=0.5))
+    api, _ = scene([], segmentations=[node])
+    with caplog.at_level(logging.DEBUG):
+        collected = collect_scene(api)
+    assert [e.node_id for e in collected.entities] == [f"{SEG}/Segment_2"]
+    assert [(s.node_id, s.reason) for s in collected.skipped] == [
+        (f"{SEG}/Segment_1", SkipReason.INVALID_DISPLAY)
+    ]
+    assert "TypeError" in caplog.text and "Segment_1" not in caplog.text

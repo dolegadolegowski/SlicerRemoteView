@@ -15,9 +15,9 @@ import weakref
 
 import numpy as np
 import pytest
-from mrml_fakes import EVENT_IDS, Node, Scene
+from mrml_fakes import EVENT_IDS, Node, Scene, Segmentation
 from support import FakeTimer, LiveScene, ack, live_client
-from vtkmodules.vtkCommonCore import VTK_OBJECT
+from vtkmodules.vtkCommonCore import VTK_OBJECT, VTK_STRING
 
 from remoteview_core.debounce import Change, Debouncer
 from remoteview_core.live import LiveUpdates
@@ -38,6 +38,15 @@ class Recorder:
 
     def mark_transform(self, node_id):
         self.calls.append(("mark_transform", node_id))
+
+    def mark_segment(self, node_id, segment_id, flags):
+        self.calls.append(("mark_segment", node_id, segment_id, flags))
+
+    def mark_segment_transform(self, node_id, segment_id):
+        self.calls.append(("mark_segment_transform", node_id, segment_id))
+
+    def mark_held_segments(self, node_id, flags):
+        self.calls.append(("mark_held_segments", node_id, flags))
 
     def hold(self):
         self.calls.append(("hold",))
@@ -346,7 +355,7 @@ def test_observers_a_world_matrix_error_logs_only_its_type(caplog):
 
 def test_observers_repr_holds_no_node_id():
     _, _, watcher = watched(Node(A, name="Liver Smith"))
-    assert repr(watcher) == "SceneWatcher(attached=True, models=1)"
+    assert repr(watcher) == "SceneWatcher(attached=True, models=1, segmentations=0)"
 
 
 # --------------------------------------------------------------------------- criterion 3: with the live controller
@@ -460,7 +469,8 @@ def test_observers_attach_failing_leaves_no_observer_and_logs_only_the_type(capl
         str(raised.value) == "the scene could not be observed" and raised.value.__suppress_context__
     )
     assert B not in printed and "Smith" not in printed
-    assert watcher.observer_count == 0 and repr(watcher) == "SceneWatcher(attached=False, models=0)"
+    assert watcher.observer_count == 0
+    assert repr(watcher) == "SceneWatcher(attached=False, models=0, segmentations=0)"
     assert not scene.HasObserver(EVENTS.node_added) and not a.HasObserver(EVENTS.display_modified)
     assert not c.HasObserver(EVENTS.display_modified)
     assert "KeyError" in caplog.text and B not in caplog.text and "Smith" not in caplog.text
@@ -509,6 +519,15 @@ class DebouncerSink:
 
     def mark_transform(self, node_id):
         self.debouncer.mark(node_id, Change.TRANSFORM)
+
+    def mark_segment(self, node_id, segment_id, flags):
+        self.debouncer.mark(f"{node_id}/{segment_id}", flags)
+
+    def mark_segment_transform(self, node_id, segment_id):
+        self.debouncer.mark(f"{node_id}/{segment_id}", Change.TRANSFORM)
+
+    def mark_held_segments(self, node_id, flags):
+        pass
 
     def hold(self):
         self.debouncer.hold()
@@ -810,3 +829,522 @@ def test_observers_a_rescan_that_fails_still_forgets_the_poses():
     a.world = original
     a.InvokeEvent(EVENTS.transform_modified)
     assert sink.take() == [("mark_transform", A)]
+
+
+# --------------------------------------------------------------------------- SLC-36: segmentation nodes
+
+SEG = "vtkMRMLSegmentationNode1"
+# SegmentModified of a segment whose name is not the cached one
+RENAMED = Change.APPEARANCE | Change.NAME
+SEGMENT_EVENTS = (
+    EVENTS.segment_added,
+    EVENTS.segment_removed,
+    EVENTS.segment_modified,
+    EVENTS.representation_modified,
+    EVENTS.representation_names_modified,
+)
+
+
+def test_observers_mrml_events_need_the_five_segment_ids():
+    """Keyword-only, no defaults: a misspelt ``slicer.vtkSegmentation`` constant fails in the adapter's test."""
+    with pytest.raises(TypeError):
+        MrmlEvents(**{k: v for k, v in EVENT_IDS.items() if not k.startswith(("segment", "repr"))})
+    assert (EVENTS.segment_added, EVENTS.segment_removed, EVENTS.segment_modified) == (
+        62102,
+        62103,
+        62104,
+    )
+    assert (EVENTS.representation_modified, EVENTS.representation_names_modified) == (62101, 62105)
+
+
+def test_observers_a_segmentation_is_watched_with_eight_observers():
+    seg = Segmentation(SEG, segments=("Segment_1", "Segment_2"))
+    _, sink, watcher = watched(Node(A), seg)
+    assert watcher.observer_count == 5 + 4 + 8
+    assert all(seg.HasObserver(e) for e in SEGMENT_EVENTS)
+    assert not seg.HasObserver(EVENTS.mesh_modified)  # a model's event
+    assert (
+        sink.take() == []
+        and repr(watcher) == "SceneWatcher(attached=True, models=1, segmentations=1)"
+    )
+
+
+def test_observers_segment_events_with_an_id_mark_that_segment():
+    seg = Segmentation(SEG, segments=("Segment_1", "Segment_2"))
+    _, sink, _ = watched(seg)
+    seg.fire("segment_modified", "Segment_1")  # a colour or tag change: the name is the cached one
+    seg.names["Segment_1"] = "Liver Smith"
+    seg.fire("segment_modified", "Segment_1")  # renamed
+    seg.fire("segment_modified", "Segment_1")  # the cache followed the rename
+    seg.segments.append("Segment_3")
+    seg.fire("segment_added", "Segment_3")
+    seg.segments.remove("Segment_2")
+    seg.fire("segment_removed", "Segment_2")
+    seg.fire("representation_modified", "Segment_1")
+    assert sink.take() == [
+        ("mark_segment", SEG, "Segment_1", Change.APPEARANCE),
+        ("mark_segment", SEG, "Segment_1", RENAMED),
+        ("mark_segment", SEG, "Segment_1", Change.APPEARANCE),
+        ("mark_segment", SEG, "Segment_3", Change.ADDED),
+        ("mark_segment", SEG, "Segment_2", Change.REMOVED),
+        ("mark_segment", SEG, "Segment_1", Change.GEOMETRY),
+    ]
+    # the cache followed the add and the remove: a whole-node event names the current segments
+    seg.fire("representation_names_modified")
+    assert sink.take() == [
+        ("mark_segment", SEG, "Segment_1", Change.GEOMETRY),
+        ("mark_segment", SEG, "Segment_3", Change.GEOMETRY),
+        ("mark_held_segments", SEG, Change.GEOMETRY),
+    ]
+
+
+def test_observers_a_null_segment_modified_marks_appearance_and_a_rename_never_geometry():
+    """An export's own display getters may fire a deferred ``SegmentModified(NULL)``: as geometry it would re-export
+    the scene after every export, as ``name`` it would remove every hidden held segment (the classifier takes
+    ``name`` on a hidden held node as a sure rename) — so ``name`` only for a segment whose name changed."""
+    seg = Segmentation(SEG, segments=("Segment_1", "Segment_2"))
+    _, sink, _ = watched(seg)
+    seg.fire("segment_modified")
+    calls = sink.take()
+    assert calls == [
+        ("mark_segment", SEG, "Segment_1", Change.APPEARANCE),
+        ("mark_segment", SEG, "Segment_2", Change.APPEARANCE),
+        ("mark_held_segments", SEG, Change.APPEARANCE),
+    ]
+    assert not any(c[-1] & (Change.GEOMETRY | Change.NAME) for c in calls)
+    seg.names["Segment_2"] = "Spleen Smith"
+    # deferred after a rename: that segment, and only that one, carries name
+    seg.fire("segment_modified")
+    assert sink.take() == [
+        ("mark_segment", SEG, "Segment_1", Change.APPEARANCE),
+        ("mark_segment", SEG, "Segment_2", RENAMED),
+        ("mark_held_segments", SEG, Change.APPEARANCE),
+    ]
+    seg.fire("segment_modified")  # the cache followed
+    assert [c[-1] for c in sink.take()] == [Change.APPEARANCE] * 3
+    seg.fire("representation_modified")  # NULL: every current and held segment's mesh
+    assert sink.take() == [
+        ("mark_segment", SEG, "Segment_1", Change.GEOMETRY),
+        ("mark_segment", SEG, "Segment_2", Change.GEOMETRY),
+        ("mark_held_segments", SEG, Change.GEOMETRY),
+    ]
+
+
+def test_observers_null_add_and_remove_diff_the_segment_list_against_the_cache():
+    seg = Segmentation(SEG, segments=("Segment_1", "Segment_2"))
+    _, sink, _ = watched(seg)
+    seg.segments += ["Segment_3", "Segment_4"]
+    seg.fire("segment_added")  # deferred at EndModify: no ID
+    assert sink.take() == [
+        ("mark_segment", SEG, "Segment_3", Change.ADDED),
+        ("mark_segment", SEG, "Segment_4", Change.ADDED),
+    ]
+    seg.fire("segment_added")  # nothing new since
+    assert sink.take() == []
+    seg.segments.remove("Segment_1")
+    seg.segments.remove("Segment_4")
+    seg.fire("segment_removed")
+    assert sink.take() == [
+        ("mark_segment", SEG, "Segment_1", Change.REMOVED),
+        ("mark_segment", SEG, "Segment_4", Change.REMOVED),
+    ]
+    seg.fire("segment_modified")
+    assert [c[2] for c in sink.take() if c[0] == "mark_segment"] == ["Segment_2", "Segment_3"]
+
+
+def test_observers_a_segment_modified_never_refreshes_the_id_list():
+    """A ``SegmentModified`` for a segment the cache does not know marks it as renamed (no cached name) and leaves the
+    ID list alone: the deferred ``SegmentAdded(NULL)`` that may follow still finds it new."""
+    seg = Segmentation(SEG, segments=("Segment_1",))
+    _, sink, _ = watched(seg)
+    seg.segments.append("Segment_2")
+    seg.fire("segment_modified", "Segment_2")
+    assert sink.take() == [("mark_segment", SEG, "Segment_2", RENAMED)]
+    seg.fire("segment_modified")  # NULL: the cached segments only
+    assert [c[2] for c in sink.take() if c[0] == "mark_segment"] == ["Segment_1"]
+    seg.fire("segment_added")
+    assert sink.take() == [("mark_segment", SEG, "Segment_2", Change.ADDED)]
+    seg.fire("segment_modified", "Segment_2")  # known now, with its name
+    assert sink.take() == [("mark_segment", SEG, "Segment_2", Change.APPEARANCE)]
+
+
+def test_observers_a_segmentation_moved_marks_each_segment_transform_unless_the_pose_is_unchanged():
+    seg = Segmentation(SEG, segments=("Segment_1", "Segment_2"))
+    _, sink, _ = watched(seg)
+    seg.InvokeEvent(EVENTS.transform_modified)  # a parent transform renamed: the same pose
+    assert sink.take() == []
+    seg.world = seg.world.copy()
+    seg.world[0, 3] = 5.0
+    seg.InvokeEvent(EVENTS.transform_modified)
+    seg.InvokeEvent(EVENTS.transform_modified)  # the new pose again
+    assert sink.take() == [
+        ("mark_segment_transform", SEG, "Segment_1"),
+        ("mark_segment_transform", SEG, "Segment_2"),
+    ]
+    seg.world = None  # a chain that is not linear: always marks
+    seg.InvokeEvent(EVENTS.transform_modified)
+    assert len(sink.take()) == 2
+
+
+def test_observers_a_segmentation_display_event_marks_every_current_and_held_segment():
+    seg = Segmentation(SEG, segments=("Segment_1",))
+    scene, sink, _ = watched(seg)
+    seg.InvokeEvent(EVENTS.display_modified)
+    assert sink.take() == [
+        ("mark_segment", SEG, "Segment_1", Change.APPEARANCE),
+        ("mark_held_segments", SEG, Change.APPEARANCE),
+    ]
+    # a 3D view node added or removed: the segments too
+    view = Node("vtkMRMLViewNode2", cls="vtkMRMLViewNode")
+    scene.add(view)
+    assert sink.take() == [
+        ("mark_segment", SEG, "Segment_1", Change.APPEARANCE),
+        ("mark_held_segments", SEG, Change.APPEARANCE),
+    ]
+
+
+def test_observers_a_segmentation_added_and_removed():
+    scene, sink, watcher = watched(Node(A))
+    seg = Segmentation(SEG, segments=("Segment_1", "Segment_2"))
+    scene.add(seg)
+    assert sink.take() == [
+        ("mark_segment", SEG, "Segment_1", Change.ADDED),
+        ("mark_segment", SEG, "Segment_2", Change.ADDED),
+    ]
+    assert watcher.observer_count == 5 + 4 + 8
+    empty = Segmentation("vtkMRMLSegmentationNode2")  # usually no segment yet at NodeAddedEvent
+    scene.add(empty)
+    assert sink.take() == [] and watcher.observer_count == 5 + 4 + 16
+    scene.remove(seg)
+    seg.fire("segment_modified", "Segment_1")  # unwatched
+    assert sink.take() == [("mark_held_segments", SEG, Change.REMOVED)]
+    assert watcher.observer_count == 5 + 4 + 8 and not seg.HasObserver(EVENTS.segment_modified)
+
+
+def test_observers_a_hidden_from_editors_segmentation_is_watched_but_not_marked():
+    seg = Segmentation(SEG, segments=("Segment_1",), hidden=True)
+    scene, sink, watcher = watched(seg)
+    assert watcher.observer_count == 5 + 8
+    seg.fire("segment_modified", "Segment_1")
+    seg.fire("segment_modified")
+    seg.fire("representation_modified", "Segment_1")
+    seg.fire("representation_names_modified")
+    seg.segments.append("Segment_2")
+    seg.fire("segment_added", "Segment_2")
+    seg.InvokeEvent(EVENTS.display_modified)
+    seg.world = seg.world.copy()
+    seg.world[0, 3] = 3.0
+    seg.InvokeEvent(EVENTS.transform_modified)
+    seg.name = "Segmentation Smith"
+    seg.Modified()
+    assert sink.take() == []
+    # a HideFromEditors flip: every current (the cache followed the add) and held segment, appearance|geometry
+    seg.hidden = False
+    seg.Modified()
+    assert sink.take() == [
+        ("mark_segment", SEG, "Segment_1", Change.APPEARANCE | Change.GEOMETRY),
+        ("mark_segment", SEG, "Segment_2", Change.APPEARANCE | Change.GEOMETRY),
+        ("mark_held_segments", SEG, Change.APPEARANCE | Change.GEOMETRY),
+    ]
+    seg.name = "Segmentation Jones"
+    seg.Modified()  # a segmentation's rename: nothing (segment names come from the segments)
+    assert sink.take() == []
+    scene.remove(seg)  # a removal is marked whatever the node
+    assert sink.take() == [("mark_held_segments", SEG, Change.REMOVED)]
+
+
+def test_observers_unobserved_segmentation_events_mark_nothing():
+    seg = Segmentation(SEG, segments=("Segment_1",))
+    _, sink, _ = watched(seg)
+    seg.fire("SourceRepresentationModified", "Segment_1")
+    seg.fire("SourceRepresentationModified")
+    seg.fire("SegmentsOrderModified")
+    assert sink.take() == []
+    assert not seg.HasObserver(62100) and not seg.HasObserver(62106)
+
+
+def test_observers_segment_handlers_take_a_string_call_data_and_two_arguments():
+    for handler in (
+        SceneWatcher._on_segment_added,
+        SceneWatcher._on_segment_removed,
+        SceneWatcher._on_segment_modified,
+        SceneWatcher._on_representation_modified,
+    ):
+        assert handler.CallDataType == VTK_STRING
+    assert not hasattr(SceneWatcher._on_representation_names, "CallDataType")
+
+
+def test_observers_a_non_str_call_data_is_the_whole_node_case():
+    """A call data that is not a ``str`` (NULL arrives as two arguments; anything else is not a segment ID) marks
+    every current segment."""
+    seg = Segmentation(SEG, segments=("Segment_1", "Segment_2"))
+    _, sink, watcher = watched(seg)
+    watcher._on_segment_modified(seg, "NoEvent", 42)
+    assert sink.take() == [
+        ("mark_segment", SEG, "Segment_1", Change.APPEARANCE),
+        ("mark_segment", SEG, "Segment_2", Change.APPEARANCE),
+        ("mark_held_segments", SEG, Change.APPEARANCE),
+    ]
+    watcher._on_segment_removed(seg, "NoEvent", b"Segment_1")  # bytes: the list decides
+    assert sink.take() == []
+
+
+def test_observers_a_segment_handler_error_logs_only_its_type(caplog):
+    class Failing(Recorder):
+        def mark_segment(self, node_id, segment_id, flags):
+            raise KeyError(f"{node_id} left lung")
+
+    seg = Segmentation(SEG, segments=("left lung",))
+    watcher = new_watcher(Scene(seg), Failing())
+    watcher.attach()
+    with caplog.at_level(logging.DEBUG):
+        seg.fire("segment_modified", "left lung")
+        seg.fire("segment_modified")
+    assert caplog.text.count("KeyError") == 2
+    assert SEG not in caplog.text and "lung" not in caplog.text
+
+
+def test_observers_an_unreadable_segment_list_logs_only_its_type(caplog):
+    class Broken(Segmentation):
+        def GetSegmentation(self):  # noqa: N802
+            raise RuntimeError(f"{SEG} left lung")
+
+    seg = Broken(SEG, segments=("left lung",))
+    with caplog.at_level(logging.DEBUG):
+        _, sink, watcher = watched(seg)
+        seg.fire("segment_modified")
+    assert watcher.observer_count == 5 + 8  # watched, with an empty cache
+    assert sink.take() == [("mark_held_segments", SEG, Change.APPEARANCE)]
+    assert "RuntimeError" in caplog.text and SEG not in caplog.text and "lung" not in caplog.text
+
+
+def test_observers_an_unreadable_segment_name_logs_only_its_type(caplog):
+    """A name that cannot be read is unknown: compared with one that was, it counts as a rename (conservative)."""
+
+    class Unnamed(Segmentation):
+        def __init__(self, *args, **kw):
+            super().__init__(*args, **kw)
+            self.broken = False
+
+        def GetSegmentation(self):  # noqa: N802
+            owner = self
+
+            class Broken(_VtkSegmentationProxy):
+                def GetSegment(self, segment_id):  # noqa: N802
+                    if owner.broken:
+                        raise RuntimeError(f"{SEG} {segment_id}")
+                    return super().GetSegment(segment_id)
+
+            return Broken(super().GetSegmentation())
+
+    seg = Unnamed(SEG, segments=("left lung",))
+    _, sink, _ = watched(seg)  # names read fine at watch time
+    seg.broken = True
+    with caplog.at_level(logging.DEBUG):
+        seg.fire("segment_modified", "left lung")
+    assert sink.take() == [("mark_segment", SEG, "left lung", RENAMED)]
+    assert "RuntimeError" in caplog.text and SEG not in caplog.text and "lung" not in caplog.text
+    seg.fire("segment_modified")  # unknown again: nothing changed since
+    assert [c[-1] for c in sink.take()] == [Change.APPEARANCE] * 2
+
+
+class _VtkSegmentationProxy:
+    """Forwards to a fake ``vtkSegmentation``; a test subclass overrides one method."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def GetSegmentIDs(self):  # noqa: N802
+        return self._inner.GetSegmentIDs()
+
+    def GetSegment(self, segment_id):  # noqa: N802
+        return self._inner.GetSegment(segment_id)
+
+
+def test_observers_detach_removes_the_segmentation_observers_and_frees_the_watcher():
+    seg = Segmentation(SEG, segments=("Segment_1",))
+    scene, sink, watcher = watched(seg)
+    watcher.detach()
+    assert watcher.observer_count == 0
+    for event in (
+        *SEGMENT_EVENTS,
+        EVENTS.display_modified,
+        EVENTS.transform_modified,
+        EVENTS.modified,
+    ):
+        assert not seg.HasObserver(event)
+    seg.fire("segment_modified", "Segment_1")
+    scene.add(Segmentation("vtkMRMLSegmentationNode2"))
+    assert sink.take() == []
+    gone = weakref.ref(watcher)
+    del watcher
+    gc.collect()
+    assert gone() is None
+
+
+def test_observers_a_rescan_refreshes_the_segment_cache():
+    seg = Segmentation(SEG, segments=("Segment_1",))
+    _, sink, watcher = watched(seg)
+    seg.segments.append("Segment_2")
+    off_thread(seg.fire, "segment_added", "Segment_2")  # missed
+    assert sink.take() == [] and watcher.take_off_thread() is True
+    seg.fire("representation_names_modified")
+    assert [c[2] for c in sink.take() if c[0] == "mark_segment"] == ["Segment_1", "Segment_2"]
+
+
+def test_observers_only_exact_class_segmentations_are_watched():
+    sub = Segmentation(SEG, segments=("Segment_1",))
+    sub.cls = "vtkMRMLSomeSegmentationNode"
+    scene = Scene(sub)
+    scene.by_class = lambda name: [sub] if name == "vtkMRMLSegmentationNode" else []
+    _, sink, watcher = watched(scene=scene)
+    sub.fire("segment_modified", "Segment_1")
+    assert sink.take() == [] and watcher.observer_count == 5
+
+
+# --------------------------------------------------------------------------- SLC-36: with the live controller
+
+
+@pytest.fixture
+def segment_rig():
+    """A live session over a scene of one model and two segments; the real watcher on vtkObject fakes."""
+    timer = FakeTimer()
+    client = live_client()
+    scene_api = LiveScene(
+        {"id": A},
+        {"id": SEG, "segment": "Segment_1", "name": "Liver"},
+        {"id": SEG, "segment": "Segment_2", "name": "Spleen"},
+    )
+    sent = []
+    live = LiveUpdates(
+        client,
+        scene=lambda: scene_api,
+        send=sent.append,
+        discard_queued=lambda: None,
+        timer=timer,
+        clock=timer.clock,
+        slicer_version="5.12.4",
+        end_session=lambda text: None,
+    )
+    timer.callback = live.flush
+    seg = Segmentation(SEG, segments=("Segment_1", "Segment_2"))
+    scene = Scene(Node(A), seg)
+    watcher = new_watcher(scene, live)
+    live.start()
+    watcher.attach()
+    client.handle(ack(1))
+    live.observe()
+    sent.clear()
+    return timer, scene_api, live, sent, seg, client
+
+
+def _messages(sent):
+    return [m for m in sent if isinstance(m, dict)]
+
+
+def test_observers_a_null_segment_modified_after_an_export_sends_nothing(segment_rig):
+    """The critic's case: the export's own display getters fire a deferred ``SegmentModified(NULL)`` right after
+    the snapshot — nothing changed, so no ``begin`` and no update at 750 ms or 2 s."""
+    timer, _, live, sent, seg, _ = segment_rig
+    assert f"{SEG}/Segment_1" in live.sent and f"{SEG}/Segment_2" in live.sent
+    seg.fire("segment_modified")
+    timer.advance(750)
+    live.tick()
+    timer.advance(2_000)
+    live.tick()
+    assert _messages(sent) == []
+
+
+def test_observers_a_null_segment_modified_with_a_hidden_segment_sends_nothing(segment_rig):
+    """Criterion 1 and 3 together: a held segment hidden in Slicer is ``visible: false`` on the viewers; the deferred
+    ``SegmentModified(NULL)`` of the next export (or of any colour change) must not remove it — nothing is renamed —
+    and showing it again is the cheap ``visible: true``, not a snapshot."""
+    timer, scene_api, live, sent, seg, _ = segment_rig
+    scene_api.segment(SEG, "Segment_1")["visible"] = False
+    seg.InvokeEvent(EVENTS.display_modified)
+    timer.advance(150)
+    [update] = _messages(sent)
+    assert update["changes"] == [{"nodeId": f"{SEG}/Segment_1", "visible": False}]
+    sent.clear()
+    seg.fire("segment_modified")
+    timer.advance(750)
+    live.tick()
+    timer.advance(2_000)
+    live.tick()
+    assert _messages(sent) == []
+    assert live.sent.get(f"{SEG}/Segment_1") is not None  # still held, not removed
+    scene_api.segment(SEG, "Segment_1")["visible"] = True
+    seg.InvokeEvent(EVENTS.display_modified)
+    timer.advance(150)
+    [update] = _messages(sent)
+    assert update["type"] == "scene.update" and update["changes"] == [
+        {"nodeId": f"{SEG}/Segment_1", "visible": True}
+    ]
+    # renamed while hidden: that segment leaves the viewers (a stale name), the other stays
+    sent.clear()
+    scene_api.segment(SEG, "Segment_2")["visible"] = False
+    seg.InvokeEvent(EVENTS.display_modified)
+    timer.advance(150)
+    sent.clear()
+    seg.names["Segment_2"] = "Spleen Smith"
+    seg.fire("segment_modified")
+    timer.advance(750)
+    [removed] = _messages(sent)
+    assert removed["type"] == "scene.nodeRemoved" and removed["nodeIds"] == [f"{SEG}/Segment_2"]
+
+
+def test_observers_segment_marks_reach_the_live_controller(segment_rig):
+    timer, scene_api, live, sent, seg, _ = segment_rig
+    scene_api.segment(SEG, "Segment_2")["color"] = (0.1, 0.2, 0.3)
+    seg.fire("segment_modified", "Segment_2")  # a colour change, the name unchanged: the fast lane
+    timer.advance(149)
+    assert _messages(sent) == []
+    timer.advance(1)
+    [update] = _messages(sent)
+    assert update["type"] == "scene.update" and update["changes"] == [
+        {"nodeId": f"{SEG}/Segment_2", "color": [0.1, 0.2, 0.3]}
+    ]
+    sent.clear()
+    # renamed: name travels in the GLB only, so a re-export on the slow lane
+    scene_api.segment(SEG, "Segment_2")["name"] = "Spleen Smith"
+    seg.names["Segment_2"] = "Spleen Smith"
+    seg.fire("segment_modified", "Segment_2")
+    timer.advance(749)
+    assert _messages(sent) == []
+    timer.advance(1)
+    live.tick()
+    assert [m["type"] for m in _messages(sent)][:1] == ["scene.snapshot.begin"]
+    client = segment_rig[5]
+    client.handle(ack(client.snapshot_in_flight))
+    live.observe()
+    sent.clear()
+    # the display node changed (a segment's opacity slider): the fast lane
+    scene_api.segment(SEG, "Segment_1")["opacity"] = 0.5
+    seg.InvokeEvent(EVENTS.display_modified)
+    timer.advance(150)
+    [update] = _messages(sent)
+    assert update["changes"] == [{"nodeId": f"{SEG}/Segment_1", "opacity": 0.5}]
+    sent.clear()
+    # brush strokes: one re-export 750 ms after the last one
+    for _ in range(5):
+        seg.fire("representation_modified", "Segment_1")
+        timer.advance(500)
+    assert _messages(sent) == []  # 2.5 s of strokes, no begin yet (SLC-36's burst rule)
+    timer.advance(249)
+    assert _messages(sent) == []
+    timer.advance(1)
+    live.tick()
+    assert [m["type"] for m in _messages(sent)][:1] == ["scene.snapshot.begin"]
+
+
+def test_observers_a_segmentation_removed_from_the_scene_removes_its_held_segments(segment_rig):
+    timer, scene_api, live, sent, seg, _ = segment_rig
+    scene_api.remove(SEG)
+    scene = Scene(Node(A), seg)
+    watcher = new_watcher(scene, live)
+    watcher.attach()
+    scene.remove(seg)
+    timer.advance(150)
+    [removed] = _messages(sent)
+    assert removed["type"] == "scene.nodeRemoved"
+    assert sorted(removed["nodeIds"]) == [f"{SEG}/Segment_1", f"{SEG}/Segment_2"]

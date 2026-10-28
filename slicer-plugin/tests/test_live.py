@@ -10,11 +10,22 @@ import math
 
 import numpy as np
 import pytest
-from support import FakeTimer, LiveScene, ack, live_client, reassemble, root_extras, sphere
+from support import (
+    FakeTimer,
+    LiveScene,
+    ack,
+    leaks,
+    live_client,
+    manifest,
+    reassemble,
+    root_extras,
+    sphere,
+)
 from vtkmodules.vtkCommonTransforms import vtkTransform
 
 from remoteview_core.collect import polydata_from_triangles
 from remoteview_core.debounce import Change
+from remoteview_core.ids import SceneIds
 from remoteview_core.live import (
     RESET_NOT_SENT,
     RESET_REFUSED,
@@ -62,7 +73,14 @@ class Rig:
     MRML. ``sent`` records what the controller and the client hand to the transport."""
 
     def __init__(
-        self, strict, scene: LiveScene, *, export=build_snapshot, anonymize=False, **limits
+        self,
+        strict,
+        scene: LiveScene,
+        *,
+        export=build_snapshot,
+        anonymize=False,
+        ids=None,
+        **limits,
     ):
         self.timer = FakeTimer()
         self.client = live_client(validate=strict, **limits)
@@ -94,6 +112,7 @@ class Rig:
             on_event=self._on_event,
             export=counted,
             anonymize_names=anonymize,
+            ids=ids,
         )
         self.timer.callback = self.live.flush
 
@@ -894,6 +913,78 @@ def test_live_hide_names_switch_reexports_when_allowed(strict):
     rig.ack()
     rig.wait(2)
     assert rig.begins() == []
+
+
+SEG = "vtkMRMLSegmentationNode1"
+
+
+def test_live_exports_segments_and_keeps_their_aliases_when_names_are_hidden(strict):
+    """SLC-35, §7.3: the registry the panel hands in is the one every export uses — an alias issued by the first
+    snapshot is the same in the snapshot *Hide node names* asks for."""
+    ids = SceneIds()
+    scene = LiveScene(
+        {"id": A, "name": "Liver Smith"},
+        {"id": SEG, "segment": "left lung", "name": "Left lung Smith"},
+        {"id": SEG, "segment": "Tumor(1)", "name": "Tumor Smith"},
+        {"id": SEG, "segment": "Segment_2", "name": "Spleen Smith"},
+    )
+    rig = Rig(strict, scene, ids=ids)
+    assert rig.live.ids is ids
+    rig.live.start()
+    _, glb, _ = reassemble(list(rig.sent))
+    assert [(m["nodeId"], m.get("segmentId")) for m in manifest(glb)] == [
+        (A, None),
+        (f"{SEG}/s_1", "left lung"),
+        (f"{SEG}/s_2", "Tumor(1)"),
+        (f"{SEG}/Segment_2", "Segment_2"),
+    ]
+    assert all(node_id in rig.live.sent for node_id in (A, f"{SEG}/s_1", f"{SEG}/Segment_2"))
+    rig.take()
+    rig.ack()
+    scene.nodes[1]["visible"] = False  # the lung hidden: a fresh registry would give the tumour s_1
+    rig.live.set_anonymize_names(True)
+    rig.live.tick()
+    _, glb, _ = reassemble(list(rig.sent))
+    assert [(m["nodeId"], m.get("segmentId"), m["name"]) for m in manifest(glb)] == [
+        (A, None, "Model 1"),
+        (
+            f"{SEG}/s_2",
+            None,
+            "Segment 1",
+        ),  # the first export's alias: a registry per export renumbers
+        (f"{SEG}/s_3", None, "Segment 2"),
+    ]
+    assert root_extras(glb)["anonymizedNames"] is True and b"Smith" not in glb
+
+
+def test_live_registry_survives_start_and_stop_and_is_cleared_by_reset(strict):
+    """D-a: ``start()``, ``stop()`` and a new session on the same controller keep the raw → alias maps (a resume
+    must not renumber); ``reset()`` (the scene closed) clears them while the counters keep counting."""
+    rig = two(strict)
+    ids = rig.live.ids
+
+    def alias() -> str:
+        return ids.segment_node_id(SEG, "left lung", anonymize=False)
+
+    assert alias() == f"{SEG}/s_1" and ids.model_node_id("Sphere") == "m_1"
+    rig.live.start()
+    assert alias() == f"{SEG}/s_1" and ids.model_node_id("Sphere") == "m_1"
+    rig.live.stop()
+    assert alias() == f"{SEG}/s_1" and ids.model_node_id("Sphere") == "m_1"
+    rig.live._forget_session()
+    assert alias() == f"{SEG}/s_1" and ids.model_node_id("Sphere") == "m_1"
+    rig.live.start()
+    rig.live.reset()
+    assert (
+        alias() == f"{SEG}/s_2" and ids.model_node_id("Sphere") == "m_2"
+    )  # fresh numbers, never reused
+    assert alias() == f"{SEG}/s_2"
+    rig.live.stop()
+    rig.live.reset()  # stopped: ignored, like every other call
+    assert alias() == f"{SEG}/s_2"
+    assert isinstance(
+        Rig(strict, LiveScene()).live.ids, SceneIds
+    )  # a registry of its own without one
 
 
 def test_live_request_snapshot_lifts_shrink_and_the_flush_gate_but_not_retry_after(strict):
@@ -1702,3 +1793,357 @@ def test_live_request_resync_is_not_held_off_by_events_that_keep_coming(strict, 
         times and times[0] <= every * 0.05 + 2.1
     )  # the first event, then at most the first back-off
     assert len(times) >= 4 and max(b - a for a, b in itertools.pairwise(times)) <= 60 + every * 0.05
+
+
+# --------------------------------------------------------------------------- F. marks through the registry (SLC-36)
+
+
+def _changes(rig: Rig) -> list[dict]:
+    """The ``changes`` of the one ``scene.update`` in ``sent`` (emptied)."""
+    [update] = rig.take()
+    assert update["type"] == "scene.update"
+    return update["changes"]
+
+
+def test_live_marks_on_a_scripted_model_id_address_its_alias(strict):
+    """The critic's case: a model ``Sphere`` is exported as ``m_1``; the observers mark it under its raw ID, and the
+    controller resolves it — a colour change is one update addressing ``m_1``, its removal ``scene.nodeRemoved``,
+    never a dropped mark or the raw ID (T7)."""
+    rig = Rig(strict, LiveScene({"id": "Sphere"}, {"id": A})).started()
+    assert "m_1" in rig.live.sent and "Sphere" not in rig.live.sent
+    rig.scene.node("Sphere")["color"] = (0.1, 0.2, 0.3)
+    rig.live.mark("Sphere", Change.APPEARANCE)
+    rig.advance(150)
+    assert _changes(rig) == [{"nodeId": "m_1", "color": [0.1, 0.2, 0.3]}]
+    rig.scene.node("Sphere")["world"] = moved(5.0)
+    rig.live.mark_transform("Sphere")
+    rig.advance(150)
+    [change] = _changes(rig)
+    assert change["nodeId"] == "m_1" and change["matrix"][12] == pytest.approx(0.005)
+    rig.scene.node("Sphere")["visible"] = False
+    rig.live.mark("Sphere", Change.APPEARANCE)
+    rig.advance(150)
+    assert _changes(rig) == [{"nodeId": "m_1", "visible": False}]
+    rig.scene.remove("Sphere")
+    rig.live.mark("Sphere", Change.REMOVED)
+    rig.advance(150)
+    [removed] = rig.take()
+    assert (removed["type"], removed["nodeIds"]) == ("scene.nodeRemoved", ["m_1"])
+    assert "m_1" not in rig.live.sent
+    # an ID neither shown nor held: nothing (T7); the alias it got is never reissued
+    rig.live.mark("Sphere2", Change.APPEARANCE | Change.GEOMETRY)
+    rig.live.mark_transform("Sphere2")
+    rig.wait(3)
+    assert rig.take() == [] and rig.live.ids.model_node_id("Sphere2") == "m_2"
+
+
+def test_live_a_scripted_model_added_mid_session_is_announced_and_exported_as_its_alias(strict):
+    rig = two(strict).started()
+    rig.scene.add("Sphere", name="Sphere Smith")
+    rig.live.mark("Sphere", Change.ADDED)
+    rig.advance(750)
+    frames = list(rig.sent)
+    added, begin, _ = rig.take()
+    assert added["type"] == "scene.nodeAdded" and added["nodes"] == [
+        {"nodeId": "m_1", "kind": "model"}
+    ]
+    assert begin["type"] == "scene.snapshot.begin" and begin["nodeCount"] == 3
+    _, glb, _ = reassemble(frames[1:])  # after the scene.nodeAdded
+    assert [(m["nodeId"], m["mrmlId"], m["name"]) for m in manifest(glb)] == [
+        (A, A, "Liver"),
+        (B, B, "Liver"),
+        ("m_1", "m_1", "Sphere Smith"),
+    ]  # the raw ID is nowhere in the manifest, the name travels in the GLB as agreed
+    assert "m_1" in rig.live.sent
+
+
+def test_live_segment_marks_address_the_viewers_node_ids(strict):
+    scene = LiveScene(
+        {"id": A},
+        {"id": SEG, "segment": "Segment_1", "name": "Liver"},
+        {"id": SEG, "segment": "left lung", "name": "Lung"},
+    )
+    rig = Rig(strict, scene).started()
+    first, lung = f"{SEG}/Segment_1", f"{SEG}/s_1"
+    assert first in rig.live.sent and lung in rig.live.sent
+    scene.segment(SEG, "left lung")["color"] = (0.1, 0.2, 0.3)
+    rig.live.mark_segment(SEG, "left lung", Change.APPEARANCE)
+    rig.advance(150)
+    assert _changes(rig) == [{"nodeId": lung, "color": [0.1, 0.2, 0.3]}]
+    # the segmentation node moved: one matrix per held segment in one update
+    scene.place(SEG, world=moved(5.0))
+    rig.live.mark_transform(SEG)
+    rig.advance(150)
+    changes = _changes(rig)
+    assert sorted(c["nodeId"] for c in changes) == sorted([first, lung])
+    assert all(c["matrix"][12] == pytest.approx(0.005) for c in changes)
+    # per segment, as the watcher marks it: nothing new to say
+    rig.live.mark_segment_transform(SEG, "Segment_1")
+    rig.live.mark_segment_transform(SEG, "left lung")
+    rig.wait(1)
+    assert rig.take() == []
+    # a baked segmentation moved: one begin
+    scene.place(SEG, world=SHEAR)
+    rig.live.mark_segment_transform(SEG, "Segment_1")
+    rig.advance(150)
+    assert len(rig.begins()) == 1
+    rig.ack()
+    assert rig.live.sent.get(first).matrix is None
+    scene.place(SEG, world=SHEAR @ moved(1.0))
+    rig.live.mark_transform(SEG)  # geometry for the baked segments: the slow lane
+    assert rig.timer.starts[-1] == 750
+    rig.advance(750)
+    assert len(rig.begins()) == 1
+    rig.ack()
+    # a new shown segment: announced with its kind, then the snapshot
+    scene.nodes.append({**LiveScene._defaults(), "id": SEG, "segment": "Segment_3", "world": SHEAR})
+    rig.live.mark_segment(SEG, "Segment_3", Change.ADDED)
+    rig.advance(749)
+    assert rig.take() == []
+    rig.advance(1)
+    added, begin, _ = rig.take()
+    assert added["nodes"] == [{"nodeId": f"{SEG}/Segment_3", "kind": "segment"}]
+    assert begin["type"] == "scene.snapshot.begin"
+    rig.ack()
+    # the segmentation node removed: every held segment goes
+    scene.remove(SEG)
+    rig.live.mark_held_segments(SEG, Change.REMOVED)
+    rig.advance(150)
+    [removed] = rig.take()
+    assert removed["type"] == "scene.nodeRemoved"
+    assert sorted(removed["nodeIds"]) == sorted([first, lung, f"{SEG}/Segment_3"])
+    assert len(rig.live.sent) == 1
+
+
+def test_live_a_segment_hidden_or_removed_in_slicer(strict):
+    scene = LiveScene(
+        {"id": A}, {"id": SEG, "segment": "Segment_1"}, {"id": SEG, "segment": "Segment_2"}
+    )
+    rig = Rig(strict, scene).started()
+    scene.segment(SEG, "Segment_1")["visible"] = False
+    rig.live.mark_segment(SEG, "Segment_1", Change.APPEARANCE)
+    rig.advance(150)
+    assert _changes(rig) == [{"nodeId": f"{SEG}/Segment_1", "visible": False}]
+    scene.remove(SEG, "Segment_2")
+    rig.live.mark_segment(SEG, "Segment_2", Change.REMOVED)
+    rig.advance(150)
+    [removed] = rig.take()
+    assert removed["nodeIds"] == [f"{SEG}/Segment_2"]
+    # a segment neither shown nor held (never exported): nothing
+    rig.live.mark_segment(SEG, "Segment_9", Change.APPEARANCE | Change.GEOMETRY)
+    rig.live.mark_segment_transform(SEG, "Segment_9")
+    rig.live.mark_held_segments("vtkMRMLSegmentationNode7", Change.REMOVED)
+    rig.wait(3)
+    assert rig.take() == []
+
+
+def test_live_hide_node_names_mid_session_aliases_every_segment_once(strict, monkeypatch):
+    """``set_anonymize_names(True)`` → one begin with ``s_<n>`` for every segment, no ``segmentId``, names
+    ``Segment <n>``; a later mark under *Hide node names* resolves to the alias that export used — the same registry
+    (a fresh one would number the segments again). A segment first seen under *Hide node names* (its mark arrives
+    before any export aliased it) is resolved with the flag too: announced as ``/s_4``, never under its raw ID —
+    with ``anonymize=False`` the mark would resolve verbatim, miss the ``_shown`` listing and be dropped (T7), so
+    the new segment would never reach the viewers; no raw segment ID is a key of any drained change set."""
+    from remoteview_core import live as live_module  # noqa: PLC0415
+
+    drained_keys: list[str] = []
+    real_classify = live_module.classify
+
+    def recording(drained, *args, **kwargs):
+        drained_keys.extend(drained.changes)
+        return real_classify(drained, *args, **kwargs)
+
+    monkeypatch.setattr(live_module, "classify", recording)
+    scene = LiveScene(
+        {"id": SEG, "segment": "left lung", "name": "Lung Smith"},
+        {"id": SEG, "segment": "Segment_1", "name": "Liver Smith"},
+        {"id": SEG, "segment": "Segment_2", "name": "Spleen Smith"},
+    )
+    rig = Rig(strict, scene).started()
+    assert f"{SEG}/s_1" in rig.live.sent and f"{SEG}/Segment_1" in rig.live.sent
+    rig.live.set_anonymize_names(True)
+    rig.live.tick()
+    _, glb, _ = reassemble(list(rig.sent))
+    assert len(rig.begins()) == 1
+    assert [(m["nodeId"], m.get("segmentId"), m["name"]) for m in manifest(glb)] == [
+        (f"{SEG}/s_1", None, "Segment 1"),
+        (f"{SEG}/s_2", None, "Segment 2"),
+        (f"{SEG}/s_3", None, "Segment 3"),
+    ]
+    assert b"Smith" not in glb and b"Segment_1" not in glb
+    rig.ack()
+    scene.segment(SEG, "Segment_2")["opacity"] = 0.5
+    rig.live.mark_segment(SEG, "Segment_2", Change.APPEARANCE)
+    rig.advance(150)
+    assert _changes(rig) == [{"nodeId": f"{SEG}/s_3", "opacity": 0.5}]
+    # a segment added under *Hide node names*: its first alias is allocated by the mark, not by an export — the
+    # viewers are told about `/s_4` (kind segment), then the snapshot carries it
+    scene.nodes.append(
+        {**LiveScene._defaults(), "id": SEG, "segment": "Segment_3", "name": "Kidney Smith"}
+    )
+    rig.live.mark_segment(SEG, "Segment_3", Change.ADDED)
+    rig.advance(750)
+    frames = list(rig.sent)
+    assert len(frames) >= 3, (
+        "the mark must reach the viewers: resolved verbatim it is in neither scene and dropped"
+    )
+    _, glb, _ = reassemble(frames[1:])
+    added, begin, _ = rig.take()
+    assert added["type"] == "scene.nodeAdded"
+    assert added["nodes"] == [{"nodeId": f"{SEG}/s_4", "kind": "segment"}]
+    assert begin["type"] == "scene.snapshot.begin"
+    assert (f"{SEG}/s_4", None, "Segment 4") in [
+        (m["nodeId"], m.get("segmentId"), m["name"]) for m in manifest(glb)
+    ]
+    assert b"Smith" not in glb and b"Segment_3" not in glb
+    rig.ack()
+    # switched off again: the aliases are kept (§7.3) and the segmentId revealed
+    rig.live.set_anonymize_names(False)
+    rig.live.tick()
+    _, glb, _ = reassemble(list(rig.sent))
+    rig.take()
+    assert [(m["nodeId"], m.get("segmentId")) for m in manifest(glb)] == [
+        (f"{SEG}/s_1", "left lung"),
+        (f"{SEG}/s_2", "Segment_1"),
+        (f"{SEG}/s_3", "Segment_2"),
+        (f"{SEG}/s_4", "Segment_3"),
+    ]
+    rig.ack()
+    scene.segment(SEG, "Segment_1")["opacity"] = 0.25
+    rig.live.mark_segment(SEG, "Segment_1", Change.APPEARANCE)
+    rig.advance(150)
+    assert _changes(rig) == [{"nodeId": f"{SEG}/s_2", "opacity": 0.25}]
+    # every mark the debouncer ever drained addressed an alias: no raw segment ID is a key of a plan's input (T7)
+    assert drained_keys and all(key.startswith(f"{SEG}/s_") for key in drained_keys)
+
+
+@pytest.mark.parametrize("hidden", [False, True])
+def test_live_a_null_segment_modified_after_an_export_sends_nothing(strict, hidden):
+    """What the watcher does for ``SegmentModified(NULL)`` right after the first snapshot's ack (the export's own
+    getters may fire it): nothing changed, so no begin and no update at 750 ms or 2 s — also with a held segment
+    hidden in Slicer (``visible: false`` on the viewers): the watcher marks ``name`` only for a changed name, so
+    the hidden one is not removed, and showing it again is a ``visible: true``, not a snapshot."""
+    scene = LiveScene({"id": SEG, "segment": "Segment_1"}, {"id": SEG, "segment": "Segment_2"})
+    rig = Rig(strict, scene).started()
+    if hidden:
+        scene.segment(SEG, "Segment_1")["visible"] = False
+        rig.live.mark_segment(SEG, "Segment_1", Change.APPEARANCE)
+        rig.advance(150)
+        assert _changes(rig) == [{"nodeId": f"{SEG}/Segment_1", "visible": False}]
+    for segment_id in ("Segment_1", "Segment_2"):
+        rig.live.mark_segment(SEG, segment_id, Change.APPEARANCE)
+    rig.live.mark_held_segments(SEG, Change.APPEARANCE)
+    rig.advance(750)
+    rig.advance(1_250)
+    rig.wait(2)
+    assert rig.take() == [] and rig.exports == 1
+    if hidden:
+        scene.segment(SEG, "Segment_1")["visible"] = True
+        rig.live.mark_segment(SEG, "Segment_1", Change.APPEARANCE)
+        rig.advance(150)
+        assert _changes(rig) == [{"nodeId": f"{SEG}/Segment_1", "visible": True}]
+        assert rig.exports == 1
+    # a rename is what carries name (observers.py compares the cached name): a hidden held segment renamed leaves
+    scene.segment(SEG, "Segment_2")["visible"] = False
+    rig.live.mark_segment(SEG, "Segment_2", Change.APPEARANCE | Change.NAME)
+    rig.advance(750)
+    [removed] = rig.take()
+    assert removed["type"] == "scene.nodeRemoved" and removed["nodeIds"] == [f"{SEG}/Segment_2"]
+
+
+@pytest.mark.parametrize(
+    ("node_id", "segment_id", "flags"),
+    [
+        (None, "Segment_1", Change.APPEARANCE),
+        ("", "Segment_1", Change.APPEARANCE),
+        (SEG, None, Change.APPEARANCE),
+        (SEG, 7, Change.APPEARANCE),
+        (SEG, "Segment_1", Change(0)),
+        (SEG, "Segment_1", 3),
+    ],
+)
+def test_live_bad_segment_mark_arguments_are_ignored(strict, caplog, node_id, segment_id, flags):
+    rig = Rig(strict, LiveScene({"id": SEG, "segment": "Segment_1"})).started()
+    with caplog.at_level(logging.DEBUG, logger="remoteview_core.live"):
+        rig.live.mark_segment(node_id, segment_id, flags)
+        if node_id != SEG or not isinstance(segment_id, str):
+            rig.live.mark_segment_transform(node_id, segment_id)
+        if node_id != SEG or not isinstance(flags, Change) or not flags:
+            rig.live.mark_held_segments(node_id, flags)
+    assert rig.timer.deadline is None and caplog.records == []
+    rig.wait(1)
+    assert rig.take() == []
+
+
+def test_live_a_bytes_segment_id_is_aliased_and_marked(strict):
+    scene = LiveScene({"id": SEG, "segment": b"L\xe4sion", "name": "Lesion"})
+    rig = Rig(strict, scene).started()
+    assert f"{SEG}/s_1" in rig.live.sent
+    scene.segment(SEG, b"L\xe4sion")["opacity"] = 0.5
+    rig.live.mark_segment(SEG, b"L\xe4sion", Change.APPEARANCE)
+    rig.advance(150)
+    assert _changes(rig) == [{"nodeId": f"{SEG}/s_1", "opacity": 0.5}]
+
+
+@pytest.mark.parametrize("run", ["exported", "skipped", "failing-writer"])
+def test_live_a_verbatim_name_like_segment_id_reaches_no_log_or_repr(
+    strict, caplog, capfd, monkeypatch, run
+):
+    """T7 with a verbatim segment ID that looks like a name (``Liver_DoeJohn`` is inside the character set, so it is
+    the nodeId on the wire): a normal run, a run where that segment is left out (``no-triangles``), and a run whose
+    export fails in the writer — nothing of it in the log, stdout, stderr, ``repr(live)``, the plans or the skipped
+    list."""
+    from remoteview_core import live as live_module  # noqa: PLC0415
+    from remoteview_core import snapshot as snapshot_module  # noqa: PLC0415
+    from remoteview_core.glb_writer import GlbWriteError  # noqa: PLC0415
+
+    plans = []
+    real_classify = live_module.classify
+
+    def recording(*args, **kwargs):
+        plan = real_classify(*args, **kwargs)
+        plans.append(plan)
+        return plan
+
+    monkeypatch.setattr(live_module, "classify", recording)
+    scene = LiveScene(
+        {"id": A, "name": "Liver Smith"},
+        {"id": SEG, "segment": "Liver_DoeJohn", "name": "Liver Doe"},
+        {"id": SEG, "segment": "left lung", "name": "Lung Doe"},
+    )
+    if run == "skipped":
+        scene.segment(SEG, "Liver_DoeJohn")["mesh"] = DEGENERATE
+    rig = Rig(strict, scene)
+    caplog.set_level(logging.DEBUG)
+    rig.started()
+    if run == "skipped":
+        assert f"{SEG}/Liver_DoeJohn" in rig.live.sent.skipped
+    else:
+        assert f"{SEG}/Liver_DoeJohn" in rig.live.sent
+    if run == "failing-writer":
+
+        def boom(*args, **kwargs):
+            raise GlbWriteError("entities[1]: a verbatim segment ID under anonymizedNames")
+
+        monkeypatch.setattr(snapshot_module, "write_glb", boom)
+    scene.segment(SEG, "Liver_DoeJohn")["color"] = (0.1, 0.2, 0.3)
+    rig.live.mark_segment(SEG, "Liver_DoeJohn", Change.APPEARANCE | Change.GEOMETRY)
+    rig.live.mark_segment(SEG, "left lung", Change.APPEARANCE)
+    rig.live.mark_held_segments(SEG, Change.APPEARANCE)
+    rig.advance(750)
+    rig.wait(3)
+    if run == "failing-writer":
+        assert "live: scene not exported (GlbWriteError)" in caplog.text
+        assert rig.kinds()[-1] is LiveEventKind.FAILED
+    text = " ".join(
+        [
+            repr(rig.live),
+            repr(rig.live.sent),
+            repr(rig.live.ids),
+            *(repr(p) for p in plans),
+            *(repr(e) for e in rig.events),
+            *(repr(e.snapshot.skipped) for e in rig.events if e.snapshot is not None),
+        ]
+    )
+    assert plans and "Liver_DoeJohn" not in text and "lung" not in text and "Doe" not in text
+    assert leaks(caplog, capfd, "Liver_DoeJohn", "left lung", "Doe", "Smith", SEG, A) == []
