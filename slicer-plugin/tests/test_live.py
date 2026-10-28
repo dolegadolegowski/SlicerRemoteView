@@ -10,7 +10,20 @@ import math
 
 import numpy as np
 import pytest
-from support import FakeTimer, LiveScene, ack, live_client, reassemble, root_extras, sphere
+from support import (
+    CODE,
+    SESSION_ID,
+    TOKEN,
+    FakeTimer,
+    LiveScene,
+    ack,
+    leaks,
+    live_client,
+    reassemble,
+    resumed,
+    root_extras,
+    sphere,
+)
 from vtkmodules.vtkCommonTransforms import vtkTransform
 
 from remoteview_core.collect import polydata_from_triangles
@@ -21,7 +34,7 @@ from remoteview_core.live import (
     LiveEventKind,
     LiveUpdates,
 )
-from remoteview_core.protocol_client import ProtocolStateError, SessionState
+from remoteview_core.protocol_client import NodeChange, ProtocolStateError, SessionState
 from remoteview_core.snapshot import build_snapshot
 from remoteview_protocol import envelope, schemas
 
@@ -726,7 +739,8 @@ def test_live_a_lost_connection_counts_as_a_resync(strict):
     assert len(rig.begins()) == 1
     rig.client.transport_lost()
     rig.live.observe()
-    rig.client.state = SessionState.ACTIVE  # resumed (SLC-17)
+    # back live, set by hand (the real resume: test_live_resume_*)
+    rig.client.state = SessionState.ACTIVE
     rig.live.observe()
     rig.live.tick()
     assert len(rig.begins()) == 1  # the first re-sync: at once
@@ -789,16 +803,18 @@ def test_live_grace_holds_marks_and_resume_resyncs_at_once(strict, in_flight, pa
     rig.client.transport_lost()
     rig.live.observe()
     assert rig.client.state is SessionState.GRACE
-    rig.client.state = paused  # SLC-17 resumes through RESUMING
+    rig.client.state = paused  # set by hand (the real resume: test_live_resume_*)
     rig.live.observe()
     assert rig.live.running
-    assert rig.kinds() == kinds  # a lost snapshot is not an ack
+    # a lost snapshot is not an ack (SLC-35: it is reported once)
+    assert rig.kinds() == kinds + ([LiveEventKind.LOST] if in_flight else [])
     rig.scene.node(A)["color"] = (0.5, 0.1, 0.1)
     rig.live.mark(A, Change.APPEARANCE)
     assert rig.timer.deadline is None  # kept, not flushed
     rig.wait(5)
     assert rig.take() == []
-    rig.client.state = SessionState.ACTIVE  # resumed (SLC-17)
+    # back live, set by hand (the real resume: test_live_resume_*)
+    rig.client.state = SessionState.ACTIVE
     rig.live.observe()
     assert rig.timer.deadline == rig.timer.now  # the kept marks, at 0 ms
     rig.advance(0)
@@ -1077,7 +1093,8 @@ def test_live_repr_events_and_logs_of_a_full_run_hold_no_id_or_name(strict, capl
 
 def test_live_a_flush_in_a_paused_session_keeps_the_reset(strict):
     """A reset whose flush is dropped (the session was not live then) still clears the closed scene: the next flush
-    exports it as a reset, and no update addresses a reused ID."""
+    exports it as a reset, and no update addresses a reused ID. Owed at the drop, the reset holds the client's updates
+    (SLC-35), so the optional scene.nodeAdded hint (§8.2) is not sent either."""
     rig = two(strict).started()
     rig.live.reset()
     rig.client.state = SessionState.GRACE  # lost, but observe() has not run yet
@@ -1088,12 +1105,8 @@ def test_live_a_flush_in_a_paused_session_keeps_the_reset(strict):
     rig.live.mark(A, Change.APPEARANCE)
     rig.advance(150)
     messages = rig.take()
-    assert [m["type"] for m in messages] == [  # no scene.update for the reused A
-        "scene.nodeAdded",
-        "scene.snapshot.begin",
-        "scene.snapshot.end",
-    ]
-    assert messages[0]["nodes"] == [{"nodeId": A, "kind": "model"}]  # §7.3: a new node
+    # no scene.update for the reused A (§7.3: a new node)
+    assert [m["type"] for m in messages] == ["scene.snapshot.begin", "scene.snapshot.end"]
     assert rig.live.sent.get(A).color == (0.0, 0.0, 1.0)
 
 
@@ -1207,7 +1220,8 @@ def test_live_a_lost_connection_after_an_update_error_resyncs_at_once(strict):
     rig.wait(70)
     rig.client.transport_lost()
     rig.live.observe()
-    rig.client.state = SessionState.ACTIVE  # resumed (SLC-17)
+    # back live, set by hand (the real resume: test_live_resume_*)
+    rig.client.state = SessionState.ACTIVE
     rig.live.observe()
     rig.live.tick()
     assert len(rig.begins()) == 1  # not the old error's 100 s
@@ -1702,3 +1716,332 @@ def test_live_request_resync_is_not_held_off_by_events_that_keep_coming(strict, 
         times and times[0] <= every * 0.05 + 2.1
     )  # the first event, then at most the first back-off
     assert len(times) >= 4 and max(b - a for a, b in itertools.pairwise(times)) <= 60 + every * 0.05
+
+
+# ------------------------------------------------------------------------- SLC-35: the live scene across a resume
+
+
+def drop(rig: Rig, close_code: int = 1006) -> None:
+    """The connection drops; the panel observes it (§9.1)."""
+    rig.client.transport_lost(close_code)
+    rig.live.observe()
+
+
+def resume(rig: Rig, *, scene: int, snapshot: int | None) -> None:
+    """A new connection: session.resume, then the relay's session.resumed (§4.3), each observed like the panel does."""
+    resume_id = rig.client.resume()["id"]
+    rig.live.observe()  # resuming: still paused
+    rig.relay(resumed(resume_id, scene_version=scene, snapshot_version=snapshot))
+
+
+def types(rig: Rig) -> list[str]:
+    return [m["type"] for m in rig.take()]
+
+
+def in_flight_snapshot(rig: Rig) -> int:
+    """Ask for a snapshot and let it begin; its version."""
+    rig.live.request_snapshot()
+    rig.live.tick()
+    assert rig.live.in_flight
+    return rig.client.snapshot_in_flight
+
+
+def test_live_resume_drop_emits_lost_for_a_snapshot_in_flight(strict):
+    rig = two(strict)
+    rig.live.start()
+    rig.take()
+    drop(rig)
+    assert rig.kinds() == [LiveEventKind.SENT, LiveEventKind.LOST]
+    assert not rig.live.in_flight and rig.live.owed
+    rig.client.resume()
+    rig.live.observe()
+    drop(rig)  # dropped again before the answer: nothing more was lost
+    assert rig.kinds() == [LiveEventKind.SENT, LiveEventKind.LOST]
+    calm = two(strict).started()
+    drop(calm)
+    assert LiveEventKind.LOST not in calm.kinds()  # nothing in flight, nothing lost
+
+
+def test_live_resume_consistent_owes_nothing(strict):
+    """§13 step 10: the relay holds our snapshot and version; the change made offline goes as one update."""
+    rig = two(strict).started()
+    drop(rig)
+    rig.scene.node(A)["color"] = (0.2, 0.3, 0.4)
+    rig.live.mark(A, Change.APPEARANCE)
+    assert rig.timer.deadline is None  # kept while offline
+    resume(rig, scene=1, snapshot=1)
+    assert not rig.live.owed
+    rig.advance(150)
+    [update] = rig.take()
+    assert (update["type"], update["sceneVersion"], update["baseVersion"]) == ("scene.update", 2, 1)
+
+
+def test_live_resume_acks_the_lost_snapshot(strict):
+    rig = two(strict)
+    rig.live.start()  # v1
+    rig.take()
+    rig.scene.node(A)["color"] = (0.6, 0.6, 0.1)
+    rig.live.mark(A, Change.APPEARANCE)  # held behind v1
+    drop(rig)
+    resume(rig, scene=1, snapshot=1)  # the relay had v1: only its ack was lost
+    assert rig.kinds() == [LiveEventKind.SENT, LiveEventKind.LOST, LiveEventKind.ACKED]
+    assert not rig.live.owed and rig.client.accepted_version == 1
+    rig.advance(150)
+    [update] = rig.take()
+    assert (update["type"], update["sceneVersion"], update["baseVersion"]) == ("scene.update", 2, 1)
+
+
+def test_live_resume_without_the_snapshot_sends_it_at_once(strict):
+    rig = two(strict)
+    rig.live.start()  # v1, cut by the drop
+    rig.take()
+    drop(rig)
+    resume(rig, scene=1, snapshot=None)
+    rig.live.tick()
+    [begin] = rig.begins()
+    assert (
+        begin["sceneVersion"] == 2 and begin["nodeCount"] == 2
+    )  # a lost-connection re-sync: at once
+
+
+def test_live_resume_after_a_relay_error_is_not_a_refusal(strict):
+    """An error answering the resume (not a scene) must not make the owed snapshot wait the relay's retryAfterS."""
+    rig = two(strict).started()
+    drop(rig)
+    resume_id = rig.client.resume()["id"]
+    rig.live.observe()
+    rig.relay(error("RATE_LIMITED", resume_id, retryAfterS=100))
+    drop(rig)
+    resume(rig, scene=1, snapshot=None)  # the relay lost the snapshot meanwhile
+    rig.live.tick()
+    assert len(rig.begins()) == 1
+
+
+@pytest.mark.parametrize(
+    "when", ["reset-before-drop", "reset-in-grace", "reset-while-resuming", "reset-flush-pending"]
+)
+def test_live_resume_reset_owed_goes_first(strict, when):
+    """§7.3: whatever the resume says, the new scene's snapshot is the first scene frame, and no update names a closed
+    scene's node (its ID may be reused)."""
+    rig = two(strict).started()
+    if when != "reset-flush-pending":
+        in_flight_snapshot(rig)  # v2, of the scene about to close
+        # a change held by the client behind v2: released on top of v2 by a resume that adopts it
+        assert rig.client.send_changes([NodeChange(A, color=(0.9, 0.1, 0.1))]) == []
+        rig.take()
+    rig.scene = LiveScene({"id": A, "color": (0.0, 0.0, 1.0)})  # the new scene reuses A
+    last = rig.client.versions.last
+    if when in ("reset-in-grace", "reset-while-resuming"):
+        drop(rig)
+        resume_id = None
+        if when == "reset-while-resuming":
+            resume_id = rig.client.resume()["id"]
+            rig.live.observe()
+        rig.live.reset()
+        if resume_id is None:
+            resume_id = rig.client.resume()["id"]
+            rig.live.observe()
+        # the relay holds everything we sent: up to date
+        rig.relay(resumed(resume_id, scene_version=last, snapshot_version=last))
+    else:
+        rig.live.reset()  # the reset's flush has not run yet
+        drop(rig)
+        resume(rig, scene=last, snapshot=last)
+    rig.live.tick()
+    rig.advance(0)
+    sent = rig.take()
+    assert [m["type"] for m in sent] == ["scene.snapshot.begin", "scene.snapshot.end"]
+    assert sent[0]["nodeCount"] == 1  # the new scene
+    assert rig.live.reset_owed
+    rig.ack()
+    assert not rig.live.reset_owed and rig.live.sent.get(A).color == (0.0, 0.0, 1.0)
+
+
+def test_live_resume_reset_snapshot_in_flight_is_adopted_not_sent_twice(strict):
+    rig = two(strict).started()
+    rig.scene = LiveScene({"id": C})
+    rig.live.reset()
+    rig.advance(150)  # the reset's snapshot R
+    [begin] = rig.begins()
+    reset_version = begin["sceneVersion"]
+    drop(rig)  # R in flight
+    resume(rig, scene=reset_version, snapshot=reset_version)  # the relay had R
+    rig.live.tick()
+    rig.advance(1000)
+    assert rig.take() == []  # not sent again
+    assert rig.kinds()[-2:] == [LiveEventKind.LOST, LiveEventKind.ACKED]
+    assert not rig.live.reset_owed and not rig.live.owed
+
+
+def test_live_resume_reset_snapshot_cut_is_sent_again_first(strict):
+    rig = two(strict).started()
+    rig.scene = LiveScene({"id": C})
+    rig.live.reset()
+    rig.advance(150)
+    [begin] = rig.begins()
+    drop(rig)
+    resume(rig, scene=begin["sceneVersion"], snapshot=None)  # R was cut
+    rig.live.tick()
+    sent = rig.take()
+    assert [m["type"] for m in sent] == ["scene.snapshot.begin", "scene.snapshot.end"]
+    assert sent[0]["sceneVersion"] == begin["sceneVersion"] + 1 and sent[0]["nodeCount"] == 1
+    assert rig.live.reset_owed
+
+
+def test_live_resume_reset_clears_the_lost_snapshot(strict):
+    """A snapshot of the closed scene lost at the drop and recovered by the resume is no ack of the reset."""
+    rig = two(strict)
+    rig.live.start()  # v1, of the scene about to close
+    rig.take()
+    drop(rig)
+    rig.scene = LiveScene({"id": C})
+    rig.live.reset()  # offline
+    resume(rig, scene=1, snapshot=1)  # the relay had v1 (the closed scene)
+    assert LiveEventKind.ACKED not in rig.kinds()
+    assert rig.live.reset_owed
+    rig.advance(0)  # the reset's flush, kept while offline
+    [begin] = rig.begins()
+    assert begin["sceneVersion"] == 2 and begin["nodeCount"] == 1
+    rig.ack()
+    assert not rig.live.reset_owed
+
+
+def test_live_resume_forgets_the_lost_snapshot_once_back(strict):
+    """A snapshot lost in one outage is not taken for an ack in the next (the ACKED would clear a reset owed)."""
+    rig = two(strict)
+    rig.live.start()  # v1
+    rig.take()
+    drop(rig)
+    resume(rig, scene=1, snapshot=None)  # v1 cut: re-sent
+    rig.live.tick()
+    rig.take()
+    rig.ack()  # v2
+    drop(rig)  # nothing in flight now
+    acks = rig.kinds().count(LiveEventKind.ACKED)
+    resume(rig, scene=2, snapshot=2)
+    assert rig.kinds().count(LiveEventKind.ACKED) == acks  # nothing was acknowledged
+    assert not rig.live.owed
+
+
+def test_live_reset_while_live_keeps_the_added_hint(strict):
+    """D10: a reset while the session is live does not hold the client's updates, so its scene.nodeAdded hint goes
+    out (§8.2)."""
+    rig = two(strict).started()
+    rig.scene = LiveScene({"id": C})
+    rig.live.reset()
+    rig.advance(150)
+    assert types(rig) == ["scene.nodeAdded", "scene.snapshot.begin", "scene.snapshot.end"]
+
+
+def test_live_reset_owed_property(strict):
+    rig = two(strict)
+    assert not rig.live.reset_owed  # not running
+    rig.live.start()
+    rig.ack()
+    rig.take()
+    rig.live.hold()
+    rig.live.reset()
+    assert rig.live.reset_owed
+    rig.live.release()
+    rig.advance(0)
+    assert rig.live.reset_owed  # begun, not acknowledged
+    rig.ack()
+    assert not rig.live.reset_owed
+    rig.live.reset()
+    rig.live.stop()
+    assert not rig.live.reset_owed
+
+
+def test_live_resume_keeps_marks_flushed_before_the_drop_was_observed(strict):
+    """The marks a flush drops while the client is offline need a snapshot, even after a clean resume."""
+    rig = two(strict).started()
+    rig.scene.node(A)["color"] = (0.3, 0.3, 0.9)
+    rig.live.mark(A, Change.APPEARANCE)
+    rig.client.transport_lost()
+    rig.timer.advance(150)  # the flush runs before the drop is observed
+    rig.live.observe()
+    resume(rig, scene=1, snapshot=1)
+    rig.wait(1)
+    assert types(rig) == ["scene.snapshot.begin", "scene.snapshot.end"]
+    assert rig.live.sent.get(A).color == (0.3, 0.3, 0.9)
+
+
+@pytest.mark.parametrize("when", ["reset-in-grace", "reset-before-drop"])
+def test_live_a_reset_across_a_drop_is_not_a_lost_connection_resync(strict, when):
+    """A clean resume with a reset owed sends the reset's snapshot, not a re-sync: a real re-sync soon after the
+    reset's ack still goes at once."""
+    rig = two(strict).started()
+    if when == "reset-in-grace":
+        drop(rig)
+    rig.scene = LiveScene({"id": A}, {"id": B})
+    rig.live.reset()
+    if when == "reset-before-drop":
+        drop(rig)  # the reset's flush has not run yet
+    resume(rig, scene=1, snapshot=1)
+    rig.advance(0)
+    assert len(rig.begins()) == 1
+    rig.ack()
+    rig.advance(1000)
+    resync(rig)
+    rig.live.tick()
+    assert len(rig.begins()) == 1  # the first re-sync of the session: at once
+
+
+def test_live_resume_logs_and_reprs_hold_no_id_name_code_or_token(strict, caplog, capfd):
+    """T7 across the paths SLC-35 adds: a drop with a snapshot lost, a scene closed offline, owed and clean
+    resumes."""
+    caplog.set_level(logging.DEBUG)
+    rig = Rig(
+        strict, LiveScene({"id": A, "name": "Liver Smith"}, {"id": B, "name": "Kidney Jones"})
+    )
+    rig.live.start()
+    rig.take()
+    drop(rig)  # v1 lost
+    rig.scene = LiveScene({"id": C, "name": "Spleen Brown"})
+    rig.live.reset()
+    resume(rig, scene=1, snapshot=None)
+    rig.advance(0)
+    rig.take()
+    rig.ack()
+    rig.scene.node(C)["color"] = (0.2, 0.2, 0.2)
+    rig.live.mark(C, Change.APPEARANCE)
+    drop(rig)
+    resume(rig, scene=rig.client.versions.last, snapshot=rig.client.accepted_version)
+    rig.advance(150)
+    text = " ".join([repr(rig.live), repr(rig.live.sent), *(repr(e) for e in rig.events)])
+    for needle in (A, B, C, "Smith", "Jones", "Brown", CODE, TOKEN, SESSION_ID):
+        assert needle not in text
+    assert leaks(caplog, capfd, A, B, C, "Smith", "Jones", "Brown", CODE, TOKEN, SESSION_ID) == []
+
+
+@pytest.mark.parametrize("gate", ["flush", "too-large"])
+def test_live_resume_counts_a_change_flushed_before_the_drop_was_observed(strict, gate):
+    """A change flushed while the client is already offline is a change all the same: the gate it opens stays open
+    across the resume."""
+    rig = two(strict).started()
+    if gate == "flush":
+        refuse_next_snapshot(rig, "INTERNAL")  # 2 s
+        rig.wait(2)
+        for _ in range(2):  # 4 s, then the third failure closes the flush gate
+            begin_id = rig.begin_id()
+            rig.take()
+            rig.relay(error("INTERNAL", begin_id))
+            rig.wait(4)
+        rig.wait(10)  # past the 8 s back-off
+    else:
+        refuse_next_snapshot(rig, "PAYLOAD_TOO_LARGE")
+        rig.wait(65)
+    assert rig.live.waits_for_change and rig.take() == []
+    if gate == "flush":
+        rig.scene.node(A)["color"] = (0.3, 0.3, 0.3)
+        rig.live.mark(A, Change.APPEARANCE)
+    else:
+        rig.scene.node(B)["visible"] = False
+        rig.live.mark(B, Change.APPEARANCE)
+    rig.client.transport_lost()
+    rig.timer.advance(150)  # the flush runs before the drop is observed
+    rig.live.observe()
+    assert not rig.live.waits_for_change
+    resume(rig, scene=rig.client.versions.last, snapshot=1)
+    rig.wait(1)
+    assert len(rig.begins()) == 1

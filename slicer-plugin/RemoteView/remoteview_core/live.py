@@ -12,6 +12,12 @@ of the session, the first snapshot included:
   hold), from each snapshot's ``begin`` until its ack, refusal or loss — marks made meanwhile flush once after it,
   never as a second ``begin`` (no supersede: a slow uplink must finish its upload, T2) — and while the connection is
   lost (``GRACE``/``RESUMING``);
+- **resume** (SLC-35, protocol §4.3, §6.3): a snapshot in flight at the drop gives :attr:`LiveEventKind.LOST`; the
+  client's ``session.resumed`` says whether the relay holds it (then an ``ACKED`` follows: only its ack was lost) and
+  whether a snapshot is owed — a clean resume owes nothing and the kept marks flush as updates, an owed one is a
+  lost-connection re-sync (at once the first time). A reset owed at the drop whose snapshot has not begun, or made
+  while offline, holds the client's updates so none names the closed scene, and its snapshot goes first; a reset's
+  snapshot in flight at the drop is adopted or sent again, never both;
 - **reset** (a closed scene, §7.3): the only supersede. The queued chunks of a snapshot in flight are dropped and the
   new scene's snapshot begins at the flush, whatever the pacing. When it cannot be built, an empty snapshot clears the
   closed scene off the viewers and the scene stays owed; when that fails too, when a frame of it cannot be sent, or
@@ -97,6 +103,7 @@ class LiveEventKind(enum.Enum):
     REFUSED = "refused"  # the relay refused it (``code``)
     TOO_LARGE = "too-large"  # an export over the relay's limit (``too_large``); nothing was sent
     FAILED = "failed"  # a scene read or an export failed; nothing was sent
+    LOST = "lost"  # a snapshot in flight was lost with the connection (§6.3); ACKED follows if the relay had it
 
 
 @dataclass(frozen=True)
@@ -178,6 +185,8 @@ class LiveUpdates:
         self._paused = False  # the pause hold (GRACE/RESUMING) is on
         self._depth = 0  # batch holds
         self._reset_owed = False  # a closed scene may still be on the viewers
+        # the snapshot in flight at the drop, until the session is back
+        self._lost_inflight: int | None = None
         self._seen_error: Any = None  # the client's last_error already attributed
         self._needed_seen = False  # the current snapshot_needed has its gate
         # the gate of an owed snapshot
@@ -223,6 +232,12 @@ class LiveUpdates:
         large, or :data:`FAILURES_BEFORE_FLUSH_GATE` attempts failed without an ack (the SLC-29 review). Read it when a
         text is shown: :attr:`LiveEventKind.REFUSED` is emitted before the refusal sets the gate."""
         return self._shrink is not None or self._needs_flush  # stop() forgets both
+
+    @property
+    def reset_owed(self) -> bool:
+        """A closed scene may still be on the viewers: the new scene's snapshot (or an empty one) is not acknowledged
+        yet (§7.3)."""
+        return self._reset_owed  # stop() forgets it
 
     @property
     def batch_held(self) -> bool:
@@ -286,6 +301,12 @@ class LiveUpdates:
             if self._inflight is not None:
                 self._discard()
                 self._end_inflight()
+            # an ack of the closed scene's snapshot recovered at the resume must not clear the reset
+            self._lost_inflight = None
+            if self._client.state in _PAUSED:
+                # offline: hold the client's updates, so a clean resume releases none that names the closed scene
+                self._client.require_snapshot()
+                self._needed_seen = True
             self._debouncer.reset()
         except Exception as exc:  # noqa: BLE001 — called from a VTK observer (T7)
             _log.error("live: reset failed (%s)", type(exc).__name__)
@@ -402,7 +423,12 @@ class LiveUpdates:
 
     def _on_flush(self, drained: Drained) -> None:
         if not self._running or self._client.state not in _LIVE:
-            return  # a snapshot is owed anyway: its export installs a new viewers' scene
+            if self._client.state in _PAUSED:  # stop() leaves no marks to flush
+                # offline (a flush before the drop was observed): a clean resume owes nothing, so the marks dropped
+                # here need a snapshot; they are a change all the same
+                self._lift_gates(drained)
+                self._client.require_snapshot()
+            return
         try:
             self._apply_flush(drained)
         except Exception as exc:  # noqa: BLE001 — T7: the type only
@@ -412,13 +438,11 @@ class LiveUpdates:
         self.tick()
 
     def _apply_flush(self, drained: Drained) -> None:
-        self._needs_flush = False  # a change after the failures
         if self._reset_owed and not drained.reset:
             # a reset whose flush was dropped while the session was not live
             drained = Drained(drained.changes, reset=True)
         self._reset_owed = drained.reset
-        if self._shrink is not None and self._shrinks(drained):
-            self._shrink = None
+        self._lift_gates(drained)
         try:
             plan = classify(drained, self._scene(), self._sent, anonymize_names=self._anonymize)
         except SceneReadError:
@@ -442,6 +466,12 @@ class LiveUpdates:
         for message in self._client.send_removed(plan.removed):
             self._send(message)
         self._sent.apply(plan)  # a held result counts as sent: the next snapshot drops it
+
+    def _lift_gates(self, drained: Drained) -> None:
+        """A flush is a change: it opens the flush gate, and the too-large gate when it may make the export smaller."""
+        self._needs_flush = False  # a change after the failures
+        if self._shrink is not None and self._shrinks(drained):
+            self._shrink = None
 
     def _shrinks(self, drained: Drained) -> bool:
         """The flush may make an export refused as too large smaller."""
@@ -553,16 +583,32 @@ class LiveUpdates:
             if not self._paused:
                 self._paused = True
                 self._debouncer.hold()
+                if self._reset_owed and self._inflight is None:
+                    # a reset whose snapshot has not begun: hold the client's updates so none names the closed scene
+                    # (§7.3); one in flight is owed by the resume or adopted by it. Not a lost-connection re-sync: the
+                    # reset's export ignores the gate
+                    self._client.require_snapshot()
+                    self._needed_seen = True
             version = self._inflight
             if version is not None and self._client.snapshot_in_flight != version:
-                self._end_inflight()  # lost with the connection (§6.3) unless acked first
+                self._end_inflight()
                 if self._client.accepted_version >= version:
-                    self._acked()
-            self._check_cause(lost=True)
-            return
+                    self._acked()  # acknowledged just before the drop
+                else:
+                    # the resume says whether the relay holds it (§6.3)
+                    self._lost_inflight = version
+                    self._emit(LiveEventKind.LOST)
+            return  # a drop alone owes nothing: the resume decides
         if self._paused:
             self._paused = False
             self._debouncer.release()
+            lost, self._lost_inflight = self._lost_inflight, None
+            if lost is not None and self._client.accepted_version >= lost:
+                self._acked()  # the relay had it; only its ack was lost
+            # an error answering the resume is not a scene refusal
+            self._seen_error = self._client.last_error
+            self._check_cause(lost=True)  # an owed snapshot is a lost-connection re-sync
+            return
         self._check_inflight()
         if self._running:
             self._check_cause()
