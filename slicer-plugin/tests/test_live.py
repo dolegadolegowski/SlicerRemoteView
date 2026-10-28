@@ -10,11 +10,21 @@ import math
 
 import numpy as np
 import pytest
-from support import FakeTimer, LiveScene, ack, live_client, reassemble, root_extras, sphere
+from support import (
+    FakeTimer,
+    LiveScene,
+    ack,
+    live_client,
+    manifest,
+    reassemble,
+    root_extras,
+    sphere,
+)
 from vtkmodules.vtkCommonTransforms import vtkTransform
 
 from remoteview_core.collect import polydata_from_triangles
 from remoteview_core.debounce import Change
+from remoteview_core.ids import SceneIds
 from remoteview_core.live import (
     RESET_NOT_SENT,
     RESET_REFUSED,
@@ -62,7 +72,14 @@ class Rig:
     MRML. ``sent`` records what the controller and the client hand to the transport."""
 
     def __init__(
-        self, strict, scene: LiveScene, *, export=build_snapshot, anonymize=False, **limits
+        self,
+        strict,
+        scene: LiveScene,
+        *,
+        export=build_snapshot,
+        anonymize=False,
+        ids=None,
+        **limits,
     ):
         self.timer = FakeTimer()
         self.client = live_client(validate=strict, **limits)
@@ -94,6 +111,7 @@ class Rig:
             on_event=self._on_event,
             export=counted,
             anonymize_names=anonymize,
+            ids=ids,
         )
         self.timer.callback = self.live.flush
 
@@ -894,6 +912,78 @@ def test_live_hide_names_switch_reexports_when_allowed(strict):
     rig.ack()
     rig.wait(2)
     assert rig.begins() == []
+
+
+SEG = "vtkMRMLSegmentationNode1"
+
+
+def test_live_exports_segments_and_keeps_their_aliases_when_names_are_hidden(strict):
+    """SLC-35, §7.3: the registry the panel hands in is the one every export uses — an alias issued by the first
+    snapshot is the same in the snapshot *Hide node names* asks for."""
+    ids = SceneIds()
+    scene = LiveScene(
+        {"id": A, "name": "Liver Smith"},
+        {"id": SEG, "segment": "left lung", "name": "Left lung Smith"},
+        {"id": SEG, "segment": "Tumor(1)", "name": "Tumor Smith"},
+        {"id": SEG, "segment": "Segment_2", "name": "Spleen Smith"},
+    )
+    rig = Rig(strict, scene, ids=ids)
+    assert rig.live.ids is ids
+    rig.live.start()
+    _, glb, _ = reassemble(list(rig.sent))
+    assert [(m["nodeId"], m.get("segmentId")) for m in manifest(glb)] == [
+        (A, None),
+        (f"{SEG}/s_1", "left lung"),
+        (f"{SEG}/s_2", "Tumor(1)"),
+        (f"{SEG}/Segment_2", "Segment_2"),
+    ]
+    assert all(node_id in rig.live.sent for node_id in (A, f"{SEG}/s_1", f"{SEG}/Segment_2"))
+    rig.take()
+    rig.ack()
+    scene.nodes[1]["visible"] = False  # the lung hidden: a fresh registry would give the tumour s_1
+    rig.live.set_anonymize_names(True)
+    rig.live.tick()
+    _, glb, _ = reassemble(list(rig.sent))
+    assert [(m["nodeId"], m.get("segmentId"), m["name"]) for m in manifest(glb)] == [
+        (A, None, "Model 1"),
+        (
+            f"{SEG}/s_2",
+            None,
+            "Segment 1",
+        ),  # the first export's alias: a registry per export renumbers
+        (f"{SEG}/s_3", None, "Segment 2"),
+    ]
+    assert root_extras(glb)["anonymizedNames"] is True and b"Smith" not in glb
+
+
+def test_live_registry_survives_start_and_stop_and_is_cleared_by_reset(strict):
+    """D-a: ``start()``, ``stop()`` and a new session on the same controller keep the raw → alias maps (a resume
+    must not renumber); ``reset()`` (the scene closed) clears them while the counters keep counting."""
+    rig = two(strict)
+    ids = rig.live.ids
+
+    def alias() -> str:
+        return ids.segment_node_id(SEG, "left lung", anonymize=False)
+
+    assert alias() == f"{SEG}/s_1" and ids.model_node_id("Sphere") == "m_1"
+    rig.live.start()
+    assert alias() == f"{SEG}/s_1" and ids.model_node_id("Sphere") == "m_1"
+    rig.live.stop()
+    assert alias() == f"{SEG}/s_1" and ids.model_node_id("Sphere") == "m_1"
+    rig.live._forget_session()
+    assert alias() == f"{SEG}/s_1" and ids.model_node_id("Sphere") == "m_1"
+    rig.live.start()
+    rig.live.reset()
+    assert (
+        alias() == f"{SEG}/s_2" and ids.model_node_id("Sphere") == "m_2"
+    )  # fresh numbers, never reused
+    assert alias() == f"{SEG}/s_2"
+    rig.live.stop()
+    rig.live.reset()  # stopped: ignored, like every other call
+    assert alias() == f"{SEG}/s_2"
+    assert isinstance(
+        Rig(strict, LiveScene()).live.ids, SceneIds
+    )  # a registry of its own without one
 
 
 def test_live_request_snapshot_lifts_shrink_and_the_flush_gate_but_not_retry_after(strict):

@@ -13,6 +13,7 @@ from support import (
     FakeScene,
     ack,
     live_client,
+    manifest,
     needs_node,
     needs_relay_stub,
     needs_validator,
@@ -25,6 +26,7 @@ from support import (
 )
 
 from remoteview_core import snapshot as snapshot_module
+from remoteview_core.ids import SceneIds
 from remoteview_core.protocol_client import (
     ProtocolClient,
     ProtocolStateError,
@@ -195,6 +197,59 @@ def test_snapshot_with_hidden_names():
     )
     assert root_extras(glb)["anonymizedNames"] is True
     assert b"Doe" not in glb and b"Model 1" in glb
+
+
+SEG = "vtkMRMLSegmentationNode1"
+
+
+def test_snapshot_exports_segments_and_reuses_the_sessions_aliases():
+    """SLC-35, §7.3: two exports of one session share one ``SceneIds``; *Hide node names* switched on between them
+    aliases every segment and omits ``segmentId``, and an alias issued by the first export stays the same."""
+    client = live_client()
+    ids = SceneIds()
+    lung = {"id": SEG, "segment": "left lung", "mesh": sphere(8), "name": "Left lung Doe"}
+    scene = FakeScene(
+        {"id": "vtkMRMLModelNode4", "mesh": sphere(8), "name": "Skull"},
+        lung,
+        {"id": SEG, "segment": "Tumor(1)", "mesh": sphere(8), "name": "Tumor Doe"},
+        {"id": SEG, "segment": "Segment_2", "mesh": sphere(8), "name": "Liver Doe"},
+    )
+    begin, glb, _ = reassemble(
+        list(build_snapshot(scene, client, slicer_version="5.12.4", ids=ids).frames())
+    )
+    shown = manifest(glb)
+    assert [
+        (m["nodeId"], m["kind"], m["mrmlId"], m.get("segmentId"), m["name"]) for m in shown
+    ] == [
+        ("vtkMRMLModelNode4", "model", "vtkMRMLModelNode4", None, "Skull"),
+        (f"{SEG}/s_1", "segment", SEG, "left lung", "Left lung Doe"),
+        (f"{SEG}/s_2", "segment", SEG, "Tumor(1)", "Tumor Doe"),
+        (f"{SEG}/Segment_2", "segment", SEG, "Segment_2", "Liver Doe"),
+    ]
+    assert begin["nodeCount"] == 4 and root_extras(glb)["anonymizedNames"] is False
+    client.handle(ack(1))
+    scene.nodes.remove(lung)  # hidden meanwhile: a fresh registry would now give the tumour s_1
+    _, glb, _ = reassemble(
+        list(
+            build_snapshot(
+                scene, client, slicer_version="5.12.4", anonymize_names=True, ids=ids
+            ).frames()
+        )
+    )
+    hidden = manifest(glb)
+    assert [(m["nodeId"], m.get("segmentId"), m["name"]) for m in hidden] == [
+        ("vtkMRMLModelNode4", None, "Model 1"),
+        (f"{SEG}/s_2", None, "Segment 1"),  # the alias of the first export, not a fresh number
+        (f"{SEG}/s_3", None, "Segment 2"),
+    ]
+    assert root_extras(glb)["anonymizedNames"] is True
+    assert b"Doe" not in glb and b"Tumor" not in glb and b"Segment_2" not in glb
+    # without a registry (a single export) every build starts counting afresh
+    client.handle(ack(2))
+    _, glb, _ = reassemble(
+        list(build_snapshot(scene, client, slicer_version="5.12.4", anonymize_names=True).frames())
+    )
+    assert [m["nodeId"] for m in manifest(glb)][1:] == [f"{SEG}/s_1", f"{SEG}/s_2"]
 
 
 def test_snapshot_over_the_relay_limit_is_refused_before_anything_is_sent():

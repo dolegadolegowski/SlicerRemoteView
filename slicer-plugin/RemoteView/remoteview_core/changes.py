@@ -22,7 +22,11 @@ snapshot can show the change (§8.2: v1 has no per-node geometry):
   changed meanwhile (a hidden node's pose cannot be read, and a re-export would leave it out too);
 - a node the adapter cannot read (deleted meanwhile, a bad MRML state) → re-export: the export reads it again and
   reports it. ``classify`` raises only :class:`SceneReadError` (fixed text) when the node list itself fails —
-  except on a reset, which needs no scene read: the closed scene is forgotten anyway.
+  except on a reset, which needs no scene read: the closed scene is forgotten anyway;
+- SLC-35 interim, until SLC-36 hands ``classify`` the session's :class:`~remoteview_core.ids.SceneIds`: a mark under
+  a raw ID that is not a generated MRML ID and that the viewers do not hold under that ID → re-export, because the
+  export aliases such a node as ``m_<n>`` and the viewers may hold it under the alias (a model ``Sphere`` hidden or
+  deleted in Slicer leaves the viewers with that snapshot); a generated ID in neither scene is dropped (T7).
 
 A re-export plan carries no update items: the snapshot carries every change. Its ``added`` lists the IDs it brings
 that the viewers do not hold, for ``scene.nodeAdded`` (a hint: the export may still leave one out, §8.2).
@@ -69,11 +73,11 @@ from remoteview_core.collect import (
     placement_of,
     raw_name,
     transform_to_bake,
-    valid_model_id,
 )
 from remoteview_core.coords import gltf_matrix_column_major
 from remoteview_core.debounce import Change, Drained
 from remoteview_core.glb_writer import Entity
+from remoteview_core.ids import is_generated_id
 from remoteview_core.names import sanitize_name
 from remoteview_core.protocol_client import NodeChange
 
@@ -334,14 +338,26 @@ def classify(
     return Plan(changes=tuple(changes), removed=tuple(removed), forget=tuple(forget))
 
 
+def _contract_model_id(raw: Any) -> str | None:
+    """The ``nodeId`` of a shown model as this classifier can know it without the session's registry: the MRML ID
+    when it is what Slicer generates (§7.3), else ``None`` — a model the export aliases as ``m_<n>`` is not listed
+    here and the viewers hold it under the alias, so a mark under its raw ID finds it neither shown nor held:
+    :meth:`_Classifier._not_held` re-exports every such mark (``not is_generated_id``) instead of dropping it — the
+    export decides, so hiding or removing the model takes it off the viewers with the next snapshot, at the price of
+    a snapshot for each of its marks (also while hidden) — until SLC-36 hands :class:`~remoteview_core.ids.SceneIds`
+    to ``classify``, maps the marks through it and lists segments too."""
+    return raw if is_generated_id(raw) else None
+
+
 def _shown(scene_api: SceneApi, *, anonymize: bool) -> dict[str, Any]:
-    """The nodes the 3D view shows whose IDs pass collect's rules for the current setting (of duplicates the first,
-    the one exported)."""
+    """The nodes the 3D view shows under the ``nodeId`` the export gives them (of duplicates the first, the one
+    exported). ``anonymize`` does not change a model's ID since protocol v1.1 (kept for SLC-36's segment IDs)."""
+    del anonymize
     shown: dict[str, Any] = {}
     try:
         for node in scene_api.visible_model_nodes():
-            node_id = scene_api.node_id(node)
-            if valid_model_id(node_id, anonymize=anonymize):
+            node_id = _contract_model_id(scene_api.node_id(node))
+            if node_id is not None:
                 shown.setdefault(node_id, node)
     except Exception:  # noqa: BLE001 — the adapter's text may carry a node ID (T7): a fixed one replaces it
         raise SceneReadError("the scene's nodes could not be read") from None
@@ -371,6 +387,13 @@ class _Classifier:
     def _not_held(self, node_id: str, flags: Change, node: Any) -> _Outcome | None:
         skip = self._sent.skipped.get(node_id)
         if node is None:
+            if skip is None and not is_generated_id(node_id):
+                # SLC-35 interim: the export aliases every other raw ID as ``m_<n>`` (ids.py) while the observers
+                # mark it raw, so the viewers may hold this node under an alias this classifier cannot know without
+                # the registry — the export decides, as for a held segment (_hidden): hidden or removed, the node
+                # leaves the viewers with that snapshot; never the raw ID (T7). SLC-36 maps marks through SceneIds
+                # and restores the drop below for an ID in neither scene
+                return _Outcome.REEXPORT
             # in neither the scene nor the viewers' scene: nothing to say (T7); a node the export left out loses its
             # reason when its mesh or pose changes while hidden
             return _Outcome.FORGET if skip is not None and flags & _STALE_WHEN_HIDDEN else None

@@ -35,6 +35,8 @@ DISCLOSURE_WORDS = (
     "surface meshes",
     "names",
     "Hide node names",
+    "segment IDs",
+    "models and segments",
     "colours",
     "opacity",
     "visibility",

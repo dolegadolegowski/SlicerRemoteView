@@ -29,7 +29,12 @@ of the session, the first snapshot included:
   upload per change (a lost connection neither counts nor closes it). Updates stay held while a snapshot is owed
   (``ProtocolClient.require_snapshot``);
 - *Hide node names* and the device profile have no MRML event: :meth:`~LiveUpdates.set_anonymize_names` and
-  :meth:`~LiveUpdates.request_snapshot` (SLC-18) ask for a snapshot.
+  :meth:`~LiveUpdates.request_snapshot` (SLC-18) ask for a snapshot;
+- **IDs** (protocol v1.1 §7.3, SLC-35): every export of the session runs through one
+  :class:`~remoteview_core.ids.SceneIds` (:attr:`~LiveUpdates.ids`), owned by the panel — one per ``session.create`` —
+  and handed in at construction, so a resumed session (SLC-17) cannot lose the aliases the viewers hold, while a new
+  ``session.create`` (Stop → Start) may renumber. ``start()``/``stop()`` never touch it; :meth:`~LiveUpdates.reset`
+  (the scene closed) clears its raw → alias maps and keeps its counters, so no alias is ever reissued.
 
 The panel (SLC-32) calls ``start(deferred=True)``, attaches the observers, then :meth:`~LiveUpdates.tick` — all in
 one main-thread call, so a batch process running at Start holds the first snapshot until it ends; it calls
@@ -59,6 +64,7 @@ from typing import Any
 from remoteview_core.changes import Plan, SceneReadError, SentScene, classify
 from remoteview_core.collect import SceneApi
 from remoteview_core.debounce import Change, Debouncer, Drained, Timer
+from remoteview_core.ids import SceneIds
 from remoteview_core.protocol_client import ProtocolClient, ProtocolStateError, SessionState
 from remoteview_core.snapshot import Snapshot, SnapshotTooLargeError, build_snapshot
 
@@ -128,6 +134,9 @@ class _EmptyScene:
     def visible_model_nodes(self) -> list[Any]:
         return []
 
+    def visible_segments(self) -> list[Any]:
+        return []
+
 
 def _retry_after(details: Any) -> float | None:
     """``details.retryAfterS`` when it is a finite positive number (relay input: anything else is ignored)."""
@@ -156,9 +165,11 @@ class LiveUpdates:
         anonymize_names: bool = False,
         on_event: Callable[[LiveEvent], object] = lambda event: None,
         export: Callable[..., Snapshot] = build_snapshot,
+        ids: SceneIds | None = None,
     ) -> None:
         self._client = client
         self._scene = scene
+        self._ids = ids if ids is not None else SceneIds()
         self._send = send
         self._discard_queued = discard_queued
         self._clock = clock
@@ -205,6 +216,11 @@ class LiveUpdates:
     def sent(self) -> SentScene:
         """What the viewers hold (the scene of the last export, with every change sent since)."""
         return self._sent
+
+    @property
+    def ids(self) -> SceneIds:
+        """The session's raw ID → alias registry (§7.3), the one every export of this controller uses."""
+        return self._ids
 
     @property
     def in_flight(self) -> bool:
@@ -281,6 +297,8 @@ class LiveUpdates:
             return
         try:
             self._reset_owed = True
+            # the aliases were the closed scene's: forgotten, never reissued (§7.3 — the counters keep counting)
+            self._ids.reset()
             # no update may address a closed scene's ID, which the next scene may reuse (§7.3)
             self._sent.apply(Plan(snapshot=True, reset=True))
             if self._inflight is not None:
@@ -451,10 +469,15 @@ class LiveUpdates:
         return shown is not None and bool(self._shrink - shown)
 
     def _shown_ids(self) -> frozenset[Any] | None:
-        """The IDs of the nodes the 3D view shows (a light read: no mesh), or ``None`` when they cannot be read."""
+        """The ``nodeId`` of every model and segment the 3D view shows (a light read: no mesh), or ``None`` when they
+        cannot be read."""
         try:
             scene = self._scene()
-            return frozenset(scene.node_id(node) for node in scene.visible_model_nodes())
+            shown = {self._ids.model_node_id(scene.node_id(n)) for n in scene.visible_model_nodes()}
+            for handle in scene.visible_segments():
+                node_raw, seg_raw = scene.segment_identity(handle)
+                shown.add(self._ids.segment_node_id(node_raw, seg_raw, anonymize=self._anonymize))
+            return frozenset(shown)
         except Exception:  # noqa: BLE001 — the adapter's text may carry an ID (T7)
             return None
 
@@ -500,6 +523,7 @@ class LiveUpdates:
             slicer_version=self._slicer_version,
             anonymize_names=self._anonymize,
             announce=announce,
+            ids=self._ids,
         )
 
     def _empty(self, cause: _Cause, too_large: SnapshotTooLargeError | None = None) -> None:

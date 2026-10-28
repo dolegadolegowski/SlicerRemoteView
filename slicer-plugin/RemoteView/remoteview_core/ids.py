@@ -24,6 +24,8 @@
   revealed.
 
 Standard library only. No method puts a raw ID into an exception text or the ``repr`` (a raw segment ID may be PHI).
+Main thread only (unsynchronised; the collection, the snapshot builder and the classifier share one instance and all
+run on Slicer's main thread).
 """
 
 from __future__ import annotations

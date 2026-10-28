@@ -28,6 +28,7 @@ from remoteview_core.collect import SkipReason, collect_scene, polydata_from_tri
 from remoteview_core.coords import gltf_matrix_column_major, ras_matrix_to_gltf
 from remoteview_core.debounce import Change, DirtySet, Drained
 from remoteview_core.glb_writer import RootExtras, write_glb
+from remoteview_core.ids import SceneIds
 from remoteview_core.protocol_client import NodeChange
 from remoteview_core.snapshot import SnapshotTooLargeError, build_snapshot
 from remoteview_protocol import schemas
@@ -325,17 +326,18 @@ def test_changes_a_reset_survives_a_scene_that_cannot_be_listed():
 
 
 def test_changes_hide_node_names_switched_needs_a_snapshot():
-    """The viewers' scene was made under the other setting: its names follow other rules (T7). Since SLC-27 a
-    hand-set ID is skipped in both modes (protocol v1.1 §7.3; SLC-35 aliases it), so a switch changes no ID — the
-    hand-set one is never updated, removed or announced either way."""
+    """The viewers' scene was made under the other setting: its names follow other rules (T7). Since SLC-35 a
+    hand-set ID is exported as ``m_<n>`` in both modes (protocol v1.1 §7.3), so a switch changes no ID — the
+    hand-set one is never updated, removed or announced under its raw ID either way."""
     scene = LiveScene(
         {"id": "vtkMRMLModelNode4"},
         {"id": "vtkMRMLModelNode5"},
         {"id": "vtkMRMLModelNode6", "visible": False},  # hidden at the named export: not held
-        {"id": "Doe_John_liver"},  # hand-set: skipped in both modes
+        {"id": "Doe_John_liver"},  # hand-set: held as m_1 in both modes, never under its raw ID
     )
     named = exported(scene)
     assert "vtkMRMLModelNode5" in named and "Doe_John_liver" not in named and not named.anonymized
+    assert "m_1" in named
     scene.node("vtkMRMLModelNode5")["opacity"] = 0.5
     scene.node("vtkMRMLModelNode6")["visible"] = True
     scene.node("Doe_John_liver")["opacity"] = 0.5
@@ -790,10 +792,73 @@ def test_changes_a_rename_needs_a_snapshot_only_when_the_exported_name_changes(
 
 
 @pytest.mark.parametrize("flags", [*Change, Change.ADDED | Change.REMOVED])
-def test_changes_an_id_in_neither_scene_is_dropped(flags):
+def test_changes_a_generated_id_in_neither_scene_is_dropped(flags):
     scene = LiveScene({"id": "vtkMRMLModelNode4"})
     sent = exported(scene)
-    assert plan_of(scene, sent, ("Doe_John_liver", flags)) == Plan()
+    assert plan_of(scene, sent, ("vtkMRMLModelNode9", flags)) == Plan()
+
+
+@pytest.mark.parametrize("anonymize", [False, True])
+@pytest.mark.parametrize("flags", [*Change, Change.ADDED | Change.REMOVED])
+def test_changes_a_raw_id_the_classifier_cannot_map_is_left_to_the_export(flags, anonymize):
+    """SLC-35 interim: without the registry the classifier cannot tell a hidden ``Sphere`` the viewers hold as
+    ``m_1`` from an ID in neither scene — a snapshot, never the ID (T7); SLC-36 maps the marks through ``SceneIds``
+    and restores the drop."""
+    scene = LiveScene({"id": "vtkMRMLModelNode4"})
+    sent = exported(scene, anonymize=anonymize)
+    plan = plan_of(scene, sent, ("Doe_John_liver", flags), anonymize=anonymize)
+    assert plan == Plan(snapshot=True) and plan.added == ()
+
+
+@pytest.mark.parametrize("anonymize", [False, True])
+@pytest.mark.parametrize(
+    ("change", "flags"),
+    [
+        ("hidden", Change.APPEARANCE),
+        ("recoloured", Change.APPEARANCE),
+        ("new-mesh", Change.APPEARANCE | Change.GEOMETRY),
+        ("moved", Change.TRANSFORM),
+        ("renamed", Change.NAME),
+        ("removed", Change.REMOVED),
+        ("readded", Change.ADDED | Change.REMOVED),
+    ],
+)
+def test_changes_marks_on_a_model_exported_under_an_alias_re_export(change, flags, anonymize):
+    """SLC-35 interim: a model with a hand-set MRML ID is exported as ``m_1`` (ids.py) in both modes, while the
+    observers mark it under its raw ID — the classifier cannot map one to the other without the registry (SLC-36),
+    so every mark re-exports: hidden or deleted in Slicer, the model leaves the viewers with that snapshot (the
+    consent text promises every change; T7), and no raw ID reaches ``scene.nodeAdded``."""
+    ids = SceneIds()
+    scene = LiveScene({"id": "Sphere"}, {"id": "vtkMRMLModelNode2"})
+    collected = collect_scene(scene, anonymize_names=anonymize, ids=ids)
+    sent = SentScene.from_export(
+        collected.entities, collected.skipped, anonymized=collected.anonymized_names
+    )
+    assert "m_1" in sent and "Sphere" not in sent and "vtkMRMLModelNode2" in sent
+    if change == "removed":
+        scene.remove("Sphere")
+    else:
+        scene.node("Sphere").update(
+            {
+                "hidden": {"visible": False},
+                "recoloured": {"color": (0.0, 0.0, 1.0)},
+                "new-mesh": {"mesh": sphere(4)},
+                "moved": {"world": moved(3.0)},
+                "renamed": {"name": "Liver segment 8"},
+                "readded": {},
+            }[change]
+        )
+    plan = plan_of(scene, sent, ("Sphere", flags), anonymize=anonymize)
+    assert plan == Plan(snapshot=True) and plan.added == ()
+    # the snapshot it asks for is right: the hidden or deleted model is no longer in it, under one registry
+    again = collect_scene(scene, anonymize_names=anonymize, ids=ids)
+    held_again = {e.node_id for e in again.entities}
+    assert ("m_1" in held_again) == (change not in ("hidden", "removed"))
+    # the same change of the generated node is one update item, no snapshot (the alias is the only difference)
+    if change == "hidden":
+        scene.node("vtkMRMLModelNode2")["visible"] = False
+        plan = plan_of(scene, sent, ("vtkMRMLModelNode2", flags), anonymize=anonymize)
+        assert plan == Plan(changes=(NodeChange("vtkMRMLModelNode2", visible=False),))
 
 
 def test_changes_added_and_removed_follows_the_scene():
@@ -810,13 +875,15 @@ def test_changes_added_and_removed_follows_the_scene():
 
 
 def test_changes_hide_node_names_keeps_hand_set_ids_off_the_wire():
-    """With *Hide node names* only generated IDs are exported (collect): a hand-set ID is not the viewers' to know."""
+    """A hand-set ID is exported as ``m_1`` in both modes (SLC-35): it is not the viewers' to know — its marks
+    re-export (SLC-35 interim) and only generated IDs are announced."""
     scene = LiveScene({"id": "vtkMRMLModelNode4"}, {"id": "Doe_John_liver"})
     sent = exported(scene, anonymize=True)
-    assert "Doe_John_liver" not in sent
+    assert "Doe_John_liver" not in sent and "m_1" in sent
     scene.node("Doe_John_liver")["color"] = (0.0, 0.0, 1.0)
     for flags in (Change.APPEARANCE | Change.GEOMETRY, Change.ADDED, Change.REMOVED, Change.NAME):
-        assert plan_of(scene, sent, ("Doe_John_liver", flags), anonymize=True) == Plan()
+        plan = plan_of(scene, sent, ("Doe_John_liver", flags), anonymize=True)
+        assert plan == Plan(snapshot=True) and plan.added == ()
     scene.add("vtkMRMLModelNode9")
     plan = plan_of(scene, sent, ("vtkMRMLModelNode9", Change.ADDED), anonymize=True)
     assert plan.added == (("vtkMRMLModelNode9", "model"),)  # never the hand-set ID

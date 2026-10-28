@@ -35,6 +35,7 @@ from remoteview_core.changes import SentScene
 from remoteview_core.collect import SceneApi, SkippedNode, collect_scene
 from remoteview_core.decimate import PROFILES, estimate_glb_size, fit_to_budget, glb_binary_size
 from remoteview_core.glb_writer import RootExtras, write_glb
+from remoteview_core.ids import SceneIds
 from remoteview_core.protocol_client import (
     ProtocolClient,
     ProtocolStateError,
@@ -105,10 +106,13 @@ def build_snapshot(  # noqa: PLR0913 — keyword-only options after the scene an
     anonymize_names: bool = False,
     quantize: bool = True,
     announce: Iterable[tuple[str, str]] = (),
+    ids: SceneIds | None = None,
 ) -> Snapshot:
     """Collect ``scene_api`` and build the next snapshot of ``client``'s session (see the module docstring). The GLB
     is quantised (``KHR_mesh_quantization``, FR-09) unless ``quantize`` is false. ``announce`` lists the ``(nodeId,
-    kind)`` pairs for :attr:`Snapshot.announced` (``ProtocolClient.announce_added``: none while updates are held)."""
+    kind)`` pairs for :attr:`Snapshot.announced` (``ProtocolClient.announce_added``: none while updates are held).
+    ``ids`` is the session's alias registry (§7.3: every export of a session reuses the aliases it issued); ``None``
+    makes a fresh one for a single export."""
     limits = client.limits
     if (
         client.state not in (SessionState.CREATED, SessionState.ACTIVE)
@@ -116,7 +120,7 @@ def build_snapshot(  # noqa: PLR0913 — keyword-only options after the scene an
         or not client.profile
     ):
         raise ProtocolStateError(f"cannot send a snapshot in state {client.state.value}")
-    collected = collect_scene(scene_api, anonymize_names=anonymize_names)
+    collected = collect_scene(scene_api, anonymize_names=anonymize_names, ids=ids)
     budget = PROFILES[client.profile]
     fitted = fit_to_budget(collected.entities, budget)
     if glb_binary_size(fitted.entities, quantize=quantize) > limits["maxSnapshotBytes"]:
