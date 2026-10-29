@@ -932,14 +932,19 @@ def test_decimate_fold_repair():
 # --------------------------------------------------------------------------- the whole scene (criterion 1)
 
 
-def test_decimate_quest2_scene_fits_500k_with_no_node_above_100k():
-    """A 400k-triangle sphere and three other nodes under ``quest2`` (FR-10, §7.5)."""
-    nodes = entities(
+def quest2_scene() -> list:
+    """A 400k-triangle sphere and three other nodes, the last a ``vtkCubeSource`` (4 points of its own per face)."""
+    return entities(
         {"id": "vtkMRMLModelNode4", "mesh": sphere(448)},  # 399,616 triangles
         {"id": "vtkMRMLModelNode5", "mesh": sphere(240)},  # 114,240
         {"id": "vtkMRMLModelNode6", "mesh": sphere(160)},  # 50,560
         {"id": "vtkMRMLModelNode7", "mesh": cube()},  # 12
     )
+
+
+def test_decimate_quest2_scene_fits_500k_with_no_node_above_100k():
+    """A 400k-triangle sphere and three other nodes under ``quest2`` (FR-10, §7.5)."""
+    nodes = quest2_scene()
     counts = [e.triangle_count for e in nodes]
     assert counts == [399_616, 114_240, 50_560, 12]
     result = fit_to_budget(nodes, QUEST2)
@@ -951,6 +956,18 @@ def test_decimate_quest2_scene_fits_500k_with_no_node_above_100k():
     )  # within their shares: untouched
     assert all(has_unit_normals(e) and outward(e) > 0.9 for e in result.entities[:3])  # the spheres
     write_glb(list(result.entities), ROOT, quantize=True)
+
+
+def test_decimate_quest2_scene_has_no_small_islands():
+    """SLC-53: with *Remove small islands* the same scene fits with the same counts — every sphere is one part, and
+    the cube's six faces (two triangles each by vertex IDs) are one part by position, the only one of its node."""
+    nodes = quest2_scene()
+    plain = fit_to_budget(nodes, QUEST2)
+    result = fit_to_budget(nodes, QUEST2, remove_islands=True)
+    assert result.cleaned == () and plain.cleaned == ()
+    assert [e.triangle_count for e in result.entities] == [e.triangle_count for e in plain.entities]
+    assert result.reduced == plain.reduced == ("vtkMRMLModelNode4", "vtkMRMLModelNode5")
+    assert result.entities[2] is nodes[2] and result.entities[3] is nodes[3]
 
 
 def test_decimate_fit_to_budget_holds_the_total():

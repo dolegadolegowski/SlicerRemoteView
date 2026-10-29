@@ -79,6 +79,8 @@ after the weld it reaches 303.
 
 **The pipeline** (`decimate_entity`; constants in `decimate.py`, clustering in `clustering.py`, numpy only):
 
+0. Small islands (SLC-53, in `fit_to_budget(…, remove_islands=True)`, before the shares): every node loses its parts
+   below 1,196 triangles that also have less than 1 % of its largest part's triangles — [slicer-islands.md](slicer-islands.md).
 1. Size bound. A node above `2 · max(CLUSTER_GOAL, 3 · share)` triangles (800k for a 100k share; `CLUSTER_GOAL`
    400,000) is clustered to about that goal. The cell is the median edge × √(triangles / goal). A cluster is a
    connected piece of the mesh inside one grid cell, so the two sides of a wall thinner than a cell stay apart.

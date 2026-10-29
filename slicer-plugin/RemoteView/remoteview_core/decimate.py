@@ -16,6 +16,9 @@ Nodes are **never dropped** (§7.5): a node nothing can reduce keeps its mesh an
 collected entities (glTF metres, after SLC-07's clean-up), one node per :func:`decimate_entity` call, in bounded time
 (SLC-41; the bound covers decimation, not collect):
 
+- small islands (SLC-53, ``remove_islands``): before the shares every node loses its parts below
+  :data:`SMALL_ISLAND_TRIANGLES` that are also below :data:`SMALL_ISLAND_SHARE` of its largest part
+  (:func:`island_mask`); the largest part always stays;
 - size bound: a node above ``2 · max(CLUSTER_GOAL, 3 · share)`` triangles (800k for a 100k share) is first reduced to
   at most twice that goal by connected vertex clustering (:mod:`remoteview_core.clustering`; both sides of a thin wall
   stay apart, seams stay closed);
@@ -37,9 +40,9 @@ collected entities (glTF metres, after SLC-07's clean-up), one node per :func:`d
   collected node's.
 
 ``vtkDecimatePro`` is not used (its splitting cracked the surface, SLC-41). Sources and measurements:
-``docs/research/slicer-decimate.md``. :func:`glb_binary_size` (exact) lets ``build_snapshot`` refuse a scene whose
-binary chunk alone is over the relay's limit before the file is built; :func:`estimate_glb_size` gives the size that
-refusal reports.
+``docs/research/slicer-decimate.md``, ``docs/research/slicer-islands.md`` (SLC-53). :func:`glb_binary_size` (exact)
+lets ``build_snapshot`` refuse a scene whose binary chunk alone is over the relay's limit before the file is built;
+:func:`estimate_glb_size` gives the size that refusal reports.
 
 Main thread only (VTK). No Slicer or Qt import.
 """
@@ -166,6 +169,17 @@ REGULARIZATION = 0.01
 QUADRIC_SECONDS = 8.0
 #: Rounds of :func:`_repair_folds` (each turns over the triangles whose face opposes their vertex normals).
 FOLD_ROUNDS = 3
+#: *Remove small islands* (SLC-53): a connected part with fewer triangles than this is left out of the snapshot.
+#: Slicer's Islands effect removes islands of fewer than 1,000 voxels by default (``MinimumSize``,
+#: SegmentEditorIslandsEffect.py v5.12.4 L95, L392; face connectivity L155). The smallest surface Slicer's default
+#: conversion (vtkBinaryLabelmapToClosedSurfaceConversionRule.cxx v5.12.4 L72-L101, L279-L486) makes of 1,000
+#: face-connected voxels has 1,196 triangles (a 10 × 10 × 10 cube; a ball of 1,000 voxels has 1,448, random compact
+#: clusters 2,920-3,012, thin shapes up to 8,000). So a part with fewer triangles has fewer than 1,000 voxels.
+SMALL_ISLAND_TRIANGLES = 1_196
+#: A part is left out only if it also has less than this share of the triangles of its node's largest part: a node
+#: made of small parts of similar size keeps them (electrode contacts, glyphs, letters, screws next to a small body).
+#: Below 1 the largest part is never left out (never dropped, §7.5).
+SMALL_ISLAND_SHARE = 0.01
 #: :func:`_fallback` grows its cell by ``FALLBACK_GROWTH`` up to ``FALLBACK_TRIES`` times until the share is met; when
 #: that empties the mesh after a cell that left too many, it bisects between the two up to ``FALLBACK_BISECT`` times.
 FALLBACK_GROWTH = 1.25
@@ -407,7 +421,7 @@ def decimate_entity(
     indices = np.asarray(entity.indices)
     if indices.size and (indices.min() < 0 or indices.max() >= len(entity.positions)):
         return None
-    triangles = indices.reshape(-1, 3).astype(np.int64)
+    triangles = indices.reshape(-1, 3).astype(np.int64, copy=False)  # never written to (SLC-53)
     a, b, c = triangles.T
     # a triangle repeating a vertex: collect never makes them; a share of 0: allocate never gives one
     if target <= 0 or np.any((a == b) | (b == c) | (a == c)):
@@ -523,15 +537,83 @@ def _fallback_entity(
 @dataclass(frozen=True)
 class FitResult:
     """The entities within budget, in input order: ``reduced`` names the nodes that were decimated, ``unreduced`` those
-    above their share that nothing could reduce (kept whole, never dropped)."""
+    above their share that nothing could reduce (kept whole, never dropped), ``cleaned`` those whose small islands were
+    left out (SLC-53)."""
 
     entities: tuple[Entity, ...]
     reduced: tuple[str, ...]
     unreduced: tuple[str, ...]
+    cleaned: tuple[str, ...] = ()
 
     @property
     def triangle_count(self) -> int:
         return sum(e.triangle_count for e in self.entities)
+
+
+def island_mask(entity: Entity) -> NDArray[np.bool_] | None:
+    """The triangles of ``entity`` that lie in its small islands (:func:`clustering.small_islands` with
+    :data:`SMALL_ISLAND_TRIANGLES` and :data:`SMALL_ISLAND_SHARE`), or ``None`` when it has none — or no triangle, or
+    indices outside its positions, which :func:`decimate_entity` refuses. Logs one line with the counts when there are
+    islands (T7: no name, ID or coordinate)."""
+    indices = np.asarray(entity.indices)
+    count = entity.triangle_count
+    if count == 0 or indices.min() < 0 or indices.max() >= len(entity.positions):
+        return None
+    drop, islands = clustering.small_islands(
+        np.asarray(entity.positions, dtype=np.float64).reshape(-1, 3),
+        indices.reshape(-1, 3).astype(np.int64, copy=False),
+        SMALL_ISLAND_TRIANGLES,
+        SMALL_ISLAND_SHARE,
+    )
+    if not islands:
+        return None
+    _log.info(
+        "Islands: %d small islands (%d of %d triangles) are left out of a node",
+        islands,
+        int(drop.sum()),
+        count,
+    )
+    return drop
+
+
+def without_islands(entity: Entity, drop: NDArray[np.bool_], *, compact: bool = True) -> Entity:
+    """``entity`` without the triangles ``drop`` marks. ``compact`` also drops the vertices no kept triangle uses; a
+    kept vertex keeps every triangle around it (they are in the same part), so its normal stays right.
+    ``compact=False`` shares the positions and normals (no copy, unused vertices kept): only for
+    :func:`decimate_entity`, whose results are compact — such an entity must never leave :func:`fit_entity`, or the
+    vertices of the islands would be written to the GLB."""
+    triangles = np.asarray(entity.indices).reshape(-1, 3)[~drop]
+    if not compact:
+        return dataclasses.replace(entity, indices=triangles)
+    used = np.zeros(len(entity.positions), dtype=bool)
+    used[triangles.ravel()] = True
+    remap = np.cumsum(used) - 1
+    return dataclasses.replace(
+        entity,
+        positions=np.asarray(entity.positions)[used],
+        normals=np.asarray(entity.normals)[used],
+        indices=remap[triangles],
+    )
+
+
+def fit_entity(
+    entity: Entity,
+    drop: NDArray[np.bool_] | None,
+    target: int,
+    *,
+    quadric: Callable[[float], Any] | None = None,
+) -> tuple[Entity, bool | None]:
+    """One node of :func:`fit_to_budget`: ``entity`` without the triangles ``drop`` marks (its small islands, from
+    :func:`island_mask`), reduced to ``target`` triangles if it has more. The flag is ``True`` when it was decimated,
+    ``False`` when nothing could reduce it (sent whole, without its islands) and ``None`` within its share."""
+    count = entity.triangle_count - (0 if drop is None else int(drop.sum()))
+    if count <= target:
+        return (entity if drop is None else without_islands(entity, drop)), None
+    working = entity if drop is None else without_islands(entity, drop, compact=False)
+    smaller = decimate_entity(working, target, quadric=quadric)
+    if smaller is not None:
+        return smaller, True
+    return (entity if drop is None else without_islands(entity, drop)), False
 
 
 def fit_to_budget(
@@ -539,24 +621,29 @@ def fit_to_budget(
     budget: Budget,
     *,
     quadric: Callable[[float], Any] | None = None,
+    remove_islands: bool = False,
 ) -> FitResult:
-    """Decimate ``entities`` to ``budget`` (see the module docstring); ``quadric`` goes to :func:`decimate_entity`."""
-    targets = allocate([e.triangle_count for e in entities], budget)
+    """Decimate ``entities`` to ``budget`` (see the module docstring); ``quadric`` goes to :func:`decimate_entity`.
+    With ``remove_islands`` every node first loses its small islands (:func:`island_mask`), also a node within its
+    share, and the shares follow the triangles left."""
+    drops = [island_mask(e) if remove_islands else None for e in entities]
+    targets = allocate(
+        [
+            e.triangle_count - (0 if d is None else int(d.sum()))
+            for e, d in zip(entities, drops, strict=True)
+        ],
+        budget,
+    )
     fitted: list[Entity] = []
     reduced: list[str] = []
     unreduced: list[str] = []
-    for entity, target in zip(entities, targets, strict=True):
-        if entity.triangle_count <= target:
-            fitted.append(entity)
-            continue
-        smaller = decimate_entity(entity, target, quadric=quadric)
-        if smaller is None:
-            fitted.append(entity)
-            unreduced.append(entity.node_id)
-        else:
-            fitted.append(smaller)
-            reduced.append(entity.node_id)
-    return FitResult(tuple(fitted), tuple(reduced), tuple(unreduced))
+    for entity, drop, target in zip(entities, drops, targets, strict=True):
+        result, decimated = fit_entity(entity, drop, target, quadric=quadric)
+        fitted.append(result)
+        if decimated is not None:
+            (reduced if decimated else unreduced).append(entity.node_id)
+    cleaned = tuple(e.node_id for e, d in zip(entities, drops, strict=True) if d is not None)
+    return FitResult(tuple(fitted), tuple(reduced), tuple(unreduced), cleaned)
 
 
 #: The GLB container: a 12-byte header and two 8-byte chunk headers.
