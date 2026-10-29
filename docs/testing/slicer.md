@@ -1345,8 +1345,7 @@ Expected results:
 - Step 3: after the first change the button reads "Send now (30 s)" and counts down; each change restarts it at 30;
   the phone shows all three changes at once, 30 s after the last one; the panel's detail says "Changes in Slicer wait:
   RemoteView sends them N s after the last change." meanwhile, nothing after.
-- Step 4: nothing goes to the phone for the minute ("Send now (changes wait)" never appears: that text is for a batch);
-  the panel says "Changes in Slicer wait for Send now."; the first click sends the colour (a `scene.update`), the
+- Step 4: nothing goes to the phone for the minute; the button reads "Send now (changes wait)" and the panel says "Changes in Slicer wait for Send now."; the first click sends the colour (a `scene.update`), the
   second sends the whole scene again (a snapshot: "Updating the scene", then "Live"), without a progress window.
 - Step 5: the phone shows the colour within about half a second, the button never counts down.
 - Step 6: the closed scene leaves the phone at once (the reset ignores the delay, §7.3); the hidden sphere never had

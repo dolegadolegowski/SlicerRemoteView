@@ -261,6 +261,9 @@ class Debouncer:
         self._holds += 1
         self._timer.stop()
         self._due = None
+        self._handoff = (
+            False  # the 0 ms timer it stopped is void: release() decides anew (review of SLC-56)
+        )
 
     def release(self) -> None:
         """``EndBatchProcessEvent`` (or the end of another hold): once the last hold ends, flush what was kept — from

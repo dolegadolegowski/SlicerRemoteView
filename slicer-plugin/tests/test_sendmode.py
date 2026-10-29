@@ -51,6 +51,8 @@ def test_sendmode_button_text_counts_down_while_changes_wait():
     assert send_button_text(code="ABCDE", changes_wait=True, due_in=None) == SEND_NOW_HELD
     assert send_button_text(code="ABCDE", changes_wait=True, due_in=12.3) == "Send now (13 s)"
     assert send_button_text(code="ABCDE", changes_wait=True, due_in=0.0) == "Send now (1 s)"
+    # At once: the lanes' own 150-750 ms waits are no countdown (review of SLC-57)
+    assert send_button_text(code="ABCDE", changes_wait=True, due_in=0.15, lanes=True) == SEND_NOW
 
 
 # --------------------------------------------------------------------------- the toolbar
@@ -151,6 +153,10 @@ def test_sendmode_toolbar_sends_now_or_opens_the_panel(
     controller.send_now.assert_called_once_with()
     widget.render(PanelView("Live · no viewers yet.", code="ABCDE", changes_wait=True))
     assert action.text == SEND_NOW_HELD
+    toolbar.modeBox.currentIndex = mode_index("now")
+    widget.render(waiting)
+    assert action.text == SEND_NOW  # At once: no countdown
+    toolbar.modeBox.currentIndex = mode_index("manual")
     widget.render(PanelView("Not connected."))
     assert (action.enabled, action.text) == (False, SEND_NOW)
     controller.send_now.side_effect = KeyError("vtkMRMLModelNode4 Doe^John")

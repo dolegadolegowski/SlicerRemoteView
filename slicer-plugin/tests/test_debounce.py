@@ -633,3 +633,24 @@ def test_debounce_a_new_policy_reschedules_the_pending_marks(setup):
     assert len(flushed) == 1
     debouncer.set_policy(SendPolicy(delay_s=15))  # nothing pending: nothing scheduled
     assert timer.deadline is None and debouncer.due_in(timer.clock()) is None
+
+
+def test_debounce_a_hold_right_after_a_hand_off_does_not_block_the_next_policy(setup):
+    """Review of SLC-56: ``LiveUpdates.hold()`` releases a preparation's hold (a 0 ms hand-off) and holds again in one
+    call; a policy chosen during that batch must still schedule at its end, and a reset must still flush."""
+    timer, debouncer, flushed = setup
+    debouncer.hold()
+    debouncer.mark("vtkMRMLModelNode1", Change.APPEARANCE)
+    debouncer.release()
+    assert timer.starts[-1] == 0
+    debouncer.hold()  # before the event loop ran the 0 ms timer
+    debouncer.set_policy(SendPolicy(delay_s=30))
+    debouncer.release()
+    assert timer.starts[-1] == 30_000 and debouncer.due_in(timer.clock()) == 30.0
+    debouncer.mark("vtkMRMLModelNode2", Change.APPEARANCE)
+    assert timer.starts[-1] == 30_000
+    debouncer.reset()
+    assert timer.starts[-1] == APPEARANCE_MS
+    timer.advance(APPEARANCE_MS)
+    [(_, drained)] = flushed
+    assert drained.reset

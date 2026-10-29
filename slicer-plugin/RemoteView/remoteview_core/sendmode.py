@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from remoteview_core.debounce import AT_ONCE, SendPolicy
 
 SEND_NOW = "Send scene now"
-SEND_NOW_HELD = "Send now (changes wait)"  # a batch holds them: Slicer is busy
+SEND_NOW_HELD = "Send now (changes wait)"  # for the button (manual), or for a batch to end
 SEND_NOW_TIP = (
     "Send the changes waiting in Slicer to the viewers now, or the whole scene again when nothing waits. "
     "Needs a running session."
@@ -59,10 +59,13 @@ def mode_index(key: object) -> int:
     return SEND_MODES.index(send_mode(key))
 
 
-def send_button_text(*, code: str, changes_wait: bool, due_in: float | None) -> str:
-    """The *Send scene now* button for a panel view: the countdown while changes wait under a delay, a note while a
-    hold keeps them, the plain text otherwise (and without a session, when the button is disabled)."""
-    if not code or not changes_wait:
+def send_button_text(
+    *, code: str, changes_wait: bool, due_in: float | None, lanes: bool = False
+) -> str:
+    """The *Send scene now* button for a panel view: the countdown while changes wait under a delay, a note while
+    they wait for the button or for a batch to end, the plain text otherwise — under the lanes (``lanes``, *At once*)
+    too, whose own short waits are no countdown — and without a session, when the button is disabled."""
+    if not code or not changes_wait or lanes:
         return SEND_NOW
     if due_in is None:
         return SEND_NOW_HELD

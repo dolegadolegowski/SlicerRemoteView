@@ -193,7 +193,10 @@ class SendToolbar:
 
         self.sendAction.enabled = bool(view.code)
         self.sendAction.text = sendmode.send_button_text(
-            code=view.code, changes_wait=view.changes_wait, due_in=view.due_in
+            code=view.code,
+            changes_wait=view.changes_wait,
+            due_in=view.due_in,
+            lanes=self.mode().policy.lanes,
         )
 
 
