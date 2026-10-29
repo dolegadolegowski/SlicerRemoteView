@@ -40,7 +40,7 @@ URL = "wss://relay.example.org/ws"
 CODE = "7KQ4X"
 TOKEN = "pt_Mn3Vq8YtK2cR9xLwZaBdE7fGhJ4uP6sTvW1yXoNQ5kA"  # noqa: S105 — the protocol.md §4.2 example token
 SESSION_ID = "sess_01K7Q4XMB2TJ9RD6"
-#: A second session (a re-create after a relay restart may get another code, SLC-38).
+#: A second session (a re-create after a relay restart may get another code, SLC-45).
 OTHER_CODE = "9HJ4M"
 OTHER_SESSION_ID = "sess_01K7Q9ZRB4MP2WX8"
 OTHER_TOKEN = "pt_Zq2Wx7Rb4Mp9Kt3Hv6Nc8Yd1Lf5Gs0Je2Ua7Qo4Xi"  # noqa: S105 — a made-up token of the defs pattern
@@ -97,7 +97,7 @@ class NodeProcess:
     """A helper script run by Node (fixed argv: ``node`` and repository files); its first stdout line is its address.
 
     One reader thread owns the script's stdout and queues its lines. :meth:`command` writes one line to the script and
-    returns its one-line answer (the relay stub's commands, SLC-39); :meth:`finish` closes its stdin, which makes the
+    returns its one-line answer (the relay stub's commands, SLC-46); :meth:`finish` closes its stdin, which makes the
     script print its summary and exit; a script that hangs is killed.
     """
 

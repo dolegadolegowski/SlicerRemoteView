@@ -12,7 +12,7 @@ of the session, the first snapshot included:
   hold), from each snapshot's ``begin`` until its ack, refusal or loss — marks made meanwhile flush once after it,
   never as a second ``begin`` (no supersede: a slow uplink must finish its upload, T2) — and while the connection is
   lost (``GRACE``/``RESUMING``);
-- **resume** (SLC-35, protocol §4.3, §6.3): a snapshot in flight at the drop gives :attr:`LiveEventKind.LOST`; the
+- **resume** (SLC-42, protocol §4.3, §6.3): a snapshot in flight at the drop gives :attr:`LiveEventKind.LOST`; the
   client's ``session.resumed`` says whether the relay holds it (then an ``ACKED`` follows: only its ack was lost) and
   whether a snapshot is owed — a clean resume owes nothing and the kept marks flush as updates, an owed one is a
   lost-connection re-sync (at once the first time). A reset owed at the drop whose snapshot has not begun, or made

@@ -1,4 +1,4 @@
-"""SLC-37: the panel resumes its session after a lost connection (docs/protocol.md §4.3, §8.4, §9.1, §9.3; FR-14,
+"""SLC-44: the panel resumes its session after a lost connection (docs/protocol.md §4.3, §8.4, §9.1, §9.3; FR-14,
 US-05; T1, T4, T7).
 
 The transport reconnects by itself (SLC-08). On each ``Connected`` while reconnecting the panel sends
@@ -43,7 +43,7 @@ from remoteview_core.transport import (
 from remoteview_protocol import envelope, schemas
 
 SECRETS = (CODE, TOKEN, SESSION_ID)
-#: SLC-38: a re-created session has its own ID and token, and maybe another code
+#: SLC-45: a re-created session has its own ID and token, and maybe another code
 ALL_SECRETS = (*SECRETS, OTHER_CODE, OTHER_SESSION_ID, OTHER_TOKEN)
 NETWORK = TransportError(ErrorKind.NETWORK, retryable=True)
 HEARTBEAT = TransportError(ErrorKind.HEARTBEAT, retryable=True)
@@ -170,12 +170,12 @@ def test_panel_resume_ignores_frames_of_the_old_connection(fake, clocks):
 
 
 def test_panel_resume_restart_says_the_relay_restarts(fake, clocks):
-    """§9.3: after a 4008 the relay keeps no session, so the code is not promised to stay (T4, SLC-38)."""
+    """§9.3: after a 4008 the relay keeps no session, so the code is not promised to stay (T4, SLC-45)."""
     ctl = controller(clocks)
     live(ctl)
     view = deliver(ctl, Disconnected(1, RESTART, 0.0))
     assert view.status == "The relay is restarting — reconnecting in 1 s."
-    # not "The code stays the same" (SLC-38): the relay may have freed it until the session is created again
+    # not "The code stays the same" (SLC-45): the relay may have freed it until the session is created again
     assert view.detail == f"{RESTART.guidance}\n{panel.RELAY_RESTARTED}" and view.code == CODE
 
 
@@ -265,7 +265,7 @@ def test_panel_resume_session_not_found_ends_the_session(fake, clocks, caplog, c
     live(ctl)
     deliver(ctl, Disconnected(1, NETWORK, 0.6), Connected(2))
     deliver(ctl, Received(2, relay_error("SESSION_NOT_FOUND", resume_id(2))))
-    assert [m["type"] for m in sent(2)] == ["session.resume"]  # no session.create either (SLC-38)
+    assert [m["type"] for m in sent(2)] == ["session.resume"]  # no session.create either (SLC-45)
     view = deliver(ctl, Disconnected(2, None, None, final_sent=False))
     assert (view.status, view.detail) == (panel.SESSION_ENDED, panel.SESSION_GONE_OFFLINE)
     assert leaks(caplog, capfd, *SECRETS) == []
@@ -609,7 +609,7 @@ def test_panel_resume_shutdown_while_reconnecting(fake, clocks, caplog, capfd):
     assert leaks(caplog, capfd, *SECRETS) == []
 
 
-# --------------------------------------------------------------------------- SLC-38: the relay restarted
+# --------------------------------------------------------------------------- SLC-45: the relay restarted
 
 
 def restarted(ctl: PanelController, *, connection: int = 2) -> dict:

@@ -337,7 +337,7 @@ def test_panel_live_observers_exist_only_while_live(fake, caplog, capfd, end):
 
 
 def test_panel_live_resume_keeps_the_live_updates_and_observers(fake, caplog, capfd):
-    """SLC-37: while reconnecting the marks wait (no flush, no tick); ``session.resumed`` brings back the same live
+    """SLC-44: while reconnecting the marks wait (no flush, no tick); ``session.resumed`` brings back the same live
     updates and observers (no second watcher, no second snapshot), and the held change goes out as an update."""
     caplog.set_level(logging.DEBUG)
     a = MrmlModel(A, name="Doe^John liver")
@@ -361,7 +361,7 @@ def test_panel_live_resume_keeps_the_live_updates_and_observers(fake, caplog, ca
     assert leaks(caplog, capfd, *NAMES, CODE, TOKEN) == []
 
 
-# --------------------------------------------------------------------------- SLC-38: the scene across a reconnect
+# --------------------------------------------------------------------------- SLC-45: the scene across a reconnect
 
 NETWORK = TransportError(ErrorKind.NETWORK, retryable=True)
 
@@ -852,7 +852,7 @@ def test_panel_live_a_close_that_fails_still_removes_the_observers(
 def test_panel_live_shutdown_stops_the_transport_even_if_the_close_raises(
     fake, monkeypatch, caplog, capfd, fails
 ):
-    """SLC-34 review (SLC-36): module cleanup leaves no transport, observer or pending flush behind, even when the
+    """SLC-34 review (SLC-43): module cleanup leaves no transport, observer or pending flush behind, even when the
     close or the transport's stop raises; the error still reaches ``cleanup()``, which logs its type only."""
     caplog.set_level(logging.DEBUG)
     a = MrmlModel(A, name="Doe^John liver")

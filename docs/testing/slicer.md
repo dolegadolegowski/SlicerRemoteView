@@ -267,7 +267,7 @@ Expected results:
 - Step 16, stop during the upload: the panel leaves "Sending the scene". The stop message waits behind the bytes already
   written (several MB at 1 Mbit/s), so after 2 s the connection is aborted and the panel says the stop message could
   not be sent and that anyone with the code can still see the last scene until the relay ends the session, after a
-  few minutes (SLC-37); the viewer shows the frozen scene as offline until the relay expires it. Quitting Slicer
+  few minutes (SLC-44); the viewer shows the frozen scene as offline until the relay expires it. Quitting Slicer
   behaves the same and Slicer exits within 3 s. Expected, not a defect (`docs/research/slicer-heartbeat.md`).
 - Throughout: no traceback in the Python console, no session code or token in the console or the application log.
 
@@ -675,7 +675,7 @@ Known gaps (not failures):
 |---|---|---|---|---|
 | | | | | |
 
-## §7 Resume and reconnect (SLC-37, SLC-38, SLC-39; FR-14, US-05, NFR-20, protocol §4.3, §6.3, §8.4, §9.1, §9.3; T1, T4)
+## §7 Resume and reconnect (SLC-44, SLC-45, SLC-46; FR-14, US-05, NFR-20, protocol §4.3, §6.3, §8.4, §9.1, §9.3; T1, T4)
 
 Preconditions: §2's setup, with its relays (a), (b) and (c); §6's helpers and two of its synthetic models shown in 3D
 (`spheres(2)`; never patient data in §7); a large scene for
@@ -771,7 +771,7 @@ Steps:
 
 Known gaps (not failures):
 - A relay that crashes without close 4008 and comes back without the session ends it (`SESSION_NOT_FOUND`, no
-  re-create; report `2026-10-28-slicer-1.md` item 4).
+  re-create; report `2026-10-28-slicer-2.md` item 4).
 - A fallback create refused by the relay (`CAPACITY`, `RATE_LIMITED`) ends the session; there is no retry loop.
 - On Windows a sleep of roughly 3 to 6.5 minutes (default grace) still resumes at the wake and ends with "The relay
   ended the session while RemoteView was offline."; a frame that reached Slicer before the sleep but is read only

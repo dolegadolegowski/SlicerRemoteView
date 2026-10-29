@@ -806,7 +806,7 @@ def test_live_grace_holds_marks_and_resume_resyncs_at_once(strict, in_flight, pa
     rig.client.state = paused  # set by hand (the real resume: test_live_resume_*)
     rig.live.observe()
     assert rig.live.running
-    # a lost snapshot is not an ack (SLC-35: it is reported once)
+    # a lost snapshot is not an ack (SLC-42: it is reported once)
     assert rig.kinds() == kinds + ([LiveEventKind.LOST] if in_flight else [])
     rig.scene.node(A)["color"] = (0.5, 0.1, 0.1)
     rig.live.mark(A, Change.APPEARANCE)
@@ -1094,7 +1094,7 @@ def test_live_repr_events_and_logs_of_a_full_run_hold_no_id_or_name(strict, capl
 def test_live_a_flush_in_a_paused_session_keeps_the_reset(strict):
     """A reset whose flush is dropped (the session was not live then) still clears the closed scene: the next flush
     exports it as a reset, and no update addresses a reused ID. Owed at the drop, the reset holds the client's updates
-    (SLC-35), so the optional scene.nodeAdded hint (§8.2) is not sent either."""
+    (SLC-42), so the optional scene.nodeAdded hint (§8.2) is not sent either."""
     rig = two(strict).started()
     rig.live.reset()
     rig.client.state = SessionState.GRACE  # lost, but observe() has not run yet
@@ -1718,7 +1718,7 @@ def test_live_request_resync_is_not_held_off_by_events_that_keep_coming(strict, 
     assert len(times) >= 4 and max(b - a for a, b in itertools.pairwise(times)) <= 60 + every * 0.05
 
 
-# ------------------------------------------------------------------------- SLC-35: the live scene across a resume
+# ------------------------------------------------------------------------- SLC-42: the live scene across a resume
 
 
 def drop(rig: Rig, close_code: int = 1006) -> None:
@@ -1988,7 +1988,7 @@ def test_live_a_reset_across_a_drop_is_not_a_lost_connection_resync(strict, when
 
 
 def test_live_resume_logs_and_reprs_hold_no_id_name_code_or_token(strict, caplog, capfd):
-    """T7 across the paths SLC-35 adds: a drop with a snapshot lost, a scene closed offline, owed and clean
+    """T7 across the paths SLC-42 adds: a drop with a snapshot lost, a scene closed offline, owed and clean
     resumes."""
     caplog.set_level(logging.DEBUG)
     rig = Rig(

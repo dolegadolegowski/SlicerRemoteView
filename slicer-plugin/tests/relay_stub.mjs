@@ -6,7 +6,7 @@
 // With --report-updates a line follows: the JSON {"violations": [...], "updates": [[type, sceneVersion, baseVersion],
 // ...]} of the stub's version checks (§6.2, §8.1, §8.4) and of every scene.update / scene.nodeRemoved /
 // scene.nodeAdded it received, in order. With --report-sessions a last line follows: the JSON {"sessions": [...],
-// "violations": [...]} with one entry per publisher handshake (SLC-39): {"first": "session.create" |
+// "violations": [...]} with one entry per publisher handshake (SLC-46): {"first": "session.create" |
 // "session.resume", "preferredCode": "none" | "previous" | "other" | null (a resume), "lastSceneVersion": n | null,
 // "frames": [...]}, its frames as ["scene.snapshot.begin", v], ["chunk", v, i], ["scene.snapshot.end", v],
 // [type, v, base] for updates, ["session.close"] or ["other"] — pings left out. "previous" means the code of the

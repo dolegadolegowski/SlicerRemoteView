@@ -1,4 +1,4 @@
-"""SLC-39: the resume end to end — the panel with the real ``RelayTransport`` and ``SceneWatcher`` against the relay
+"""SLC-46: the resume end to end — the panel with the real ``RelayTransport`` and ``SceneWatcher`` against the relay
 stub of tools/fake-slicer (``relay_stub.mjs``, its commands and its ``--report-sessions`` line; protocol §4.3, §6.2,
 §6.3, §8.4, §9.1, §9.3; FR-14, US-05; T1, T4, T7).
 

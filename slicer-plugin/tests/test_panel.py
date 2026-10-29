@@ -443,7 +443,7 @@ def test_panel_retry_text_never_says_zero_seconds(fake):
 
 
 def test_panel_drop_after_the_session_started_reconnects(fake):
-    """SLC-37: the session waits for a resume with the same code instead of ending (test_panel_resume.py)."""
+    """SLC-44: the session waits for a resume with the same code instead of ending (test_panel_resume.py)."""
     ctl = controller()
     live(ctl)
     view = deliver(ctl, Disconnected(1, TransportError(ErrorKind.NETWORK, retryable=True), 0.5))
@@ -530,7 +530,7 @@ def test_panel_shutdown_after_stop_only_waits(fake):
 
 
 def test_panel_shutdown_sends_no_fallback_close_without_a_connection(fake, monkeypatch):
-    """SLC-36: a plain ``session.close`` replaces a close that raised only on a socket the panel knows."""
+    """SLC-43: a plain ``session.close`` replaces a close that raised only on a socket the panel knows."""
     ctl = controller()
     ctl.start(URL)  # the transport has not connected yet
 
@@ -586,7 +586,7 @@ def test_panel_texts_are_plain_and_complete():
         assert "<" not in text and ">" not in text
         assert (text == "") == (reason == "USER_STOPPED")  # every other end is explained
     assert panel.viewers_text(0) == "Session running · no viewers yet."
-    # SLC-36: the reconnect texts (shown from SLC-37 on)
+    # SLC-43: the reconnect texts (shown from SLC-44 on)
     reconnect = [
         panel.RECONNECTING_IN,
         panel.RESTARTING_IN,
@@ -619,7 +619,7 @@ def test_panel_texts_are_plain_and_complete():
     ):
         assert re.search(r"anyone with the code (can )?still sees?\b", text, re.IGNORECASE)
         assert "a few minutes" in text
-    # SLC-37: a stop whose session.close was lost says so too
+    # SLC-44: a stop whose session.close was lost says so too
     assert panel.FINAL_NOT_SENT.endswith(panel.RELAY_HOLDS_SESSION)
     # a relay that keeps sessions longer than RemoteView waits: the same warning, with no duration
     longer = panel.RELAY_HOLDS_SESSION_LONGER
@@ -655,7 +655,7 @@ def test_panel_texts_are_plain_and_complete():
 
 
 def test_panel_view_link_needs_a_code():
-    """SLC-11 review: the link holds the code, so a view never carries one without the other (SLC-36)."""
+    """SLC-11 review: the link holds the code, so a view never carries one without the other (SLC-43)."""
     link = f"https://relay.example.org/j#{CODE}"
     assert PanelView("Live", code=CODE, link=link).link == link
     with pytest.raises(ValueError, match=r"^a join link needs its code$") as raised:

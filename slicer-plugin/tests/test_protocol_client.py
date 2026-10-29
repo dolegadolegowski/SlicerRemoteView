@@ -1039,7 +1039,7 @@ def test_protocol_client_known_platforms_match_the_schema():
     assert set(_defs()["platform"]["enum"]) == protocol_client.KNOWN_PLATFORMS
 
 
-# --------------------------------------------------------------------------- contract bounds (branch audit, SLC-36)
+# --------------------------------------------------------------------------- contract bounds (branch audit, SLC-43)
 # The Slicer runtime has no jsonschema: the client's own checks must accept exactly what the vendored schema allows,
 # so a bound widened in a protocol minor fails here instead of making the client drop valid relay messages.
 

@@ -1015,7 +1015,7 @@ class ProtocolClient:
         self.close_reason = reason
         self._publisher_token = None
         # an ended session's code must not stay on screen or be reused as preferredCode — the one exception is the
-        # §4.3 fallback after SESSION_NOT_FOUND, for which the caller keeps its own copy of the code (SLC-38: only
+        # §4.3 fallback after SESSION_NOT_FOUND, for which the caller keeps its own copy of the code (SLC-45: only
         # after a close 4008 in the same outage, inside the reconnect window, never after Stop; T1)
         self.code = None
         self.snapshot_in_flight = None

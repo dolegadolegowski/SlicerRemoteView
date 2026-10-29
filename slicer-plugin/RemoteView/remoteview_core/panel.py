@@ -13,7 +13,7 @@
   close reasons and error codes are mapped to texts, and an unknown code is shown only as its validated enum value.
   The adapter's labels are plain text (no rich text from anywhere).
 - The session code is shown only while the session runs and is never logged.
-- A connection lost after ``session.created`` is resumed (SLC-37, §4.3): the panel keeps the code and Stop while the
+- A connection lost after ``session.created`` is resumed (SLC-44, §4.3): the panel keeps the code and Stop while the
   transport reconnects by itself, each new connection starts with ``session.resume``, and ``session.resumed`` brings
   the session back to Live with the same live updates and observers. The reconnect window — the relay's grace (at most
   :data:`MAX_GRACE_S`) plus :data:`RECONNECT_SLACK_S` — runs from when the transport says the connection was lost
@@ -25,7 +25,7 @@
   session answers ``SESSION_NOT_FOUND``. A resume left unanswered for :data:`CREATE_TIMEOUT_S`, a relay that refuses
   it, or Stop while offline ends the session — except a relay that restarted (close 4008 in this outage, inside the
   window) and no longer knows the session: then the panel creates it again on the same socket, asking for the old code
-  (``preferredCode``, §4.3, §9.3), and the new session goes live afresh (SLC-38; versions from 1, §8.4; a different
+  (``preferredCode``, §4.3, §9.3), and the new session goes live afresh (SLC-45; versions from 1, §8.4; a different
   code is shown with a note until the session ends, T4). A connection lost before ``session.created`` is retried by
   the transport, which then sends a new ``session.create``; a relay that keeps the socket open but does not answer it
   within :data:`CREATE_TIMEOUT_S` ends the attempt.
@@ -38,7 +38,7 @@
   scene — with the reason and what happens next; a scene that cannot go out now (too large, refused, not prepared)
   leaves the session running (the code still works). A closed scene that cannot be cleared off the viewers ends the
   session (§7.3).
-- No automatic ``session.renew``: until ``release`` decides how renewal follows user activity (SLC-40), a
+- No automatic ``session.renew``: until ``release`` decides how renewal follows user activity (SLC-47), a
   session nobody joins ends after the relay's idle TTL (NFR-11, T1) instead of living for its 12 h maximum.
 """
 
@@ -74,7 +74,7 @@ SHUTDOWN_TIMEOUT_S = 3.0
 #: each ``session.resume``. The relay answers at once (§4.1, §4.3); the heartbeat alone would keep a relay that answers
 #: pings but not the request — and the panel — waiting for ever.
 CREATE_TIMEOUT_S = 15.0
-#: The reconnect window after a lost connection (SLC-37): the relay's grace (``ttl.graceS``, at most MAX_GRACE_S) plus
+#: The reconnect window after a lost connection (SLC-44): the relay's grace (``ttl.graceS``, at most MAX_GRACE_S) plus
 #: up to 60 s before the relay notices the drop (§9.1). Then the relay has ended the session, and resuming it later
 #: would publish to nobody (T1). A backward wall-clock step beyond WALL_JUMP_TOLERANCE_S (not an NTP correction) ends
 #: the window too.
@@ -108,7 +108,7 @@ PROTOCOL_VIOLATION = (
     "The relay sent data RemoteView does not expect, so the session was stopped. "
     "Please report this."
 )
-#: Reconnecting after a lost connection (SLC-37/SLC-38; protocol §4.3, §9.1). "A few minutes", never a number: the
+#: Reconnecting after a lost connection (SLC-44/SLC-45; protocol §4.3, §9.1). "A few minutes", never a number: the
 #: relay's grace plus up to 60 s before the relay notices the drop (§9.1 heartbeat). While the relay may keep the
 #: session, the texts say who can still see the scene, as the consent text does ("anyone who has the session code").
 RECONNECTING_IN = "Connection lost — reconnecting in {seconds} s."
@@ -190,13 +190,13 @@ class Phase(enum.Enum):
     IDLE = "idle"  # nothing runs; Start is enabled
     CONNECTING = "connecting"  # transport started, waiting for session.created
     LIVE = "live"  # session created: the code is shown
-    # the connection was lost: the code and Stop stay while the session waits for a resume (SLC-37)
+    # the connection was lost: the code and Stop stay while the session waits for a resume (SLC-44)
     RECONNECTING = "reconnecting"
     STOPPING = "stopping"  # waiting for the transport to end
 
 
 #: The phases that show the session code and its link: a session keeps its code while reconnecting (after a 4008
-#: restart the relay may have freed it until the session is created again: SLC-38 says so, T4).
+#: restart the relay may have freed it until the session is created again: SLC-45 says so, T4).
 _SHOWS_CODE = (Phase.LIVE, Phase.RECONNECTING)
 #: The phases in which a transport runs for a session that is not stopping: Stop is enabled, the extra-CA note shows.
 _RUNNING = (Phase.CONNECTING, Phase.LIVE, Phase.RECONNECTING)
@@ -660,7 +660,7 @@ class PanelController:
         """The transport retries: before the session exists a new ``session.create`` follows; after, a resume."""
         # CREATED/ACTIVE/RESUMING → GRACE (§9.1); a create left unanswered → CLOSED, sent again on the next connection
         client.transport_lost(event.close_code)
-        self._observe_live()  # the marks are held; a snapshot in flight is lost (§6.3, SLC-35)
+        self._observe_live()  # the marks are held; a snapshot in flight is lost (§6.3, SLC-42)
         self._connection, self._answer_deadline = None, None
         guidance = event.error.guidance if event.error is not None else ""
         if self.phase is Phase.CONNECTING:
@@ -687,14 +687,14 @@ class PanelController:
         self._guidance = guidance
         self._show_reconnecting()
 
-    # ------------------------------------------------------------------ reconnecting (SLC-37)
+    # ------------------------------------------------------------------ reconnecting (SLC-44)
 
     def _forget_outage(self) -> None:
         """No connection lost, or the session is back: no window, restart, re-create or resume flag, status or
         guidance, and no code kept for a re-create (T1)."""
         self._lost_at = self._lost_wall = self._handled_wall = self._window_s = self._grace_s = 0.0
         self._restart_seen = self._recreating = self._resume_sent = False
-        # the code of the session being reconnected, for a re-create (SLC-38); never kept past the outage (T1)
+        # the code of the session being reconnected, for a re-create (SLC-45); never kept past the outage (T1)
         self._preferred_code = ""
         self._reconnect_status = self._guidance = ""
 
@@ -760,7 +760,7 @@ class PanelController:
         preferred, recreated = self._preferred_code, self._recreating
         self._forget_outage()
         if not recreated:
-            self._observe_live()  # leaves the pause: an owed snapshot goes from the next tick or flush (SLC-35)
+            self._observe_live()  # leaves the pause: an owed snapshot goes from the next tick or flush (SLC-42)
             return
         # a new session after a relay restart: its own live updates, observers and first snapshot (§8.4)
         self._forget_scene()
