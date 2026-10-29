@@ -11,6 +11,7 @@ DATA_ITEMS = (
     "surface meshes of the models and segments shown in the 3D view",
     "segments as Slicer's 3D view shows them",
     "clipping is not applied",
+    "small islands are left out while Remove small islands is on",
     "no images or volumes",
     "their names",
     "MRML node IDs",

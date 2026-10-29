@@ -39,6 +39,7 @@ from support import (
     parent_widget,
     pump_while,
     reassemble,
+    specked,
     sphere,
     start_relay_stub,
 )
@@ -94,7 +95,13 @@ class Rig:
     """A panel whose ``watch`` factory builds (and records) the real ``SceneWatcher`` over ``scene``."""
 
     def __init__(
-        self, *models, transport_factory=FakeTransport, batch=False, scene_class=Scene, watch=None
+        self,
+        *models,
+        transport_factory=FakeTransport,
+        batch=False,
+        scene_class=Scene,
+        watch=None,
+        remove_islands=False,
     ):
         self.models = list(models)
         self.scene = scene_class(MrmlView("vtkMRMLViewNode1"), *models)
@@ -109,6 +116,7 @@ class Rig:
             scene=lambda: MrmlSceneApi(self.scene.by_class, FakeFolders()),
             flush_timer=self.timer,
             watch=watch or self.watch,
+            remove_islands=remove_islands,
         )
         self.timer.callback = self.ctl.flush_live  # what the adapter's timeout() connection does
 
@@ -442,6 +450,31 @@ def test_panel_live_repeated_failures_wait_for_a_change(fake):
     recolor(a, (0.0, 0.0, 1.0))
     rig.timer.advance(150)
     assert len(rig.begins()) == 4
+
+
+def test_panel_live_remove_small_islands_follows_the_switch(fake):
+    """SLC-54: switched on and off during a live session, the scene goes again without and with the specks;
+    switched while no session runs, the next Start uses it."""
+    rig = live_rig(MrmlModel(A, polydata=specked(32)))
+    assert [b["triangleCount"] for b in rig.begins()] == [2_016]
+    acked(rig, 1)
+    rig.ctl.set_remove_islands(True)
+    rig.pump()
+    assert acked(rig, 2).status == "Live · no viewers yet."
+    rig.ctl.set_remove_islands(False)
+    rig.pump()
+    assert [b["triangleCount"] for b in rig.begins()] == [2_016, 1_920, 2_016]
+    assert acked(rig, 3).status == "Live · no viewers yet."
+    rig.ctl.stop()
+    deliver(rig.ctl, Disconnected(1, None, None, final_sent=True))
+    rig.ctl.set_remove_islands(True)
+    rig.ctl.start(URL)
+    deliver(rig.ctl, Connected(1), Received(1, created()))
+    assert [b["triangleCount"] for b in rig.begins()] == [1_920]
+    restarted = Rig(MrmlModel(A, polydata=specked(32)), remove_islands=True)
+    restarted.ctl.start(URL)
+    deliver(restarted.ctl, Connected(1), Received(1, created()))
+    assert [b["triangleCount"] for b in restarted.begins()] == [1_920]
 
 
 def test_panel_live_an_acknowledged_empty_scene_is_not_live(fake):

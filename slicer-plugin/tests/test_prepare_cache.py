@@ -9,10 +9,8 @@ import time
 
 import numpy as np
 import pytest
-from support import FakeScene, live_client, manifest, reassemble, sphere
+from support import FakeScene, live_client, manifest, reassemble, specked, sphere
 from vtkmodules.vtkCommonTransforms import vtkTransform
-from vtkmodules.vtkFiltersCore import vtkAppendPolyData
-from vtkmodules.vtkFiltersSources import vtkSphereSource
 
 from remoteview_core import collect, decimate, snapshot
 from remoteview_core.meshcache import MeshCache, mesh_stamp
@@ -278,23 +276,6 @@ def test_prepare_cache_stamp_follows_the_mesh():
 
 
 # --------------------------------------------------------------------------- small islands (SLC-53 follow-up (e))
-
-
-def specked(resolution: int, specks: int = 6):
-    """``sphere(resolution)`` and ``specks`` spheres of 16 triangles beside it, as one mesh: small islands of a body
-    from ``sphere(32)`` (1,920 triangles, of which 1 % is 19.2) up."""
-    append = vtkAppendPolyData()
-    append.AddInputData(sphere(resolution))
-    for i in range(specks):
-        speck = vtkSphereSource()
-        speck.SetRadius(0.5)
-        speck.SetCenter(150.0 + 5.0 * i, 0.0, 0.0)
-        speck.SetThetaResolution(4)
-        speck.SetPhiResolution(4)
-        speck.Update()
-        append.AddInputData(speck.GetOutput())
-    append.Update()
-    return append.GetOutput()
 
 
 def specked_three() -> Scene:

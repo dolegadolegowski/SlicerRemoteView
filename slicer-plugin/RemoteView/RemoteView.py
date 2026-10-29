@@ -28,6 +28,9 @@ _log = logging.getLogger(__name__)
 #: values the transport accepted are stored — a refused address may hold credentials (§3.1).
 RELAY_URL_SETTING = "RemoteView/RelayURL"
 EXTRA_CA_SETTING = "RemoteView/ExtraCACertificate"
+#: *Remove small islands* (SLC-54): on unless the user turned it off (the owner's request). Saved at every toggle — a
+#: boolean holds no secret — and read with ``slicer.util.toBool``, which takes a stored ``"false"`` string too.
+REMOVE_ISLANDS_SETTING = "RemoteView/RemoveSmallIslands"
 #: NFR-30: the QR code in the panel is at least 240 × 240 px (``remoteview_core.links.MIN_QR_PIXELS``, repeated here
 #: so that nothing but ``qt`` and ``slicer`` is imported when the module loads).
 MIN_QR_PIXELS = 240
@@ -137,6 +140,11 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
         self.ui.extraCaPathLineEdit.currentPath = caFile
         # A remembered extra trust anchor is never applied out of sight (T5): show the section that holds it.
         self.ui.advancedCollapsibleButton.collapsed = not caFile
+        # toBool, settingsValue: https://github.com/Slicer/Slicer/blob/v5.12.4/Base/Python/slicer/util.py#L3634-L3670
+        self.ui.removeIslandsCheckBox.checked = slicer.util.settingsValue(
+            REMOVE_ISLANDS_SETTING, True, converter=slicer.util.toBool
+        )
+        self.ui.removeIslandsCheckBox.connect("toggled(bool)", self.onRemoveIslandsToggled)
         self.ui.startButton.connect("clicked(bool)", self.onStartClicked)
         self.ui.stopButton.connect("clicked(bool)", self.onStopClicked)
         self.ui.copyLinkButton.connect("clicked(bool)", self.onCopyLinkClicked)
@@ -185,6 +193,20 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
 
         self.ui.consentLabel.text = consent_text(url)
 
+    def onRemoveIslandsToggled(self, checked: bool) -> None:
+        """*Remove small islands* (SLC-54): saved at once; a live session sends the scene again, otherwise the next
+        session uses it. A Qt slot: a failure is logged by its type only (T7), and one of the two does not stop the
+        other."""
+        try:
+            qt.QSettings().setValue(REMOVE_ISLANDS_SETTING, bool(checked))
+        except Exception as exc:  # noqa: BLE001 — a Qt slot (T7)
+            _log.error("RemoteView: Remove small islands not saved (%s)", type(exc).__name__)
+        try:
+            if self.controller is not None:
+                self.controller.set_remove_islands(bool(checked))
+        except Exception as exc:  # noqa: BLE001 — a Qt slot (T7)
+            _log.error("RemoteView: Remove small islands not applied (%s)", type(exc).__name__)
+
     def onStartClicked(self, _checked: bool = False) -> None:
         # Imported only now: nothing of the session machinery is loaded before the user starts (FR-02).
         from remoteview_core.panel import PanelController  # noqa: PLC0415
@@ -197,6 +219,7 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
                 ensure_deps=self.ensureDependencies,
                 flush_timer=self.flushTimer,
                 watch=self.makeWatcher,
+                remove_islands=bool(self.ui.removeIslandsCheckBox.checked),
             )
         url = self.ui.relayUrlLineEdit.text.strip()
         caFile = self.ui.extraCaPathLineEdit.currentPath.strip()

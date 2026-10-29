@@ -268,7 +268,8 @@ class PanelController:
     snapshots are made of. ``watch(live)`` returns the :class:`Watcher` that marks the scene's changes on ``live``;
     ``flush_timer`` is the single-shot timer whose timeout calls :meth:`flush_live`. ``watch`` needs both (marks that
     are never flushed would freeze the viewers silently). ``prepare_slice_s`` is how long one pump tick may prepare
-    the scene (tests pass 0: one step per tick).
+    the scene (tests pass 0: one step per tick). ``remove_islands`` is *Remove small islands* (SLC-54) for the
+    sessions it starts; :meth:`set_remove_islands` changes it, for the live session too.
     """
 
     def __init__(  # noqa: PLR0913 — keyword-only collaborators, defaults for the application
@@ -284,6 +285,7 @@ class PanelController:
         flush_timer: Timer | None = None,
         watch: Callable[[LiveUpdates], Watcher] | None = None,
         prepare_slice_s: float = PREPARE_SLICE_S,
+        remove_islands: bool = False,
     ) -> None:
         if watch is not None and (scene is None or flush_timer is None):
             raise ValueError("watch needs a scene factory and a flush_timer")
@@ -297,6 +299,7 @@ class PanelController:
         self._flush_timer: Timer = flush_timer if flush_timer is not None else _NoTimer()
         self._watch = watch
         self._prepare_slice_s = prepare_slice_s
+        self._remove_islands = bool(remove_islands)
         self._live: LiveUpdates | None = None
         self._watcher: Watcher | None = None
         # ensure_deps blocks inside Qt's event loop (dialogs, pip's progress window): a second click must not start over
@@ -327,6 +330,13 @@ class PanelController:
     def observer_count(self) -> int:
         """The observers the current watcher has added (its own bookkeeping; 0 without one)."""
         return self._watcher.observer_count if self._watcher is not None else 0
+
+    def set_remove_islands(self, on: bool) -> None:
+        """*Remove small islands* changed (SLC-54): the live session sends the scene again; without one, the next
+        session starts with it."""
+        self._remove_islands = bool(on)
+        if self._live is not None:
+            self._live.set_remove_islands(self._remove_islands)
 
     @property
     def active(self) -> bool:
@@ -565,6 +575,7 @@ class PanelController:
                 # a resume (SLC-17) keeps it because the panel, not the controller, owns it
                 ids=SceneIds(),
                 slice_s=self._prepare_slice_s,
+                remove_islands=self._remove_islands,
             )
             if self._watch is not None:
                 watching = True

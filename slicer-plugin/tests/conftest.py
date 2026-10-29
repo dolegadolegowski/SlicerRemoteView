@@ -328,6 +328,15 @@ def _make_stub_modules() -> dict[str, types.ModuleType]:
         return converter(settings.value(key)) if settings.contains(key) else default
 
     util.settingsValue = settings_value
+
+    def to_bool(value):
+        """``slicer.util.toBool`` as Slicer 5.12.4 has it (Base/Python/slicer/util.py L3634-L3659)."""
+        try:
+            return bool(int(value))
+        except (ValueError, TypeError):
+            return value.lower() in ["true"] if isinstance(value, str) else bool(value)
+
+    util.toBool = to_bool
     # an empty scene (MRML stays manual, docs/testing/slicer.md); tests replace these to add nodes
     util.getNodesByClass = lambda _class_name: []
     util.mainWindow = lambda: None  # no main window in the tests

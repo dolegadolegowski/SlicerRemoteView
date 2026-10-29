@@ -19,6 +19,7 @@ from support import (
     manifest,
     reassemble,
     root_extras,
+    specked,
     sphere,
 )
 from vtkmodules.vtkCommonTransforms import vtkTransform
@@ -82,6 +83,7 @@ class Rig:
         *,
         export=None,
         anonymize=False,
+        remove_islands=False,
         ids=None,
         slice_s=None,
         **limits,
@@ -94,9 +96,11 @@ class Rig:
         self.ended: list[str] = []
         self.events: list = []
         self.exports = 0  # export attempts (a too-large one sends nothing)
+        self.islands: list[bool] = []  # the island rule of every preparation, in order (SLC-54)
 
         def counted(*args, **options):
             self.exports += 1
+            self.islands.append(options["remove_islands"])
             if export is None:
                 return (yield from prepare_snapshot(*args, **options))
             options.pop("progress", None)
@@ -119,6 +123,7 @@ class Rig:
             on_event=self._on_event,
             prepare=counted,
             anonymize_names=anonymize,
+            remove_islands=remove_islands,
             ids=ids,
             slice_s=slice_s,
         )
@@ -923,6 +928,53 @@ def test_live_hide_names_switch_reexports_when_allowed(strict):
     assert rig.begins() == []
 
 
+def test_live_remove_small_islands_switch_reexports_when_allowed(strict):
+    """SLC-54, like *Hide node names*: the switch waits for the snapshot in flight, then the scene goes again with
+    the specks left out (the body's 1,920 triangles of 2,016); a wait the relay asked for is honoured, the too-large
+    gate allows one attempt and an unchanged value does nothing."""
+    rig = Rig(strict, LiveScene({"id": A, "mesh": specked(32)}))
+    rig.live.start()
+    assert [b["triangleCount"] for b in rig.begins()] == [2_016]
+    rig.live.set_remove_islands(True)
+    rig.wait(2)
+    assert rig.take() == []  # in flight
+    rig.ack()
+    rig.live.tick()
+    begin, glb, _ = reassemble(list(rig.sent))
+    assert begin["triangleCount"] == 1_920 and [n["triangleCount"] for n in manifest(glb)] == [
+        1_920
+    ]
+    rig.take()
+    rig.ack()
+    # a wait the relay asked for is honoured
+    failed = refuse_next_snapshot(rig, "CAPACITY", retryAfterS=30)
+    rig.live.set_remove_islands(False)
+    first_begin_at(rig, failed + 30)
+    assert rig.islands[-1] is False  # the scene with its islands again
+    rig.ack()
+    # under the too-large gate: one attempt
+    refuse_next_snapshot(rig, "PAYLOAD_TOO_LARGE")
+    rig.live.set_remove_islands(True)
+    rig.live.tick()
+    assert len(rig.begins()) == 1 and rig.islands[-1] is True
+    prepared = len(rig.islands)
+    rig.live.set_remove_islands(True)  # unchanged: nothing
+    rig.ack()
+    rig.wait(2)
+    assert rig.begins() == [] and len(rig.islands) == prepared
+
+
+def test_live_every_preparation_gets_the_island_rule_the_empty_one_of_a_reset_too(strict):
+    """``_build`` (the empty snapshot that clears a closed scene off the viewers, SLC-51) gets the rule like
+    ``_export``."""
+    rig = started_in_steps(stepwise(strict, {"id": A}, {"id": B}, remove_islands=True))
+    closed_and_replaced(rig)
+    rig.live.reset()
+    rig.advance(750)
+    assert after_a_reset(rig) == [(2, 0), (3, 1)]
+    assert len(rig.islands) >= 4 and set(rig.islands) == {True}
+
+
 SEG = "vtkMRMLSegmentationNode1"
 
 
@@ -1031,6 +1083,7 @@ def test_live_stopped_controller_ignores_everything(strict):
         rig.live.flush,
         rig.live.request_snapshot,
         lambda: rig.live.set_anonymize_names(True),
+        lambda: rig.live.set_remove_islands(True),
     ):
         call()
     rig.wait(2)
@@ -2305,6 +2358,19 @@ def test_live_hide_node_names_while_preparing_starts_again_with_it(strict):
     to_the_end(rig)
     _, glb, _ = reassemble(list(rig.sent))
     assert root_extras(glb)["anonymizedNames"] is True and b"Doe" not in glb
+
+
+def test_live_remove_small_islands_while_preparing_starts_again_with_it(strict):
+    """SLC-54: the switch abandons a preparation made with the other rule; the next one leaves the specks out."""
+    rig = stepwise(strict, {"id": A, "mesh": specked(32)})
+    rig.live.start()
+    rig.live.tick()
+    rig.live.set_remove_islands(True)
+    assert rig.live.preparing is None and rig.sent == []
+    rig.live.tick()
+    to_the_end(rig)
+    assert [b["triangleCount"] for b in rig.begins()] == [1_920]
+    assert rig.islands == [False, True]
 
 
 def test_live_a_resync_while_preparing_lets_it_finish_and_follows_it(strict):

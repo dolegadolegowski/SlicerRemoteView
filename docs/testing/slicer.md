@@ -714,7 +714,8 @@ Steps:
 Expected results:
 
 - Step 1: the text lists what *Start session* sends (the complete surface meshes of the models shown in the 3D view —
-  clipping is not applied — no images or volumes, names and MRML node IDs, colours, opacity, visibility, position, the
+  clipping is not applied; small islands are left out while *Remove small islands* is on (SLC-54); no images or
+  volumes, names and MRML node IDs, colours, opacity, visibility, position, the
   Slicer/RemoteView/OS versions) and who can see it. It names "the relay whose address you enter above" for the empty
   field and "the relay at relay.example.org" for both `wss://` addresses (never `user` or `secret`); for
   `ws://127.0.0.1:8787/ws` it names "the relay at 127.0.0.1" and ends with "A ws:// address is not encrypted; Start
@@ -1037,7 +1038,7 @@ Known gaps (not failures):
 |---|---|---|---|---|
 | | | | | |
 
-## §14 Decimation to the device profile (SLC-14, SLC-41, SLC-53; FR-10, NFR-03, NFR-04, protocol §7.5)
+## §14 Decimation to the device profile (SLC-14, SLC-41, SLC-53, SLC-54; FR-10, NFR-03, NFR-04, protocol §7.5)
 
 Preconditions: §2's setup with relay (b) or (c) and a viewer joined. The panel uses the `mobile` profile (500k
 triangles in all, 100k per model; the profile selector is SLC-18). In a new scene run in the Python console
@@ -1131,8 +1132,7 @@ Expected results:
 Steps (small islands, SLC-53):
 
 Preconditions: the scene of steps 3-5; restart Slicer first, so that the module is loaded fresh and `ru_maxrss` counts
-from this run. *Remove small islands* has no panel option before SLC-54, so a session started now still sends every
-island: these steps check the core in the console only.
+from this run. Steps 6-7 check the core in the console; the panel's checkbox (SLC-54) follows in steps 8-12.
 
 6. In the Python console, time the island step on its own, then the fit with the islands left out:
 
@@ -1167,7 +1167,60 @@ Expected results:
   the snippet's own `island_mask` call, one from the call inside `fit_to_budget`), counts only — no node name, ID or
   coordinate. Whether the Python console shows these INFO lines too depends on its log level: `[TODO verify]` for
   5.12.4.
-- Throughout: no traceback in the Python console. The phone check (fewer specks) comes with SLC-54's checkbox.
+- Throughout: no traceback in the Python console.
+
+Steps (the *Remove small islands* checkbox, SLC-54):
+
+Preconditions: the scene of steps 3-5, §15's stall meter pasted into the Python console, and a viewer on a phone;
+before step 8, forget any stored choice in the Python console with
+`qt.QSettings().remove("RemoteView/RemoveSmallIslands")`, then restart Slicer and load the scene again.
+
+8. Open *RemoteView*: read the checkbox under the consent statement and its tooltip. Start a session and look at the
+   segmentation on the phone; *Stop session*, uncheck *Remove small islands*, start again and look again.
+9. During the session run `longest()`, check the box again and watch the panel's status and the phone; when it says
+   "Live", run `longest()` again. Then uncheck the box and watch the phone.
+10. Restart Slicer and open *RemoteView*.
+11. In the new, empty scene, make in the Python console a model of 8 small spheres, and a model of a large sphere with
+    a 1 mm sphere far from it:
+
+    ```python
+    import vtk
+    def ball(center, radius, n=16):
+        source = vtk.vtkSphereSource()
+        source.SetCenter(*center)
+        source.SetRadius(radius)
+        source.SetThetaResolution(n)
+        source.SetPhiResolution(n)
+        source.Update()
+        return source.GetOutput()
+    append = vtk.vtkAppendPolyData()
+    for i in range(8):
+        append.AddInputData(ball((0, 200 + 10 * i, 0), 2))
+    append.Update()
+    slicer.modules.models.logic().AddModel(append.GetOutput()).SetName("Eight spheres")
+    joined = vtk.vtkAppendPolyData()
+    joined.AddInputData(ball((0, 0, 0), 40, 448))  # 399,616 triangles
+    joined.AddInputData(ball((0, 0, 300), 1))  # 448 triangles, under 1,196 and under 1 % of the large sphere's
+    joined.Update()
+    slicer.modules.models.logic().AddModel(joined.GetOutput()).SetName("Big with a speck")
+    ```
+
+12. With the box checked, start a session and look for both models on the phone.
+
+Expected results:
+
+- Step 8: the box reads "Remove small islands (islands below the minimum size are not sent)" and is checked; the
+  tooltip names 1,196 triangles, 1% of the largest piece and that the largest piece is always sent. With the box
+  checked the phone shows fewer specks around the segmentation than with it unchecked, and Slicer's *Error Log*
+  has an `Islands: …` line (counts only) for the first session and none for the second.
+- Step 9: a toggle empties the cache of the session's meshes, so the status shows "Preparing the scene" (with the
+  progress window after 1 s on a large scene), then "Updating the scene", then "Live"; the specks leave the phone, and
+  come back once the box is unchecked. Each toggle costs one snapshot that collects and fits every node again, in
+  steps: on the reporter's scene the second `longest()` prints at most the quadric's step (about 1.9 s; the island
+  step takes about 1 s).
+- Step 10: the box is as it was left in step 9.
+- Step 12: all eight spheres of *Eight spheres* are on the phone (equal pieces are kept); of *Big with a speck* the
+  large sphere is, complete, and the 1 mm sphere is not.
 
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|

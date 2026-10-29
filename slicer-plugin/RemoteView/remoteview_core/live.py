@@ -36,7 +36,8 @@ of the session, the first snapshot included:
   or local failures without an ack an attempt also waits for a flush, so a refusal that repeats costs at most one
   upload per change (a lost connection neither counts nor closes it). Updates stay held while a snapshot is owed
   (``ProtocolClient.require_snapshot``);
-- *Hide node names* and the device profile have no MRML event: :meth:`~LiveUpdates.set_anonymize_names` and
+- *Hide node names*, *Remove small islands* and the device profile have no MRML event:
+  :meth:`~LiveUpdates.set_anonymize_names`, :meth:`~LiveUpdates.set_remove_islands` (SLC-54) and
   :meth:`~LiveUpdates.request_snapshot` (SLC-18) ask for a snapshot;
 - **preparation in steps** (SLC-51, ``docs/research/slicer-prepare.md``): an export is prepared by SLC-28's
   ``prepare_snapshot`` with the session's :class:`~remoteview_core.meshcache.MeshCache` (SLC-50), a slice of
@@ -193,6 +194,7 @@ class LiveUpdates:
         slicer_version: str,
         end_session: Callable[[str], object],
         anonymize_names: bool = False,
+        remove_islands: bool = False,
         on_event: Callable[[LiveEvent], object] = lambda event: None,
         prepare: Callable[..., Steps[Snapshot]] = prepare_snapshot,
         ids: SceneIds | None = None,
@@ -207,6 +209,7 @@ class LiveUpdates:
         self._slicer_version = slicer_version
         self._end_session = end_session
         self._anonymize = bool(anonymize_names)
+        self._remove_islands = bool(remove_islands)  # every export's island rule (SLC-53, SLC-54)
         self._on_event = on_event
         self._prepare_fn = prepare
         self._slice_s = slice_s
@@ -498,9 +501,16 @@ class LiveUpdates:
         self._anonymize = bool(on)
         self.request_snapshot()
 
+    def set_remove_islands(self, on: bool) -> None:
+        """*Remove small islands* changed (SLC-54): the viewers need the scene with (or without) the small islands."""
+        if bool(on) == self._remove_islands:
+            return
+        self._remove_islands = bool(on)
+        self.request_snapshot()
+
     def request_snapshot(self) -> None:
-        """Send the scene again (a new device profile, *Hide node names*): lifts the too-large and flush gates, not a
-        wait the relay asked for."""
+        """Send the scene again (a new device profile, *Hide node names*, *Remove small islands*): lifts the too-large
+        and flush gates, not a wait the relay asked for."""
         if not self._running:
             return
         self._abandon()  # prepared with the old setting
@@ -645,6 +655,7 @@ class LiveUpdates:
                 ids=self._ids,
                 cache=self._cache,
                 progress=progress,
+                remove_islands=self._remove_islands,
             )
         except Exception as exc:  # noqa: BLE001 — the scene cannot be read (T7: type only)
             self._not_prepared(exc, reset)
@@ -738,6 +749,7 @@ class LiveUpdates:
                 anonymize_names=self._anonymize,
                 announce=announce,
                 ids=self._ids,
+                remove_islands=self._remove_islands,
             )
         )
 

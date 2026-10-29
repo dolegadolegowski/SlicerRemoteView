@@ -45,8 +45,9 @@ def consent_text(url: str) -> str:
     transport = UNENCRYPTED if url.strip().startswith("ws://") else ENCRYPTED
     return (
         f"When you click Start session, RemoteView sends to {relay}: the complete surface meshes of the models "
-        "and segments shown in the 3D view (segments as Slicer's 3D view shows them — clipping is not applied; no "
-        "images or volumes), their names, MRML node IDs and segment IDs, their colours, opacity, visibility and "
+        "and segments shown in the 3D view (segments as Slicer's 3D view shows them — clipping is not applied; small "
+        "islands are left out while Remove small islands is on; no images or volumes), their names, MRML node IDs "
+        "and segment IDs, their colours, opacity, visibility and "
         "position, and the Slicer, RemoteView and operating-system versions. While the session runs, RemoteView also "
         "sends every change to them (models and segments shown, added or renamed later, and any scene you open or "
         "load) until you click Stop session. Hiding, deleting or renaming a model or segment does not take back what "
