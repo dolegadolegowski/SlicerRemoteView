@@ -1037,7 +1037,7 @@ Known gaps (not failures):
 |---|---|---|---|---|
 | | | | | |
 
-## §14 Decimation to the device profile (SLC-14, SLC-41; FR-10, NFR-03, NFR-04, protocol §7.5)
+## §14 Decimation to the device profile (SLC-14, SLC-41, SLC-53; FR-10, NFR-03, NFR-04, protocol §7.5)
 
 Preconditions: §2's setup with relay (b) or (c) and a viewer joined. The panel uses the `mobile` profile (500k
 triangles in all, 100k per model; the profile selector is SLC-18). In a new scene run in the Python console
@@ -1127,6 +1127,47 @@ Expected results:
   speckle pattern. Expected at 100k triangles: the fine grain is smoothed away, and the thinnest perforated walls show
   a few see-through specks.
 - Throughout: no warning or traceback in the Python console (step 3 prints its one line).
+
+Steps (small islands, SLC-53):
+
+Preconditions: the scene of steps 3-5; restart Slicer first, so that the module is loaded fresh and `ru_maxrss` counts
+from this run. *Remove small islands* has no panel option before SLC-54, so a session started now still sends every
+island: these steps check the core in the console only.
+
+6. In the Python console, time the island step on its own, then the fit with the islands left out:
+
+   ```python
+   import resource, time
+   from remoteview_core import collect, decimate, mrml_scene
+   scene = mrml_scene.MrmlSceneApi(slicer.util.getNodesByClass, slicer.vtkMRMLFolderDisplayNode)
+   collected = collect.collect_scene(scene, anonymize_names=False)
+   start = time.perf_counter()
+   masks = [decimate.island_mask(e) for e in collected.entities]
+   middle = time.perf_counter()
+   fitted = decimate.fit_to_budget(collected.entities, decimate.PROFILES["mobile"], remove_islands=True)
+   end = time.perf_counter()
+   left_out = sum(int(m.sum()) for m in masks if m is not None)
+   total = sum(e.triangle_count for e in collected.entities)
+   print(f"islands {middle - start:.1f} s, {left_out} of {total} triangles left out;",
+         f"fit {end - middle:.1f} s, {fitted.triangle_count} triangles, cleaned {len(fitted.cleaned)},",
+         f"reduced {len(fitted.reduced)}, unreduced {len(fitted.unreduced)},",
+         f"peak {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20:.0f} MiB")  # macOS: bytes
+   ```
+
+7. Open *View → Error Log* and look for the lines that start with `Islands:`.
+
+Expected results:
+
+- Step 6, on the reporter's scene: the island step about 1 s under Rosetta (natively 0.6 s); 661,624 of 16,116,404
+  triangles left out; the fit with the islands left out about 7 s (it includes the island step, partly paid back by a
+  faster `components`; step 3's fit measured 6.6-6.7 s), at most 100,000 triangles, `cleaned 1`, `reduced 1`,
+  `unreduced 0`; the peak not above step 3's (about 12,500 MiB; 12.2 GiB measured for SLC-41). Another scene gives
+  other counts, at about the same speed per triangle.
+- Step 7: two lines `Islands: 14453 small islands (661624 of 16116404 triangles) are left out of a node` (one from
+  the snippet's own `island_mask` call, one from the call inside `fit_to_budget`), counts only — no node name, ID or
+  coordinate. Whether the Python console shows these INFO lines too depends on its log level: `[TODO verify]` for
+  5.12.4.
+- Throughout: no traceback in the Python console. The phone check (fewer specks) comes with SLC-54's checkbox.
 
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|

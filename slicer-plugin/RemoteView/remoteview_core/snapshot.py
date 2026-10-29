@@ -227,10 +227,10 @@ def _fit_steps(
 ) -> Steps[tuple[FitResult, tuple[SkippedNode, ...]]]:
     """``decimate.fit_steps`` with the cache (SLC-50): the shares come from the triangle counts collect gave (a
     cached node's too); a cached node keeps its entry's result when that fits its share; every other node goes through
-    ``decimate.fit_node_steps`` — a cached one that was decimated is collected again first (its entry is the mesh fitted
-    to another share; any other entry holds the collected mesh) — and what it gives is stored. Also returns the skipped
-    nodes: a mesh collected again may have become one to leave out since the node was listed, and the entities are
-    then named again, as a fresh collection would name them."""
+    ``decimate.fit_entity_steps`` — a cached one that was decimated is collected again first (its entry is the mesh
+    fitted to another share; any other entry holds the collected mesh) — and what it gives is stored. Also returns the
+    skipped nodes: a mesh collected again may have become one to leave out since the node was listed, and the entities
+    are then named again, as a fresh collection would name them."""
     targets = decimate.allocate([source.count for source in collected.sources], budget)
     fitted: list[Entity] = []
     kept: list[Source] = []
@@ -251,7 +251,8 @@ def _fit_steps(
                     progress.done += 1
                     continue
                 entity, count = again, again.triangle_count
-            result, smaller, whole = yield from decimate.fit_node_steps(entity, target)
+            result, decimated = yield from decimate.fit_entity_steps(entity, None, target)
+            smaller, whole = decimated is True, decimated is False
             if source.stamp is not None:
                 geometry = (result.positions, result.normals, result.indices)
                 entry = CachedMesh(source.stamp, count, target, *geometry, smaller, whole)
