@@ -26,11 +26,17 @@ test.describe("code entry", () => {
     expect(scrolls).toEqual({ x: false, y: false });
   });
 
-  test("typing a code enables Join; the code never appears in the URL or any request", async ({
+  test("Join opens the socket without the code in any URL and reports a failed connection", async ({
     page,
   }) => {
     const requested: string[] = [];
     page.on("request", (request) => requested.push(request.url()));
+    const sockets: { url: string; frames: string[] }[] = [];
+    page.on("websocket", (ws) => {
+      const socket = { url: ws.url(), frames: [] as string[] };
+      sockets.push(socket);
+      ws.on("framesent", (frame) => socket.frames.push(String(frame.payload)));
+    });
 
     await page.goto("/");
     await cells(page).first().click();
@@ -40,8 +46,17 @@ test.describe("code entry", () => {
     await expect(join).toBeEnabled();
 
     await join.click();
-    await expect(join).toBeDisabled(); // busy state: no connection layer yet
+    // `vite preview` has no relay behind /ws, so the socket fails; the viewer must say so and become usable again.
+    await expect(page.locator(".code-entry__message")).toBeVisible();
+    await expect(join).toBeEnabled();
 
+    // Join is refused up front where WebGL 2 is missing (e.g. headless WebKit on Linux): no socket at all then.
+    const webgl2 = await page.evaluate(
+      () => !!document.createElement("canvas").getContext("webgl2"),
+    );
+    expect(sockets).toHaveLength(webgl2 ? 1 : 0);
+    if (!webgl2) await expect(page.locator(".code-entry__message")).toContainText("3D");
+    if (webgl2) expect(sockets[0]!.url).toMatch(/^ws:\/\/127\.0\.0\.1:\d+\/ws$/);
     expect(page.url()).not.toMatch(/7KQ4X/i);
     expect(new URL(page.url()).search).toBe("");
     expect(new URL(page.url()).hash).toBe("");

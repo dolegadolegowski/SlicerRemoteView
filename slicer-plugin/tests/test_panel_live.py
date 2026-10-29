@@ -26,18 +26,22 @@ from support import (
     TOKEN,
     URL,
     FakeFolders,
+    FakeSegment,
     FakeTimer,
     FakeTransport,
     MrmlModel,
+    MrmlSegmentation,
     MrmlView,
     ack,
     created,
     deliver,
     leaks,
     live_client,
+    manifest,
     needs_relay_stub,
     parent_widget,
     pump_while,
+    reassemble,
     relay_error,
     resumed,
     sphere,
@@ -78,6 +82,17 @@ MODEL_EVENTS = (
     EVENTS.transform_modified,
     EVENTS.modified,
 )
+SEGMENTATION_EVENTS = (
+    EVENTS.display_modified,
+    EVENTS.transform_modified,
+    EVENTS.modified,
+    EVENTS.segment_added,
+    EVENTS.segment_removed,
+    EVENTS.segment_modified,
+    EVENTS.representation_modified,
+    EVENTS.representation_names_modified,
+)
+SEG = "vtkMRMLSegmentationNode1"
 
 
 class Rig:
@@ -130,11 +145,30 @@ class Rig:
         ]
 
     def observers(self) -> int:
-        """VTK observers on the scene (5 events) and on every model ever in it (4 events each)."""
+        """VTK observers on the scene (5 events) and on every model (4 events each) or segmentation (8) ever in
+        it."""
         count = sum(bool(self.scene.HasObserver(event)) for event in SCENE_EVENTS)
-        for model in self.models:
-            count += sum(bool(model.HasObserver(event)) for event in MODEL_EVENTS)
+        for node in self.models:
+            events = SEGMENTATION_EVENTS if isinstance(node, MrmlSegmentation) else MODEL_EVENTS
+            count += sum(bool(node.HasObserver(event)) for event in events)
         return count
+
+    def glb(self, index: int = -1) -> bytes:
+        """The GLB of the ``index``-th snapshot the panel sent (frames after its ``begin`` up to its ``end``)."""
+        frames = self.sent()
+        starts = [
+            i
+            for i, m in enumerate(frames)
+            if isinstance(m, dict) and m["type"] == "scene.snapshot.begin"
+        ]
+        start = starts[index]
+        end = next(
+            i
+            for i in range(start, len(frames))
+            if isinstance(frames[i], dict) and frames[i]["type"] == "scene.snapshot.end"
+        )
+        _, glb, _ = reassemble(frames[start : end + 1])
+        return glb
 
     def pump(self, ms: float = 0):
         self.timer.advance(ms)
@@ -1137,3 +1171,314 @@ def test_panel_live_adapter_reload_during_a_session(import_remote_view, slicer_s
     again, _ = start()  # the reloaded panel's Start works
     assert _observed(scene, a) and again.controller.observer_count == 5 + 4
     again.cleanup()
+
+
+@pytest.mark.usefixtures("fake", "packages_installed")
+def test_panel_live_adapter_follows_a_segmentation(
+    import_remote_view, slicer_stubs, monkeypatch, caplog, capfd
+):
+    """SLC-37: ``RemoteView.py``'s watcher observes a segmentation node through the five ``slicer.vtkSegmentation.*``
+    ids it passes — a per-segment colour change (``SegmentModified`` with the segment ID) is one ``scene.update``
+    addressing that segment, and Stop leaves no observer on the scene or the node (T7 checked on the log)."""
+    caplog.set_level(logging.DEBUG)
+    seg = MrmlSegmentation(
+        SEG,
+        segments=[
+            FakeSegment("Segment_1", name="Doe^John liver", polydata=sphere(8)),
+            FakeSegment("Segment_2", name="Doe^John spleen", polydata=sphere(8)),
+        ],
+    )
+    scene, start = _adapter(import_remote_view, slicer_stubs, monkeypatch, seg)
+    widget, transport = start()
+    code = widget.controller.view.code
+    assert widget.controller.observer_count == 5 + 8
+    assert all(seg.HasObserver(e) for e in SEGMENTATION_EVENTS)
+    [begin] = [
+        m for _, m in transport.sent if isinstance(m, dict) and m["type"] == "scene.snapshot.begin"
+    ]
+    assert begin["nodeCount"] == 2
+    transport.events.put(Received(1, ack(1)))
+    widget.onPump()
+    assert widget.ui.statusLabel.text == "Live · no viewers yet."
+    seg.displays[0].per_segment["Segment_1"] = {"override_color": (0.0, 0.0, 1.0)}
+    seg.fire("SegmentModified", "Segment_1")
+    # an appearance change: the fast lane, 150 ms after the mark
+    assert widget.flushTimer.active and 0 < widget.flushTimer.starts[-1] <= 150
+    widget.flushTimer.fire()
+    updates = [m for _, m in transport.sent if isinstance(m, dict) and m["type"] == "scene.update"]
+    assert len(updates) == 1
+    assert updates[0]["changes"] == [{"nodeId": f"{SEG}/Segment_1", "color": [0.0, 0.0, 1.0]}]
+    widget.onStopClicked()
+    assert widget.controller.observer_count == 0
+    assert not any(seg.HasObserver(e) for e in SEGMENTATION_EVENTS)
+    assert not any(scene.HasObserver(e) for e in SCENE_EVENTS)
+    assert not widget.flushTimer.active
+    widget.cleanup()
+    assert leaks(caplog, capfd, *NAMES, "Segment_1", "Segment_2", SEG, code, TOKEN) == []
+
+
+# --------------------------------------------------------------------------- SLC-36: segments and aliases end to end
+
+
+def _updates(rig: Rig) -> list[dict]:
+    return [m for m in rig.sent() if isinstance(m, dict) and m["type"] == "scene.update"]
+
+
+def test_panel_live_segments_and_a_scripted_model_follow_slicer(fake, caplog, capfd):
+    """The real watcher, adapter and controller over vtkObject fakes: v1 holds both segments and the ``Sphere`` model
+    as ``m_1``; a colour change on ``Sphere`` addresses ``m_1``, a per-segment opacity change its segment, a brush
+    stroke re-exports once, a new segment is announced with kind ``segment``, the removed segmentation takes its
+    segments off the viewers — and no raw ID or name reaches the log (T7)."""
+    caplog.set_level(logging.DEBUG)
+    seg = MrmlSegmentation(
+        SEG,
+        segments=[
+            FakeSegment("Segment_1", name="Doe^John liver", polydata=sphere(8)),
+            FakeSegment("left lung", name="Doe^John lung", polydata=sphere(8)),
+        ],
+    )
+    sphere_model = MrmlModel("Sphere", name="Doe^John sphere")
+    rig = live_rig(seg, sphere_model)
+    ctl = rig.ctl
+    assert ctl.observer_count == 5 + 8 + 4 == rig.observers()
+    [begin] = rig.begins()
+    assert begin["nodeCount"] == 3
+    assert [(m["nodeId"], m["kind"], m.get("segmentId")) for m in manifest(rig.glb())] == [
+        ("m_1", "model", None),
+        (f"{SEG}/Segment_1", "segment", "Segment_1"),
+        (f"{SEG}/s_1", "segment", "left lung"),
+    ]
+    acked(rig, 1)
+    # a colour change on the scripted model: one update addressing its alias
+    recolor(sphere_model, (0.0, 1.0, 0.0))
+    rig.timer.advance(150)
+    [update] = _updates(rig)
+    assert (update["sceneVersion"], update["baseVersion"]) == (2, 1)
+    assert update["changes"] == [{"nodeId": "m_1", "color": [0.0, 1.0, 0.0]}]
+    # a per-segment opacity change (the display node's event): its segment only
+    seg.displays[0].per_segment["left lung"] = {"opacity_3d": 0.5}
+    seg.InvokeEvent(EVENTS.display_modified)
+    rig.timer.advance(150)
+    assert _updates(rig)[-1]["changes"] == [{"nodeId": f"{SEG}/s_1", "opacity": 0.5}]
+    # SegmentModified with the ID: a colour change
+    seg.displays[0].per_segment["Segment_1"] = {"override_color": (0.0, 0.0, 1.0)}
+    seg.fire("SegmentModified", "Segment_1")
+    rig.timer.advance(750)
+    assert _updates(rig)[-1]["changes"] == [
+        {"nodeId": f"{SEG}/Segment_1", "color": [0.0, 0.0, 1.0]}
+    ]
+    # brush strokes: one begin, 750 ms after the last
+    for _ in range(4):
+        seg.segmentation.segments[0].mesh = sphere(10)
+        seg.fire("RepresentationModified", "Segment_1")
+        rig.timer.advance(500)
+    assert len(rig.begins()) == 1
+    rig.timer.advance(250)
+    assert len(rig.begins()) == 2 and rig.begins()[-1]["nodeCount"] == 3
+    acked(rig, rig.begins()[-1]["sceneVersion"])
+    # a new segment: announced with its kind, then the snapshot
+    seg.add_segment(FakeSegment("Segment_3", name="Doe^John spleen", polydata=sphere(8)))
+    rig.timer.advance(750)
+    added = [m for m in rig.sent() if isinstance(m, dict) and m["type"] == "scene.nodeAdded"]
+    assert added[-1]["nodes"] == [{"nodeId": f"{SEG}/Segment_3", "kind": "segment"}]
+    assert len(rig.begins()) == 3 and rig.begins()[-1]["nodeCount"] == 4
+    acked(rig, rig.begins()[-1]["sceneVersion"])
+    # the segmentation removed: its segments leave the viewers, its observers go
+    rig.scene.remove(seg)
+    rig.timer.advance(150)
+    [removed] = [m for m in rig.sent() if isinstance(m, dict) and m["type"] == "scene.nodeRemoved"]
+    assert sorted(removed["nodeIds"]) == sorted(
+        [f"{SEG}/Segment_1", f"{SEG}/s_1", f"{SEG}/Segment_3"]
+    )
+    assert ctl.observer_count == 5 + 4 and rig.observers() == 5 + 4
+    ctl.stop()
+    assert rig.observers() == 0
+    assert leaks(caplog, capfd, *NAMES, "Sphere", "left lung", "Segment_1", SEG) == []
+
+
+def _of_type(rig: Rig, type_: str) -> list[dict]:
+    return [m for m in rig.sent() if isinstance(m, dict) and m["type"] == type_]
+
+
+def test_panel_live_segmentation_opacity_3d_zero_is_visible_false_not_a_removal(fake):
+    """Manual §13 step 5 sub-step 3: a segmentation at ``Opacity3D`` 0 is not drawn (the DM's ``IsVisible``), so its
+    segments leave ``shown`` with an appearance-only mark — the viewers hold them, so each gets ``visible: false`` and
+    ``visible: true`` when the opacity comes back (the fast lane), never ``scene.nodeRemoved`` or a snapshot. Models
+    and segmentations differ at opacity 0 at export time only (a segmentation at ``Opacity3D`` 0 is left out of a
+    snapshot, a model at opacity 0 is exported)."""
+    seg = MrmlSegmentation(SEG)
+    rig = live_rig(seg)
+    acked(rig, 1)
+    seg.displays[0].opacity_3d = 0.0
+    seg.InvokeEvent(EVENTS.display_modified)
+    assert 0 < rig.timer.starts[-1] <= 150
+    rig.timer.advance(150)
+    [hidden] = _updates(rig)
+    assert (hidden["sceneVersion"], hidden["baseVersion"]) == (2, 1)
+    assert sorted(hidden["changes"], key=lambda c: c["nodeId"]) == [
+        {"nodeId": f"{SEG}/Segment_1", "visible": False},
+        {"nodeId": f"{SEG}/Segment_2", "visible": False},
+    ]
+    seg.displays[0].opacity_3d = 1.0
+    seg.InvokeEvent(EVENTS.display_modified)
+    rig.timer.advance(150)
+    shown = _updates(rig)[-1]
+    assert (shown["sceneVersion"], shown["baseVersion"]) == (3, 2)
+    assert sorted(shown["changes"], key=lambda c: c["nodeId"]) == [
+        {"nodeId": f"{SEG}/Segment_1", "visible": True},
+        {"nodeId": f"{SEG}/Segment_2", "visible": True},
+    ]
+    assert len(_updates(rig)) == 2 and len(rig.begins()) == 1
+    assert _of_type(rig, "scene.nodeRemoved") == [] and _of_type(rig, "scene.nodeAdded") == []
+
+
+def test_panel_live_an_empty_segment_added_while_live_costs_a_snapshot_each_step(fake):
+    """Manual §13 step 9 sub-step 2: ``SegmentAdded`` of an empty segment is a snapshot (``v2``) in which the segment
+    is left out as ``no-triangles`` — not held and not in ``sent.skipped`` yet, it can only be re-exported; nothing is
+    announced since only exported entities are. Its first stroke (``RepresentationModified``) lifts a skip reason the
+    classifier is not sure about, so it is another plain snapshot (``v3``) with no ``scene.nodeAdded`` either. The
+    export's own deferred ``SegmentModified(NULL)`` afterwards marks appearance only and sends nothing."""
+    seg = MrmlSegmentation(SEG)
+    rig = live_rig(seg)
+    acked(rig, 1)
+    seg.add_segment(FakeSegment("Segment_3", name="Doe^John added", polydata=None))
+    assert rig.timer.starts[-1] == 750
+    rig.timer.advance(750)
+    assert len(rig.begins()) == 2 and rig.begins()[-1]["nodeCount"] == 2
+    assert [m["nodeId"] for m in manifest(rig.glb())] == [f"{SEG}/Segment_1", f"{SEG}/Segment_2"]
+    view = acked(rig, 2)
+    assert view.detail == panel.skipped_text(1)  # the panel: one segment could not be shared
+    seg.segmentation.segments[-1].mesh = sphere(8)
+    seg.fire("RepresentationModified", "Segment_3")
+    rig.timer.advance(750)
+    assert len(rig.begins()) == 3 and rig.begins()[-1]["nodeCount"] == 3
+    assert f"{SEG}/Segment_3" in [m["nodeId"] for m in manifest(rig.glb())]
+    acked(rig, 3)
+    seg.fire("SegmentModified")  # the deferred NULL event the export's own getters may fire
+    rig.timer.advance(750)
+    assert len(rig.begins()) == 3
+    assert _of_type(rig, "scene.nodeAdded") == [] and _updates(rig) == []
+
+
+@pytest.mark.parametrize("run", ["exported", "skipped", "failing-writer"])
+def test_panel_live_a_verbatim_name_like_segment_id_reaches_no_log(
+    fake, caplog, capfd, monkeypatch, run
+):
+    """T7 with the verbatim, name-like raw ID ``Liver_DoeJohn``: exported, left out as ``no-triangles``
+    (``Liver_DoeJohn2`` has no representation), and with a writer that fails — the log shows ``GlbWriteError`` only."""
+    from remoteview_core import snapshot as snapshot_module  # noqa: PLC0415
+    from remoteview_core.glb_writer import GlbWriteError  # noqa: PLC0415
+
+    caplog.set_level(logging.DEBUG)
+    seg = MrmlSegmentation(
+        SEG,
+        segments=[
+            FakeSegment("Liver_DoeJohn", name="Doe^John liver", polydata=sphere(8)),
+            FakeSegment("Liver_DoeJohn2", name="Doe^John liver 2", polydata=None),  # no-triangles
+            FakeSegment("left lung", name="Doe^John lung", polydata=sphere(8)),
+        ],
+    )
+    rig = live_rig(seg, MrmlModel("Sphere", name="Doe^John sphere"))
+    ids = [m["nodeId"] for m in manifest(rig.glb())]
+    assert ids == ["m_1", f"{SEG}/Liver_DoeJohn", f"{SEG}/s_1"]
+    assert rig.begins()[0]["nodeCount"] == 3
+    acked(rig, 1)
+    if run == "failing-writer":
+
+        def boom(*args, **kwargs):
+            raise GlbWriteError("entities[0]: the position, never the ID")
+
+        monkeypatch.setattr(snapshot_module, "write_glb", boom)
+    if run == "skipped":
+        seg.fire("RepresentationModified", "Liver_DoeJohn2")  # still no representation: nothing
+    else:
+        seg.segmentation.segments[0].mesh = sphere(10)
+        seg.fire("RepresentationModified", "Liver_DoeJohn")
+    seg.displays[0].per_segment["Liver_DoeJohn"] = {"opacity_3d": 0.5}
+    seg.fire("SegmentModified", "Liver_DoeJohn")
+    rig.pump(750)
+    rig.pump(3_000)
+    if run == "skipped":
+        assert len(rig.begins()) == 1 and _updates(rig)[-1]["changes"] == [
+            {"nodeId": f"{SEG}/Liver_DoeJohn", "opacity": 0.5}
+        ]
+    elif run == "exported":
+        assert len(rig.begins()) == 2
+    else:
+        assert len(rig.begins()) == 1
+        assert "live: scene not exported (GlbWriteError)" in caplog.text
+        assert rig.ctl.view.status.startswith("Scene not up to date")
+    rig.ctl.stop()
+    assert leaks(caplog, capfd, *NAMES, "Liver_DoeJohn", "left lung", "Sphere", SEG) == []
+
+
+@needs_relay_stub
+def test_panel_live_segments_end_to_end_with_the_relay_stub(caplog, capfd):
+    """Against the relay stub: v1 holds both segments and ``m_1``, a colour change on ``Sphere`` is
+    ``['scene.update', 2, 1]`` addressing ``m_1``, a per-segment opacity change another update, a brush stroke a
+    snapshot; ``violations == []`` and no raw ID or name leaks (T7)."""
+    caplog.set_level(logging.DEBUG)
+    seg = MrmlSegmentation(
+        SEG,
+        segments=[
+            FakeSegment("Segment_1", name="Doe^John liver", polydata=sphere(8)),
+            FakeSegment("Liver_DoeJohn", name="Doe^John liver 2", polydata=sphere(8)),
+        ],
+    )
+    sphere_model = MrmlModel("Sphere", name="Doe^John sphere")
+    rig = Rig(
+        seg,
+        sphere_model,
+        transport_factory=lambda url, events, extra_ca_file=None: RelayTransport(
+            url, events, use_proxy=False
+        ),
+    )
+    ctl, timer = rig.ctl, rig.timer
+
+    def wait_live():
+        pump_while(ctl, lambda: not ctl.view.status.startswith("Live"), 10)
+        assert ctl.view.status == "Live · no viewers yet."
+
+    stub = start_relay_stub("--report-updates")
+    try:
+        ctl.start(stub.address)
+        wait_live()
+        code, token = ctl.view.code, ctl._client.publisher_token().reveal()
+        assert code and token
+        assert sorted(ctl._live.sent.under(f"{SEG}/")) == [
+            f"{SEG}/Liver_DoeJohn",
+            f"{SEG}/Segment_1",
+        ]
+        assert "m_1" in ctl._live.sent and "Sphere" not in ctl._live.sent
+        recolor(sphere_model, (0.0, 1.0, 0.0))
+        assert timer.starts[-1] == 150
+        timer.advance(150)
+        assert ctl._live.sent.get("m_1").color == (
+            0.0,
+            1.0,
+            0.0,
+        )  # the update went out and was recorded
+        seg.displays[0].per_segment["Segment_1"] = {"opacity_3d": 0.5}
+        seg.InvokeEvent(EVENTS.display_modified)
+        timer.advance(150)
+        assert ctl._live.sent.get(f"{SEG}/Segment_1").opacity == pytest.approx(0.5)
+        seg.segmentation.segments[1].mesh = sphere(10)
+        seg.fire("RepresentationModified", "Liver_DoeJohn")
+        assert timer.starts[-1] == 750
+        timer.advance(750)
+        assert ctl.view.status.startswith("Updating the scene")
+        wait_live()
+        ctl.stop()
+        pump_while(ctl, lambda: ctl.active, 5)
+        assert ctl.observer_count == 0 and rig.observers() == 0
+    finally:
+        ctl.shutdown(timeout=3)
+        out = stub.finish()
+    lines = out.splitlines()
+    report = json.loads(lines[-1])
+    assert report["violations"] == []
+    assert report["updates"] == [["scene.update", 2, 1], ["scene.update", 3, 2]]
+    assert [s.split(":")[0] for s in lines[0].split()[2:]] == ["v1", "v4"]
+    assert (
+        leaks(caplog, capfd, *NAMES, "Sphere", "Liver_DoeJohn", "Segment_1", SEG, code, token) == []
+    )

@@ -18,7 +18,7 @@ from typing import ClassVar
 from unittest import mock
 
 import pytest
-from mrml_fakes import EVENT_IDS
+from mrml_fakes import EVENT_IDS, VTK_SEGMENTATION_EVENTS
 from mrml_fakes import Scene as MrmlScene
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -316,6 +316,8 @@ def _make_stub_modules() -> dict[str, types.ModuleType]:
     slicer.vtkMRMLTransformableNode = types.SimpleNamespace(
         TransformModifiedEvent=EVENT_IDS["transform_modified"]
     )
+    # the seven vtkSegmentation events (62100–62106) by Slicer's attribute names (SLC-36; the adapter passes five)
+    slicer.vtkSegmentation = types.SimpleNamespace(**VTK_SEGMENTATION_EVENTS)
     slicer.vtkMRMLFolderDisplayNode = mock.NonCallableMagicMock(
         name="slicer.vtkMRMLFolderDisplayNode",
         spec_set=[

@@ -22,20 +22,30 @@ snapshot can show the change (§8.2: v1 has no per-node geometry):
   changed meanwhile (a hidden node's pose cannot be read, and a re-export would leave it out too);
 - a node the adapter cannot read (deleted meanwhile, a bad MRML state) → re-export: the export reads it again and
   reports it. ``classify`` raises only :class:`SceneReadError` (fixed text) when the node list itself fails —
-  except on a reset, which needs no scene read: the closed scene is forgotten anyway.
+  except on a reset, which needs no scene read: the closed scene is forgotten anyway;
+- an ID in neither the scene nor the viewers' scene → nothing (T7).
+
+Segments (SLC-36, protocol v1.1 §7.3) follow the same rules as models: the shown entities are the models **and** the
+segments the 3D view shows (``SceneApi.visible_segments``), each under the ``nodeId`` the session's
+:class:`~remoteview_core.ids.SceneIds` gives it — the registry every export of the session uses, so a mark resolved
+through it (``live.py``) meets the ID the viewers hold. A held segment hidden in Slicer gets ``visible: false``, a
+stale or renamed one ``scene.nodeRemoved``, its colour, opacity, visibility and matrix are diffed (its transform is
+its segmentation node's, SLC-13), a new shown segment is announced with kind ``segment``. The marks ``classify``
+receives are already resolved: a raw MRML ID or segment ID never reaches it, so an unresolved ID is simply one in
+neither scene.
 
 A re-export plan carries no update items: the snapshot carries every change. Its ``added`` lists the IDs it brings
 that the viewers do not hold, for ``scene.nodeAdded`` (a hint: the export may still leave one out, §8.2).
 
-Privacy (T7): an ID reaches a ``scene.update``/``scene.nodeRemoved`` only if the viewers hold it — it passed collect's
-ID rules in an export — and ``added`` lists only IDs that pass them now. The *Hide node names* setting is part of the
-viewers' scene: when it differs from the one ``classify`` is called with, the plan is a re-export. Reprs show counts
-only.
+Privacy (T7): an ID reaches a ``scene.update``/``scene.nodeRemoved`` only if the viewers hold it — it passed the
+registry's ID rules in an export — and ``added`` lists only IDs that pass them now (a contract-shaped MRML ID, an
+alias, or an alias-prefixed verbatim segment ID). The *Hide node names* setting is part of the viewers' scene: when
+it differs from the one ``classify`` is called with, the plan is a re-export. Reprs show counts only.
 
 The contract with SLC-29, which wires this to the debouncer, SLC-16's client and the exports:
 
-- call ``classify`` with the current *Hide node names* setting, in ``CREATED``/``ACTIVE`` only (hold the debouncer
-  otherwise);
+- call ``classify`` with the current *Hide node names* setting and the session's registry (``ids``), in
+  ``CREATED``/``ACTIVE`` only (hold the debouncer otherwise);
 - every plan is applied, an empty one too (``forget``);
 - an update plan: ``send_changes(plan.changes)``, ``send_removed(plan.removed)``, then ``sent.apply(plan)`` — only if
   neither raised; a held result counts as sent;
@@ -69,11 +79,11 @@ from remoteview_core.collect import (
     placement_of,
     raw_name,
     transform_to_bake,
-    valid_model_id,
 )
 from remoteview_core.coords import gltf_matrix_column_major
 from remoteview_core.debounce import Change, Drained
 from remoteview_core.glb_writer import Entity
+from remoteview_core.ids import SceneIds
 from remoteview_core.names import sanitize_name
 from remoteview_core.protocol_client import NodeChange
 
@@ -189,6 +199,13 @@ class SentScene:
     def get(self, node_id: str) -> SentNode | None:
         return self._nodes.get(node_id)
 
+    def under(self, prefix: str) -> tuple[str, ...]:
+        """The held IDs that start with ``prefix`` — a segmentation node's ``"<mrmlId>/"`` names the segments of it
+        the viewers hold (``SceneIds.held_prefix``); ``()`` for an empty prefix."""
+        if not prefix:
+            return ()
+        return tuple(node_id for node_id in self._nodes if node_id.startswith(prefix))
+
     @property
     def skipped(self) -> Mapping[str, SkipInfo]:
         """Read-only; its ``repr`` shows a count only (T7)."""
@@ -294,12 +311,20 @@ class _Outcome(enum.Enum):
 
 
 def classify(
-    drained: Drained, scene_api: SceneApi, sent: SentScene, *, anonymize_names: bool
+    drained: Drained,
+    scene_api: SceneApi,
+    sent: SentScene,
+    *,
+    anonymize_names: bool,
+    ids: SceneIds,
 ) -> Plan:
-    """The :class:`Plan` for ``drained`` (see the module docstring). Reads the nodes the 3D view shows once, then the
-    display properties, world matrices and names of the marked ones."""
+    """The :class:`Plan` for ``drained`` (see the module docstring). Reads the models and segments the 3D view shows
+    once — under the ``nodeId`` the session's registry ``ids`` gives them —, then the display properties, world
+    matrices and names of the marked ones."""
+    if not isinstance(ids, SceneIds):
+        raise TypeError("classify needs the session's SceneIds")
     try:
-        shown = _shown(scene_api, anonymize=anonymize_names)
+        shown = _shown(scene_api, ids, anonymize=anonymize_names)
     except SceneReadError:
         if drained.reset:
             # the closed scene is forgotten whatever the new one holds
@@ -307,7 +332,9 @@ def classify(
         raise
     if drained.reset:
         # §7.3: after a close every shown ID is a new node, also one that reuses an old ID
-        return Plan(snapshot=True, reset=True, added=tuple((i, "model") for i in shown))
+        return Plan(
+            snapshot=True, reset=True, added=tuple((i, kind) for i, (_, kind) in shown.items())
+        )
     if bool(anonymize_names) != sent.anonymized:
         # the viewers' names and IDs follow the other setting: only an export under this one is right
         return Plan(snapshot=True, added=_added(shown, sent, ()))
@@ -334,15 +361,22 @@ def classify(
     return Plan(changes=tuple(changes), removed=tuple(removed), forget=tuple(forget))
 
 
-def _shown(scene_api: SceneApi, *, anonymize: bool) -> dict[str, Any]:
-    """The nodes the 3D view shows whose IDs pass collect's rules for the current setting (of duplicates the first,
-    the one exported)."""
-    shown: dict[str, Any] = {}
+def _shown(scene_api: SceneApi, ids: SceneIds, *, anonymize: bool) -> dict[str, tuple[Any, str]]:
+    """The models and segments the 3D view shows, ``nodeId → (handle, kind)``, under the ID the export gives them
+    through the same registry (of duplicates the first, the one exported; an entity whose raw ID the registry cannot
+    map — not a ``str``/``bytes``, an adapter bug — is not listed, like collect skips it). ``anonymize`` aliases
+    every segment, as the export under *Hide node names* does (§7.3)."""
+    shown: dict[str, tuple[Any, str]] = {}
     try:
         for node in scene_api.visible_model_nodes():
-            node_id = scene_api.node_id(node)
-            if valid_model_id(node_id, anonymize=anonymize):
-                shown.setdefault(node_id, node)
+            node_id = ids.model_node_id(scene_api.node_id(node))
+            if node_id is not None:
+                shown.setdefault(node_id, (node, "model"))
+        for handle in scene_api.visible_segments():
+            node_raw, seg_raw = scene_api.segment_identity(handle)
+            node_id = ids.segment_node_id(node_raw, seg_raw, anonymize=anonymize)
+            if node_id is not None:
+                shown.setdefault(node_id, (handle, "segment"))
     except Exception:  # noqa: BLE001 — the adapter's text may carry a node ID (T7): a fixed one replaces it
         raise SceneReadError("the scene's nodes could not be read") from None
     return shown
@@ -355,8 +389,12 @@ class _Classifier:
         self._scene = scene
         self._sent = sent
 
-    def node(self, node_id: str, flags: Change, node: Any) -> NodeChange | _Outcome | None:
+    def node(
+        self, node_id: str, flags: Change, shown: tuple[Any, str] | None
+    ) -> NodeChange | _Outcome | None:
+        """``shown`` is the ``(handle, kind)`` of a shown entity, ``None`` for one the 3D view does not show."""
         held = self._sent.get(node_id)
+        node = None if shown is None else shown[0]
         try:
             if held is None:
                 return self._not_held(node_id, flags, node)
@@ -381,9 +419,7 @@ class _Classifier:
         return _Outcome.REEXPORT_ANNOUNCED if skip.reason in _CERTAIN_LIFTS else _Outcome.REEXPORT
 
     def _hidden(self, node_id: str, flags: Change, held: SentNode) -> NodeChange | _Outcome | None:
-        if held.kind != "model":
-            # a kind classify cannot read yet (segments, SLC-27): the export decides
-            return _Outcome.REEXPORT
+        """A held model or segment the 3D view does not show any more (hidden, or gone)."""
         renamed = flags & Change.NAME and not self._sent.anonymized
         if flags & _STALE_WHEN_HIDDEN or renamed:
             # its mesh, pose or name on the viewers is stale; shown again later, it is a node they do not hold
@@ -427,13 +463,14 @@ class _Classifier:
 
 
 def _added(
-    shown: Mapping[str, Any], sent: SentScene, lifted: Iterable[str]
+    shown: Mapping[str, tuple[Any, str]], sent: SentScene, lifted: Iterable[str]
 ) -> tuple[tuple[str, str], ...]:
-    """The shown IDs the viewers do not hold, except those the last export left out (unless surely lifted)."""
+    """The shown ``(nodeId, kind)`` the viewers do not hold, except those the last export left out (unless surely
+    lifted)."""
     lifted = set(lifted)
     return tuple(
-        (node_id, "model")
-        for node_id in shown
+        (node_id, kind)
+        for node_id, (_, kind) in shown.items()
         if node_id not in sent and (node_id not in sent.skipped or node_id in lifted)
     )
 

@@ -194,7 +194,11 @@ const minMax = (values: ArrayLike<number>, stride: number): { min: number[]; max
   return { min, max };
 };
 
-function buildDocument(entities: Entity[], sceneVersion = 1): { json: Json; bin: Uint8Array } {
+function buildDocument(
+  entities: Entity[],
+  sceneVersion = 1,
+  anonymizedNames = false,
+): { json: Json; bin: Uint8Array } {
   const bin = new Bin();
   const json: Json = {
     asset: { version: "2.0", generator: GENERATOR },
@@ -224,7 +228,7 @@ function buildDocument(entities: Entity[], sceneVersion = 1): { json: Json; bin:
       units: "m",
       upAxis: "+Y",
       rasToGltf: "x=R*0.001, y=S*0.001, z=-A*0.001",
-      anonymizedNames: false,
+      anonymizedNames,
     },
   });
   const addView = (bytes: Uint8Array, extra: Record<string, number>): number => {
@@ -411,8 +415,56 @@ const synthetic = (i: number, levels: number, radius: number): Entity => ({
   mesh: sphere(levels, radius),
 });
 
+/** §7.3 segment aliases (protocol 1.1, PRO-23): Slicer keeps caller-supplied segment IDs, the nodeId must stay in §3.3. */
+const aliasedLeftLung: Entity = {
+  nodeId: "vtkMRMLSegmentationNode1/s_1",
+  kind: "segment",
+  mrmlId: "vtkMRMLSegmentationNode1",
+  segmentId: "left lung", // outside [A-Za-z0-9_./:-]: carried in extras only, the nodeId is the alias
+  name: "Left lung",
+  color: [0.4, 0.6, 0.9],
+  opacity: 1,
+  visible: true,
+  mesh: asymmetricTetrahedron(),
+};
+const plainSpleen: Entity = {
+  nodeId: "vtkMRMLSegmentationNode1/Segment_2", // a conforming ID keeps the verbatim nodeId
+  kind: "segment",
+  mrmlId: "vtkMRMLSegmentationNode1",
+  segmentId: "Segment_2",
+  name: "Spleen",
+  color: [0.7, 0.3, 0.3],
+  opacity: 0.6,
+  visible: true,
+  matrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.03, 0, 0, 1],
+  mesh: sphere(1, 0.012),
+};
+/** `anonymizedNames: true`: no name-derived string anywhere, so every segment is aliased and has no `segmentId`. */
+const anonymousSegment = (n: number, mesh: Mesh): Entity => ({
+  nodeId: `vtkMRMLSegmentationNode1/s_${n}`,
+  kind: "segment",
+  mrmlId: "vtkMRMLSegmentationNode1",
+  name: `Segment ${n}`,
+  color: [0.3 + 0.1 * n, 0.5, 0.7],
+  opacity: 1,
+  visible: true,
+  mesh,
+});
+const anonymousModel: Entity = {
+  nodeId: "vtkMRMLModelNode4",
+  kind: "model",
+  mrmlId: "vtkMRMLModelNode4",
+  name: "Model 3",
+  color: [0.9, 0.8, 0.2],
+  opacity: 1,
+  visible: true,
+  mesh: sphere(1, 0.008),
+};
+
 interface ManifestEntry {
   valid: boolean;
+  /** Present (true) only for files whose root says `anonymizedNames: true`. */
+  anonymizedNames?: boolean;
   byteLength: number;
   sha256: string;
   nodeIds: string[];
@@ -489,6 +541,31 @@ function main(): void {
       "≈ 5 MiB procedural load-test file: four spheres, the first with > 65,535 vertices (UNSIGNED_INT indices), one translucent, one hidden",
     ),
   );
+
+  const aliased = buildDocument([aliasedLeftLung, plainSpleen]);
+  emit(
+    "aliased-segments.glb",
+    packGlb(aliased.json, aliased.bin),
+    describe(
+      [aliasedLeftLung, plainSpleen],
+      true,
+      "§7.3 segment alias: raw segment ID `left lung` is outside the nodeId grammar, so nodeId is vtkMRMLSegmentationNode1/s_1 and extras.segmentId keeps the raw ID; a second segment with a conforming ID keeps its verbatim nodeId",
+    ),
+  );
+  const anonymousEntities = [
+    anonymousSegment(1, asymmetricTetrahedron()),
+    anonymousSegment(2, sphere(1, 0.01)),
+    anonymousModel,
+  ];
+  const anonymous = buildDocument(anonymousEntities, 1, true);
+  emit("anonymized-segments.glb", packGlb(anonymous.json, anonymous.bin), {
+    ...describe(
+      anonymousEntities,
+      true,
+      "anonymizedNames: true (§7.3): every segment nodeId is an alias s_<n>, no extras.segmentId, names are Segment <n> / Model <n>",
+    ),
+    anonymizedNames: true,
+  });
 
   const broken = (comment: string) =>
     describe([], false, `${comment} (derived from asymmetric-2nodes.glb)`);

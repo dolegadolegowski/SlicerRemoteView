@@ -3,11 +3,19 @@
 :class:`LiveUpdates` turns the marks of the Slicer observers (SLC-31) into what the viewers need, and owns every export
 of the session, the first snapshot included:
 
-- **marks** (:meth:`~LiveUpdates.mark`, :meth:`~LiveUpdates.mark_transform`) go to SLC-15's
-  :class:`~remoteview_core.debounce.Debouncer`; its flush is classified by SLC-30's
-  :func:`~remoteview_core.changes.classify` against :attr:`~LiveUpdates.sent` (what the viewers hold) and sent with
-  SLC-16's client — an update plan as ``scene.update``/``scene.nodeRemoved``, a re-export as ``scene.nodeAdded`` and a
-  new snapshot whose scene becomes :attr:`~LiveUpdates.sent` in the same call (``changes.py``'s contract);
+- **marks** (:meth:`~LiveUpdates.mark`, :meth:`~LiveUpdates.mark_transform`, and for segments
+  :meth:`~LiveUpdates.mark_segment`, :meth:`~LiveUpdates.mark_segment_transform`,
+  :meth:`~LiveUpdates.mark_held_segments`) arrive with the **raw** MRML and segment IDs the observers read and are
+  resolved here, never in the watcher, through the session's registry (SLC-36, §7.3): a model ``Sphere`` is marked
+  as ``m_1`` — allocated on first sight, so a model added mid-session under a scripted ID is announced and exported
+  under its alias —, a segment as ``<mrmlId>/<segmentId>`` or ``<mrmlId>/s_<n>`` under the current *Hide node names*
+  setting, and a segmentation node's transform or removal reaches every segment of it the viewers hold
+  (``SentScene.under``). The debouncer's keys are therefore the viewers' ``nodeId`` (T7: a raw ID never reaches a
+  plan). The resolved marks go to SLC-15's :class:`~remoteview_core.debounce.Debouncer`; its flush is classified by
+  SLC-30's :func:`~remoteview_core.changes.classify` against :attr:`~LiveUpdates.sent` (what the viewers hold) and
+  sent with SLC-16's client — an update plan as ``scene.update``/``scene.nodeRemoved``, a re-export as
+  ``scene.nodeAdded`` and a new snapshot whose scene becomes :attr:`~LiveUpdates.sent` in the same call
+  (``changes.py``'s contract); a mark that resolves to an ID neither shown nor held is dropped there (T7);
 - **holds**: the debouncer is held during a batch process (its own count, so a stray ``release`` cannot end another
   hold), from each snapshot's ``begin`` until its ack, refusal or loss — marks made meanwhile flush once after it,
   never as a second ``begin`` (no supersede: a slow uplink must finish its upload, T2) — and while the connection is
@@ -35,7 +43,12 @@ of the session, the first snapshot included:
   upload per change (a lost connection neither counts nor closes it). Updates stay held while a snapshot is owed
   (``ProtocolClient.require_snapshot``);
 - *Hide node names* and the device profile have no MRML event: :meth:`~LiveUpdates.set_anonymize_names` and
-  :meth:`~LiveUpdates.request_snapshot` (SLC-18) ask for a snapshot.
+  :meth:`~LiveUpdates.request_snapshot` (SLC-18) ask for a snapshot;
+- **IDs** (protocol v1.1 §7.3, SLC-35): every export of the session runs through one
+  :class:`~remoteview_core.ids.SceneIds` (:attr:`~LiveUpdates.ids`), owned by the panel — one per ``session.create`` —
+  and handed in at construction, so a resumed session (SLC-17) cannot lose the aliases the viewers hold, while a new
+  ``session.create`` (Stop → Start) may renumber. ``start()``/``stop()`` never touch it; :meth:`~LiveUpdates.reset`
+  (the scene closed) clears its raw → alias maps and keeps its counters, so no alias is ever reissued.
 
 The panel (SLC-32) calls ``start(deferred=True)``, attaches the observers, then :meth:`~LiveUpdates.tick` — all in
 one main-thread call, so a batch process running at Start holds the first snapshot until it ends; it calls
@@ -65,6 +78,7 @@ from typing import Any
 from remoteview_core.changes import Plan, SceneReadError, SentScene, classify
 from remoteview_core.collect import SceneApi
 from remoteview_core.debounce import Change, Debouncer, Drained, Timer
+from remoteview_core.ids import SceneIds
 from remoteview_core.protocol_client import ProtocolClient, ProtocolStateError, SessionState
 from remoteview_core.snapshot import Snapshot, SnapshotTooLargeError, build_snapshot
 
@@ -135,6 +149,9 @@ class _EmptyScene:
     def visible_model_nodes(self) -> list[Any]:
         return []
 
+    def visible_segments(self) -> list[Any]:
+        return []
+
 
 def _retry_after(details: Any) -> float | None:
     """``details.retryAfterS`` when it is a finite positive number (relay input: anything else is ignored)."""
@@ -163,9 +180,11 @@ class LiveUpdates:
         anonymize_names: bool = False,
         on_event: Callable[[LiveEvent], object] = lambda event: None,
         export: Callable[..., Snapshot] = build_snapshot,
+        ids: SceneIds | None = None,
     ) -> None:
         self._client = client
         self._scene = scene
+        self._ids = ids if ids is not None else SceneIds()
         self._send = send
         self._discard_queued = discard_queued
         self._clock = clock
@@ -216,6 +235,11 @@ class LiveUpdates:
         return self._sent
 
     @property
+    def ids(self) -> SceneIds:
+        """The session's raw ID → alias registry (§7.3), the one every export of this controller uses."""
+        return self._ids
+
+    @property
     def in_flight(self) -> bool:
         """A snapshot began and has no ack, refusal or loss yet."""
         return self._inflight is not None
@@ -247,27 +271,94 @@ class LiveUpdates:
     # ------------------------------------------------------------------ the observers (SLC-31); never raise
 
     def mark(self, node_id: str, flags: Change) -> None:
-        """A node changed (an ID or flags of another type, empty ones, or marks while stopped are ignored)."""
-        if not self._running or not isinstance(node_id, str) or not node_id:
-            return
-        if not isinstance(flags, Change) or not flags:
+        """A model node changed, under its raw MRML ID ``node_id`` (an ID or flags of another type, empty ones, or
+        marks while stopped are ignored). Resolved through the registry: ``m_<n>`` for an ID Slicer did not generate
+        (allocated now if needed, so a node added mid-session is announced under the alias it is exported with)."""
+        if not self._accepts(node_id, flags):
             return
         try:
-            self._debouncer.mark(node_id, flags)
+            alias = self._ids.model_node_id(node_id)
         except Exception as exc:  # noqa: BLE001 — called from a VTK observer (T7)
-            _log.error("live: mark failed (%s)", type(exc).__name__)
+            _log.error("live: mark not resolved (%s)", type(exc).__name__)
+            return
+        if alias is not None:
+            self._mark_resolved(alias, flags)
 
     def mark_transform(self, node_id: str) -> None:
         """A node's world transform may have changed: ``geometry`` for a node the viewers hold baked (only a re-export
         shows it, FR-12's slow lane), ``transform`` for every other one — a node the export left out too, which a
-        ``geometry`` mark would always re-export (SLC-30 review)."""
-        if not self._running or not isinstance(node_id, str) or not node_id:
+        ``geometry`` mark would always re-export (SLC-30 review). For a segmentation node the same goes to every
+        segment of it the viewers hold (``<alias>/…``): their transform is the node's (SLC-13)."""
+        if not self._accepts(node_id, Change.TRANSFORM):
             return
-        held = self._sent.get(node_id)
-        self.mark(
-            node_id,
-            Change.GEOMETRY if held is not None and held.matrix is None else Change.TRANSFORM,
-        )
+        try:
+            alias = self._ids.model_node_id(node_id)
+        except Exception as exc:  # noqa: BLE001 — called from a VTK observer (T7)
+            _log.error("live: mark not resolved (%s)", type(exc).__name__)
+            return
+        if alias is None:
+            return
+        for resolved in (alias, *self._sent.under(alias + "/")):
+            self._mark_resolved(resolved, self._transform_lane(resolved))
+
+    def mark_segment(self, node_id: str, segment_id: Any, flags: Change) -> None:
+        """A segment changed: ``segment_id`` is the raw ID (``str`` or ``bytes``, as ``GetSegmentIDs()`` returns it)
+        of a segment of the segmentation node with MRML ID ``node_id``. Resolved to the ``nodeId`` an export under
+        the current *Hide node names* setting gives it (§7.3) — the same registry, so it is the ID the viewers hold
+        or will hold."""
+        if not self._accepts(node_id, flags) or not isinstance(segment_id, (str, bytes)):
+            return
+        resolved = self._resolve_segment(node_id, segment_id)
+        if resolved is not None:
+            self._mark_resolved(resolved, flags)
+
+    def mark_segment_transform(self, node_id: str, segment_id: Any) -> None:
+        """The segmentation node moved: :meth:`mark_transform`'s lane rule for one of its segments."""
+        if not self._accepts(node_id, Change.TRANSFORM) or not isinstance(segment_id, (str, bytes)):
+            return
+        resolved = self._resolve_segment(node_id, segment_id)
+        if resolved is not None:
+            self._mark_resolved(resolved, self._transform_lane(resolved))
+
+    def mark_held_segments(self, node_id: str, flags: Change) -> None:
+        """Every segment of the segmentation node ``node_id`` the viewers hold changed (``flags``): a whole-node event
+        without a segment ID, or the node removed."""
+        if not self._accepts(node_id, flags):
+            return
+        try:
+            prefix = self._ids.held_prefix(node_id)
+        except Exception as exc:  # noqa: BLE001 — called from a VTK observer (T7)
+            _log.error("live: mark not resolved (%s)", type(exc).__name__)
+            return
+        if prefix is None:
+            return
+        for resolved in self._sent.under(prefix):
+            self._mark_resolved(resolved, flags)
+
+    def _accepts(self, node_id: Any, flags: Any) -> bool:
+        """The entry check of every mark: running, a non-empty ``str`` ID and non-empty ``Change`` flags."""
+        if not self._running or not isinstance(node_id, str) or not node_id:
+            return False
+        return isinstance(flags, Change) and bool(flags)
+
+    def _resolve_segment(self, node_id: str, segment_id: Any) -> str | None:
+        try:
+            return self._ids.segment_node_id(node_id, segment_id, anonymize=self._anonymize)
+        except Exception as exc:  # noqa: BLE001 — called from a VTK observer (T7)
+            _log.error("live: mark not resolved (%s)", type(exc).__name__)
+            return None
+
+    def _transform_lane(self, resolved: str) -> Change:
+        """``geometry`` for an entity the viewers hold baked, ``transform`` for every other one."""
+        held = self._sent.get(resolved)
+        return Change.GEOMETRY if held is not None and held.matrix is None else Change.TRANSFORM
+
+    def _mark_resolved(self, node_id: str, flags: Change) -> None:
+        """A mark under the viewers' ``nodeId``: to the debouncer."""
+        try:
+            self._debouncer.mark(node_id, flags)
+        except Exception as exc:  # noqa: BLE001 — called from a VTK observer (T7)
+            _log.error("live: mark failed (%s)", type(exc).__name__)
 
     def hold(self) -> None:
         """``StartBatchProcessEvent``."""
@@ -296,6 +387,8 @@ class LiveUpdates:
             return
         try:
             self._reset_owed = True
+            # the aliases were the closed scene's: forgotten, never reissued (§7.3 — the counters keep counting)
+            self._ids.reset()
             # no update may address a closed scene's ID, which the next scene may reuse (§7.3)
             self._sent.apply(Plan(snapshot=True, reset=True))
             if self._inflight is not None:
@@ -444,7 +537,9 @@ class LiveUpdates:
         self._reset_owed = drained.reset
         self._lift_gates(drained)
         try:
-            plan = classify(drained, self._scene(), self._sent, anonymize_names=self._anonymize)
+            plan = classify(
+                drained, self._scene(), self._sent, anonymize_names=self._anonymize, ids=self._ids
+            )
         except SceneReadError:
             _log.error("live: scene not read (SceneReadError)")
             self._failed(_Cause.LOCAL)
@@ -481,10 +576,15 @@ class LiveUpdates:
         return shown is not None and bool(self._shrink - shown)
 
     def _shown_ids(self) -> frozenset[Any] | None:
-        """The IDs of the nodes the 3D view shows (a light read: no mesh), or ``None`` when they cannot be read."""
+        """The ``nodeId`` of every model and segment the 3D view shows (a light read: no mesh), or ``None`` when they
+        cannot be read."""
         try:
             scene = self._scene()
-            return frozenset(scene.node_id(node) for node in scene.visible_model_nodes())
+            shown = {self._ids.model_node_id(scene.node_id(n)) for n in scene.visible_model_nodes()}
+            for handle in scene.visible_segments():
+                node_raw, seg_raw = scene.segment_identity(handle)
+                shown.add(self._ids.segment_node_id(node_raw, seg_raw, anonymize=self._anonymize))
+            return frozenset(shown)
         except Exception:  # noqa: BLE001 — the adapter's text may carry an ID (T7)
             return None
 
@@ -530,6 +630,7 @@ class LiveUpdates:
             slicer_version=self._slicer_version,
             anonymize_names=self._anonymize,
             announce=announce,
+            ids=self._ids,
         )
 
     def _empty(self, cause: _Cause, too_large: SnapshotTooLargeError | None = None) -> None:

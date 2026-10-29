@@ -1,8 +1,9 @@
-"""MRML collection (``docs/architecture.md`` §6.4, ADR 0005 + errata): Slicer model nodes → GLB entities.
+"""MRML collection (``docs/architecture.md`` §6.4, ADR 0005 + errata): Slicer model nodes and segments → GLB entities.
 
-:func:`collect_scene` reads the scene through a small injectable :class:`SceneApi` (the real implementation is the
-Slicer adapter in ``RemoteView.py``, SLC-09/SLC-22; tests use a fake) and returns one
-:class:`~remoteview_core.glb_writer.Entity` per exportable model node, in glTF space:
+:func:`collect_scene` reads the scene through a small injectable :class:`SceneApi` (the real implementation is
+:class:`~remoteview_core.mrml_scene.MrmlSceneApi`, SLC-22/SLC-35; tests use a fake) and returns one
+:class:`~remoteview_core.glb_writer.Entity` per exportable model node and per shown segment (one handle per entity,
+one code path for both), in glTF space:
 
 - geometry: a **deep copy** of the node's points (same precision), polygons and strips only (the user's data is
   never touched — ADR 0005 §3; no attribute arrays, vertices or lines) → ``vtkTriangleFilter`` → triangles with a
@@ -15,13 +16,20 @@ Slicer adapter in ``RemoteView.py``, SLC-09/SLC-22; tests use a fake) and return
   as a ``vtkTransformFilter`` on the mesh; normals are computed after it, and a transform that mirrors (negative
   Jacobian at the first triangle) gets the triangles reversed so that their front faces still point outwards;
 - appearance: display colour/opacity clamped to 0..1, visibility as a bool;
-- name: :class:`~remoteview_core.names.NameAssigner` (sanitised, or ``Model <n>`` with *Hide node names*).
+- name: :class:`~remoteview_core.names.NameAssigner` (sanitised, or ``Model <n>``/``Segment <n>`` with *Hide node
+  names*);
+- identity (protocol v1.1 §7.3, :class:`~remoteview_core.ids.SceneIds`): a model's ``nodeId``/``mrmlId`` is its MRML
+  ID when that is what Slicer generates, else an ``m_<n>`` alias — in both modes, never a skip; a segment's ``nodeId``
+  is ``<mrmlId>/<segmentId>`` verbatim or ``<mrmlId>/s_<n>``, and ``extras.segmentId`` is the raw ID or omitted under
+  *Hide node names*. The caller passes the session's registry so that every export reuses the aliases it issued
+  (``ids=None`` makes a fresh one: fine for a single export).
 
 A node that cannot be exported never aborts the snapshot: it is left out and reported in
-:attr:`CollectedScene.skipped` with a :class:`SkipReason` — no triangles (empty, points or lines only), a non-linear
-world transform the scene cannot hand over for baking, invalid or duplicate IDs (with *Hide node names* also IDs not
-of the generated shape), non-finite data (also after a bake), cells that reference missing points or are not
-stored as integers (checked before any VTK filter runs: the filters do not bounds-check point IDs).
+:attr:`CollectedScene.skipped` with a :class:`SkipReason` — no triangles (empty, points or lines only; a segment
+without a 3D representation or with a planar-contour one), a non-linear world transform the scene cannot hand over for
+baking, duplicate IDs, an ID that is not a string at all (``GetID()`` returning ``None``: an adapter bug, never a
+Slicer state), non-finite data (also after a bake), cells that reference missing points or are not stored as integers
+(checked before any VTK filter runs: the filters do not bounds-check point IDs).
 
 Main thread only (VTK). No Slicer or Qt import: the VTK classes come from ``vtkmodules``, which Slicer 5.12 and the
 ``vtk`` wheel provide identically (``docs/research/slicer-collect.md``).
@@ -30,7 +38,6 @@ Main thread only (VTK). No Slicer or Qt import: the VTK classes come from ``vtkm
 from __future__ import annotations
 
 import enum
-import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -51,41 +58,57 @@ from vtkmodules.vtkCommonTransforms import vtkAbstractTransform, vtkTransform
 from vtkmodules.vtkFiltersCore import vtkPolyDataNormals, vtkTriangleFilter
 
 from remoteview_core.coords import ras_matrix_to_gltf, ras_to_gltf_normals, ras_to_gltf_points
-from remoteview_core.glb_writer import NODE_ID_PATTERN, Entity, is_exportable_matrix
+from remoteview_core.glb_writer import Entity, is_exportable_matrix
+from remoteview_core.ids import SceneIds
 from remoteview_core.names import NameAssigner
 
 
 class SceneApi(Protocol):
-    """What :func:`collect_scene` needs from a Slicer scene (one implementation per host; tests use fakes)."""
+    """What :func:`collect_scene` needs from a Slicer scene (one implementation per host; tests use fakes). The
+    per-entity methods take a model node or a segment handle (what :meth:`visible_segments` yields); the adapter
+    dispatches on the handle type, so the collection has one code path per entity."""
 
     def visible_model_nodes(self) -> Iterable[Any]:
         """The model nodes to export, in a stable order (the adapter decides which ones — FR-05, SLC-22)."""
         ...
 
+    def visible_segments(self) -> Iterable[Any]:
+        """One handle per segment the 3D view shows, in Slicer's segment order, grouped per segmentation node in
+        scene order (the adapter decides which ones — SLC-35)."""
+        ...
+
     def node_id(self, node: Any) -> str:
-        """The MRML node ID (``vtkMRMLModelNode4``), used as ``nodeId`` (protocol §7.3)."""
+        """The MRML node ID (``vtkMRMLModelNode4``) of a model node, the raw of ``nodeId`` (protocol §7.3)."""
+        ...
+
+    def segment_identity(self, handle: Any) -> tuple[str, str | bytes]:
+        """``(segmentation node MRML ID, raw segment ID)`` of a segment handle (``bytes`` for an ID that is not
+        UTF-8)."""
         ...
 
     def name(self, node: Any) -> str | bytes | None:
-        """The display name as Slicer stores it (VTK returns ``bytes`` for a name that is not UTF-8)."""
+        """The display name of a model node or a segment handle as Slicer stores it (VTK returns ``bytes`` for a name
+        that is not UTF-8)."""
         ...
 
     def polydata(self, node: Any) -> vtkPolyData | None:
-        """The node's mesh in its own coordinates (before the parent transform), or ``None``."""
+        """The mesh of a model node or a segment handle in its own coordinates (before the parent transform), or
+        ``None``."""
         ...
 
     def display_props(self, node: Any) -> tuple[Sequence[float], float, bool]:
-        """``(color [r, g, b] 0..1, opacity 0..1, visible)`` of the node's 3D display."""
+        """``(color [r, g, b] 0..1, opacity 0..1, visible)`` of the 3D display of a model node or a segment handle."""
         ...
 
     def world_matrix(self, node: Any) -> Any:
-        """The 4×4 RAS (mm) node-to-world matrix (identity without a parent transform), or ``None`` when the parent
-        transform chain is not linear."""
+        """The 4×4 RAS (mm) node-to-world matrix of a model node or a segment handle (identity without a parent
+        transform), or ``None`` when the parent transform chain is not linear."""
         ...
 
     def world_transform(self, node: Any) -> vtkAbstractTransform | None:
-        """The whole node-to-world transform (RAS mm) as the 3D view applies it, for baking a chain that is not linear
-        into the vertices; ``None`` when it cannot be had. Asked only when :meth:`world_matrix` is ``None``."""
+        """The whole node-to-world transform (RAS mm) of a model node or a segment handle as the 3D view applies it,
+        for baking a chain that is not linear into the vertices; ``None`` when it cannot be had. Asked only when
+        :meth:`world_matrix` is ``None``."""
         ...
 
 
@@ -106,10 +129,11 @@ class SkipReason(enum.Enum):
 @dataclass(frozen=True)
 class SkippedNode:
     """A node left out of the snapshot; ``node_id`` is ``""`` when the ID itself was invalid. ``index`` is the
-    node's position in ``visible_model_nodes()`` so the panel can still show which node it was (local only, never
-    sent; not part of equality)."""
+    handle's position in ``visible_model_nodes()`` followed by ``visible_segments()`` so the panel can still show
+    which one it was (local only, never sent; not part of equality). The repr shows the reason and the index only: a
+    segment's ``nodeId`` may carry a verbatim, name-derived segment ID (T7), and a repr can reach a log."""
 
-    node_id: str
+    node_id: str = field(repr=False)
     reason: SkipReason
     index: int = field(default=-1, compare=False)
     #: ``no-triangles`` and ``invalid-geometry`` only: the bake of the node's transform made a mesh that passes the
@@ -442,24 +466,6 @@ def transform_to_bake(world: Any, scene_api: SceneApi, node: Any) -> vtkAbstract
     return transform if isinstance(transform, vtkAbstractTransform) else None
 
 
-#: The IDs Slicer generates for model nodes (``vtkMRMLModelNode4``: class name + counter, research note §3). With
-#: *Hide node names* only IDs of this shape are exported: ``SetID`` and a hand-edited ``.mrml`` accept any string,
-#: and an ID is repeated in every ``scene.update`` (T7).
-_GENERATED_ID = re.compile(r"vtkMRMLModelNode[0-9]{1,10}")
-
-
-def valid_model_id(node_id: Any, *, anonymize: bool) -> bool:
-    """The ID rules of an exported model: §3.3 shape, no ``/`` (segments use it), not ``root``; with *Hide node
-    names* only Slicer's generated IDs (T7)."""
-    valid = (
-        isinstance(node_id, str)
-        and NODE_ID_PATTERN.fullmatch(node_id) is not None
-        and "/" not in node_id
-        and node_id != "root"
-    )
-    return valid and (not anonymize or _GENERATED_ID.fullmatch(node_id) is not None)
-
-
 def raw_name(name: Any) -> str | bytes | None:
     """A name of another type (an adapter bug) counts as no name: the node gets its substitute, not dropped."""
     return name if name is None or isinstance(name, (str, bytes)) else None
@@ -476,61 +482,113 @@ def _checked_mesh(polydata: Any, bake: vtkAbstractTransform | None) -> Mesh | Sk
     return mesh if _finite_geometry(mesh) else SkipReason.INVALID_GEOMETRY
 
 
-def collect_scene(scene_api: SceneApi, *, anonymize_names: bool = False) -> CollectedScene:
-    """Collect every exportable model node of ``scene_api`` (see the module docstring)."""
-    names = NameAssigner(anonymize=anonymize_names)
-    entities: list[Entity] = []
-    skipped: list[SkippedNode] = []
-    seen: set[str] = set()
-    for index, node in enumerate(scene_api.visible_model_nodes()):
-        node_id = scene_api.node_id(node)
-        if not valid_model_id(node_id, anonymize=anonymize_names):
-            skipped.append(SkippedNode("", SkipReason.INVALID_NODE_ID, index))
-            continue
-        if node_id in seen:
-            skipped.append(SkippedNode(node_id, SkipReason.DUPLICATE_NODE_ID, index))
-            continue
-        seen.add(node_id)
-        world = scene_api.world_matrix(node)
+class _Collector:
+    """One :func:`collect_scene` call: the entities and skips so far, the names and the ID registry it uses."""
+
+    def __init__(self, scene_api: SceneApi, ids: SceneIds, *, anonymize: bool) -> None:
+        self._scene = scene_api
+        self._ids = ids
+        self._anonymize = anonymize
+        self._names = NameAssigner(anonymize=anonymize)
+        self.entities: list[Entity] = []
+        self.skipped: list[SkippedNode] = []
+        self._seen: set[str] = set()
+        self._index = -1  # the handle's position across both lists
+
+    @property
+    def anonymize(self) -> bool:
+        return self._names.anonymize
+
+    def model(self, node: Any) -> None:
+        self._index += 1
+        node_id = self._ids.model_node_id(self._scene.node_id(node))
+        if node_id is None:  # GetID() is not a string: an adapter bug, never a Slicer state
+            self.skipped.append(SkippedNode("", SkipReason.INVALID_NODE_ID, self._index))
+            return
+        self._collect_one(node, node_id, "model", node_id, None)
+
+    def segment(self, handle: Any) -> None:
+        self._index += 1
+        node_raw, seg_raw = self._scene.segment_identity(handle)
+        node_id = self._ids.segment_node_id(node_raw, seg_raw, anonymize=self._anonymize)
+        if node_id is None:  # neither raw ID is a string
+            self.skipped.append(SkippedNode("", SkipReason.INVALID_NODE_ID, self._index))
+            return
+        mrml_id = (
+            self._ids.model_node_id(node_raw) or ""
+        )  # never empty: a segment nodeId implies its prefix
+        self._collect_one(
+            handle,
+            node_id,
+            "segment",
+            mrml_id,
+            self._ids.segment_extra(seg_raw, anonymize=self._anonymize),
+        )
+
+    def _collect_one(
+        self, handle: Any, node_id: str, kind: str, mrml_id: str, segment_id: str | None
+    ) -> None:
+        """Export one entity (a model node or a segment handle) under ``node_id``, or report why not."""
+        index, scene = self._index, self._scene
+        if node_id in self._seen:
+            self.skipped.append(SkippedNode(node_id, SkipReason.DUPLICATE_NODE_ID, index))
+            return
+        self._seen.add(node_id)
+        world = scene.world_matrix(handle)
         matrix = placement_of(world)
         if isinstance(matrix, SkipReason):
-            skipped.append(SkippedNode(node_id, matrix, index))
-            continue
+            self.skipped.append(SkippedNode(node_id, matrix, index))
+            return
         bake = None
         if matrix is BAKE:
-            bake, matrix = transform_to_bake(world, scene_api, node), None
+            bake, matrix = transform_to_bake(world, scene, handle), None
             if bake is None:
-                skipped.append(SkippedNode(node_id, SkipReason.NON_LINEAR_TRANSFORM, index))
-                continue
-        display = display_of(scene_api.display_props(node))
+                self.skipped.append(SkippedNode(node_id, SkipReason.NON_LINEAR_TRANSFORM, index))
+                return
+        display = display_of(scene.display_props(handle))
         if display is None:
-            skipped.append(SkippedNode(node_id, SkipReason.INVALID_DISPLAY, index))
-            continue
-        polydata = scene_api.polydata(node)
+            self.skipped.append(SkippedNode(node_id, SkipReason.INVALID_DISPLAY, index))
+            return
+        polydata = scene.polydata(handle)
         mesh = _checked_mesh(polydata, bake)
         if isinstance(mesh, SkipReason):
             # the bake is to blame only if the mesh passes unbaked (the extra check runs for skipped nodes only)
             baked = bake is not None and not isinstance(_checked_mesh(polydata, None), SkipReason)
-            skipped.append(SkippedNode(node_id, mesh, index, baked=baked))
-            continue
+            self.skipped.append(SkippedNode(node_id, mesh, index, baked=baked))
+            return
         color, opacity, visible = display
-        entities.append(
+        self.entities.append(
             Entity(
                 node_id=node_id,
-                kind="model",
-                name=names.assign("model", raw_name(scene_api.name(node))),
+                kind=kind,
+                name=self._names.assign(kind, raw_name(scene.name(handle))),
                 positions=ras_to_gltf_points(mesh.positions, dtype=np.float64),
                 normals=ras_to_gltf_normals(mesh.normals),
                 indices=mesh.triangles,
                 color=color,
                 opacity=opacity,
                 visible=visible,
-                mrml_id=node_id,
+                mrml_id=mrml_id,
+                segment_id=segment_id,
                 matrix=matrix,
                 baked=bake is not None,
             )
         )
-    return CollectedScene(tuple(entities), tuple(skipped), names.anonymize)
+
+
+def collect_scene(
+    scene_api: SceneApi, *, anonymize_names: bool = False, ids: SceneIds | None = None
+) -> CollectedScene:
+    """Collect every exportable model node, then every shown segment, of ``scene_api`` (see the module docstring).
+    ``ids`` is the session's alias registry (a fresh one when ``None``)."""
+    collector = _Collector(
+        scene_api, ids if ids is not None else SceneIds(), anonymize=anonymize_names
+    )
+    for node in scene_api.visible_model_nodes():
+        collector.model(node)
+    for handle in scene_api.visible_segments():
+        collector.segment(handle)
+    return CollectedScene(tuple(collector.entities), tuple(collector.skipped), collector.anonymize)
 
 
 def collect_entities(scene_api: SceneApi, *, anonymize_names: bool = False) -> list[Entity]:

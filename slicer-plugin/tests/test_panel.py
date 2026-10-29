@@ -581,6 +581,13 @@ def test_panel_texts_are_plain_and_complete():
     assert all(text and "<" not in text and ">" not in text for text in texts)
     assert [text for text in followed if "stop and start" in text.lower()] == []
     assert all("stop and start" in text.lower() for text in unfollowed)
+    # SLC-35: segments leave the PC too, so every text that asks the user to hide or change something names them
+    for text in (panel.HIDE_MODELS, panel.HIDE_MODELS_AND_RESTART):
+        assert "models or segments" in text
+    assert "model or segment" in panel.RETRY_ON_CHANGE
+    assert "models or segments" in panel.skipped_text(
+        2
+    ) and "model or segments" in panel.skipped_text(1)
     for reason, text in panel.END_REASONS.items():
         assert re.fullmatch(r"[A-Z][A-Z0-9_]*", reason)
         assert "<" not in text and ">" not in text

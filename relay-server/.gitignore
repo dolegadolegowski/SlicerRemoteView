@@ -1,0 +1,5 @@
+# A local copy of the viewer build in public/ (the Docker build puts it there, SRV-20).
+public/assets/*
+!public/assets/.gitkeep
+public/manifest.webmanifest
+public/icons/

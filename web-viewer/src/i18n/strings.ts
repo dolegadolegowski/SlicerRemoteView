@@ -82,17 +82,63 @@ const en = {
   "state.sessionEnded.title": "Presentation ended",
   "state.sessionEnded.body":
     "The presenter closed the session or it expired. Enter a new code to join another one.",
+  "state.contextLost.title": "3D view paused",
+  "state.contextLost.body":
+    "The device needed its graphics memory back. The scene returns by itself in a moment; if it does not, reload the page.",
+  "state.xrFailed.title": "AR/VR could not start",
+  "state.xrFailed.body":
+    "The headset did not open the immersive view. Try again, or keep using the 2D view.",
   "state.webgl2Unavailable.title": "3D is not available",
   "state.webgl2Unavailable.body":
     "This browser or device cannot run WebGL 2, which the viewer needs. Try a current Safari or Chrome.",
   "state.snapshotTooLarge.title": "Scene is too large for this device",
   "state.snapshotTooLarge.body":
     "The scene is larger than this device can load. Ask the presenter to share a lighter scene.",
+  "state.snapshotInvalid.title": "Scene could not be opened",
+  "state.snapshotInvalid.body":
+    "The scene that was shared is damaged or uses features this viewer does not support. Ask the presenter to share it again.",
+  "state.snapshotFailed.title": "Scene could not be downloaded",
+  "state.snapshotFailed.body": "Check the connection and tap Join to try again.",
+  "state.snapshotUpdateFailed.title": "New scene could not be downloaded",
+  "state.snapshotUpdateFailed.body":
+    "You are still seeing the previous scene. Check the connection, or ask the presenter to share the scene again.",
+  "state.linkInvalid.title": "The link has no valid code",
+  "state.linkInvalid.body":
+    "The link you opened does not contain a valid session code. Check the code shown in 3D Slicer.",
+  "viewer.updating": "Updating the scene…",
+  "viewer.presenterChanged": "The presenter changed {name}",
+  "viewer.presenterChangedMany": "The presenter changed {count} structures",
+
+  "statusBar.label": "Session status",
+  "statusBar.connected": "Connected",
+  "statusBar.viewers": "Viewers: {count}",
+  "statusBar.scene": "Scene v{version}",
+  "statusBar.leave": "Leave",
+  "activity.summary": "Active sessions: {sessions} · Viewers: {viewers}",
+  // The language's own name, shown on the switch to it (WEB-21): each table names its own language.
+  "lang.name": "English",
+  "viewer.fit": "Fit view",
+  "xr.enterAr": "View in AR",
+  "xr.enterVr": "View in VR",
+  "xr.quest2Budget":
+    "This scene is above the Quest 2 budget and may stutter. Ask the presenter to share it with the Quest 2 profile.",
+  "xr.quest2Profile":
+    "This scene was not prepared for Quest 2 and may stutter. Ask the presenter to share it with the Quest 2 profile.",
+  "viewer.dismiss": "Dismiss",
+  "viewer.canvasLabel":
+    "3D scene. Drag with one finger to rotate, pinch with two fingers to zoom and move, double-tap to fit.",
+  "nodePanel.title": "Structures",
+  "nodePanel.toggle": "Structures ({count})",
+  "nodePanel.showAll": "Show all",
+  "nodePanel.unnamed": "Unnamed {n}",
+  "nodePanel.empty": "This scene has no structures.",
+  "nodePanel.opacity": "Opacity of {name}",
   "codeEntry.title": "Join a session",
   "codeEntry.lead": "Enter the 5-character code shown in 3D Slicer.",
   "codeEntry.cellLabel": "Code character {n} of {total}",
   "codeEntry.join": "Join",
   "codeEntry.joining": "Joining…",
+  "codeEntry.leave": "Leave session",
   "codeEntry.hint.zeroOrO": "Codes never contain 0 or O — check that character.",
   "codeEntry.hint.oneIorL": "Codes never contain 1, I or L — check that character.",
   "codeEntry.hint.notInAlphabet":
@@ -176,17 +222,62 @@ const pl: Record<StringKey, string> = {
   "state.sessionEnded.title": "Prezentacja zakończona",
   "state.sessionEnded.body":
     "Prezenter zamknął sesję albo wygasła. Wpisz nowy kod, aby dołączyć do innej.",
+  "state.contextLost.title": "Widok 3D wstrzymany",
+  "state.contextLost.body":
+    "Urządzenie odebrało pamięć grafiki. Scena wróci sama za chwilę; jeśli nie wróci, odśwież stronę.",
+  "state.xrFailed.title": "Nie udało się uruchomić AR/VR",
+  "state.xrFailed.body":
+    "Gogle nie otworzyły widoku immersyjnego. Spróbuj ponownie lub korzystaj z widoku 2D.",
   "state.webgl2Unavailable.title": "Grafika 3D jest niedostępna",
   "state.webgl2Unavailable.body":
     "Ta przeglądarka lub urządzenie nie obsługuje WebGL 2, którego wymaga podgląd. Spróbuj w aktualnym Safari lub Chrome.",
   "state.snapshotTooLarge.title": "Scena jest za duża dla tego urządzenia",
   "state.snapshotTooLarge.body":
     "Scena jest większa, niż to urządzenie może wczytać. Poproś prezentera o lżejszą scenę.",
+  "state.snapshotInvalid.title": "Nie udało się otworzyć sceny",
+  "state.snapshotInvalid.body":
+    "Udostępniona scena jest uszkodzona albo używa funkcji, których podgląd nie obsługuje. Poproś prezentera o ponowne udostępnienie.",
+  "state.snapshotFailed.title": "Nie udało się pobrać sceny",
+  "state.snapshotFailed.body": "Sprawdź połączenie i stuknij „Dołącz”, aby spróbować ponownie.",
+  "state.snapshotUpdateFailed.title": "Nie udało się pobrać nowej sceny",
+  "state.snapshotUpdateFailed.body":
+    "Nadal widzisz poprzednią scenę. Sprawdź połączenie albo poproś prezentera o ponowne udostępnienie sceny.",
+  "state.linkInvalid.title": "Link nie zawiera prawidłowego kodu",
+  "state.linkInvalid.body":
+    "Otwarty link nie zawiera prawidłowego kodu sesji. Sprawdź kod widoczny w 3D Slicerze.",
+  "viewer.updating": "Aktualizowanie sceny…",
+  "viewer.presenterChanged": "Prezenter zmienił: {name}",
+  "viewer.presenterChangedMany": "Prezenter zmienił struktury: {count}",
+
+  "statusBar.label": "Stan sesji",
+  "statusBar.connected": "Połączono",
+  "statusBar.viewers": "Widzowie: {count}",
+  "statusBar.scene": "Scena v{version}",
+  "statusBar.leave": "Wyjdź",
+  "activity.summary": "Aktywne sesje: {sessions} · Widzowie: {viewers}",
+  "lang.name": "Polski",
+  "viewer.fit": "Dopasuj widok",
+  "xr.enterAr": "Zobacz w AR",
+  "xr.enterVr": "Zobacz w VR",
+  "xr.quest2Budget":
+    "Ta scena przekracza budżet Questa 2 i może się zacinać. Poproś prezentera o udostępnienie jej z profilem Quest 2.",
+  "xr.quest2Profile":
+    "Ta scena nie została przygotowana dla Questa 2 i może się zacinać. Poproś prezentera o udostępnienie jej z profilem Quest 2.",
+  "viewer.dismiss": "Zamknij",
+  "viewer.canvasLabel":
+    "Scena 3D. Przeciągnij jednym palcem, aby obrócić, rozsuń dwa palce, aby przybliżyć i przesunąć, stuknij dwukrotnie, aby dopasować.",
+  "nodePanel.title": "Struktury",
+  "nodePanel.toggle": "Struktury ({count})",
+  "nodePanel.showAll": "Pokaż wszystkie",
+  "nodePanel.unnamed": "Bez nazwy {n}",
+  "nodePanel.empty": "Ta scena nie zawiera struktur.",
+  "nodePanel.opacity": "Krycie: {name}",
   "codeEntry.title": "Dołącz do sesji",
   "codeEntry.lead": "Wpisz 5-znakowy kod widoczny w 3D Slicerze.",
   "codeEntry.cellLabel": "Znak kodu {n} z {total}",
   "codeEntry.join": "Dołącz",
   "codeEntry.joining": "Dołączanie…",
+  "codeEntry.leave": "Opuść sesję",
   "codeEntry.hint.zeroOrO": "Kody nigdy nie zawierają 0 ani O — sprawdź ten znak.",
   "codeEntry.hint.oneIorL": "Kody nigdy nie zawierają 1, I ani L — sprawdź ten znak.",
   "codeEntry.hint.notInAlphabet": "Kody składają się z liter A–Z (bez I, L, O) i cyfr 2–9.",

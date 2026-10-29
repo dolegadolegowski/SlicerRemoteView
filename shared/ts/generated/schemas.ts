@@ -48,19 +48,22 @@ export const SCHEMA_FILES: Readonly<Record<string, Record<string, unknown>>> = {
         "pattern": "^[A-Za-z0-9_./:-]+$"
       },
       "sceneVersion": {
-        "description": "Monotonic scene version; 0 = nothing published (§4.2, §8.4).",
+        "description": "Monotonic scene version, a uint32 (the chunk header carries it as uint32, §6.3); 0 = nothing published (§3.3, §4.2, §8.4).",
         "type": "integer",
-        "minimum": 0
+        "minimum": 0,
+        "maximum": 4294967295
       },
       "snapshotVersion": {
-        "description": "sceneVersion of a GLB snapshot; never 0, because 0 means nothing published (§4.2, §6.2, §8.4).",
+        "description": "sceneVersion of a GLB snapshot, a uint32; never 0, because 0 means nothing published (§3.3, §4.2, §6.2, §8.4).",
         "type": "integer",
-        "minimum": 1
+        "minimum": 1,
+        "maximum": 4294967295
       },
       "updateVersion": {
-        "description": "sceneVersion carried by scene.update, scene.nodeRemoved and scene.nodeAdded: never 0; the relay, not the schema, enforces sceneVersion > baseVersion (§8.1, §8.4).",
+        "description": "sceneVersion carried by scene.update, scene.nodeRemoved and scene.nodeAdded: a uint32, never 0; the relay, not the schema, enforces sceneVersion > baseVersion (§8.1, §8.4).",
         "type": "integer",
-        "minimum": 1
+        "minimum": 1,
+        "maximum": 4294967295
       },
       "color": {
         "description": "[r, g, b] floats in 0..1 (§3.2).",
@@ -178,10 +181,16 @@ export const SCHEMA_FILES: Readonly<Record<string, Record<string, unknown>>> = {
         "pattern": "^[0-9a-f]{64}$"
       },
       "byteLength": {
-        "description": "Size of a complete GLB snapshot in bytes, at most MAX_SNAPSHOT_BYTES = 64 MiB (§3.3, §6.2).",
+        "description": "Size of a complete GLB snapshot in bytes, at most MAX_SNAPSHOT_BYTES = 64 MiB (§3.3, §6.2). Used where the relay reports a snapshot it holds (scene.snapshot.ready, viewer.joined.snapshot); a publisher's announcement uses announcedByteLength.",
         "type": "integer",
         "minimum": 1,
         "maximum": 67108864
+      },
+      "announcedByteLength": {
+        "description": "byteLength as a publisher announces it in scene.snapshot.begin: deliberately without the 64 MiB maximum (only the largest exactly representable integer, 2^53 - 1, bounds it), so that a value above MAX_SNAPSHOT_BYTES reaches the relay's rule and is answered PAYLOAD_TOO_LARGE with details.maxSnapshotBytes instead of INVALID_MESSAGE (§3.3, §6.2, report 2026-10-20-server-2).",
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 9007199254740991
       },
       "snapshotFormat": {
         "description": "Container format of a snapshot; v1 knows only binary glTF (§6.2).",
@@ -707,7 +716,8 @@ export const SCHEMA_FILES: Readonly<Record<string, Record<string, unknown>>> = {
           "integer",
           "null"
         ],
-        "minimum": 1
+        "minimum": 1,
+        "maximum": 4294967295
       },
       "haveSceneVersion": {
         "description": "Last scene version the viewer applied; 0 when none (§8.3, §8.4).",
@@ -809,7 +819,7 @@ export const SCHEMA_FILES: Readonly<Record<string, Record<string, unknown>>> = {
         "$ref": "defs.schema.json#/definitions/snapshotVersion"
       },
       "byteLength": {
-        "$ref": "defs.schema.json#/definitions/byteLength"
+        "$ref": "defs.schema.json#/definitions/announcedByteLength"
       },
       "sha256": {
         "description": "SHA-256 of the complete GLB, repeated in scene.snapshot.end (§6.2, §6.4).",
@@ -959,7 +969,8 @@ export const SCHEMA_FILES: Readonly<Record<string, Record<string, unknown>>> = {
           "integer",
           "null"
         ],
-        "minimum": 1
+        "minimum": 1,
+        "maximum": 4294967295
       },
       "nodes": {
         "description": "Merged changes per node, in no particular order; empty when nothing accumulated.",
@@ -1415,7 +1426,8 @@ export const SCHEMA_FILES: Readonly<Record<string, Record<string, unknown>>> = {
           "integer",
           "null"
         ],
-        "minimum": 1
+        "minimum": 1,
+        "maximum": 4294967295
       },
       "viewerCount": {
         "type": "integer",
@@ -1602,7 +1614,8 @@ export const SCHEMA_FILES: Readonly<Record<string, Record<string, unknown>>> = {
           "integer",
           "null"
         ],
-        "minimum": 1
+        "minimum": 1,
+        "maximum": 4294967295
       },
       "snapshotAvailable": {
         "description": "true = the viewer SHOULD fetch GET /api/scene/:sceneVersion now (§5.2, §6.5); then `snapshot` is present.",
@@ -1658,7 +1671,8 @@ export const SCHEMA_FILES: Readonly<Record<string, Record<string, unknown>>> = {
         },
         "snapshotVersion": {
           "type": "integer",
-          "minimum": 1
+          "minimum": 1,
+          "maximum": 4294967295
         }
       },
       "required": [

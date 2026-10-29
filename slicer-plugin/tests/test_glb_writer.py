@@ -35,6 +35,9 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = PLUGIN_ROOT.parent
 CORE_DIR = PLUGIN_ROOT / "RemoteView" / "remoteview_core"
 ROOT = RootExtras(scene_version=7, profile="mobile", slicer_version="5.12.4")
+ANONYMOUS = RootExtras(
+    scene_version=1, profile="mobile", slicer_version="5.12.4", anonymized_names=True
+)
 
 # --------------------------------------------------------------------------- fixtures
 
@@ -421,71 +424,73 @@ def test_glb_writer_constants_match_the_protocol_schema():
 # --------------------------------------------------------------------------- negative cases
 
 
-@pytest.mark.parametrize(
-    ("overrides", "message"),
-    [
-        ({"node_id": "bad id with spaces"}, "nodeId"),
-        ({"node_id": "x" * 129}, "nodeId"),
-        ({"node_id": "vtkMRMLModelNode3\n", "mrml_id": "vtkMRMLModelNode3\n"}, "nodeId"),
-        ({"node_id": "root", "mrml_id": "root"}, "reserved"),
-        ({"node_id": "vtkMRMLModelNode4"}, "MRML ID"),
-        ({"mrml_id": ""}, "mrmlId"),
-        ({"segment_id": "Segment_1"}, "segmentId"),
-        ({"kind": "volume"}, "kind"),
-        ({"name": "Patient\x07Name"}, "sanitised"),
-        ({"name": "Liver\u202egnp.exe"}, "sanitised"),  # bidi override (Cf)
-        ({"name": "Li\u200bver"}, "sanitised"),  # zero-width space (Cf)
-        (
-            {"name": "Liver\ud800"},
-            "sanitised",
-        ),  # lone surrogate: would fail as UnicodeEncodeError later
-        ({"name": "Line\u2028break"}, "sanitised"),
-        ({"name": " padded "}, "sanitised"),
-        ({"name": " leading"}, "sanitised"),
-        ({"name": "Para\u2029graph"}, "sanitised"),  # paragraph separator (Zp)
-        ({"name": "Private\ue000use"}, "sanitised"),  # private use (Co)
-        ({"name": "Un\u0378assigned"}, "sanitised"),  # unassigned (Cn)
-        ({"name": "n" * 65}, "sanitised"),
-        ({"name": 42}, "sanitised"),
-        ({"color": (1.2, 0.0, 0.0)}, "color"),
-        ({"color": (0.5, 0.5)}, "color"),
-        ({"color": ("a", "b", "c")}, "color"),
-        ({"color": ("0.5", 0.5, 0.5)}, "color"),
-        ({"color": (True, False, True)}, "color"),
-        ({"color": np.array(0.5)}, "color"),  # 0-d array has no len()
-        ({"opacity": float("nan")}, "opacity"),
-        ({"opacity": "0.5"}, "opacity"),
-        ({"opacity": True}, "opacity"),
-        ({"node_id": "a/b", "mrml_id": "a/b"}, "mrmlId"),
-        ({"visible": "false"}, "booleans"),
-        ({"baked": "no"}, "booleans"),
-        ({"positions": np.full((4, 3), np.nan)}, "finite"),
-        ({"positions": np.full((4, 3), 1e39)}, "finite"),  # finite float64, overflows float32
-        ({"positions": np.zeros((4, 3), dtype=complex)}, "real"),
-        ({"positions": np.zeros((0, 3))}, "positions"),
-        ({"positions": [[0, 0, 0], [1, 1]]}, "arrays"),  # ragged
-        ({"normals": np.zeros((4, 3))}, "unit length"),
-        ({"normals": np.tile([0.0, 1.0 + 2e-4, 0.0], (4, 1))}, "unit length"),
-        ({"normals": np.zeros((3, 3))}, "same shape"),
-        ({"indices": np.array([[0, 1, 4]])}, "out of range"),
-        ({"indices": np.array([[0, -1, 2]])}, "out of range"),
-        ({"indices": np.array([[0.0, 1.0, 2.0]])}, "integers"),
-        ({"indices": np.zeros((0, 3), dtype=int)}, "indices"),
-        ({"matrix": np.eye(3)}, "4x4"),
-        (
-            {"matrix": np.array([[1, 0.3, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1.0]])},
-            "shear",
-        ),
-        ({"matrix": np.full((4, 4), np.nan)}, "4x4"),
-        ({"matrix": [[1, 0, 0, 0], [0, 1]]}, "4x4"),  # ragged
-        ({"matrix": np.diag([1.0, 1.0, 1.0, 1.0]) + np.eye(4, k=3) * 1e39}, "float32"),
-        ({"matrix": np.diag([1e-50, 1e-50, 1e-50, 1.0])}, "shear"),  # scale 0 in float32
-        ({"baked": True}, "baked"),
-    ],
-)
+INVALID_ENTITIES = [
+    ({"node_id": "bad id with spaces"}, "nodeId"),
+    ({"node_id": "x" * 129}, "nodeId"),
+    ({"node_id": "vtkMRMLModelNode3\n", "mrml_id": "vtkMRMLModelNode3\n"}, "nodeId"),
+    ({"node_id": "root", "mrml_id": "root"}, "reserved"),
+    ({"node_id": "vtkMRMLModelNode4"}, "MRML ID"),
+    ({"mrml_id": ""}, "mrmlId"),
+    ({"segment_id": "Segment_1"}, "segmentId"),
+    ({"kind": "volume"}, "kind"),
+    ({"name": "Patient\x07Name"}, "sanitised"),
+    ({"name": "Liver\u202egnp.exe"}, "sanitised"),  # bidi override (Cf)
+    ({"name": "Li\u200bver"}, "sanitised"),  # zero-width space (Cf)
+    (
+        {"name": "Liver\ud800"},
+        "sanitised",
+    ),  # lone surrogate: would fail as UnicodeEncodeError later
+    ({"name": "Line\u2028break"}, "sanitised"),
+    ({"name": " padded "}, "sanitised"),
+    ({"name": " leading"}, "sanitised"),
+    ({"name": "Para\u2029graph"}, "sanitised"),  # paragraph separator (Zp)
+    ({"name": "Private\ue000use"}, "sanitised"),  # private use (Co)
+    ({"name": "Un\u0378assigned"}, "sanitised"),  # unassigned (Cn)
+    ({"name": "n" * 65}, "sanitised"),
+    ({"name": 42}, "sanitised"),
+    ({"color": (1.2, 0.0, 0.0)}, "color"),
+    ({"color": (0.5, 0.5)}, "color"),
+    ({"color": ("a", "b", "c")}, "color"),
+    ({"color": ("0.5", 0.5, 0.5)}, "color"),
+    ({"color": (True, False, True)}, "color"),
+    ({"color": np.array(0.5)}, "color"),  # 0-d array has no len()
+    ({"opacity": float("nan")}, "opacity"),
+    ({"opacity": "0.5"}, "opacity"),
+    ({"opacity": True}, "opacity"),
+    ({"node_id": "a/b", "mrml_id": "a/b"}, "mrmlId"),
+    ({"visible": "false"}, "booleans"),
+    ({"baked": "no"}, "booleans"),
+    ({"positions": np.full((4, 3), np.nan)}, "finite"),
+    ({"positions": np.full((4, 3), 1e39)}, "finite"),  # finite float64, overflows float32
+    ({"positions": np.zeros((4, 3), dtype=complex)}, "real"),
+    ({"positions": np.zeros((0, 3))}, "positions"),
+    ({"positions": [[0, 0, 0], [1, 1]]}, "arrays"),  # ragged
+    ({"normals": np.zeros((4, 3))}, "unit length"),
+    ({"normals": np.tile([0.0, 1.0 + 2e-4, 0.0], (4, 1))}, "unit length"),
+    ({"normals": np.zeros((3, 3))}, "same shape"),
+    ({"indices": np.array([[0, 1, 4]])}, "out of range"),
+    ({"indices": np.array([[0, -1, 2]])}, "out of range"),
+    ({"indices": np.array([[0.0, 1.0, 2.0]])}, "integers"),
+    ({"indices": np.zeros((0, 3), dtype=int)}, "indices"),
+    ({"matrix": np.eye(3)}, "4x4"),
+    (
+        {"matrix": np.array([[1, 0.3, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1.0]])},
+        "shear",
+    ),
+    ({"matrix": np.full((4, 4), np.nan)}, "4x4"),
+    ({"matrix": [[1, 0, 0, 0], [0, 1]]}, "4x4"),  # ragged
+    ({"matrix": np.diag([1.0, 1.0, 1.0, 1.0]) + np.eye(4, k=3) * 1e39}, "float32"),
+    ({"matrix": np.diag([1e-50, 1e-50, 1e-50, 1.0])}, "shear"),  # scale 0 in float32
+    ({"baked": True}, "baked"),
+]
+
+
+@pytest.mark.parametrize(("overrides", "message"), INVALID_ENTITIES)
 def test_glb_writer_rejects_invalid_entities(overrides, message):
-    with pytest.raises(GlbWriteError, match=message):
+    with pytest.raises(GlbWriteError, match=message) as refused:
         write_glb([_tumor(**overrides)], ROOT)
+    # the message names the entity's position, never its ID (SLC-27)
+    assert "entities[0]" in str(refused.value) and "vtkMRMLModelNode3" not in str(refused.value)
 
 
 def test_glb_writer_rejects_bad_segment_ids():
@@ -498,6 +503,187 @@ def test_glb_writer_rejects_bad_segment_ids():
             write_glb([_liver(segment_id=segment_id)], ROOT)
     with pytest.raises(GlbWriteError, match="segment"):
         write_glb([_liver(mrml_id="vtkMRMLSegmentationNode2")], ROOT)
+
+
+# --------------------------------------------------------------------------- SLC-27: v1.1 identity rules (§7.3)
+
+SEG = "vtkMRMLSegmentationNode1"
+ALIASED = dict(node_id=f"{SEG}/s_1", segment_id="left lung", name="Left lung")
+ANONYMISED = dict(node_id=f"{SEG}/s_1", segment_id=None, name="Segment 1")
+
+
+def test_glb_writer_writes_an_aliased_segment_with_its_raw_id():
+    """A segment ID outside the nodeId grammar: nodeId is the alias, extras.segmentId the raw ID (§7.3 1.1)."""
+    doc, _, _ = _parse(write_glb([_liver(**ALIASED)], ROOT))
+    extras = doc["nodes"][1]["extras"]
+    assert extras["nodeId"] == f"{SEG}/s_1" and extras["mrmlId"] == SEG
+    assert extras["segmentId"] == "left lung" and extras["kind"] == "segment"
+
+
+def test_glb_writer_anonymised_segments_carry_no_raw_id_or_name():
+    """anonymizedNames: true — every segment is an alias without segmentId; the JSON chunk holds no raw ID or
+    name (string search of the decoded chunk)."""
+    entities = [
+        _liver(**ANONYMISED),
+        _liver(node_id=f"{SEG}/s_2", segment_id=None, name="Segment 2"),
+    ]
+    entities.append(_tumor(name="Model 1"))
+    doc, _, text = _parse(write_glb(entities, ANONYMOUS))
+    assert doc["nodes"][0]["extras"]["anonymizedNames"] is True
+    assert [t["extras"]["nodeId"] for t in doc["nodes"][1::2]] == [
+        f"{SEG}/s_1",
+        f"{SEG}/s_2",
+        "vtkMRMLModelNode3",
+    ]
+    assert all("segmentId" not in t["extras"] for t in doc["nodes"][1::2])
+    chunk = text.decode("utf-8")
+    for raw in ("left lung", "Liver", "Segment_2", "Tumor"):
+        assert raw not in chunk
+
+
+@pytest.mark.parametrize(
+    ("overrides", "root", "message"),
+    [
+        # a verbatim segment ID under hidden names: the ID may be name-derived (report 2026-10-18-slicer-3)
+        ({"name": "Segment 1"}, ANONYMOUS, "alias"),
+        ({**ANONYMISED, "segment_id": "left lung"}, ANONYMOUS, "omitted"),
+        ({**ALIASED, "segment_id": None}, ROOT, "raw segmentId"),  # an alias must carry the raw ID
+        ({**ALIASED, "segment_id": 5}, ROOT, "raw segmentId"),
+        ({"mrml_id": "Sphere", "node_id": "Sphere/Segment_2"}, ROOT, "mrmlId"),
+        ({"mrml_id": "m_", "node_id": "m_/Segment_2"}, ROOT, "mrmlId"),
+        ({"mrml_id": "s_1", "node_id": "s_1/Segment_2"}, ROOT, "mrmlId"),
+        ({"node_id": f"{SEG}/a/b", "segment_id": "a/b"}, ROOT, "segmentId"),  # a slash in the tail
+        ({"node_id": f"{SEG}/left lung", "segment_id": "left lung"}, ROOT, "nodeId"),
+        ({"node_id": f"{SEG}/", "segment_id": ""}, ROOT, "segment"),
+        # `s_1x` is not an alias (verbatim rules apply): the segmentId must equal the tail
+        ({"node_id": f"{SEG}/s_1x", "segment_id": "s_1"}, ROOT, "segment"),
+    ],
+)
+def test_glb_writer_rejects_segments_outside_the_identity_rules(overrides, root, message):
+    with pytest.raises(GlbWriteError, match=message) as refused:
+        write_glb([_liver(**overrides)], root)
+    assert "entities[0]" in str(refused.value)
+
+
+def test_glb_writer_accepts_m_aliases_for_models_and_segmentation_nodes():
+    """A node whose MRML ID is not generated (`Sphere`) is exported as m_<n> in both modes (§7.3 1.1)."""
+    entities = [
+        _tumor(node_id="m_1", mrml_id="m_1"),
+        _liver(node_id="m_2/Segment_1", mrml_id="m_2", segment_id="Segment_1"),
+        _liver(node_id="m_2/s_1", mrml_id="m_2", segment_id="left lung", name="Left lung"),
+        _liver(node_id=f"{SEG}/Liver_DoeJohn", segment_id="Liver_DoeJohn"),
+    ]
+    doc, _, _ = _parse(write_glb(entities, ROOT))
+    assert [t["extras"]["mrmlId"] for t in doc["nodes"][1::2]] == ["m_1", "m_2", "m_2", SEG]
+    anonymised = [
+        _tumor(node_id="m_1", mrml_id="m_1", name="Model 1"),
+        _liver(node_id="m_2/s_1", mrml_id="m_2", segment_id=None, name="Segment 1"),
+    ]
+    doc, _, _ = _parse(write_glb(anonymised, ANONYMOUS))
+    assert [t["extras"]["nodeId"] for t in doc["nodes"][1::2]] == ["m_1", "m_2/s_1"]
+    with pytest.raises(GlbWriteError, match="mrmlId"):
+        write_glb([_tumor(node_id="Sphere", mrml_id="Sphere")], ROOT)
+
+
+def test_glb_writer_name_length_counts_utf16_units():
+    """Report 2026-10-27-protocol-2 item 4: ≤ 64 UTF-16 code units, counted without encoding — a lone surrogate
+    is simply not a sanitised name (it would raise UnicodeEncodeError as `len(s.encode("utf-16-le"))`)."""
+    assert writer.utf16_length("") == 0 and writer.utf16_length("abc") == 3
+    assert writer.utf16_length("\U0001f600") == 2 and writer.utf16_length("\ud800") == 1
+    assert writer.is_valid_name("\ud800") is False
+    assert writer.is_valid_name("a" * 64 + "\udc00") is False
+    astral = "a" * 63 + "\U0001f600"
+    assert len(astral) == 64 and writer.utf16_length(astral) == 65
+    assert writer.is_valid_name(astral) is False
+    assert writer.is_valid_name("a" * 62 + "\U0001f600") is True
+    with pytest.raises(GlbWriteError, match="UTF-16"):
+        write_glb([_tumor(name=astral)], ROOT)
+
+
+def _named_liver(**overrides) -> Entity:
+    """A segment whose verbatim ID is name-derived (T7): nothing about it may reach an error text."""
+    fields = dict(
+        node_id=f"{SEG}/Liver_DoeJohn", segment_id="Liver_DoeJohn", matrix=_tumor().matrix
+    )
+    fields.update(overrides)
+    return _liver(**fields)
+
+
+@pytest.mark.parametrize("overrides", [case[0] for case in INVALID_ENTITIES])
+def test_glb_writer_errors_name_the_position_not_the_id(overrides):
+    with pytest.raises(GlbWriteError) as refused:
+        write_glb([_named_liver(**overrides)], ROOT)
+    text = str(refused.value)
+    assert "Liver_DoeJohn" not in text and "Doe" not in text and "entities[0]" in text
+    with pytest.raises(GlbWriteError) as refused:
+        write_glb([_tumor(), _named_liver(**overrides)], ROOT)
+    assert "Liver_DoeJohn" not in str(refused.value) and "entities[1]" in str(refused.value)
+
+
+def test_glb_writer_duplicate_error_names_the_position_not_the_id():
+    with pytest.raises(GlbWriteError, match="duplicate") as refused:
+        write_glb([_named_liver(), _named_liver()], ROOT)
+    assert "Liver_DoeJohn" not in str(refused.value) and "entities[1]" in str(refused.value)
+
+
+def _fixture_document(name: str) -> tuple[dict, bytes]:
+    glb = (REPO_ROOT / "shared" / "fixtures" / "glb" / name).read_bytes()
+    json_length = struct.unpack_from("<I", glb, 12)[0]
+    text = glb[20 : 20 + json_length]
+    return json.loads(text), text
+
+
+def _entity_from_extras(extras: dict) -> Entity:
+    """An entity carrying a fixture's T.extras identity (geometry does not matter to the identity rules)."""
+    marker = _triangle()
+    return Entity(
+        node_id=extras["nodeId"],
+        kind=extras["kind"],
+        name=extras["name"],
+        positions=marker.positions,
+        normals=marker.normals,
+        indices=marker.indices,
+        color=tuple(extras["color"]),
+        opacity=float(extras["opacity"]),
+        visible=bool(extras["visible"]),
+        mrml_id=extras["mrmlId"],
+        segment_id=extras.get("segmentId"),
+    )
+
+
+@pytest.mark.parametrize("name", ["aliased-segments.glb", "anonymized-segments.glb"])
+def test_glb_writer_identity_rules_agree_with_the_protocol_fixtures(name):
+    """The PRO-23 fixtures' T.extras pass the writer's own identity check under their root's anonymizedNames, and
+    entities built from them write with the same flag; the flag flipped, the aliased fixture (a verbatim
+    `Segment_2` and a present segmentId) is refused — the rules are not a rubber stamp."""
+    doc, text = _fixture_document(name)
+    manifest = json.loads((REPO_ROOT / "shared" / "fixtures" / "glb" / "manifest.json").read_text())
+    root = doc["nodes"][0]["extras"]
+    anonymized = root["anonymizedNames"]
+    t_nodes = [doc["nodes"][i] for i in doc["nodes"][0]["children"]]
+    assert [t["extras"]["nodeId"] for t in t_nodes] == manifest["files"][name]["nodeIds"]
+    seen: set[str] = set()
+    entities = [_entity_from_extras(t["extras"]) for t in t_nodes]
+    for index, entity in enumerate(entities):
+        writer._validate_identity(entity, index, seen, anonymized)
+    extras = RootExtras(
+        scene_version=root["sceneVersion"],
+        profile=root["profile"],
+        slicer_version=root["source"]["version"],
+        anonymized_names=anonymized,
+        source_app=root["source"]["app"],
+    )
+    written, _, _ = _parse(write_glb(entities, extras))
+    assert [t["extras"] for t in written["nodes"][1::2]] == [
+        {**t["extras"], "triangleCount": 1} for t in t_nodes
+    ]
+    if anonymized:
+        assert b"segmentId" not in text
+    else:
+        assert any(e.segment_id == "left lung" for e in entities)
+        with pytest.raises(GlbWriteError, match="anonymised"):
+            for index, entity in enumerate(entities):
+                writer._validate_identity(entity, index, set(), True)
 
 
 def test_glb_writer_accepts_near_unit_normals_and_empty_names():
@@ -563,11 +749,6 @@ def test_glb_writer_rejects_duplicates():
         write_glb([_tumor(), _tumor()], ROOT)
 
 
-ANONYMOUS = RootExtras(
-    scene_version=1, profile="mobile", slicer_version="5.12.4", anonymized_names=True
-)
-
-
 @pytest.mark.parametrize(
     "name",
     [
@@ -588,7 +769,8 @@ def test_glb_writer_anonymised_names_must_be_substitutes(name):
 
 
 def test_glb_writer_accepts_anonymised_substitutes():
-    doc, _, _ = _parse(write_glb([_liver(name="Segment 1"), _tumor(name="Model 12")], ANONYMOUS))
+    aliased = _liver(node_id="vtkMRMLSegmentationNode1/s_1", segment_id=None, name="Segment 1")
+    doc, _, _ = _parse(write_glb([aliased, _tumor(name="Model 12")], ANONYMOUS))
     assert doc["nodes"][0]["extras"]["anonymizedNames"] is True
     numpy_flag = RootExtras(
         scene_version=1, profile="mobile", slicer_version="5.12.4", anonymized_names=np.True_
@@ -639,11 +821,19 @@ def test_glb_writer_entity_is_keyword_only():
         Entity("vtkMRMLModelNode1", "model")  # type: ignore[misc]
 
 
-def test_glb_writer_entity_repr_hides_names_and_geometry():
-    """A repr in a log line or traceback must not carry a (possibly PHI) name or the mesh (T7)."""
+def test_glb_writer_entity_repr_hides_ids_names_and_geometry():
+    """A repr in a log line or traceback must not carry a (possibly PHI) name or the mesh, nor an ID: a verbatim
+    segment ID — and the nodeId built from it — may be name-derived (T7), and MRML IDs stay out of logs like in
+    ``changes.SentScene`` (MUTATION CHECK: the default dataclass repr lists ``node_id``, ``mrml_id`` and
+    ``segment_id``)."""
     text = repr(_tumor(name="Jan Kowalski"))
-    assert "vtkMRMLModelNode3" in text
     assert "Kowalski" not in text and "array" not in text and "positions" not in text
+    assert "vtkMRMLModelNode3" not in text and "node_id" not in text and "mrml_id" not in text
+    assert "kind='model'" in text and "opacity=0.5" in text and "visible=False" in text
+    liver = repr(_named_liver())
+    assert "Liver_DoeJohn" not in liver and "Doe" not in liver and "segment_id" not in liver
+    assert "vtkMRMLSegmentationNode1" not in liver and "kind='segment'" in liver
+    assert _named_liver().segment_id == "Liver_DoeJohn"  # the field itself is untouched
 
 
 # --------------------------------------------------------------------------- Khronos validator (criterion 1)

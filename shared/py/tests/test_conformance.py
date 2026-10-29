@@ -7,6 +7,7 @@ the expected ``instancePath``.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pytest
@@ -119,9 +120,15 @@ def test_unknown_fields_and_higher_minor_versions_are_accepted() -> None:
     ping = _example("ping")
     assert validate_message({**ping, "futureField": 1}, None, STRICT) == []
     assert validate_message({**ping, "protocolVersion": "1.7"}, None, STRICT) == []
+    for announced in ("1.0", "1.1"):  # revision 1.1 changes no wire format (section 2)
+        assert validate_message({**ping, "protocolVersion": announced}, None, STRICT) == []
     assert validate_message({**ping, "protocolVersion": "2.0"}, None, STRICT)
 
 
 def test_protocol_version_matches_the_document() -> None:
+    """The announced version is one the document defines: same major, minor not newer."""
     doc = PROTOCOL_DOC.read_text(encoding="utf-8")
-    assert f"Protocol version `{PROTOCOL_VERSION}`" in doc
+    match = re.search(r"Protocol version `(\d+)\.(\d+)`", doc)
+    assert match is not None
+    major, minor = (int(part) for part in PROTOCOL_VERSION.split("."))
+    assert major == int(match.group(1)) and minor <= int(match.group(2))

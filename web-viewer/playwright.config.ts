@@ -28,7 +28,8 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: `npm run build && npx vite preview --host 127.0.0.1 --port ${PORT} --strictPort`,
+    // shared/ and tools/fake-slicer are built first: the join-and-view smoke spawns the fake-slicer CLI (dist/).
+    command: `(cd .. && npm run build -w shared -w tools/fake-slicer) && npm run build && npx vite preview --host 127.0.0.1 --port ${PORT} --strictPort`,
     url: `http://127.0.0.1:${PORT}`,
     // Never reuse: a leftover preview server would serve a stale dist/.
     reuseExistingServer: false,

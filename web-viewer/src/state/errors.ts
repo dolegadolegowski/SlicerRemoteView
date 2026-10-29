@@ -17,6 +17,8 @@ export interface Description {
   readonly actionLabel: string;
   /** True when the client must stop reconnecting automatically (architecture §7 "stop on"). */
   readonly fatal: boolean;
+  /** What is described, so the text can be given again in another language (`localize`, WEB-21). */
+  readonly subject?: { readonly code: string | number } | { readonly state: AppState };
 }
 
 /** `error.code` values of §9.2. */
@@ -110,6 +112,7 @@ function render(
   e: Entry,
   prefix: "message" | "state",
   lang: Lang,
+  subject: NonNullable<Description["subject"]>,
   params?: Record<string, number>,
 ): Description {
   const key = (part: "title" | "body") => `${prefix}.${e.id}.${part}` as StringKey;
@@ -119,6 +122,7 @@ function render(
     action: e.action,
     actionLabel: e.action === "none" ? "" : t(lang, `action.${e.action}`),
     fatal: e.fatal,
+    subject,
   };
 }
 
@@ -139,7 +143,7 @@ export function describe(
     typeof code === "number"
       ? isKnownCloseCode(code) && BY_CLOSE_CODE[code]
       : isKnownErrorCode(code) && BY_ERROR_CODE[code];
-  return render(known || UNKNOWN, "message", lang);
+  return render(known || UNKNOWN, "message", lang, { code });
 }
 
 /** UI-only application states that are not protocol errors. */
@@ -151,7 +155,13 @@ export type AppState =
   | { readonly kind: "presenterOffline" }
   | { readonly kind: "sessionEnded" }
   | { readonly kind: "webgl2Unavailable" }
-  | { readonly kind: "snapshotTooLarge" };
+  | { readonly kind: "snapshotTooLarge" }
+  | { readonly kind: "snapshotInvalid" }
+  | { readonly kind: "snapshotFailed" }
+  | { readonly kind: "snapshotUpdateFailed" }
+  | { readonly kind: "linkInvalid" }
+  | { readonly kind: "contextLost" }
+  | { readonly kind: "xrFailed" };
 
 const STATE_ENTRIES: Readonly<Record<AppState["kind"], Entry>> = {
   connecting: entry("connecting", "none"),
@@ -162,10 +172,26 @@ const STATE_ENTRIES: Readonly<Record<AppState["kind"], Entry>> = {
   sessionEnded: entry("sessionEnded", "enterCode", true),
   webgl2Unavailable: entry("webgl2Unavailable", "none", true),
   snapshotTooLarge: entry("snapshotTooLarge", "askPresenter"),
+  snapshotInvalid: entry("snapshotInvalid", "askPresenter"),
+  snapshotFailed: entry("snapshotFailed", "retry"),
+  snapshotUpdateFailed: entry("snapshotUpdateFailed", "askPresenter"),
+  linkInvalid: entry("linkInvalid", "enterCode"),
+  contextLost: entry("contextLost", "none"),
+  xrFailed: entry("xrFailed", "none"),
 };
 
 export function describeState(state: AppState, lang: Lang = detectLang()): Description {
   const percent =
     state.kind === "downloading" ? Math.round(Math.min(1, Math.max(0, state.progress)) * 100) : 0;
-  return render(STATE_ENTRIES[state.kind], "state", lang, { percent });
+  return render(STATE_ENTRIES[state.kind], "state", lang, { state }, { percent });
+}
+
+/**
+ * `description` in `lang` (WEB-21): what it describes, rendered again, so a message already on screen follows a
+ * language switch; one made by hand (no `subject`) stays as it is.
+ */
+export function localize(description: Description, lang: Lang): Description {
+  const subject = description.subject;
+  if (!subject) return description;
+  return "code" in subject ? describe(subject.code, lang) : describeState(subject.state, lang);
 }

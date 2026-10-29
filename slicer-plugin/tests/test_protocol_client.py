@@ -252,7 +252,7 @@ def test_protocol_client_chunks_the_large_ts_fixture(chunk_size, chunk_count):
     frames = [chunk_header.decode_chunk_header(f) for f in messages.chunks]
     assert len(frames) == messages.begin["chunkCount"] == chunk_count
     assert [(f.scene_version, f.chunk_index) for f in frames] == [
-        (3, i) for i in range(chunk_count)
+        (reference["sceneVersion"], i) for i in range(chunk_count)
     ]
     assert frames[-1].payload.nbytes == len(glb) - (chunk_count - 1) * chunk_size
     assert b"".join(bytes(f.payload) for f in frames) == glb

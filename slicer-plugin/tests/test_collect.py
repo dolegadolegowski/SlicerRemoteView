@@ -13,6 +13,20 @@ from typing import Any
 import numpy as np
 import pytest
 from pygltflib import GLTF2
+from support import (
+    FakeDisplay,
+    FakeFolders,
+    FakeModel,
+    FakeSegDisplay,
+    FakeSegment,
+    FakeSegmentation,
+    FakeView,
+    LiveScene,
+    glb_strings,
+    manifest,
+)
+from support import FakeMrmlTransform as MrmlTransform
+from support import FakeScene as DictScene
 from vtkmodules.util.numpy_support import (
     get_numpy_array_type,
     numpy_to_vtk,
@@ -45,6 +59,8 @@ from remoteview_core.collect import (
     mesh_from_polydata,
 )
 from remoteview_core.glb_writer import Entity, RootExtras, is_exportable_matrix, write_glb
+from remoteview_core.ids import SceneIds
+from remoteview_core.mrml_scene import MrmlSceneApi
 
 # --------------------------------------------------------------------------- fakes and fixtures
 
@@ -69,6 +85,9 @@ class FakeScene:
 
     def visible_model_nodes(self):
         return list(self.nodes)
+
+    def visible_segments(self):
+        return []
 
     def node_id(self, node):
         return node.node_id
@@ -597,11 +616,17 @@ def test_collect_skips_nodes_without_triangles_and_keeps_the_rest():
 @pytest.mark.parametrize(
     ("node", "reason", "reported_id"),
     [
-        (FakeNode("bad id", None), SkipReason.INVALID_NODE_ID, ""),
-        (FakeNode("vtkMRMLModelNode1/x", None), SkipReason.INVALID_NODE_ID, ""),
-        (FakeNode("root", None), SkipReason.INVALID_NODE_ID, ""),
+        # §7.3 v1.1 (SLC-35): an ID that is not what Slicer generates is aliased m_<n>, never skipped — these
+        # are reported under their alias for their missing mesh
+        (FakeNode("bad id", None), SkipReason.NO_TRIANGLES, "m_1"),
+        (FakeNode("vtkMRMLModelNode1/x", None), SkipReason.NO_TRIANGLES, "m_1"),
+        (FakeNode("root", None), SkipReason.NO_TRIANGLES, "m_1"),
+        (FakeNode("x" * 129, None), SkipReason.NO_TRIANGLES, "m_1"),
+        (FakeNode("Sphere", None), SkipReason.NO_TRIANGLES, "m_1"),
+        (FakeNode(b"vtkMRMLModelNode1", None), SkipReason.NO_TRIANGLES, "m_1"),
+        # an ID that is not a string at all: an adapter bug, never a Slicer state
         (FakeNode(42, None), SkipReason.INVALID_NODE_ID, ""),
-        (FakeNode("x" * 129, None), SkipReason.INVALID_NODE_ID, ""),
+        (FakeNode(None, None), SkipReason.INVALID_NODE_ID, ""),
         (
             FakeNode("vtkMRMLModelNode9", None, color=(np.nan, 0, 0)),
             SkipReason.INVALID_DISPLAY,
@@ -707,6 +732,8 @@ sphere.Update()
 class Scene:
     def visible_model_nodes(self):
         return ["vtkMRMLModelNode1", "vtkMRMLModelNode2"]
+    def visible_segments(self):
+        return []
     def node_id(self, node):
         return node
     def name(self, node):
@@ -816,8 +843,10 @@ def test_collect_malformed_adapter_values_never_abort():
     )
 
 
-def test_collect_hide_node_names_exports_only_generated_ids():
-    """With Hide node names a hand-edited ID (which could carry a name) never leaves the PC (T7)."""
+@pytest.mark.parametrize("anonymize", [False, True])
+def test_collect_aliases_ids_that_are_not_generated(anonymize):
+    """Protocol v1.1 §7.3 (SLC-27, SLC-35): a hand-edited ID (which could carry a name) never leaves the PC in either
+    mode (T7) — the node is exported under an ``m_<n>`` alias in ``nodeId`` and ``mrmlId``, never skipped."""
     hand_edited = [
         "Kowalski.Jan.1950-01-01",
         "KowalskiJan19500101",
@@ -825,20 +854,47 @@ def test_collect_hide_node_names_exports_only_generated_ids():
         "vtkMRMLModelNode7Kowalski",
         "vtkMRMLModelNodeKowalski",
         "vtkMRMLModelNode7.Jan",
-        "vtkMRMLModelNode12345678901",  # 11 digits: longer than Slicer's counter
+        "Sphere",
     ]
+    generated = [
+        "vtkMRMLModelNode7",
+        "vtkMRMLModelNode12345678901",
+    ]  # the contract has no digit cap
     scene = FakeScene(
         *(FakeNode(node_id, _sphere(), name="Jan Kowalski") for node_id in hand_edited),
-        FakeNode("vtkMRMLModelNode7", _cube(), name="Jan Kowalski"),
+        *(FakeNode(node_id, _cube(), name="Jan Kowalski") for node_id in generated),
     )
-    hidden = collect_scene(scene, anonymize_names=True)
-    assert [(e.node_id, e.name) for e in hidden.entities] == [("vtkMRMLModelNode7", "Model 1")]
-    assert hidden.skipped == (SkippedNode("", SkipReason.INVALID_NODE_ID),) * len(hand_edited)
-    assert [s.index for s in hidden.skipped] == list(range(len(hand_edited)))
-    glb = write_glb(hidden.entities, _root(True))
-    assert b"Kowalski" not in glb and b"Jan" not in glb
-    shown = collect_scene(scene)
-    assert [e.node_id for e in shown.entities] == [*hand_edited, "vtkMRMLModelNode7"]
+    collected = collect_scene(scene, anonymize_names=anonymize)
+    aliases = [f"m_{n}" for n in range(1, len(hand_edited) + 1)]
+    expected_ids = aliases + generated
+    names = (
+        [f"Model {n}" for n in range(1, len(expected_ids) + 1)]
+        if anonymize
+        else ["Jan Kowalski"] * len(expected_ids)
+    )
+    assert [(e.node_id, e.mrml_id, e.name) for e in collected.entities] == list(
+        zip(expected_ids, expected_ids, names, strict=True)
+    )
+    assert (
+        collected.skipped == ()
+    )  # no invalid-node-id skip for any string ID (the old path gave 6)
+    # a CollectedScene lists every Entity: its repr, which can reach a log, shows no ID or name (T7)
+    text = repr(collected)
+    assert "Kowalski" not in text and "vtkMRMLModelNode" not in text and "Sphere" not in text
+    glb = write_glb(collected.entities, _root(anonymize))
+    for raw in hand_edited:
+        assert raw.encode() not in glb
+    if anonymize:
+        assert b"Kowalski" not in glb and b"Jan" not in glb
+
+
+def test_collect_skipped_node_repr_hides_the_id():
+    """A verbatim segment ID may be name-derived (T7): the repr, which can reach a log, shows the reason and
+    the position only."""
+    text = repr(SkippedNode("Liver_DoeJohn", SkipReason.NO_TRIANGLES, 2))
+    assert "Liver_DoeJohn" not in text and "Doe" not in text
+    assert "NO_TRIANGLES" in text and "index=2" in text
+    assert SkippedNode("Liver_DoeJohn", SkipReason.NO_TRIANGLES, 2).node_id == "Liver_DoeJohn"
 
 
 def test_collect_duplicate_ids_and_non_finite_points_are_skipped():
@@ -1177,6 +1233,180 @@ def test_collect_result_types():
         "invalid-transform",
         "non-linear-transform",
     }
+
+
+# --------------------------------------------------------------------------- segments (SLC-35; plan criteria 1–3)
+
+SEG = "vtkMRMLSegmentationNode1"
+
+
+def _adapter(*nodes, folders=None, views=("vtkMRMLViewNode1",)) -> MrmlSceneApi:
+    """``MrmlSceneApi`` over ``FakeModel``/``FakeSegmentation`` nodes, like ``slicer.util.getNodesByClass``."""
+    by_class = {
+        "vtkMRMLModelNode": [n for n in nodes if isinstance(n, FakeModel)],
+        "vtkMRMLSegmentationNode": [n for n in nodes if isinstance(n, FakeSegmentation)],
+        "vtkMRMLViewNode": [FakeView(v) for v in views],
+    }
+    return MrmlSceneApi(by_class.__getitem__, folders or FakeFolders())
+
+
+def _segmentation(node_id=SEG, *, meshes=True, **kw) -> FakeSegmentation:
+    display = FakeSegDisplay(
+        opacity_3d=0.5,
+        opacity=1.0,
+        per_segment={
+            "Segment_1": {"opacity_3d": 0.8, "override_color": (1.0, 0.0, 0.0)},
+            "Segment_2": {"opacity_3d": 0.6, "override_color": (0.0, 1.0, 0.0)},
+        },
+    )
+    segments = [
+        FakeSegment("Segment_1", name=" Liver\u0000 ", polydata=_sphere() if meshes else None),
+        FakeSegment("Segment_2", name="Spleen", polydata=_cube() if meshes else None),
+    ]
+    return FakeSegmentation(node_id, displays=[display], segments=segments, **kw)
+
+
+def test_collect_segments_follow_the_models_with_the_four_factor_opacity():
+    """Plan criterion 1: one entity per shown segment, ``nodeId = <mrmlId>/<segmentId>``, kind ``segment``, opacity
+    = hierarchy × segment Opacity3D × node Opacity3D × display opacity (0.8 × 0.5 × 1.0, 0.6 × 0.5 × 1.0)."""
+    model = FakeModel("vtkMRMLModelNode1", displays=[FakeDisplay()], polydata=_sphere())
+    collected = collect_scene(_adapter(model, _segmentation()))
+    assert [(e.node_id, e.kind, e.mrml_id, e.segment_id, e.name) for e in collected.entities] == [
+        ("vtkMRMLModelNode1", "model", "vtkMRMLModelNode1", None, "Liver"),
+        (
+            f"{SEG}/Segment_1",
+            "segment",
+            SEG,
+            "Segment_1",
+            "Liver",
+        ),  # sanitised: trimmed, NUL removed
+        (f"{SEG}/Segment_2", "segment", SEG, "Segment_2", "Spleen"),
+    ]
+    _, first, second = collected.entities
+    assert (first.color, first.opacity) == ((1.0, 0.0, 0.0), pytest.approx(0.4))
+    assert (second.color, second.opacity) == ((0.0, 1.0, 0.0), pytest.approx(0.3))
+    assert first.visible and second.visible and not first.baked and first.matrix is None
+    assert first.triangle_count > 0 and second.triangle_count == 12
+    assert collected.skipped == ()
+    write_glb(collected.entities, _root())
+    # the index runs across both lists: the model is 0, the segments 1 and 2
+    without = collect_scene(_adapter(model, _segmentation(meshes=False)))
+    assert [(s.node_id, s.reason, s.index) for s in without.skipped] == [
+        (f"{SEG}/Segment_1", SkipReason.NO_TRIANGLES, 1),
+        (f"{SEG}/Segment_2", SkipReason.NO_TRIANGLES, 2),
+    ]
+
+
+def test_collect_segments_under_a_transform_are_placed_like_a_model():
+    """Plan criterion 2 (§7.3): a linear parent gives ``T.matrix``, a non-linear one is baked, a chain the scene
+    cannot hand over is skipped — for every segment of the node alike."""
+    shift = MrmlTransform([[1, 0, 0, 10], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
+    linear = collect_scene(_adapter(_segmentation(transform=shift)))
+    assert [e.matrix[0][3] for e in linear.entities] == [
+        pytest.approx(0.010)
+    ] * 2  # +10 mm R → +0.010 m X
+    assert all(not e.baked for e in linear.entities)
+    plain = collect_scene(_adapter(_segmentation()))
+    tps = _tps()
+    warped = collect_scene(_adapter(_segmentation(transform=MrmlTransform(None, warp=tps))))
+    assert [e.baked for e in warped.entities] == [True, True]
+    assert all(e.matrix is None for e in warped.entities)
+    # the sphere (around R 100, inside the spline's box) moved: S (glTF +Y) up by the spline's bend, the cube at
+    # R −40 is outside the landmarks but still transformed
+    for before, after in zip(plain.entities, warped.entities, strict=True):
+        assert after.positions.shape == before.positions.shape
+        assert not np.allclose(after.positions, before.positions)
+    # a non-linear chain the scene cannot hand over (the adapter always can; a fake says None): skipped, reported
+    chain = LiveScene(
+        {"id": SEG, "segment": "Segment_1", "world": None},
+        {"id": SEG, "segment": "Segment_2", "world": None},
+    )
+    skipped = collect_scene(chain)
+    assert [(s.node_id, s.reason) for s in skipped.skipped] == [
+        (f"{SEG}/Segment_1", SkipReason.NON_LINEAR_TRANSFORM),
+        (f"{SEG}/Segment_2", SkipReason.NON_LINEAR_TRANSFORM),
+    ]
+
+
+#: Report 2026-10-27-protocol-2 item 1: raw IDs that cannot go verbatim (§3.3 set, 128 characters, the reserved
+#: namespace, bytes for a non-UTF-8 ID).
+ALIASED_RAW = ["left lung", "Läsion", "Tumor(1)", "a" * 110, "s_1", b"L\xe4sion"]
+
+
+def _alias_scene(**extra) -> DictScene:
+    return DictScene(
+        {"id": "Sphere", "mesh": _sphere(), "name": "Sphere"},
+        *(
+            {"id": SEG, "segment": raw, "mesh": _sphere(), "name": f"Segment {i} Doe"}
+            for i, raw in enumerate(ALIASED_RAW, start=1)
+        ),
+        {"id": "Seg", "segment": "Segment_1", "mesh": _cube(), "name": "Kidney Doe"},
+        **extra,
+    )
+
+
+def test_collect_aliases_segments_and_nodes_through_the_registry():
+    """Plan criterion 3: ``s_1..s_6`` with the raw ``segmentId`` (bytes decoded with U+FFFD), a model ``Sphere`` →
+    ``m_1``, a segmentation ``Seg`` → ``m_2/Segment_1`` with ``mrmlId m_2``; no ``invalid-node-id`` skip (the old
+    skip path gave 7)."""
+    ids = SceneIds()
+    collected = collect_scene(_alias_scene(), ids=ids)
+    assert [(e.node_id, e.mrml_id, e.segment_id) for e in collected.entities] == [
+        ("m_1", "m_1", None),
+        *((f"{SEG}/s_{n}", SEG, raw) for n, raw in enumerate(ALIASED_RAW[:5], start=1)),
+        (f"{SEG}/s_6", SEG, "L\ufffdsion"),
+        ("m_2/Segment_1", "m_2", "Segment_1"),
+    ]
+    assert collected.skipped == ()
+    glb = write_glb(collected.entities, _root())
+    entries = manifest(glb)
+    # the raw IDs travel in extras.segmentId only (names shown), never inside a nodeId or mrmlId
+    assert [m["nodeId"] for m in entries] == [e.node_id for e in collected.entities]
+    assert [m.get("segmentId") for m in entries] == [e.segment_id for e in collected.entities]
+    for raw in ("left lung", "Tumor(1)", "Sphere"):
+        assert not any(raw in m["nodeId"] or raw in m["mrmlId"] for m in entries)
+    assert not any(m["mrmlId"] == "Seg" or m["nodeId"].startswith("Seg/") for m in entries)
+    # the registry keeps what it issued: the same scene again gives the same nodeIds
+    again = collect_scene(_alias_scene(), ids=ids)
+    assert [e.node_id for e in again.entities] == [e.node_id for e in collected.entities]
+    assert repr(ids) == "SceneIds(models=2, segments=6, next_m=3, next_s=7)"
+
+
+def test_collect_an_id_that_is_not_a_string_is_the_only_invalid_node_id():
+    scene = DictScene(
+        {"id": None, "mesh": _sphere()},
+        {"id": "vtkMRMLModelNode2", "mesh": _sphere()},
+        {"id": None, "segment": "Segment_1", "mesh": _sphere()},
+        {"id": SEG, "segment": 7, "mesh": _sphere()},
+    )
+    collected = collect_scene(scene)
+    assert [e.node_id for e in collected.entities] == ["vtkMRMLModelNode2"]
+    assert collected.skipped == (SkippedNode("", SkipReason.INVALID_NODE_ID),) * 3
+    assert [s.index for s in collected.skipped] == [0, 2, 3]
+
+
+def test_collect_anonymised_segments_are_all_aliased_and_the_json_holds_no_raw_string():
+    """§7.3 with ``anonymizedNames: true``: every segment ``s_<n>``, no ``segmentId``, names ``Segment <n>``; every
+    string in the JSON chunk is a constant, an alias, a generated MRML ID or a substitute (T7)."""
+    scene = _alias_scene()
+    scene.nodes.append(
+        {"id": SEG, "segment": "Segment_9", "mesh": _sphere(), "name": "Pancreas Doe"}
+    )
+    collected = collect_scene(scene, anonymize_names=True)
+    assert collected.anonymized_names is True
+    assert [(e.node_id, e.segment_id, e.name) for e in collected.entities] == [
+        ("m_1", None, "Model 1"),
+        *((f"{SEG}/s_{n}", None, f"Segment {n}") for n in range(1, 7)),
+        ("m_2/s_7", None, "Segment 7"),
+        (f"{SEG}/s_8", None, "Segment 8"),  # a conforming ID is aliased too under Hide node names
+    ]
+    glb = write_glb(collected.entities, _root(True))
+    strings = glb_strings(glb)
+    raw = ["left lung", "Läsion", "Tumor(1)", "a" * 110, "L\xe4sion", "L\ufffdsion", "Sphere",
+           "Segment_1", "Segment_9", "Doe", "Kidney", "Pancreas"]  # fmt: skip
+    assert [s for s in strings for needle in raw if needle in s] == []
+    assert all("segmentId" not in entry for entry in manifest(glb))
+    assert len(manifest(glb)) == 9
 
 
 def test_collect_imports_no_slicer_qt_or_rendering():

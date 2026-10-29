@@ -68,11 +68,11 @@ class RemoteView(ScriptedLoadableModule):
 Shows the 3D scene on phones, tablets and Meta Quest headsets that join with a 5-character code.
 Nothing leaves this computer until you click <b>Start session</b>. From then on the relay server
 shown in the panel receives: the surface meshes of the models and segments shown in 3D (no images
-or volumes), their names (unless <i>Hide node names</i> is on) and MRML IDs, colours, opacity,
-visibility and transforms, and the Slicer, extension and operating-system versions. While a session
-runs, the relay also receives every change to these models, including models shown, added or renamed
-later and any scene you open or load, until you click <b>Stop session</b>. Hiding, deleting or
-renaming a model does not take back what was already sent.
+or volumes), their names (unless <i>Hide node names</i> is on), MRML IDs and segment IDs, colours,
+opacity, visibility and transforms, and the Slicer, extension and operating-system versions. While a
+session runs, the relay also receives every change to these models and segments, including ones
+shown, added or renamed later and any scene you open or load, until you click <b>Stop session</b>.
+Hiding, deleting or renaming a model or segment does not take back what was already sent.
 Anyone who has the code can view the scene while the session runs. Traffic is encrypted (TLS) on
 the way to the relay, but the relay itself can read the scene (no end-to-end encryption).
 The first Start asks before downloading the Python packages the module needs from PyPI.
@@ -238,6 +238,13 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
             display_modified=slicer.vtkMRMLDisplayableNode.DisplayModifiedEvent,
             mesh_modified=slicer.vtkMRMLModelNode.MeshModifiedEvent,
             transform_modified=slicer.vtkMRMLTransformableNode.TransformModifiedEvent,
+            # vtkSegmentation's events, forwarded by every segmentation node (SLC-36; [TODO verify] the attributes
+            # exist and read 62102 62103 62104 62101 62105 — manual §13 step 1, SLC-37)
+            segment_added=slicer.vtkSegmentation.SegmentAdded,
+            segment_removed=slicer.vtkSegmentation.SegmentRemoved,
+            segment_modified=slicer.vtkSegmentation.SegmentModified,
+            representation_modified=slicer.vtkSegmentation.RepresentationModified,
+            representation_names_modified=slicer.vtkSegmentation.ContainedRepresentationNamesModified,
         )
         return SceneWatcher(
             sink,
@@ -413,7 +420,9 @@ class RemoteViewLogic(ScriptedLoadableModuleLogic):
 
     @staticmethod
     def sceneApi():
-        """The current scene as ``remoteview_core.collect`` reads it: the model nodes the 3D view shows (SLC-22)."""
+        """The current scene as ``remoteview_core.collect`` reads it: the model nodes (SLC-22) and the segments (SLC-35)
+        the 3D view shows. No segmentations logic is injected: the adapter reads the representation the 3D view draws
+        and never creates one (spec D-g; manual §13)."""
         from remoteview_core.mrml_scene import MrmlSceneApi  # noqa: PLC0415 — imports VTK
 
         return MrmlSceneApi(slicer.util.getNodesByClass, slicer.vtkMRMLFolderDisplayNode)

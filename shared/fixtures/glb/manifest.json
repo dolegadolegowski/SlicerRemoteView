@@ -44,6 +44,34 @@
       "extensionsRequired": [],
       "$comment": "≈ 5 MiB procedural load-test file: four spheres, the first with > 65,535 vertices (UNSIGNED_INT indices), one translucent, one hidden"
     },
+    "aliased-segments.glb": {
+      "valid": true,
+      "byteLength": 3452,
+      "sha256": "3d46dc9529d340d887655e0408e9ec90e19089bebf11542f90d51e624ef1aa2d",
+      "nodeIds": [
+        "vtkMRMLSegmentationNode1/s_1",
+        "vtkMRMLSegmentationNode1/Segment_2"
+      ],
+      "nodeCount": 2,
+      "triangleCount": 36,
+      "extensionsRequired": [],
+      "$comment": "§7.3 segment alias: raw segment ID `left lung` is outside the nodeId grammar, so nodeId is vtkMRMLSegmentationNode1/s_1 and extras.segmentId keeps the raw ID; a second segment with a conforming ID keeps its verbatim nodeId"
+    },
+    "anonymized-segments.glb": {
+      "valid": true,
+      "byteLength": 5028,
+      "sha256": "fa668c94bc341d5cabfb6e69fdfe29d399b8417e52df387556fb4eaea5b94741",
+      "nodeIds": [
+        "vtkMRMLSegmentationNode1/s_1",
+        "vtkMRMLSegmentationNode1/s_2",
+        "vtkMRMLModelNode4"
+      ],
+      "nodeCount": 3,
+      "triangleCount": 68,
+      "extensionsRequired": [],
+      "$comment": "anonymizedNames: true (§7.3): every segment nodeId is an alias s_<n>, no extras.segmentId, names are Segment <n> / Model <n>",
+      "anonymizedNames": true
+    },
     "bad-magic.glb": {
       "valid": false,
       "byteLength": 3400,

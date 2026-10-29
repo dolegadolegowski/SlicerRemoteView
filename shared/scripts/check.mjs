@@ -10,11 +10,11 @@
  * 3. the §9.2 error codes equal the `errorCode` enum of `defs.schema.json`;
  * 4. fixture partition: valid fixtures pass, invalid ones fail at their `expect.instancePath`
  *    (the Python run is replayed by `py/tests/test_conformance.py`, step 6);
- * 5. generated files are current (`generate.mjs --check`);
+ * 5. generated files are current (`generate.mjs --check`: TypeScript, Python and — limited to `shared/cs` — C#, PRO-17);
  * 6. Python: `pytest py/tests/test_conformance.py`, and — when the directory exists —
  *    `vendor-py.mjs slicer-plugin/RemoteView/_vendor/remoteview_protocol --check` (ADR 0007 §3).
  *
- * Flags: `--skip-python` (no venv: skips the Python half of 5 and 6), `--static-only` (steps 1–4 only; tests),
+ * Flags: `--skip-python` (no venv: skips the Python half of 5 and 6), `--skip-vendored` (skips the `slicer-plugin/_vendor` comparison of 6: that directory belongs to the `slicer` workstream and goes stale whenever `shared/py` changes, until it re-vendors; `npm test` uses it so unit tests do not depend on another component's tree, CI runs the full `npm run check`), `--static-only` (steps 1–4 only; tests),
  * `--schema-dir`, `--fixtures-dir`, `--doc <path>` (point steps 1–4 at another tree; tests).
  */
 import { execFileSync } from "node:child_process";
@@ -33,6 +33,7 @@ const schemaDir = option("--schema-dir", resolve(shared, "schema"));
 const fixturesDir = option("--fixtures-dir", resolve(shared, "fixtures/messages"));
 const docPath = option("--doc", resolve(shared, "../docs/protocol.md"));
 const skipPython = flag("--skip-python");
+const skipVendored = flag("--skip-vendored");
 const SCHEMA_BASE = "https://slicerremoteview.dev/schema/";
 const NON_MESSAGE = new Set(["envelope", "defs"]);
 
@@ -147,7 +148,7 @@ if (!flag("--static-only")) {
     fail(`missing ${pytest} — create the venv first (shared/README.md, "Python package")`);
   else run("pytest py/tests/test_conformance.py", pytest, ["py/tests/test_conformance.py"]);
   const vendored = resolve(shared, "../slicer-plugin/RemoteView/_vendor/remoteview_protocol");
-  if (existsSync(vendored))
+  if (existsSync(vendored) && !skipVendored)
     run("vendor-py --check", process.execPath, ["scripts/vendor-py.mjs", vendored, "--check"]);
 }
 

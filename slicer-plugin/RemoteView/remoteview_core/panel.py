@@ -57,6 +57,7 @@ from urllib.parse import urlsplit
 from remoteview_core.collect import SceneApi
 from remoteview_core.debounce import Timer
 from remoteview_core.deps import DepsResult, Outcome
+from remoteview_core.ids import SceneIds
 from remoteview_core.links import join_url
 from remoteview_core.live import LiveEvent, LiveEventKind, LiveUpdates
 from remoteview_core.protocol_client import ProtocolClient, SessionState, envelope, make_client_info
@@ -237,11 +238,11 @@ SCENE_REFUSED = {
     "CAPACITY": "The relay has no room for the scene right now.",
 }
 #: What happens next, after the reason, while changes in Slicer are followed (a watcher is attached)…
-HIDE_MODELS = "Hide models in 3D to make it smaller: RemoteView then sends it again."
-RETRY_ON_CHANGE = "RemoteView tries again after the next change to a model shown in 3D."
+HIDE_MODELS = "Hide models or segments in 3D to make it smaller: RemoteView then sends it again."
+RETRY_ON_CHANGE = "RemoteView tries again after the next change to a model or segment shown in 3D."
 RETRY_LATER = "RemoteView tries again automatically."
 #: … and when they are not (no watch factory): nothing in Slicer can then open the too-large or the flush gate.
-HIDE_MODELS_AND_RESTART = "Hide models in 3D, then stop and start the session."
+HIDE_MODELS_AND_RESTART = "Hide models or segments in 3D, then stop and start the session."
 RESTART = "Stop and start the session to try again."
 OBSERVE_FAILED = (
     "Changes in Slicer cannot be followed, so the scene was not sent. Please report this."
@@ -279,8 +280,8 @@ def budget_text(snapshot: Snapshot) -> str:
     if snapshot.unreduced:
         count = len(snapshot.unreduced)
         parts.append(
-            f"{count} model{'s' if count != 1 else ''} could not be simplified for the device profile and "
-            f"{'are' if count != 1 else 'is'} sent whole."
+            f"{count} model{'s' if count != 1 else ''} or segments could not be simplified for the device "
+            f"profile and {'are' if count != 1 else 'is'} sent whole."
         )
     if snapshot.over_target:
         # MB = 10^6 bytes, one decimal; the size rounded up and the target down, so they never read the same
@@ -288,16 +289,17 @@ def budget_text(snapshot: Snapshot) -> str:
         target = math.floor(snapshot.target_bytes / 100_000) / 10
         parts.append(
             f"The scene is {size:.1f} MB, more than the {target:.1f} MB recommended for the device profile: viewers "
-            "may load it slowly. Hide models in 3D to make it smaller."
+            "may load it slowly. Hide models or segments in 3D to make it smaller."
         )
     return " ".join(parts)
 
 
 def skipped_text(count: int) -> str:
-    """Models the 3D view shows that the snapshot leaves out (the node list of SLC-18 says which and why)."""
+    """Models and segments the 3D view shows that the snapshot leaves out (the node list of SLC-18 says which and
+    why)."""
     if count <= 0:
         return ""
-    return f"{count} model{'s' if count != 1 else ''} shown in 3D could not be shared."
+    return f"{count} model{'s' if count != 1 else ''} or segments shown in 3D could not be shared."
 
 
 def end_text(reason: str | None) -> str:
@@ -841,6 +843,9 @@ class PanelController:
                 slicer_version=self._slicer_version,
                 end_session=self._end_live,
                 on_event=self._on_live_event,
+                # one alias registry per session.create (§7.3): every export of this session reuses its aliases, and
+                # a resume (SLC-17) keeps it because the panel, not the controller, owns it
+                ids=SceneIds(),
             )
             if self._watch is not None:
                 watching = True

@@ -1,0 +1,23 @@
+{
+  "protocolVersion": "1.0",
+  "type": "scene.update",
+  "id": "p-41",
+  "ts": 1792238430000,
+  "sceneVersion": 4294967295,
+  "baseVersion": 4294967294,
+  "changes": [
+    {
+      "nodeId": "vtkMRMLSegmentationNode1/Segment_2",
+      "visible": false
+    },
+    {
+      "nodeId": "vtkMRMLModelNode3",
+      "color": [0.95, 0.85, 0.7],
+      "opacity": 0.35
+    },
+    {
+      "nodeId": "vtkMRMLModelNode5",
+      "matrix": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.012, -0.004, 0, 1]
+    }
+  ]
+}

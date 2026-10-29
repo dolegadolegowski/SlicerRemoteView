@@ -6,13 +6,16 @@ import pytest
 
 from remoteview_core.consent import ENCRYPTED, UNENCRYPTED, UNKNOWN_RELAY, consent_text, relay_host
 
-#: Everything that leaves the PC with a model snapshot (protocol §4.1 clientInfo, §7 GLB extras), as the text says it.
+#: Everything that leaves the PC with a snapshot (protocol §4.1 clientInfo, §7 GLB extras), as the text says it.
 DATA_ITEMS = (
-    "surface meshes of the models shown in the 3D view",
+    "surface meshes of the models and segments shown in the 3D view",
+    "segments as Slicer's 3D view shows them",
     "clipping is not applied",
     "no images or volumes",
     "their names",
     "MRML node IDs",
+    "segment IDs",
+    "Hiding, deleting or renaming a model or segment",
     "colours",
     "opacity",
     "visibility",

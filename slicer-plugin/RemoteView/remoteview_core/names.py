@@ -15,17 +15,19 @@ from __future__ import annotations
 
 import unicodedata
 
-from remoteview_core.glb_writer import FORBIDDEN_NAME_CATEGORIES, MAX_NAME_LENGTH, is_valid_name
+from remoteview_core.glb_writer import (
+    FORBIDDEN_NAME_CATEGORIES,
+    MAX_NAME_LENGTH,
+    is_valid_name,
+    utf16_length,
+)
 
-#: §7.3 "≤ 64 chars", counted in UTF-16 code units (an astral character counts twice).
+#: §7.3 "≤ 64 chars", counted in UTF-16 code units (an astral character counts twice) — the writer's
+#: :func:`~remoteview_core.glb_writer.utf16_length` is the one counter (SLC-27).
 MAX_NAME_UTF16_UNITS = MAX_NAME_LENGTH
 _LABELS = {"model": "Model", "segment": "Segment"}
 #: Regional indicator symbols: a flag is a pair, so a cut must not leave half of one.
 _REGIONAL_INDICATORS = range(0x1F1E6, 0x1F200)
-
-
-def _utf16_units(ch: str) -> int:
-    return 2 if ord(ch) > 0xFFFF else 1
 
 
 def _drop_broken_tail(kept: str, removed: str) -> str:
@@ -67,7 +69,7 @@ def sanitize_name(raw: str | bytes | None) -> str:
     units = 0
     cut = len(collapsed)
     for index, ch in enumerate(collapsed):
-        units += _utf16_units(ch)
+        units += utf16_length(ch)
         if units > MAX_NAME_UTF16_UNITS:
             cut = index
             break
