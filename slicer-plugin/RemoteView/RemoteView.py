@@ -50,11 +50,6 @@ SCAN_HINT = "Scan the QR code with a phone camera, or open the viewer and type t
 TYPE_HINT = "Open the viewer and type the code."
 #: Shown under the status when the link exists but its QR code cannot be drawn.
 QR_NOT_DRAWN = "The QR code could not be drawn. Read the code out or use Copy link."
-#: The progress dialog of the scene's preparation (FR-10, SLC-51): Qt shows it once the preparation is estimated to take
-#: longer than this (``minimumDuration``, judged from the progress after its first tenth of a second), so a live change
-#: of a small scene does not flash it.
-PROGRESS_DIALOG_MS = 1000
-PREPARING_LABEL = "Preparing the scene for the viewers. Slicer stays usable meanwhile."
 
 #
 # RemoteView
@@ -112,7 +107,6 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
         self.shownPixmaps = {}  # label name -> the pixmap it shows (assigned only when it changes)
         self.presentation = None
         self.presentationUi = None
-        self.progressDialog = None  # while the scene is prepared (SLC-51)
         ScriptedLoadableModuleWidget.__init__(self, parent)
 
     def setup(self) -> None:
@@ -170,7 +164,6 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
         try:
             # no code is left on a projector or in a hidden label
             self.closePresentation()
-            self.closeProgress()
             self.showPixmap("qrLabel", self.ui.qrLabel, None)
             self.forgetQr()
             self.link = ""
@@ -320,39 +313,6 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
             self.ui.detailLabel.text = "\n".join(
                 part for part in (view.detail, QR_NOT_DRAWN) if part
             )
-        self.showProgress(view.progress)
-
-    def showProgress(self, progress) -> None:
-        """A non-modal progress dialog while the scene is prepared (FR-10, SLC-51); ``progress`` is ``(done, total)``
-        or ``None`` (closed). Slicer stays usable — the dialog does not take the focus —, and there is no cancel
-        button: *Stop session* is in the panel. Qt shows it once the preparation looks longer than
-        :data:`PROGRESS_DIALOG_MS`; closed from its title bar it stays closed until the next preparation. A failure here
-        is logged by type only: the panel's texts and the session go on."""
-        try:
-            if progress is None:
-                self.closeProgress()
-                return
-            done, total = progress
-            if self.progressDialog is None:
-                self.progressDialog = dialog = qt.QProgressDialog(slicer.util.mainWindow())
-                dialog.windowTitle = "RemoteView"
-                dialog.labelText = PREPARING_LABEL
-                dialog.windowModality = qt.Qt.NonModal
-                dialog.setAttribute(qt.Qt.WA_ShowWithoutActivating)
-                dialog.setCancelButton(None)
-                dialog.minimumDuration = PROGRESS_DIALOG_MS
-            if self.progressDialog.wasCanceled:  # closed by the user: setValue would show it again
-                return
-            self.progressDialog.maximum = max(total, 1)
-            self.progressDialog.value = min(done, total)
-        except Exception as exc:  # noqa: BLE001 — a dialog must not stop the panel (T7: type only)
-            _log.warning("progress dialog not shown (%s)", type(exc).__name__)
-
-    def closeProgress(self) -> None:
-        dialog, self.progressDialog = self.progressDialog, None
-        if dialog is not None:
-            dialog.reset()  # hides it and stops the timer that would show it later
-            dialog.deleteLater()
 
     def showLink(self, link: str, code: str) -> bool:
         """The QR code, *Copy link* and the Presentation window follow the session: only while it runs (T6). The

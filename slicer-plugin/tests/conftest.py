@@ -137,38 +137,6 @@ class _StubQTimer:
         return self.active
 
 
-class _StubQProgressDialog:
-    """``qt.QProgressDialog``: records its properties and calls (the adapter's progress dialog, SLC-51)."""
-
-    made: ClassVar[list[_StubQProgressDialog]] = []
-
-    def __init__(self, parent=None) -> None:
-        self.parent = parent
-        self.calls: list[str] = []
-        self.values: list[int] = []
-        self.cancel_button = "default"
-        self.attributes: list[object] = []
-        self.wasCanceled = False
-        _StubQProgressDialog.made.append(self)
-
-    def __setattr__(self, name: str, value) -> None:
-        if name == "value":
-            self.values.append(value)
-        object.__setattr__(self, name, value)
-
-    def setCancelButton(self, button) -> None:
-        self.cancel_button = button
-
-    def setAttribute(self, attribute) -> None:
-        self.attributes.append(attribute)
-
-    def reset(self) -> None:
-        self.calls.append("reset")
-
-    def deleteLater(self) -> None:
-        self.calls.append("deleteLater")
-
-
 class _StubQFont:
     """The ``qt.QFont`` enum values the adapter uses."""
 
@@ -394,8 +362,6 @@ def _make_stub_modules() -> dict[str, types.ModuleType]:
         QPainter=_StubQPainter,
         QColor=_StubQColor,
         QApplication=_make_application_class(),
-        QProgressDialog=_StubQProgressDialog,
-        Qt=types.SimpleNamespace(NonModal=0, WA_ShowWithoutActivating=98),
     )
     ctk = _strict_module("ctk")
     return {

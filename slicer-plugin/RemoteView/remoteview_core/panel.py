@@ -26,8 +26,8 @@
   leaves the session running (the code still works). A closed scene that cannot be cleared off the viewers ends the
   session (§7.3).
 - The scene is prepared a slice of :data:`PREPARE_SLICE_S` at a time, one slice per pump tick (SLC-51): the code is
-  shown at once, the status says "Preparing the scene", and :attr:`PanelView.progress` drives the adapter's progress
-  dialog (FR-10).
+  shown at once and the status says "Preparing the scene"; :attr:`PanelView.progress` carries the progress (no dialog
+  since SLC-55, the owner's request).
 - No automatic ``session.renew``: until ``release`` decides how renewal follows user activity (SLC-17/SLC-18), a
   session nobody joins ends after the relay's idle TTL (NFR-11, T1) instead of living for its 12 h maximum.
 """
@@ -137,7 +137,7 @@ class PanelView:
     start_enabled: bool = True
     stop_enabled: bool = False
     settings_enabled: bool = True  # relay address and CA file
-    #: while the scene is prepared (SLC-51): ``(done, total)`` units of work, for the progress dialog (FR-10)
+    #: while the scene is prepared (SLC-51): ``(done, total)`` units of work (the adapter shows no dialog, SLC-55)
     progress: tuple[int, int] | None = None
 
 

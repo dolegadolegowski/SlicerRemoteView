@@ -1,45 +1,37 @@
-"""SLC-22: the consent statement shown before Start (R-06, NFR-16)."""
+"""SLC-22, SLC-55: the consent statement shown before Start (R-06, NFR-16): two sentences and the project link."""
 
 from __future__ import annotations
 
 import pytest
 
-from remoteview_core.consent import ENCRYPTED, UNENCRYPTED, UNKNOWN_RELAY, consent_text, relay_host
-
-#: Everything that leaves the PC with a snapshot (protocol §4.1 clientInfo, §7 GLB extras), as the text says it.
-DATA_ITEMS = (
-    "surface meshes of the models and segments shown in the 3D view",
-    "segments as Slicer's 3D view shows them",
-    "clipping is not applied",
-    "small islands are left out while Remove small islands is on",
-    "no images or volumes",
-    "their names",
-    "MRML node IDs",
-    "segment IDs",
-    "Hiding, deleting or renaming a model or segment",
-    "colours",
-    "opacity",
-    "visibility",
-    "position",
-    "the Slicer, RemoteView and operating-system versions",
-    "While the session runs, RemoteView also sends every change",
-    "any scene you open or load",
-    "does not take back what was already sent",
-    "Anyone who has the session code can view the scene",
+from remoteview_core.consent import (
+    ENCRYPTED,
+    MORE,
+    PROJECT_URL,
+    UNENCRYPTED,
+    UNKNOWN_RELAY,
+    consent_text,
+    relay_host,
 )
 
+LINK = f'<a href="{PROJECT_URL}">{PROJECT_URL}</a>'
 
-def test_consent_names_the_relay_host_and_everything_that_is_sent():
+
+def test_consent_names_the_relay_host_and_links_the_project_page():
     text = consent_text(" wss://relay.example.org/ws ")
-    assert "the relay at relay.example.org:" in text and text.endswith(ENCRYPTED)
-    missing = [item for item in DATA_ITEMS if item not in text]
-    assert missing == []
-    assert "<" not in text and ">" not in text  # plain text (the label is Qt::PlainText as well)
+    assert text.startswith("Nothing leaves this computer before you click Start session.")
+    assert "to the relay at relay.example.org." in text
+    assert "models and segments shown in the 3D view, and every later change to them" in text
+    assert text.endswith(f"{ENCRYPTED} {MORE} {LINK}")
+    assert (
+        text.count("<") == 2
+    )  # the link's two tags are the only markup (the label is Qt::RichText)
+    assert PROJECT_URL.startswith("https://github.com/")
 
 
 def test_consent_never_shows_more_of_the_address_than_the_host():
     text = consent_text("wss://user:secret@Relay.Example.org:8443/path/ws?token=abc#frag")
-    assert "the relay at relay.example.org:" in text
+    assert "the relay at relay.example.org." in text
     for part in ("user", "secret", "8443", "path", "token", "abc", "frag"):
         assert part not in text
 
@@ -52,9 +44,8 @@ def test_consent_never_shows_more_of_the_address_than_the_host():
 )  # fmt: skip
 def test_consent_without_a_usable_address_names_no_host(url):
     assert relay_host(url) is None
-    assert consent_text(url).startswith(
-        f"When you click Start session, RemoteView sends to {UNKNOWN_RELAY}:"
-    )
+    text = consent_text(url)
+    assert f"to {UNKNOWN_RELAY}." in text and "<b>" not in text
 
 
 def test_consent_says_when_the_connection_is_not_encrypted():
@@ -64,11 +55,10 @@ def test_consent_says_when_the_connection_is_not_encrypted():
         "ws://relay.example.org/ws",
         "ws://" + "a" * 300 + "/ws",
     ):
-        assert consent_text(url).endswith(
-            UNENCRYPTED
-        )  # the scheme alone decides (the panel strips spaces too)
+        assert f"{UNENCRYPTED} {MORE}" in consent_text(url)  # the scheme alone decides
     assert (
-        consent_text("wss://[::1]/ws").endswith(ENCRYPTED) and relay_host("wss://[::1]/ws") == "::1"
+        f"{ENCRYPTED} {MORE}" in consent_text("wss://[::1]/ws")
+        and relay_host("wss://[::1]/ws") == "::1"
     )
 
 
@@ -117,7 +107,7 @@ def test_consent_adapter_shows_the_statement_for_the_address_being_typed(
     instance.onRelayUrlChanged(
         "wss://user:secret@other.example.net/ws"
     )  # Qt calls this on every keystroke
-    assert "the relay at other.example.net:" in instance.ui.consentLabel.text
+    assert "the relay at other.example.net." in instance.ui.consentLabel.text
     assert "secret" not in instance.ui.consentLabel.text
     assert instance.controller is None  # showing the statement starts nothing (FR-02)
 
@@ -126,3 +116,15 @@ def test_consent_adapter_without_an_address(import_remote_view):
     instance = _widget(import_remote_view)
     assert instance.ui.consentLabel.text == consent_text("")
     assert UNKNOWN_RELAY in instance.ui.consentLabel.text
+
+
+def test_consent_label_is_rich_text_that_opens_the_link_outside():
+    """The link needs ``Qt::RichText`` and ``openExternalLinks``; the host is the only variable part, escaped."""
+    import xml.etree.ElementTree as ET  # noqa: PLC0415
+
+    from conftest import MODULE_DIR  # noqa: PLC0415
+
+    root = ET.parse(MODULE_DIR / "Resources" / "UI" / "RemoteView.ui").getroot()  # noqa: S314 — our own file
+    label = next(w for w in root.iter("widget") if w.get("name") == "consentLabel")
+    props = {p.get("name"): "".join(p.itertext()).strip() for p in label.findall("property")}
+    assert props["textFormat"] == "Qt::RichText" and props["openExternalLinks"] == "true"

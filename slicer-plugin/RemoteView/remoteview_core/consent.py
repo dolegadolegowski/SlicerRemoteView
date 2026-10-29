@@ -1,12 +1,15 @@
-"""What the panel says before *Start session* (SLC-22; R-06, NFR-16): which relay receives what.
+"""What the panel says before *Start session* (SLC-22, SLC-55; R-06, NFR-16): which relay receives the scene.
 
-The text is fixed English (localised in SLC-21) with one variable part, the host of the relay address being typed.
-Nothing else the user typed is ever shown: no user info, port, path, query or fragment (a refused address may hold a
-secret, §3.1). Standard library only, so the panel can show it before any session code is loaded (FR-02).
+Two sentences and a link (the owner's request of 2026-10-30: the full statement left the panel for the project page and
+the module's Help tab), with one variable part, the host of the relay address being typed. Nothing else the user typed
+is ever shown: no user info, port, path, query or fragment (a refused address may hold a secret, §3.1). The text is
+Qt rich text because of the link: the host is HTML-escaped, and nothing else in it comes from outside. Standard library
+only, so the panel can show it before any session code is loaded (FR-02).
 """
 
 from __future__ import annotations
 
+import html
 import re
 from urllib.parse import urlsplit
 
@@ -21,6 +24,9 @@ UNENCRYPTED = (
     "A ws:// address is not encrypted; Start session accepts it only for a relay on this computer "
     "(development)."
 )
+#: Where the full description lives: what is sent, how to install and use the module (the user guide in the repository).
+PROJECT_URL = "https://github.com/dolegadolegowski/SlicerRemoteView"
+MORE = "What is sent and how to use RemoteView:"
 
 
 def relay_host(url: str) -> str | None:
@@ -39,19 +45,13 @@ def relay_host(url: str) -> str | None:
 
 
 def consent_text(url: str) -> str:
-    """The consent statement for the relay address ``url`` (as typed): who receives what, and who can see it."""
+    """The consent statement for the relay address ``url`` (as typed), as rich text with the project link: who
+    receives the scene, whether the way there is encrypted, and where the full description is."""
     host = relay_host(url)
-    relay = f"the relay at {host}" if host else UNKNOWN_RELAY
+    relay = f"the relay at {html.escape(host)}" if host else UNKNOWN_RELAY
     transport = UNENCRYPTED if url.strip().startswith("ws://") else ENCRYPTED
     return (
-        f"When you click Start session, RemoteView sends to {relay}: the complete surface meshes of the models "
-        "and segments shown in the 3D view (segments as Slicer's 3D view shows them — clipping is not applied; small "
-        "islands are left out while Remove small islands is on; no images or volumes), their names, MRML node IDs "
-        "and segment IDs, their colours, opacity, visibility and "
-        "position, and the Slicer, RemoteView and operating-system versions. While the session runs, RemoteView also "
-        "sends every change to them (models and segments shown, added or renamed later, and any scene you open or "
-        "load) until you click Stop session. Hiding, deleting or renaming a model or segment does not take back what "
-        "was already sent: the relay keeps the last scene it received for viewers who join later until the scene is "
-        "sent again or the session ends. Anyone who has the session code can view the scene while the session runs. "
-        f"{transport}"
+        "Nothing leaves this computer before you click Start session. Then RemoteView sends the models and "
+        f"segments shown in the 3D view, and every later change to them, to {relay}. {transport} "
+        f'{MORE} <a href="{PROJECT_URL}">{PROJECT_URL}</a>'
     )
