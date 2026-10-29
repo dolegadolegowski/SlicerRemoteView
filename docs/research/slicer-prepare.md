@@ -28,8 +28,11 @@ in the forum post). Each stretch in which the worker holds the GIL would then st
 thread wants the GIL back. Such stretches are `ufunc.at` on 48M elements (0.4 s), `np.unique(axis=0)`, `DeepCopy`,
 and the Python between calls. The project's threading rule keeps VTK on the main thread (`slicer.md` §3), and none of
 this can be tested without Slicer (CLAUDE.md rule 10). The preparation is therefore cut into steps on the main
-thread instead (below). One call in it cannot be cut: the quadric's run. Moving only that `Update()` into a worker is
-the follow-up of the plan (SLC-51 follow-ups): by (a) and (b) it runs without the GIL in Slicer. It must first be
+thread instead (below). A single numpy or VTK call cannot be cut. The longest is the quadric's run; the others are
+`vtkPolyDataNormals` (0.88 s on 31.4M triangles natively), `vtkTriangleFilter` (long on a polygon of many points:
+SLC-52), the geometry copy's `DeepCopy` and a bake's `TransformPoints` (a bake under a non-linear transform has not
+been measured). Moving only the quadric's `Update()` into a worker is the follow-up of the plan (SLC-51 follow-ups):
+by (a) and (b) it runs without the GIL in Slicer. It must first be
 measured in Slicer, together with a main-thread yield and with VTK's messages from a worker thread
 (`vtkOutputWindow`, `[TODO verify]`).
 
@@ -51,7 +54,28 @@ at a time; a step is never split, so a slice ends after the step that crosses it
   `_finished` form **one** step. Its `QUADRIC_SECONDS` deadline therefore counts only their own time, never the event
   loop's between steps, and the result does not depend on how busy Slicer is.
 - the last step: the size check, the `scene.nodeAdded` hint, `write_glb`, the SHA-256 and `begin`. The client is asked
-  for nothing before it. A preparation abandoned between steps (`close()`) has sent nothing and used no version.
+  for nothing before it. A preparation abandoned between steps (`close()`) has sent nothing and used no version. It
+  is short: 0.033 s natively for ten models of 99,456 triangles under `quest3` (994,560 triangles, an 11.4 MiB
+  quantised GLB; 0.022 s for the 17.1 MiB unquantised one), so about 0.2 s for the relay's 64 MiB limit. The SHA-256
+  and the chunks therefore stay in it (the SLC-06/SLC-08 follow-up); the chunk frames are encoded only as the
+  transport takes them.
+
+The profile of `prepare_snapshot` on a generated segmentation-like surface (Gaussian-smoothed noise, flying edges,
+one segment, `mobile` budget → 100,000 triangles), measured natively (arm64, dev venv), one step per `advance`. The
+lists of steps are from `step_profile.py`, a local harness that is not committed:
+
+| Input | Steps | Total | Longest step | Next longest | One call (`build_snapshot`) |
+|---|---|---|---|---|---|
+| 4.35M triangles | 29 | 2.77 s | 1.08 s (the quadric's step) | 0.36 s (the winding sort, before the parts) | 2.68 s, same bytes |
+| 31.4M triangles, without the parts | 30 | 12.67 s | 2.68 s (the winding sort of 94M edge keys) | 1.49 s (the area test), 1.27 s (the quadric), 1.17 s (grid keys + coincident pairs) | 13.26 s, same bytes |
+| 31.4M triangles, with the parts | 49 | 13.07 s | 1.24 s (the quadric's step) | 0.98 s (the edges inside one cell, 94M), 0.88 s (`vtkPolyDataNormals`), 0.83 s (coincident pairs), 0.63-0.67 s (a `components` round, a part of the winding sort) | 12.90 s, same bytes |
+
+The steps cost nothing measurable (13.07 s against 12.90 s in one call, within the noise). The quadric's input is
+bounded by the size bound (SLC-41), so its step does not grow with the input: 1.08-1.24 s here, about 1.9 s on the
+reporter's node in Slicer under Rosetta (its two runs took 1.75 + 0.10 s there, §14). The other steps scale with the mesh. On the reporter's 16M triangles
+they are about half of the 31.4M figures, so about 0.5 s natively and an estimated 0.75 s under Rosetta (collect +
+fit ran 1.4-1.5 times slower there, §14). The quadric's step is then the only one above 1 s; manual §15 measures
+it in Slicer.
 
 ## Per-node cache (SLC-50)
 

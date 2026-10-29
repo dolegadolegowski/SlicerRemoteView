@@ -123,7 +123,11 @@ def test_panel_snapshot_warns_about_the_device_profiles_budgets(fake, monkeypatc
     simplify is sent whole and counted."""
     from remoteview_core import decimate, snapshot  # noqa: PLC0415
 
-    monkeypatch.setattr(decimate, "decimate_entity", lambda entity, target, **kw: None)
+    def nothing_reduces(entity, target, **kw):
+        return None
+        yield  # a steps generator (remoteview_core.steps)
+
+    monkeypatch.setattr(decimate, "decimate_steps", nothing_reduces)
     small = decimate.Budget(
         total_triangles=500_000, node_triangles=50, target_bytes=1_000
     )  # sphere(8): 96

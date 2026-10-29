@@ -22,7 +22,10 @@ transport in order.
   the caller sends before the frames, for the nodes the export takes. It is built only once the binary chunk is known
   to fit, so a scene too large for the relay leaves no hint without its snapshot on the wire.
 
-Main thread only (VTK, and the client is not thread-safe). The SHA-256 is computed here too (decided in SLC-08).
+:func:`prepare_snapshot` is the same in steps (SLC-28, :mod:`remoteview_core.steps`): the collection and the
+decimation yield between their passes over a mesh, and the client is asked for nothing — no version, no hint — before
+the last step, so a preparation abandoned before it (``close()``) sends nothing and uses no version. Main thread only
+(VTK, and the client is not thread-safe). The SHA-256 is computed here too (decided in SLC-08).
 """
 
 from __future__ import annotations
@@ -32,8 +35,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from remoteview_core.changes import SentScene
-from remoteview_core.collect import SceneApi, SkippedNode, collect_scene
-from remoteview_core.decimate import PROFILES, estimate_glb_size, fit_to_budget, glb_binary_size
+from remoteview_core.collect import SceneApi, SkippedNode, collect_steps
+from remoteview_core.decimate import PROFILES, estimate_glb_size, fit_steps, glb_binary_size
 from remoteview_core.glb_writer import RootExtras, write_glb
 from remoteview_core.ids import SceneIds
 from remoteview_core.protocol_client import (
@@ -42,6 +45,7 @@ from remoteview_core.protocol_client import (
     SessionState,
     SnapshotMessages,
 )
+from remoteview_core.steps import Progress, Steps, run
 
 
 class SnapshotTooLargeError(ValueError):
@@ -113,6 +117,31 @@ def build_snapshot(  # noqa: PLR0913 — keyword-only options after the scene an
     kind)`` pairs for :attr:`Snapshot.announced` (``ProtocolClient.announce_added``: none while updates are held).
     ``ids`` is the session's alias registry (§7.3: every export of a session reuses the aliases it issued); ``None``
     makes a fresh one for a single export."""
+    return run(
+        prepare_snapshot(
+            scene_api,
+            client,
+            slicer_version=slicer_version,
+            anonymize_names=anonymize_names,
+            quantize=quantize,
+            announce=announce,
+            ids=ids,
+        )
+    )
+
+
+def prepare_snapshot(  # noqa: PLR0913 — build_snapshot's options, and the progress
+    scene_api: SceneApi,
+    client: ProtocolClient,
+    *,
+    slicer_version: str,
+    anonymize_names: bool = False,
+    quantize: bool = True,
+    announce: Iterable[tuple[str, str]] = (),
+    ids: SceneIds | None = None,
+    progress: Progress | None = None,
+) -> Steps[Snapshot]:
+    """:func:`build_snapshot` in steps (the module docstring); ``progress`` counts the nodes collected and fitted."""
     limits = client.limits
     if (
         client.state not in (SessionState.CREATED, SessionState.ACTIVE)
@@ -120,9 +149,13 @@ def build_snapshot(  # noqa: PLR0913 — keyword-only options after the scene an
         or not client.profile
     ):
         raise ProtocolStateError(f"cannot send a snapshot in state {client.state.value}")
-    collected = collect_scene(scene_api, anonymize_names=anonymize_names, ids=ids)
+    progress = progress if progress is not None else Progress()
+    collected = yield from collect_steps(
+        scene_api, anonymize_names=anonymize_names, ids=ids, progress=progress
+    )
     budget = PROFILES[client.profile]
-    fitted = fit_to_budget(collected.entities, budget)
+    fitted = yield from fit_steps(collected.entities, budget, progress=progress)
+    progress.done = progress.total  # the nodes left out need no fit
     if glb_binary_size(fitted.entities, quantize=quantize) > limits["maxSnapshotBytes"]:
         # too large whatever the JSON: refused before the file is written (NFR-23)
         raise SnapshotTooLargeError(

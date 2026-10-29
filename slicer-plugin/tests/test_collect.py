@@ -1483,6 +1483,11 @@ def _mesh_arrays(mesh) -> tuple:
     return mesh.positions, mesh.triangles, mesh.normals
 
 
+def never_wound(triangles):
+    return False
+    yield  # a steps generator (remoteview_core.steps)
+
+
 def test_collect_consistent_winding_skips_orientation_with_the_same_result(monkeypatch):
     """``ConsistencyOn`` runs only when a directed edge repeats; on a consistently wound mesh it would turn nothing
     over, so skipping it gives the same mesh (16M triangles: 4.87 s → 2.82 s)."""
@@ -1492,7 +1497,7 @@ def test_collect_consistent_winding_skips_orientation_with_the_same_result(monke
     for polydata in (_sphere(resolution=24), flying_edges(mask, 0.5)):
         skipped = mesh_from_polydata(polydata)
         with monkeypatch.context() as patch:
-            patch.setattr(collect, "_consistently_wound", lambda triangles: False)
+            patch.setattr(collect, "_consistently_wound_steps", never_wound)
             oriented = mesh_from_polydata(polydata)
         assert collect._consistently_wound(skipped.triangles)
         for mine, theirs in zip(_mesh_arrays(skipped), _mesh_arrays(oriented), strict=True):

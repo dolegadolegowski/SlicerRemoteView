@@ -10,13 +10,16 @@ cancel, go both. For non-manifold fans (pages sharing one spine) :func:`cluster_
 tetrahedral class of the vertex normal instead.
 
 Pure numpy (no VTK, no Slicer), deterministic (fixed seed). Indices are int64, positions float64. Sources and
-measurements: ``docs/research/slicer-decimate.md`` § SLC-41.
+measurements: ``docs/research/slicer-decimate.md`` § SLC-41. The ``*_steps`` functions are the same in steps (SLC-28,
+:mod:`remoteview_core.steps`): one per pass over the mesh.
 """
 
 from __future__ import annotations
 
 import numpy as np
 from numpy.typing import NDArray
+
+from remoteview_core.steps import Steps, run
 
 #: Four tetrahedral directions: the classes ``argmax(n · d)`` of ``n`` and ``-n`` always differ.
 TETRA = np.array([[1, 1, 1], [1, -1, -1], [-1, 1, -1], [-1, -1, 1]], dtype=np.float64) / np.sqrt(3)
@@ -39,6 +42,13 @@ def components(n: int, a: NDArray[np.int64], b: NDArray[np.int64]) -> NDArray[np
 
     Hooking of roots by their minimum plus full path compression; edges already inside one component are dropped each
     round, so the work shrinks quickly (4-5 rounds on 16M triangles)."""
+    return run(components_steps(n, a, b))
+
+
+def components_steps(
+    n: int, a: NDArray[np.int64], b: NDArray[np.int64]
+) -> Steps[NDArray[np.int64]]:
+    """:func:`components` in steps: one per round."""
     parent = np.arange(n, dtype=np.int64)
     a, b = np.asarray(a, dtype=np.int64), np.asarray(b, dtype=np.int64)
     while len(a):
@@ -53,6 +63,7 @@ def components(n: int, a: NDArray[np.int64], b: NDArray[np.int64]) -> NDArray[np
             if np.array_equal(compressed, parent):
                 break
             parent = compressed
+        yield
     return parent
 
 
@@ -120,6 +131,16 @@ def _collapse(
     largest vertex ID on a tie); triangles that repeat a cluster dropped, same-winding duplicates merged, and the
     sides of a fold whose windings cancel dropped. Returns the used clusters' positions and the triangles over them;
     ``kept`` (``k`` booleans), when given, is set for the clusters a kept triangle uses."""
+    return run(_collapse_steps(positions, triangles, cid, k, kept))
+
+
+def _collapse_steps(
+    positions: Positions,
+    triangles: Triangles,
+    cid: NDArray[np.int64],
+    k: int,
+    kept: NDArray[np.bool_] | None = None,
+) -> Steps[tuple[Positions, Triangles]]:
     count = np.bincount(cid, minlength=k).astype(np.float64)
     mean = (
         np.stack([np.bincount(cid, weights=positions[:, j], minlength=k) for j in range(3)], axis=1)
@@ -137,11 +158,13 @@ def _collapse(
     centres = mean.copy()
     chosen = member >= 0
     centres[chosen] = positions[member[chosen]]
+    yield
     mapped = cid[triangles]
     a, b, c = mapped.T
     mapped = mapped[(a != b) & (b != c) & (a != c)]
     if len(mapped) == 0:
         return np.empty((0, 3), dtype=np.float64), np.empty((0, 3), dtype=np.int64)
+    yield
     start = np.argmin(mapped, axis=1)  # rotate to start at the smallest index: the winding is kept
     mapped = np.take_along_axis(mapped, (start[:, None] + np.arange(3)) % 3, axis=1)
     ordered = np.sort(mapped, axis=1)
@@ -227,8 +250,26 @@ def cluster_connected(
     ``rescue``, the input triangles none of whose clusters is used by a kept triangle (islands smaller than a cell,
     also those whose two sides cancel) are clustered again with ``cell / rescue`` and added — unless there are more
     than ``rescue_limit`` of them (a node of dust: the rescue would cost O(lost) and return several times the goal)."""
+    return run(
+        cluster_connected_steps(
+            positions, triangles, cell, rescue=rescue, rescue_limit=rescue_limit
+        )
+    )
+
+
+def cluster_connected_steps(
+    positions: Positions,
+    triangles: Triangles,
+    cell: float,
+    *,
+    rescue: float = RESCUE_DIVISOR,
+    rescue_limit: int | None = None,
+) -> Steps[tuple[Positions, Triangles]]:
+    """:func:`cluster_connected` in steps."""
     key = _grid_keys(positions, cell)
+    yield
     twins = coincident_pairs(positions, triangles)
+    yield
     m = len(triangles)
     e = np.empty(
         (3 * m + len(twins), 2), dtype=np.int64
@@ -238,20 +279,23 @@ def cluster_connected(
     e[3 * m :] = twins
     same = key[e[:, 0]] == key[e[:, 1]]
     a, b = e[same, 0], e[same, 1]
-    del e, same, key  # the largest arrays: not alive during _collapse
-    label = components(len(positions), a, b)
+    del e, same, key  # the largest arrays: not alive during _collapse_steps
+    yield
+    label = yield from components_steps(len(positions), a, b)
     del a, b
     uniq, cid = np.unique(label, return_inverse=True)
     cid = cid.ravel()
+    yield
     alive = np.zeros(len(uniq), dtype=bool)
-    centres, result = _collapse(positions, triangles, cid, len(uniq), alive)
+    centres, result = yield from _collapse_steps(positions, triangles, cid, len(uniq), alive)
     if not rescue:
         return centres, result
     lost = ~alive[cid[triangles]].any(axis=1)
     n_lost = int(lost.sum())
     if not n_lost or (rescue_limit is not None and n_lost > rescue_limit):
         return centres, result
-    more, more_triangles = cluster_connected(
+    yield
+    more, more_triangles = yield from cluster_connected_steps(
         *compact(positions, triangles[lost]), cell / rescue, rescue=0
     )
     return np.concatenate([centres, more]), np.concatenate([result, more_triangles + len(centres)])
@@ -262,6 +306,13 @@ def cluster_by_normal(
 ) -> tuple[Positions, Triangles]:
     """Vertex clustering by grid cell and the tetrahedral class of the area-weighted vertex normal, for non-manifold
     fans where connected clusters do not reduce (every page reaches the spine)."""
+    return run(cluster_by_normal_steps(positions, triangles, cell))
+
+
+def cluster_by_normal_steps(
+    positions: Positions, triangles: Triangles, cell: float
+) -> Steps[tuple[Positions, Triangles]]:
+    """:func:`cluster_by_normal` in steps."""
     first = positions[triangles[:, 0]]
     face = np.cross(positions[triangles[:, 1]] - first, positions[triangles[:, 2]] - first)
     flat = triangles.ravel()
@@ -272,9 +323,11 @@ def cluster_by_normal(
         ],
         axis=1,
     )
+    yield
     key = _grid_keys(positions, cell) * 4 + np.argmax(normals @ TETRA.T, axis=1)
     uniq, cid = np.unique(key, return_inverse=True)
-    return _collapse(positions, triangles, cid.ravel(), len(uniq))
+    yield
+    return (yield from _collapse_steps(positions, triangles, cid.ravel(), len(uniq)))
 
 
 def part_sizes(positions: Positions, triangles: Triangles) -> NDArray[np.int64]:

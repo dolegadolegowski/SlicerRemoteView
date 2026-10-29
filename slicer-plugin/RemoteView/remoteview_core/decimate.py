@@ -29,8 +29,8 @@ collected entities (glTF metres, after SLC-07's clean-up), one node per :func:`d
   ``RegularizeOn`` with :data:`REGULARIZATION`; one :data:`QUADRIC_SECONDS` deadline per node, counted from the
   start of its quadric step (no run starts after it, and a progress observer aborts a running one);
 - if any part gives no usable result (aborted, no triangle, more than the share, a non-finite normal or a position
-  beyond float32): clustering of the whole node with a growing cell (:func:`_fallback`), with a warning in the log
-  naming the reason and the outcome;
+  beyond float32): clustering of the whole node with a growing cell (:func:`_fallback_steps`), with a warning in the
+  log naming the reason and the outcome;
 - folds repaired (a triangle whose face opposes its vertex normals is turned over), then point normals from
   ``vtkPolyDataNormals`` with ``SplittingOff`` (§7.4) and ``ConsistencyOff``
   (:func:`~remoteview_core.collect.mesh_from_triangles` with ``orient=False``); a zero normal becomes +Y like a
@@ -41,7 +41,9 @@ collected entities (glTF metres, after SLC-07's clean-up), one node per :func:`d
 binary chunk alone is over the relay's limit before the file is built; :func:`estimate_glb_size` gives the size that
 refusal reports.
 
-Main thread only (VTK). No Slicer or Qt import.
+:func:`decimate_steps` and :func:`fit_steps` are :func:`decimate_entity` and :func:`fit_to_budget` in steps (SLC-28,
+:mod:`remoteview_core.steps`): one per clustering pass, and the quadric's runs together in one, so its deadline
+counts only their own time, never the event loop's between steps. Main thread only (VTK). No Slicer or Qt import.
 """
 
 from __future__ import annotations
@@ -68,6 +70,7 @@ from remoteview_core.collect import (
 )
 from remoteview_core.coords import unit_normals
 from remoteview_core.glb_writer import MAX_UINT16_VERTICES, Entity
+from remoteview_core.steps import Progress, Steps, run
 
 _log = logging.getLogger(__name__)
 
@@ -159,15 +162,17 @@ EDGE_UNITS = 100.0
 REGULARIZATION = 0.01
 #: Wall-clock budget of one node's quadric step (:func:`_reduce_parts`), from its start: no run starts after it, and a
 #: progress observer aborts a running one — VTK checks the abort only every 10,000 collapses, after the set-up (fact e;
-#: the set-up is bounded by :data:`QUADRIC_WORK`). An aborted run fails the node, which then goes to :func:`_fallback`.
-#: The clustering before it is numpy and linear, so it is not counted: counted from the entry, the reporter's node left
-#: the quadric 1.5 s of margin in Slicer under Rosetta (size bound 4.4-4.5 s, then a quadric step of 2.0-2.2 s), and
-#: machine load could switch it to the coarser fallback; now the step has about 4 times what it needs.
+#: the set-up is bounded by :data:`QUADRIC_WORK`). An aborted run fails the node, which then goes to
+#: :func:`_fallback_steps`. The clustering before it is numpy and linear, so it is not counted: counted from the entry,
+#: the reporter's node left the quadric 1.5 s of margin in Slicer under Rosetta (size bound 4.4-4.5 s, then a quadric
+#: step of 2.0-2.2 s), and machine load could switch it to the coarser fallback; now the step has about 4 times what it
+#: needs. In steps (SLC-28) the quadric's runs are one step, so the time between steps never counts either.
 QUADRIC_SECONDS = 8.0
 #: Rounds of :func:`_repair_folds` (each turns over the triangles whose face opposes their vertex normals).
 FOLD_ROUNDS = 3
-#: :func:`_fallback` grows its cell by ``FALLBACK_GROWTH`` up to ``FALLBACK_TRIES`` times until the share is met; when
-#: that empties the mesh after a cell that left too many, it bisects between the two up to ``FALLBACK_BISECT`` times.
+#: :func:`_fallback_steps` grows its cell by ``FALLBACK_GROWTH`` up to ``FALLBACK_TRIES`` times until the share is met;
+#: when that empties the mesh after a cell that left too many, it bisects between the two up to ``FALLBACK_BISECT``
+#: times.
 FALLBACK_GROWTH = 1.25
 FALLBACK_TRIES = 12
 FALLBACK_BISECT = 8
@@ -316,25 +321,25 @@ def _repair_folds(
     return triangles
 
 
-def _connected(
+def _connected_steps(
     positions: NDArray[np.float64], triangles: NDArray[np.int64], cell: float
-) -> tuple[NDArray[np.float64], NDArray[np.int64]]:
-    return clustering.cluster_connected(positions, triangles, cell, rescue=0)
+) -> Steps[tuple[NDArray[np.float64], NDArray[np.int64]]]:
+    return clustering.cluster_connected_steps(positions, triangles, cell, rescue=0)
 
 
-def _fallback(
+def _fallback_steps(
     positions: NDArray[np.float64], triangles: NDArray[np.int64], target: int
-) -> tuple[NDArray[np.float64], NDArray[np.int64]] | None:
+) -> Steps[tuple[NDArray[np.float64], NDArray[np.int64]] | None]:
     """Clustering with the cell grown until at most ``target`` triangles are left — connected clusters, then normal
     classes (which reduce a non-manifold fan that connected clusters empty). When a cell empties the mesh after one
     that left too many, the cell is bisected between the two. ``None`` when neither gives ``0 <`` triangles ``≤
     target`` (a soup of triangles each smaller than the first cell). Bounded (at most
     ``2 · (FALLBACK_TRIES + FALLBACK_BISECT)`` numpy passes); no splitting, so no cracks."""
     start = clustering.median_edge(positions, triangles) * math.sqrt(len(triangles) / target)
-    for cluster in (_connected, clustering.cluster_by_normal):
+    for cluster in (_connected_steps, clustering.cluster_by_normal_steps):
         cell, above = start, None
         for _ in range(FALLBACK_TRIES):
-            centres, result = cluster(positions, triangles, cell)
+            centres, result = yield from cluster(positions, triangles, cell)
             if len(result) <= target:
                 break
             above = cell
@@ -346,7 +351,7 @@ def _fallback(
         empty = cell
         for _ in range(FALLBACK_BISECT if above is not None else 0):
             middle = math.sqrt(above * empty)
-            centres, result = cluster(positions, triangles, middle)
+            centres, result = yield from cluster(positions, triangles, middle)
             if 0 < len(result) <= target:
                 return centres, result
             if len(result):
@@ -388,19 +393,29 @@ def decimate_entity(
     """``entity`` reduced to at most ``target`` triangles (unchanged when it already has no more).
 
     1. A mesh above ``2 · max(CLUSTER_GOAL, 3 · target)`` triangles is clustered to at most twice that goal
-       (:func:`_bounded`).
+       (:func:`_bounded_steps`).
     2. A mesh with non-manifold fans (``fan_weight`` above :data:`FAN_LIMIT`, or ``edge_work`` above
-       :data:`QUADRIC_WORK`) is clustered by normal class (:func:`_unfanned`).
+       :data:`QUADRIC_WORK`) is clustered by normal class (:func:`_unfanned_steps`).
     3. The quadric (``quadric``, default :data:`QUADRIC`, looked up at the call) on the large parts and on the small
        ones (:func:`_reduce_parts`), on welded and scaled coordinates, within :data:`QUADRIC_SECONDS` of the start of
        this step.
-    4. If any part gives no usable result: :func:`_fallback` (clustering) on the whole mesh of step 2, with a warning
-       in the log (counts only, no node data).
+    4. If any part gives no usable result: :func:`_fallback_steps` (clustering) on the whole mesh of step 2, with a
+       warning in the log (counts only, no node data).
     5. Folds repaired, normals recomputed (:func:`_finished`).
 
     Returns ``None`` — before any VTK filter runs — for indices outside the positions or a triangle that repeats a
     vertex (VTK does not check them), and when nothing can reduce the mesh; :func:`fit_to_budget` then keeps the
     node whole and reports it (never dropped, §7.5)."""
+    return run(decimate_steps(entity, target, quadric=quadric))
+
+
+def decimate_steps(
+    entity: Entity,
+    target: int,
+    *,
+    quadric: Callable[[float], Any] | None = None,
+) -> Steps[Entity | None]:
+    """:func:`decimate_entity` in steps (the module docstring)."""
     count = entity.triangle_count
     if count <= target:
         return entity
@@ -414,19 +429,24 @@ def decimate_entity(
         return None
     positions = np.asarray(entity.positions, dtype=np.float64).reshape(-1, 3)
     goal = max(CLUSTER_GOAL, 3 * target)
+    yield
     if len(triangles) > 2 * goal:
-        bounded, bounded_triangles = _bounded(positions, triangles, goal)
+        bounded, bounded_triangles = yield from _bounded_steps(positions, triangles, goal)
         # nothing left to give the quadric: the fallback on the input
         if len(bounded_triangles) == 0:
-            return _fallback_entity(
-                entity, positions, triangles, target, "the size bound left no triangle"
+            return (
+                yield from _fallback_entity_steps(
+                    entity, positions, triangles, target, "the size bound left no triangle"
+                )
             )
         positions, triangles = bounded, bounded_triangles
     if (
         clustering.fan_weight(triangles) > FAN_LIMIT
         or clustering.edge_work(triangles) > QUADRIC_WORK
     ):
-        positions, triangles = _unfanned(positions, triangles, target)
+        yield
+        positions, triangles = yield from _unfanned_steps(positions, triangles, target)
+    yield
     deadline = time.monotonic() + QUADRIC_SECONDS
     reduced = _reduce_parts(positions, triangles, target, deadline, quadric or QUADRIC)
     if reduced is not None and 0 < len(reduced[1]) <= target:
@@ -434,24 +454,27 @@ def decimate_entity(
         if result is not None:
             return result
     late = time.monotonic() > deadline
-    return _fallback_entity(
-        entity,
-        positions,
-        triangles,
-        target,
-        f"the quadric did not finish within {QUADRIC_SECONDS:g} s"
-        if late
-        else "the quadric gave no usable result",
+    yield
+    return (
+        yield from _fallback_entity_steps(
+            entity,
+            positions,
+            triangles,
+            target,
+            f"the quadric did not finish within {QUADRIC_SECONDS:g} s"
+            if late
+            else "the quadric gave no usable result",
+        )
     )
 
 
-def _bounded(
+def _bounded_steps(
     positions: NDArray[np.float64], triangles: NDArray[np.int64], goal: int
-) -> tuple[NDArray[np.float64], NDArray[np.int64]]:
+) -> Steps[tuple[NDArray[np.float64], NDArray[np.int64]]]:
     """Connected clustering to about ``goal`` triangles, at most ``2 · goal`` where a pass can reach it (the rescue
     skipped above ``RESCUE_GOALS · goal`` lost triangles, then up to :data:`BOUND_TRIES` passes without it)."""
     cell = clustering.median_edge(positions, triangles) * math.sqrt(len(triangles) / goal)
-    bounded, bounded_triangles = clustering.cluster_connected(
+    bounded, bounded_triangles = yield from clustering.cluster_connected_steps(
         positions, triangles, cell, rescue_limit=RESCUE_GOALS * goal
     )
     for _ in range(BOUND_TRIES):
@@ -460,7 +483,7 @@ def _bounded(
         cell = clustering.median_edge(bounded, bounded_triangles) * math.sqrt(
             len(bounded_triangles) / goal
         )
-        again, again_triangles = clustering.cluster_connected(
+        again, again_triangles = yield from clustering.cluster_connected_steps(
             bounded, bounded_triangles, cell, rescue=0
         )
         if len(again_triangles) == 0:
@@ -469,16 +492,16 @@ def _bounded(
     return bounded, bounded_triangles
 
 
-def _unfanned(
+def _unfanned_steps(
     positions: NDArray[np.float64], triangles: NDArray[np.int64], target: int
-) -> tuple[NDArray[np.float64], NDArray[np.int64]]:
+) -> Steps[tuple[NDArray[np.float64], NDArray[np.int64]]]:
     """A mesh with non-manifold fans clustered by grid cell and normal class to at least twice ``target`` triangles
     where possible, then coarser while its ``edge_work`` is above :data:`QUADRIC_WORK` (unchanged when every try
     leaves none)."""
     fan_goal = max(FAN_GOAL_FACTOR * target, FAN_GOAL_MIN)
     cell = clustering.median_edge(positions, triangles) * math.sqrt(len(triangles) / fan_goal)
     for _ in range(FAN_TRIES):
-        centres, fans = clustering.cluster_by_normal(positions, triangles, cell)
+        centres, fans = yield from clustering.cluster_by_normal_steps(positions, triangles, cell)
         if len(fans) >= 2 * target:
             break
         cell /= FAN_REFINE
@@ -486,23 +509,26 @@ def _unfanned(
         if len(fans) == 0 or clustering.edge_work(fans) <= QUADRIC_WORK:
             break
         cell *= FAN_REFINE
-        coarser, coarser_fans = clustering.cluster_by_normal(positions, triangles, cell)
+        coarser, coarser_fans = yield from clustering.cluster_by_normal_steps(
+            positions, triangles, cell
+        )
         if len(coarser_fans) == 0:
             break
         centres, fans = coarser, coarser_fans
     return (centres, fans) if len(fans) else (positions, triangles)
 
 
-def _fallback_entity(
+def _fallback_entity_steps(
     entity: Entity,
     positions: NDArray[np.float64],
     triangles: NDArray[np.int64],
     target: int,
     reason: str,
-) -> Entity | None:
-    """:func:`_fallback` on the mesh, finished, with one warning in the log that names ``reason`` and the outcome —
-    counts only, never node data (T7) — so the Python console or the Error Log shows that the coarser path ran."""
-    coarse = _fallback(positions, triangles, target)
+) -> Steps[Entity | None]:
+    """:func:`_fallback_steps` on the mesh, finished, with one warning in the log that names ``reason`` and the
+    outcome — counts only, never node data (T7) — so the Python console or the Error Log shows that the coarser path
+    ran."""
+    coarse = yield from _fallback_steps(positions, triangles, target)
     result = None if coarse is None else _finished(entity, *coarse, target)
     if result is None:
         _log.warning(
@@ -541,6 +567,17 @@ def fit_to_budget(
     quadric: Callable[[float], Any] | None = None,
 ) -> FitResult:
     """Decimate ``entities`` to ``budget`` (see the module docstring); ``quadric`` goes to :func:`decimate_entity`."""
+    return run(fit_steps(entities, budget, quadric=quadric))
+
+
+def fit_steps(
+    entities: Sequence[Entity],
+    budget: Budget,
+    *,
+    quadric: Callable[[float], Any] | None = None,
+    progress: Progress | None = None,
+) -> Steps[FitResult]:
+    """:func:`fit_to_budget` in steps, one more per node; one unit of ``progress.done`` per node fitted."""
     targets = allocate([e.triangle_count for e in entities], budget)
     fitted: list[Entity] = []
     reduced: list[str] = []
@@ -548,14 +585,17 @@ def fit_to_budget(
     for entity, target in zip(entities, targets, strict=True):
         if entity.triangle_count <= target:
             fitted.append(entity)
-            continue
-        smaller = decimate_entity(entity, target, quadric=quadric)
-        if smaller is None:
-            fitted.append(entity)
-            unreduced.append(entity.node_id)
         else:
-            fitted.append(smaller)
-            reduced.append(entity.node_id)
+            smaller = yield from decimate_steps(entity, target, quadric=quadric)
+            if smaller is None:
+                fitted.append(entity)
+                unreduced.append(entity.node_id)
+            else:
+                fitted.append(smaller)
+                reduced.append(entity.node_id)
+        if progress is not None:
+            progress.done += 1
+        yield
     return FitResult(tuple(fitted), tuple(reduced), tuple(unreduced))
 
 
