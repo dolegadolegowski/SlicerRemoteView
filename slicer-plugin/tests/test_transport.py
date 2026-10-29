@@ -182,6 +182,13 @@ class FakeRelay:
             ws.close(code, "test")
 
 
+class TopRandom:
+    """Every draw at the top of its range (deterministic jitter)."""
+
+    def uniform(self, low: float, high: float) -> float:
+        return high
+
+
 @pytest.fixture
 def relay():
     started: list[FakeRelay] = []
@@ -1165,17 +1172,27 @@ def test_transport_terminal_close_codes_stop_reconnecting(relay, make_transport,
 
 
 @pytest.mark.parametrize(
-    ("code", "low", "high"), [(4008, 0.0, 3.0), (1011, 0.4, 0.6), (4009, 0.4, 0.6)]
+    ("code", "delay"),
+    [
+        pytest.param(4008, 3.0, id="restart-4008"),
+        pytest.param(1011, 0.6, id="1011"),
+        pytest.param(4009, 0.6, id="4009"),
+        # SLC-48: a drop like any other, not the restart jitter
+        pytest.param(4010, 0.6, id="slow_consumer-4010"),
+    ],
 )
-def test_transport_retryable_close_codes_reconnect(relay, make_transport, code, low, high):
+def test_transport_retryable_close_codes_reconnect(relay, make_transport, code, delay):
+    """With every random draw at its top, the restart jitter (0–3 s) and the first backoff (0.5 s ± 20 %) differ."""
     delays: list[float] = []
     server = relay(f"close-{code}")
-    client, events = make_transport(server.url(), sleep=recording_sleep(delays, real_after=1))
+    client, events = make_transport(
+        server.url(), sleep=recording_sleep(delays, real_after=1), rng=TopRandom()
+    )
     assert client.send(
         {"type": "session.create"}, connection=next_event(events, Connected).connection
     )
     drop = next_event(events, Disconnected)
-    assert drop.close_code == code and low <= drop.retry_in <= high
+    assert drop.close_code == code and drop.retry_in == pytest.approx(delay)
 
 
 def test_transport_http_errors_and_redirects_are_not_retried_or_followed(relay, make_transport):
@@ -1388,9 +1405,11 @@ def _response(status: int) -> Response:
         (OSError(101, "Network is unreachable"), ErrorKind.NETWORK, True),
         (InvalidMessage("did not receive a valid HTTP response"), ErrorKind.HANDSHAKE, True),
         (ConnectionClosedError(None, None), ErrorKind.NETWORK, True),
-        (ConnectionClosedError(Close(4011, "replaced"), None), ErrorKind.CLOSED, False),
-        (ConnectionClosedError(Close(4008, "restart"), None), ErrorKind.CLOSED, True),
-        (ConnectionClosedError(Close(1001, ""), None), ErrorKind.CLOSED, True),
+        (ConnectionClosedError(Close(4011, "reason-4011"), None), ErrorKind.CLOSED, False),
+        (ConnectionClosedError(Close(4008, "reason-4008"), None), ErrorKind.CLOSED, True),
+        pytest.param(ConnectionClosedError(Close(4010, "reason-4010"), None), ErrorKind.CLOSED, True,
+                     id="slow_consumer-4010"),
+        (ConnectionClosedError(Close(1001, "reason-1001"), None), ErrorKind.CLOSED, True),
         (RuntimeError("bug"), ErrorKind.INTERNAL, False),
     ],
 )  # fmt: skip
@@ -1399,6 +1418,8 @@ def test_transport_classifies_errors_by_type_never_by_text(exc, kind, retryable)
     assert (error.kind, error.retryable) == (kind, retryable)
     shown = f"{error} {error!r} {error.guidance} {error.args}"
     assert "s3cret" not in shown and "alice" not in shown and "python-socks" not in shown
+    # a close reason is the relay's free text: never shown
+    assert "reason-" not in shown
     assert error.guidance and error.__cause__ is None
 
 

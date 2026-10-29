@@ -633,6 +633,94 @@ def test_panel_live_resume_recreate_replaces_the_observers_once(fake, caplog, ca
     )
 
 
+# --------------------------------------------------------------------------- SLC-48: close 4010 is a drop
+
+
+#: The free text of the relay's error: never shown, never logged (T7).
+SLOW_TEXT = "slow consumer: the send buffer of Doe^John passed 1 MiB"
+SLOW_CLOSE = TransportError(ErrorKind.CLOSED, retryable=True, close_code=4010)
+
+
+def slow_consumer_close(rig: Rig) -> panel.PanelView:
+    """``error SLOW_CONSUMER`` (no ``replyTo``), then close 4010: the view after the close."""
+    ctl = rig.ctl
+    before, sent_before = ctl.pump(), len(sent_on(1))
+    error = relay_error("SLOW_CONSUMER", retryable=True)
+    error["message"] = SLOW_TEXT
+    view = deliver(ctl, Received(1, error))
+    # the error alone changes nothing: the relay closes the socket next
+    assert ctl.phase is Phase.LIVE and view == before and len(sent_on(1)) == sent_before
+    return deliver(ctl, Disconnected(1, SLOW_CLOSE, 0.5))
+
+
+def test_panel_live_slow_consumer_close_resumes_the_same_session(fake, caplog, capfd):
+    """Protocol v1.1 §9.3 (report ``2026-10-20-server-5``): a publisher whose send buffer on the relay passed 1 MiB gets
+    ``error SLOW_CONSUMER`` and close 4010 — a drop, not an end and not a restart: the same session resumes, with the
+    same live updates, and a change made meanwhile goes out as an update."""
+    caplog.set_level(logging.DEBUG)
+    a = MrmlModel(A, name="Doe^John liver")
+    rig = live_rig(a)
+    acked(rig, 1)
+    ctl, live_updates = rig.ctl, rig.ctl._live
+    view = slow_consumer_close(rig)
+    assert ctl.phase is Phase.RECONNECTING and view.code == CODE
+    assert view.status == panel.RECONNECTING_IN.format(seconds=1)
+    assert panel.RECONNECT_DETAIL in view.detail and panel.RELAY_RESTARTED not in view.detail
+    recolor(a, (0.0, 1.0, 0.0))
+    deliver(ctl, Connected(2))
+    [resume] = sent_on(2)
+    assert (resume["type"], resume["sessionId"]) == ("session.resume", SESSION_ID)
+    view = deliver(ctl, Received(2, resumed(resume["id"], scene_version=1, snapshot_version=1)))
+    assert ctl.phase is Phase.LIVE and view.code == CODE and ctl._live is live_updates
+    rig.pump(150)
+    assert [m["type"] for m in sent_on(2)] == ["session.resume", "scene.update"]
+    assert SLOW_TEXT not in view.status + view.detail
+    assert leaks(caplog, capfd, *NAMES, CODE, TOKEN, SESSION_ID, SLOW_TEXT) == []
+
+
+def test_panel_live_slow_consumer_error_leaves_a_snapshot_in_flight_alone(fake):
+    """The error names no message (no ``replyTo``): a snapshot in flight is not refused by it — the close that
+    follows interrupts it, and the resume sends it again on a new version (§6.2, §6.3)."""
+    rig = live_rig(MrmlModel(A, name="Doe^John liver"))
+    acked(rig, 1)
+    version = snapshot_in_flight(rig)
+    view = slow_consumer_close(rig)
+    assert panel.SCENE_INTERRUPTED in view.detail
+    deliver(rig.ctl, Connected(2))
+    [resume] = sent_on(2)
+    deliver(rig.ctl, Received(2, resumed(resume["id"], scene_version=version, snapshot_version=1)))
+    [begin] = begins_on(2)
+    assert begin["sceneVersion"] == version + 1
+
+
+def test_panel_live_slow_consumer_error_leaves_a_reset_in_flight_alone(fake):
+    """A closed scene's snapshot on its way: the error does not count as its refusal, which would end the session
+    (``RESET_REFUSED``); the close that follows interrupts it and the session reconnects."""
+    rig = live_rig(MrmlModel(A, name="Doe^John liver"))
+    acked(rig, 1)
+    close_scene(rig)
+    rig.timer.advance(0)  # the reset's snapshot begins
+    view = slow_consumer_close(rig)
+    assert rig.ctl.phase is Phase.RECONNECTING
+    assert panel.RESET_PENDING in view.detail and panel.SCENE_INTERRUPTED in view.detail
+
+
+def test_panel_live_slow_consumer_close_is_no_restart(fake):
+    """§4.3, §9.3: only a 4008 lets the panel create the session again with its code; after a 4010 a
+    ``SESSION_NOT_FOUND`` ends the session (the code may belong to another session by now, T1/T4)."""
+    rig = live_rig(MrmlModel(A, name="Doe^John liver"))
+    acked(rig, 1)
+    slow_consumer_close(rig)
+    deliver(rig.ctl, Connected(2))
+    [resume] = sent_on(2)
+    view = deliver(rig.ctl, Received(2, relay_error("SESSION_NOT_FOUND", resume["id"])))
+    assert [m["type"] for m in sent_on(2)] == ["session.resume"] and rig.ctl.phase is Phase.STOPPING
+    view = deliver(rig.ctl, Disconnected(2, None, None, final_sent=True))
+    assert view.status == panel.SESSION_ENDED and [m["type"] for m in sent_on(2)] == [
+        "session.resume"
+    ]
+
+
 # --------------------------------------------------------------------------- SLC-44, SLC-45 with segments: aliases
 
 
