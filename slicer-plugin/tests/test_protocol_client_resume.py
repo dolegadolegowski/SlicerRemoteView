@@ -22,6 +22,7 @@ from support import (
     leaks,
     live_client,
     relay_error,
+    restamped,
     resumed,
     viewer_count,
 )
@@ -50,7 +51,8 @@ def strict():
 
 def snap(client: ProtocolClient) -> int:
     """Begin a snapshot; its ``sceneVersion``."""
-    client.begin_snapshot(GLB, node_count=2, triangle_count=36)
+    glb = restamped(GLB, client.next_scene_version)
+    client.begin_snapshot(glb, node_count=2, triangle_count=36)
     return client.snapshot_in_flight
 
 

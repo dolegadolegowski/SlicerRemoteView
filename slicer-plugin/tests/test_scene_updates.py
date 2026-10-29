@@ -16,6 +16,7 @@ from support import (
     FakeScene,
     ack,
     created,
+    minimal_glb,
     needs_relay_stub,
     sphere,
     start_relay_stub,
@@ -52,15 +53,8 @@ def _error(code: str, reply_to: str | None = None) -> dict:
 
 
 def _snapshot(client: ProtocolClient):
-    return client.begin_snapshot(_glb(), node_count=1, triangle_count=12)
-
-
-def _glb() -> bytes:
-    """The smallest valid GLB header + JSON chunk the client reads ``extensionsUsed`` from."""
-    text = json.dumps({"asset": {"version": "2.0"}}).encode()
-    text += b" " * (-len(text) % 4)
-    body = (len(text)).to_bytes(4, "little") + b"JSON" + text
-    return b"glTF" + (2).to_bytes(4, "little") + (12 + len(body)).to_bytes(4, "little") + body
+    glb = minimal_glb(client.next_scene_version)
+    return client.begin_snapshot(glb, node_count=1, triangle_count=12)
 
 
 def live(strict, *, acked: bool = True, **limits) -> ProtocolClient:

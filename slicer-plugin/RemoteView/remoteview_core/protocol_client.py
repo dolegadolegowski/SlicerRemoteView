@@ -329,8 +329,8 @@ def make_client_info(slicer_version: str, platform: str) -> dict[str, str]:
     return info
 
 
-def glb_extensions(glb: bytes | bytearray | memoryview) -> tuple[list[str], list[str]]:
-    """``(extensionsUsed, extensionsRequired)`` read from a GLB's JSON chunk (so ``begin`` matches the file)."""
+def _glb_document(glb: bytes | bytearray | memoryview) -> dict[str, Any]:
+    """The glTF document of a GLB's JSON chunk."""
     view = memoryview(glb)
     if view.nbytes < 20:
         raise ValueError("not a GLB: shorter than the header")
@@ -342,11 +342,57 @@ def glb_extensions(glb: bytes | bytearray | memoryview) -> tuple[list[str], list
     document = json.loads(bytes(view[20 : 20 + json_length]))
     if not isinstance(document, dict):
         raise ValueError("GLB JSON chunk is not a glTF document")
+    return document
+
+
+def glb_extensions(glb: bytes | bytearray | memoryview) -> tuple[list[str], list[str]]:
+    """``(extensionsUsed, extensionsRequired)`` read from a GLB's JSON chunk (so ``begin`` matches the file)."""
+    return _extensions(_glb_document(glb))
+
+
+def _extensions(document: Mapping[str, Any]) -> tuple[list[str], list[str]]:
     lists = [document.get(key, []) for key in ("extensionsUsed", "extensionsRequired")]
     for names in lists:
         if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
             raise ValueError("GLB extensionsUsed/extensionsRequired must be lists of strings")
     return lists[0], lists[1]
+
+
+def _root_figures(document: Mapping[str, Any]) -> tuple[int, Any, int, int] | None:
+    """``(sceneVersion, profile, nodeCount, triangleCount)`` as the GLB states them (§6.2, §7.1–7.3): the root extras of
+    the single root node of the one scene, the number of its children (the ``T`` nodes) and the sum of their
+    ``extras.triangleCount``; ``None`` for a GLB without that layout — more than one scene, a ``scene`` other than 0, an
+    index that is not a uint, ``children`` that is not a list, a child listed twice or the root among its own children,
+    root extras that are not ``nodeId``/``kind`` ``"root"`` with a uint ``sceneVersion``, a count that is not a uint
+    (JSON ``true`` and ``1.0`` are not ``1``). The profile is returned as found: only an equal string matches the
+    ``begin``. Reads structure only — never a name."""
+    scene_index = document.get("scene", 0)
+    try:
+        [scene] = document["scenes"]
+        nodes = document["nodes"]
+        [root_index] = scene["nodes"]
+        if not (_uint(scene_index, 0, 0) and _uint(root_index)):
+            return None
+        # JSON object keys are strings: a uint index into an object raises KeyError
+        root = nodes[root_index]
+        extras = root["extras"]
+        version, profile = extras.get("sceneVersion"), extras.get("profile")
+        marks = extras.get("nodeId"), extras.get("kind")
+        children = root.get("children", [])
+        if not (isinstance(children, list) and all(_uint(i) for i in children)):
+            return None
+        counts = [nodes[i]["extras"]["triangleCount"] for i in children]
+    except (AttributeError, KeyError, IndexError, TypeError, ValueError):
+        return None
+    if (
+        marks != ("root", "root")
+        or not _uint(version)
+        or len(set(children)) < len(children)
+        or root_index in children
+        or not all(_uint(c) for c in counts)
+    ):
+        return None
+    return version, profile, len(children), sum(counts)
 
 
 def build_snapshot_messages(  # noqa: PLR0913 — one keyword per scene.snapshot.begin field (§6.2)
@@ -363,7 +409,9 @@ def build_snapshot_messages(  # noqa: PLR0913 — one keyword per scene.snapshot
     """Messages for one snapshot (§6.2–6.4) using the vendored chunk codec.
 
     Raises ``ValueError`` for values the relay would reject (chunk size outside 64 KiB–1 MiB, more than 1,024
-    chunks, empty or > 64 MiB, extensions other than ``KHR_mesh_quantization``) before anything is sent.
+    chunks, empty or > 64 MiB, extensions other than ``KHR_mesh_quantization``), and for a ``begin`` whose
+    ``sceneVersion``/``profile``/``nodeCount``/``triangleCount`` differ from the GLB root's extras and its ``T`` nodes
+    (§6.2, SLC-38), before anything is sent.
     ``message_id``/``end_message_id`` let the relay's ``error`` name the ``begin``/``end`` it answers (``replyTo``,
     §3.2).
     """
@@ -376,11 +424,16 @@ def build_snapshot_messages(  # noqa: PLR0913 — one keyword per scene.snapshot
     data = bytes(glb)
     # Validates the sizes eagerly; the pieces are memoryviews, not copies.
     pieces = list(chunk_header.chunkify(data, chunk_size))
-    used, required = glb_extensions(data)
+    document = _glb_document(data)
+    used, required = _extensions(document)
     unique = len(set(used)) == len(used) and len(set(required)) == len(required)
     if not unique or not set(required) <= set(used) <= ALLOWED_EXTENSIONS:
         raise ValueError(
             f"GLB extensions must be unique and within {sorted(ALLOWED_EXTENSIONS)} (§6.2)"
+        )
+    if _root_figures(document) != (scene_version, profile, node_count, triangle_count):
+        raise ValueError(
+            "the GLB root's sceneVersion/profile or its T-node and triangle totals differ from the begin (§6.2)"
         )
     digest = chunk_header.sha256_hex(data)
     begin = envelope(
@@ -732,7 +785,8 @@ class ProtocolClient:
     ) -> SnapshotMessages:
         """Allocate the next ``sceneVersion`` and build the snapshot messages; ``created`` → ``active`` (§6, §8.4).
 
-        A new snapshot while one is in flight supersedes it (§6.2). Size limits announced in
+        A new snapshot while one is in flight supersedes it (§6.2); a GLB whose root does not state this ``begin``'s
+        figures raises before a version is used (SLC-38). Size limits announced in
         ``session.created.limits`` are enforced here so an oversize GLB never leaves the PC; ``chunk_size``
         defaults to 1 MiB or the relay's smaller ``maxChunkBytes``. The SHA-256 is computed on the calling thread.
         """

@@ -989,10 +989,65 @@ def glb_strings(glb: bytes) -> list[str]:
     return found
 
 
-def root_extras(glb: bytes) -> dict:
+def glb_container(document: dict, binary: bytes = b"") -> bytes:
+    """A GLB of ``document`` (its JSON chunk padded with spaces) and an optional BIN chunk (§7.1)."""
+    text = json.dumps(document).encode()
+    text += b" " * (-len(text) % 4)
+    chunks = struct.pack("<II", len(text), 0x4E4F534A) + text
+    if binary:
+        chunks += struct.pack("<II", len(binary), 0x004E4942) + binary
+    return struct.pack("<III", 0x46546C67, 2, 12 + len(chunks)) + chunks
+
+
+def minimal_glb(scene_version: int) -> bytes:
+    """The smallest GLB whose root says what a ``scene.snapshot.begin`` for it must say (§6.2, SLC-38): one scene, the
+    root's extras with ``sceneVersion`` and profile ``mobile``, and one ``T`` node of 12 triangles."""
+    root = {
+        "name": "SlicerRemoteView",
+        "extras": {
+            "nodeId": "root",
+            "kind": "root",
+            "sceneVersion": scene_version,
+            "profile": "mobile",
+        },
+        "children": [1],
+    }
+    t_node = {"extras": {"nodeId": "vtkMRMLModelNode1", "triangleCount": 12}}
+    document = {
+        "asset": {"version": "2.0"},
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [root, t_node],
+    }
+    return glb_container(document)
+
+
+def rewrite_json(glb: bytes, edit) -> bytes:
+    """``glb`` with its JSON document changed in place by ``edit(document)`` (the BIN chunk kept)."""
     document = glb_json(glb)
+    edit(document)
+    json_length = struct.unpack_from("<I", glb, 12)[0]
+    rest = glb[20 + json_length :]
+    binary = rest[8 : 8 + struct.unpack_from("<I", rest, 0)[0]] if rest else b""
+    return glb_container(document, binary)
+
+
+def _root_node(document: dict) -> dict:
     [root] = [n for n in document["nodes"] if n.get("name") == "SlicerRemoteView"]
-    return root["extras"]
+    return root
+
+
+def restamped(glb: bytes, scene_version: int, profile: str = "mobile") -> bytes:
+    """``glb`` with its root's ``extras.sceneVersion``/``profile`` set: a fixture sent as a later snapshot or for
+    another profile (§6.2: the ``begin`` names the root's figures)."""
+    stamp = {"sceneVersion": scene_version, "profile": profile}
+    if _root_node(glb_json(glb))["extras"].items() >= stamp.items():
+        return glb
+    return rewrite_json(glb, lambda document: _root_node(document)["extras"].update(stamp))
+
+
+def root_extras(glb: bytes) -> dict:
+    return _root_node(glb_json(glb))["extras"]
 
 
 def manifest(glb: bytes) -> list[dict]:
