@@ -155,14 +155,10 @@ def prepare_snapshot(  # noqa: PLR0913 — build_snapshot's options, and the pro
     progress: Progress | None = None,
     cache: MeshCache | None = None,
 ) -> Steps[Snapshot]:
-    """:func:`build_snapshot` in steps (the module docstring); ``progress`` counts the nodes collected and fitted."""
-    limits = client.limits
-    if (
-        client.state not in (SessionState.CREATED, SessionState.ACTIVE)
-        or not limits
-        or not client.profile
-    ):
-        raise ProtocolStateError(f"cannot send a snapshot in state {client.state.value}")
+    """:func:`build_snapshot` in steps (the module docstring); ``progress`` counts the nodes collected and fitted.
+    The session's state and the relay's limits are checked at the first step and read again at the last: a
+    preparation in steps spans the event loop."""
+    _live_limits(client)
     progress = progress if progress is not None else Progress()
     cache = cache if cache is not None else MeshCache()  # a single export: every node is a miss
     collected = yield from collect_steps(
@@ -171,6 +167,7 @@ def prepare_snapshot(  # noqa: PLR0913 — build_snapshot's options, and the pro
     budget = PROFILES[client.profile]
     fitted, skipped = yield from _fit_steps(collected, budget, cache, progress)
     progress.done = progress.total  # the nodes left out need no fit
+    limits = _live_limits(client)
     if glb_binary_size(fitted.entities, quantize=quantize) > limits["maxSnapshotBytes"]:
         # too large whatever the JSON: refused before the file is written (NFR-23)
         raise SnapshotTooLargeError(
@@ -211,6 +208,18 @@ def prepare_snapshot(  # noqa: PLR0913 — build_snapshot's options, and the pro
         sent=sent,
         announced=announced,
     )
+
+
+def _live_limits(client: ProtocolClient) -> dict[str, Any]:
+    """The relay's limits of a session that can take a snapshot now (``ProtocolStateError`` otherwise)."""
+    limits = client.limits
+    if (
+        client.state not in (SessionState.CREATED, SessionState.ACTIVE)
+        or not limits
+        or not client.profile
+    ):
+        raise ProtocolStateError(f"cannot send a snapshot in state {client.state.value}")
+    return limits
 
 
 def _fit_steps(

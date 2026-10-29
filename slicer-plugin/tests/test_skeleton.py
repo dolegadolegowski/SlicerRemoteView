@@ -525,3 +525,60 @@ def test_skeleton_slots_without_a_controller_do_nothing(import_remote_view, capl
         widget.onPump()
     assert caplog.text == "" and widget.controller is None
     assert not widget.pumpTimer.active  # a pump with nothing to pump stops
+
+
+def test_skeleton_progress_dialog_follows_the_view(import_remote_view, slicer_stubs):
+    """SLC-51 (FR-10): a non-modal progress dialog without a cancel button while the view carries a progress, reset
+    (hidden, its timer stopped) and released when it does not, and on cleanup."""
+    from remoteview_core import panel  # noqa: PLC0415 — imports VTK after the stubs are in place
+
+    module = import_remote_view()
+    widget = module.RemoteViewWidget(mock.MagicMock(name="parentWidget"))
+    widget.setup()
+    preparing = "Preparing the scene · no viewers yet."
+    widget.render(panel.PanelView(preparing, progress=(1, 4)))
+    dialog = widget.progressDialog
+    assert dialog.windowModality == slicer_stubs["qt"].Qt.NonModal and dialog.cancel_button is None
+    assert (dialog.minimumDuration, dialog.maximum, dialog.values) == (
+        module.PROGRESS_DIALOG_MS,
+        4,
+        [1],
+    )
+    assert dialog.labelText == module.PREPARING_LABEL and dialog.calls == []
+    widget.render(panel.PanelView(preparing, progress=(3, 4)))
+    assert widget.progressDialog is dialog and dialog.values == [1, 3]
+    widget.render(panel.PanelView("Sending the scene · no viewers yet."))
+    assert widget.progressDialog is None and dialog.calls == ["reset", "deleteLater"]
+    widget.render(panel.PanelView(preparing, progress=(0, 2)))
+    second = widget.progressDialog
+    assert second is not dialog and second.attributes == [
+        slicer_stubs["qt"].Qt.WA_ShowWithoutActivating
+    ]
+    second.wasCanceled = True  # closed with its title-bar button: setValue would show it again
+    widget.render(panel.PanelView(preparing, progress=(1, 2)))
+    assert second.values == [0]
+    widget.cleanup()
+    assert widget.progressDialog is None and second.calls == ["reset", "deleteLater"]
+
+
+def test_skeleton_a_failing_progress_dialog_leaves_the_panel_working(
+    import_remote_view, slicer_stubs, monkeypatch, caplog
+):
+    """SLC-51 review: the dialog's PythonQt calls are unverified (§15): one that fails is logged by type only, and the
+    texts, the code and the QR code are still shown."""
+    from remoteview_core import panel  # noqa: PLC0415
+
+    module = import_remote_view()
+    widget = module.RemoteViewWidget(mock.MagicMock(name="parentWidget"))
+    widget.setup()
+
+    def refuse(self, button):
+        raise TypeError("vtkMRMLModelNode4 Doe^John")
+
+    monkeypatch.setattr(slicer_stubs["qt"].QProgressDialog, "setCancelButton", refuse)
+    with caplog.at_level("DEBUG"):
+        widget.render(panel.PanelView("Preparing the scene · no viewers yet.", progress=(1, 4)))
+    assert widget.ui.statusLabel.text == "Preparing the scene · no viewers yet."
+    assert "progress dialog not shown (TypeError)" in caplog.text and "Doe" not in caplog.text
+    widget.render(panel.PanelView("Sending the scene · no viewers yet."))
+    assert widget.progressDialog is None

@@ -139,12 +139,50 @@ so there is one fitting path for snapshots; its per-node decision is `decimate.f
   flush after the ack and are classified against the new scene, so dropping the client's held changes at `begin`
   stays right.
 - **A preparation runs only while an export may go out.** Stop, a reset (scene closed), a batch, a lost
-  connection, *Hide node names* or a new profile, a re-sync, or a gate that closes (a relay wait) abandon it. It
-  then sends nothing and uses no version. The next tick starts again, and the cache makes the restart cheap: only
-  nodes that were not finished, or whose stamp changed, are prepared again.
-- **No `processEvents`.** The slices run from the pump. Nothing re-enters `LiveUpdates` in the middle of a step,
-  which answers the SLC-32 review's concern about a progress dialog that runs `processEvents` during an export.
-- **The panel.** "Preparing the scene" with the progress (`Progress`: two units per node, collected and fitted). The
-  code is shown from the first tick (SLC-25 follow-up). The adapter shows a non-modal `QProgressDialog` with no
-  cancel button (*Stop session* stays in the panel). The dialog only appears once a preparation is long (its
-  `minimumDuration`), so a live change of a small scene does not flash it.
+  connection, *Hide node names* or a new profile, or a gate that closes (a relay wait) abandon it. It then sends
+  nothing and uses no version. The next tick starts again, and the cache makes the restart cheap: only nodes that
+  were not finished, or whose stamp changed, are prepared again.
+- **A closed scene leaves the viewers first.** When the scene that replaces a closed one (a reset) takes more than
+  one slice, its preparation is dropped, an empty snapshot clears the closed scene off the viewers (§7.3), and the
+  new scene follows as an owed snapshot after that one's ack. Before SLC-51 a reset bounded this with one call; in
+  steps, batches (loading data) could otherwise keep the closed scene on the viewers for as long as they run.
+- **No `processEvents`.** The slices run from the pump, so nothing re-enters `LiveUpdates` in the middle of a step.
+  This answers the SLC-32 review's concern about a progress dialog that runs `processEvents` during an export. If a
+  scene event calls back from inside a step anyway (a read that fires an MRML event), an abandon closes the steps
+  as soon as that step returns, and nothing of them is sent.
+- **The panel.** "Preparing the scene" with the progress (`Progress`: two units per node, collected and fitted);
+  during a retry the last failure's reason stays as the detail. The code is shown from the first tick (SLC-25
+  follow-up). The adapter shows a non-modal `QProgressDialog` with no cancel button (*Stop session* stays in the
+  panel) that does not take the focus (`WA_ShowWithoutActivating`). Qt shows it once its estimate of the
+  preparation's length passes `minimumDuration` (1 s) — after about a tenth of a second on a long preparation
+  (Qt 5.15 `qprogressdialog.cpp`) — so a live change of a small scene does not flash it. Closed from its title bar,
+  it stays closed until the next preparation (`setValue` would show it again). A failure in it is logged by type
+  only. A flush starts a preparation with one slice; the pump runs the others.
+- **A re-sync does not abandon.** Events missed off the main thread (SLC-33) let a running preparation finish and
+  ask for another snapshot after it. Abandoning it at each such event could hold a large scene off for ever.
+- **An abandoned preparation stays owed.** A flush's re-export, or the first snapshot, owes the client nothing, so
+  `_abandon` sets `snapshot_needed` while the session runs: a later tick starts it again. A slice condition
+  (`_may_continue`) without `snapshot_needed` lets a preparation that a flush started go on.
+- **Limits read again.** `prepare_snapshot` checks the session's state and the relay's limits at its first step and
+  again at its last.
+
+**One live geometry change, phase by phase** (the owner's report: every change froze Slicer during a session). On
+`main`, every change that needs a new snapshot collected and decimated every node again on the main thread, in one
+call: about 11 s on the reporter's scene, with Slicer frozen throughout. Measured natively with
+`live_change_profile.py`, a local harness that is not committed. It drives the panel with the real transport and the
+relay stub, pumps every 50 ms like the adapter, and times only each phase's own steps. Scene: a generated surface (one
+segment) and a sphere of 7,936 triangles, `mobile`:
+
+| Change | Until the relay's ack | Longest pump (main thread blocked) | Collect | Decimation | GLB, SHA-256, chunks | Upload |
+|---|---|---|---|---|---|---|
+| Start session, 15.5M-triangle surface | 6.99 s | 1.06 s (the quadric's step) | 3.01 s | 3.51 s | < 0.01 s | in the worker thread |
+| the sphere's mesh replaced (cache: the surface is reused) | 0.12 s | 0.01 s | < 0.01 s | none | < 0.01 s | idem |
+| the surface's mesh changed | 6.75 s | 1.05 s | 2.92 s | 3.48 s | < 0.01 s | idem |
+| the sphere's mesh replaced, 4.35M surface, uplink throttled to 250 KB/s | 5.86 s | 0.01 s | < 0.01 s | none | < 0.01 s | about 5.6 s, none of it on the main thread |
+| the surface's mesh changed, same throttle | 8.40 s | 0.90 s | 0.82 s | 1.61 s | < 0.01 s | idem |
+
+The GLB, its SHA-256 and the chunk frames take milliseconds: the GLB is about 1.2 MB at these budgets. The upload runs
+in the transport's worker thread (`RelayTransport.send` only queues a frame with `call_soon_threadsafe`), so it never
+holds the main thread. In Slicer that thread gets the GIL from the pump's yield; manual §2 step 16 measured an upload
+bound by the bandwidth (5.8 MB at 1 Mbit/s in about 46 s). What blocks the main thread now is one step at a time,
+and the longest step is the quadric's run on the changed node. A change to any other node is served from the cache.

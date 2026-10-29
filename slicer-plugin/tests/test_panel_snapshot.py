@@ -484,3 +484,71 @@ def test_panel_snapshot_end_to_end_with_the_relay_stub():
         out = stub.finish()
     closes, _pings, *snapshots = out.split()
     assert closes == "1" and len(snapshots) == 1 and snapshots[0].startswith("v1:")
+
+
+def test_panel_snapshot_shows_the_code_while_the_scene_is_prepared(fake):
+    """SLC-51 (FR-10; SLC-25 follow-up): with one step per pump tick the code is shown from the first tick, the status
+    says "Preparing the scene" and the view carries the progress for the adapter's dialog until the snapshot begins."""
+    ctl = PanelController(
+        slicer_version="5.12.4",
+        platform="win32",
+        transport_factory=FakeTransport,
+        scene=lambda: FakeScene({"id": "vtkMRMLModelNode4", "mesh": sphere(16)}),
+        clock=lambda: 0.0,
+        prepare_slice_s=0.0,
+    )
+    ctl.start(URL)
+    view = deliver(ctl, Connected(1), Received(1, created()))
+    assert (view.status, view.code) == ("Preparing the scene · no viewers yet.", CODE)
+    done, total = view.progress
+    assert 0 <= done < total == 2 and begins(FakeTransport.made[-1]) == []
+    seen = [view.progress]
+    for _ in range(100):
+        view = ctl.pump()
+        if view.progress is None:
+            break
+        seen.append(view.progress)
+    assert seen == sorted(seen) and len(seen) > 5
+    assert (view.status, view.code) == ("Sending the scene · no viewers yet.", CODE)
+    assert len(begins(FakeTransport.made[-1])) == 1
+    ctl.stop()
+    assert ctl.view.progress is None
+
+
+def test_panel_snapshot_a_retry_shows_its_preparation_with_the_last_reason(fake):
+    """SLC-51 review: the retry after a failure says "Preparing the scene" while it runs, with the reason kept as the
+    detail, and goes on to send the scene."""
+    now = [0.0]
+    broken = [True]
+
+    class Flaky(FakeScene):
+        def visible_model_nodes(self):
+            if broken:
+                raise RuntimeError("a strange node")
+            return super().visible_model_nodes()
+
+    ctl = PanelController(
+        slicer_version="5.12.4",
+        platform="win32",
+        transport_factory=FakeTransport,
+        scene=lambda: Flaky({"id": "vtkMRMLModelNode4", "mesh": sphere(16)}),
+        clock=lambda: now[0],
+        prepare_slice_s=0.0,
+    )
+    ctl.start(URL)
+    view = deliver(ctl, Connected(1), Received(1, created()))
+    assert view.detail == f"{panel.SCENE_FAILED} {panel.RETRY_LATER}"
+    broken.clear()
+    now[0] = 2.0  # the back-off is over
+    view = ctl.pump()
+    assert (view.status, view.detail) == (
+        "Preparing the scene · no viewers yet.",
+        panel.SCENE_FAILED,
+    )
+    assert view.progress is not None and view.code == CODE
+    for _ in range(100):
+        if ctl.pump().progress is None:
+            break
+    assert (
+        ctl.view.status == "Sending the scene · no viewers yet." and len(begins(fake.made[0])) == 1
+    )

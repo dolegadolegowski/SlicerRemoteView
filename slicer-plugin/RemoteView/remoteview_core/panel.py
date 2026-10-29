@@ -25,6 +25,9 @@
   scene — with the reason and what happens next; a scene that cannot go out now (too large, refused, not prepared)
   leaves the session running (the code still works). A closed scene that cannot be cleared off the viewers ends the
   session (§7.3).
+- The scene is prepared a slice of :data:`PREPARE_SLICE_S` at a time, one slice per pump tick (SLC-51): the code is
+  shown at once, the status says "Preparing the scene", and :attr:`PanelView.progress` drives the adapter's progress
+  dialog (FR-10).
 - No automatic ``session.renew``: until ``release`` decides how renewal follows user activity (SLC-17/SLC-18), a
   session nobody joins ends after the relay's idle TTL (NFR-11, T1) instead of living for its 12 h maximum.
 """
@@ -54,6 +57,10 @@ from remoteview_core.transport import Connected, Disconnected, Event, Received, 
 _log = logging.getLogger(__name__)
 
 DEFAULT_PROFILE = "mobile"
+#: How long one pump tick may prepare the scene (SLC-51): with the pump's 50 ms period the main thread spends almost all
+#: its time on a large scene's preparation and handles Qt's events between slices; a step longer than a slice (the
+#: quadric's run) still ends it (``docs/research/slicer-prepare.md``).
+PREPARE_SLICE_S = 0.05
 #: Events handled per pump tick (50 ms): the relay sends a publisher few messages; this bounds one tick's work.
 MAX_EVENTS_PER_PUMP = 100
 #: How long the module's cleanup waits for ``session.close`` to go out (the transport aborts after 2 s).
@@ -130,11 +137,14 @@ class PanelView:
     start_enabled: bool = True
     stop_enabled: bool = False
     settings_enabled: bool = True  # relay address and CA file
+    #: while the scene is prepared (SLC-51): ``(done, total)`` units of work, for the progress dialog (FR-10)
+    progress: tuple[int, int] | None = None
 
 
 #: The first part of the live status, by the state of the scene (no scene factory: "").
 SCENE_STATES = {
     "": "Session running",
+    "preparing": "Preparing the scene",  # simplified for the viewers' devices, a slice per pump tick (SLC-51)
     "sending": "Sending the scene",  # no snapshot of this session accepted yet: one in flight or owed
     "updating": "Updating the scene",  # one accepted; a newer one in flight or owed
     "live": "Live",
@@ -257,7 +267,8 @@ class PanelController:
     dialogs and block while pip runs). Without it nothing is installed or checked. ``scene`` returns the scene the
     snapshots are made of. ``watch(live)`` returns the :class:`Watcher` that marks the scene's changes on ``live``;
     ``flush_timer`` is the single-shot timer whose timeout calls :meth:`flush_live`. ``watch`` needs both (marks that
-    are never flushed would freeze the viewers silently).
+    are never flushed would freeze the viewers silently). ``prepare_slice_s`` is how long one pump tick may prepare
+    the scene (tests pass 0: one step per tick).
     """
 
     def __init__(  # noqa: PLR0913 — keyword-only collaborators, defaults for the application
@@ -272,6 +283,7 @@ class PanelController:
         ensure_deps: Callable[[], DepsResult] | None = None,
         flush_timer: Timer | None = None,
         watch: Callable[[LiveUpdates], Watcher] | None = None,
+        prepare_slice_s: float = PREPARE_SLICE_S,
     ) -> None:
         if watch is not None and (scene is None or flush_timer is None):
             raise ValueError("watch needs a scene factory and a flush_timer")
@@ -284,6 +296,7 @@ class PanelController:
         self._ensure_deps = ensure_deps
         self._flush_timer: Timer = flush_timer if flush_timer is not None else _NoTimer()
         self._watch = watch
+        self._prepare_slice_s = prepare_slice_s
         self._live: LiveUpdates | None = None
         self._watcher: Watcher | None = None
         # ensure_deps blocks inside Qt's event loop (dialogs, pip's progress window): a second click must not start over
@@ -551,6 +564,7 @@ class PanelController:
                 # one alias registry per session.create (§7.3): every export of this session reuses its aliases, and
                 # a resume (SLC-17) keeps it because the panel, not the controller, owns it
                 ids=SceneIds(),
+                slice_s=self._prepare_slice_s,
             )
             if self._watch is not None:
                 watching = True
@@ -635,6 +649,10 @@ class PanelController:
         live = self._live
         if live is None:
             return self._scene, self._problem
+        if (
+            live.preparing is not None
+        ):  # also a retry: the reason of the last failure stays as the detail
+            return "preparing", self._problem
         if self._problem:
             state = "stale" if self._accepted else "failed"
             return state, f"{self._problem} {self._next_step(live)}"
@@ -657,11 +675,13 @@ class PanelController:
     def _show_live(self) -> None:
         client: Any = self._client  # never None while LIVE (the only callers)
         scene, detail = self._scene_state()
+        preparing = self._live.preparing if self._live is not None else None
         # the extra-CA note stays next to a scene message (T5)
         self._show(
             viewers_text(client.viewer_count, scene),
             detail="\n".join(part for part in (self._ca_note, detail) if part),
             code=client.code or "",
+            progress=None if preparing is None else (preparing.done, preparing.total),
         )
 
     # ------------------------------------------------------------------ the session's end and the view
@@ -694,7 +714,14 @@ class PanelController:
         except ValueError:
             return "", NO_LINK
 
-    def _show(self, status: str, *, detail: str = "", code: str = "") -> PanelView:
+    def _show(
+        self,
+        status: str,
+        *,
+        detail: str = "",
+        code: str = "",
+        progress: tuple[int, int] | None = None,
+    ) -> PanelView:
         phase = self.phase
         note = self._ca_note if phase in (Phase.CONNECTING, Phase.LIVE) else ""
         link, link_note = self._join_link(code) if phase is Phase.LIVE else ("", "")
@@ -706,6 +733,7 @@ class PanelController:
             start_enabled=phase is Phase.IDLE,
             stop_enabled=phase in (Phase.CONNECTING, Phase.LIVE),
             settings_enabled=phase is Phase.IDLE,
+            progress=progress if phase is Phase.LIVE else None,
         )
         return self.view
 
