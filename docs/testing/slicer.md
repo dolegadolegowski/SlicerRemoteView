@@ -623,7 +623,7 @@ Steps:
     - Until `EndState`, the status reads "Sending the scene · no viewers yet." with the detail "Slicer is still loading
       or changing the scene: RemoteView sends it when Slicer is done.", and the stub has no snapshot.
     - Within 0.1 s after `EndState`, one snapshot with all three spheres; updates `[]`.
-    - Variant: click Start during a large `.mrb` load, if the panel accepts the click while the progress dialog is open
+    - Variant: click Start during a large `.mrb` load, if the panel accepts the click while Slicer's load dialog is open
       `[TODO verify]`. Expected: one snapshot after the load.
 12. **Events off the main thread** (SLC-33; research note §5 `[TODO verify]`). Do not run MRML calls on a thread:
     Slicer's own observers (displayable managers, subject hierarchy, Qt scene models) are not thread-safe. A missed
@@ -713,14 +713,15 @@ Steps:
 
 Expected results:
 
-- Step 1: the text lists what *Start session* sends (the complete surface meshes of the models shown in the 3D view —
-  clipping is not applied; small islands are left out while *Remove small islands* is on (SLC-54); no images or
-  volumes, names and MRML node IDs, colours, opacity, visibility, position, the
-  Slicer/RemoteView/OS versions) and who can see it. It names "the relay whose address you enter above" for the empty
+- Step 1 (SLC-55): the text says nothing leaves the computer before *Start session*, that RemoteView then sends the
+  models and segments shown in the 3D view and every later change to them, and ends with a clickable project link
+  (`https://github.com/dolegadolegowski/SlicerRemoteView`: a click opens it in the browser `[TODO verify]`
+  `openExternalLinks` from a `.ui` file in Slicer 5.12.4). The full statement (what is sent, who can see it) is in the
+  module's *Help* tab. It names "the relay whose address you enter above" for the empty
   field and "the relay at relay.example.org" for both `wss://` addresses (never `user` or `secret`); for
   `ws://127.0.0.1:8787/ws` it names "the relay at 127.0.0.1" and ends with "A ws:// address is not encrypted; Start
-  session accepts it only for a relay on this computer (development)." The status stays "Not connected."; nothing is
-  sent.
+  session accepts it only for a relay on this computer (development)." before the link. The status stays
+  "Not connected."; nothing is sent.
 - Step 3: the first line is `['Sphere A']` — no slice planes (*Red/Green/Yellow Volume Slice*), no *Sphere B* (hidden
   folder), nothing from *MRHead* (a volume). The second line is `[('Sphere A', 0.5, 0.08)] ()`: opacity as shown, the
   80 mm of the two transforms as 0.08 m along glTF +X.
@@ -1069,7 +1070,7 @@ Steps:
 Expected results:
 
 - Step 1: the code appears at once with "Preparing the scene" while "Big" and "Medium" are simplified in steps (SLC-28,
-  SLC-51, §15: Slicer stays usable and a progress window may appear); then "Sending the scene", then "Live". The viewer shows the four spheres, round and in
+  SLC-51, §15: Slicer stays usable; no progress window since SLC-55); then "Sending the scene", then "Live". The viewer shows the four spheres, round and in
   place — "Big" and "Medium" with visibly fewer, larger facets than in Slicer (100,000 triangles at most each; the
   total is at most 500,000), "Small" and "Tiny" unchanged; all lit from outside. The panel shows no warning (the scene
   is about 3 MB, below the 32 MB recommended for `mobile`).
@@ -1214,7 +1215,7 @@ Expected results:
   checked the phone shows fewer specks around the segmentation than with it unchecked, and Slicer's *Error Log*
   has an `Islands: …` line (counts only) for the first session and none for the second.
 - Step 9: a toggle empties the cache of the session's meshes, so the status shows "Preparing the scene" (with the
-  progress window after 1 s on a large scene), then "Updating the scene", then "Live"; the specks leave the phone, and
+  no progress window since SLC-55), then "Updating the scene", then "Live"; the specks leave the phone, and
   come back once the box is unchecked. Each toggle costs one snapshot that collects and fits every node again, in
   steps: on the reporter's scene the second `longest()` prints at most the quadric's step (about 1.9 s; the island
   step takes about 1 s).
@@ -1277,17 +1278,15 @@ Steps (five large models):
 
 Expected results:
 
-- Step 2: the code appears at once with "Preparing the scene · no viewers yet."; within a second a small
-  "RemoteView" progress window appears (it does not block Slicer, does not take the keyboard focus from the Python
-  console and has no Cancel button) and fills up; the 3D view
-  follows the mouse, a little jerkily, and the console takes input; then "Sending the scene", the progress window
-  closes, then "Live", and the phone shows the five spheres as in §14. `longest()` prints less than 1.5 s (the
+- Step 2: the code appears at once with "Preparing the scene · no viewers yet." (no progress window: SLC-55 removed
+  it at the owner's request; the status line is the only sign); the 3D view
+  follows the mouse, a little jerkily, and the console takes input; then "Sending the scene", then "Live", and the phone shows the five spheres as in §14. `longest()` prints less than 1.5 s (the
   longest step is one sphere's quadric run, measured natively 0.8 s); the whole preparation takes about as long as
   before SLC-28 (§14: a few seconds).
 - Step 3: the relay receives no `scene.snapshot.begin` for the stopped session (its log shows the session closed
-  with nothing sent), the panel says "Not connected.", the progress window closes, and no traceback appears.
+  with nothing sent), the panel says "Not connected.", and no traceback appears.
 - Step 4: only `Big2` is prepared again (the panel says "Preparing the scene" or "Updating the scene" for well under
-  a second, and no progress window appears); the phone shows the coarser `Big2` and the other four unchanged.
+  a second); the phone shows the coarser `Big2` and the other four unchanged.
   `longest()` prints less than 1 s.
 - Step 5: loading MRHead (a batch) stops the preparation; one snapshot follows when the load is done, with
   MRHead's models if any are shown in 3D. Closing the scene stops the next preparation: the closed scene never
@@ -1306,18 +1305,55 @@ Steps (large segmentation; the reporter's scene or §14's large-segmentation pre
 
 Expected results:
 
-- Step 6: the code appears within a second; the progress window appears and fills; the 3D view moves between steps
+- Step 6: the code appears within a second; the status says "Preparing the scene"; the 3D view moves between steps
   — `longest()` prints less than 3 s (one step: the quadric's run, 1.75 + 0.10 s in §14; every other step about
   0.75 s at most, from the native profile in the research note); "Live" follows about 11-13 s after the click (§14:
   collect + fit 10.5-11 s in one call before SLC-28).
 - Step 7: each change re-exports the scene without preparing the segmentation again (SLC-50): the phone shows it in
-  about 1 s, without a progress window; `longest()` prints less than 1 s.
+  about 1 s; `longest()` prints less than 1 s.
 - Step 8: a `scene.update` only (no "Preparing the scene"), as in §13 step 7.
-- `[TODO verify]` in Slicer 5.12.4: `qt.QProgressDialog` takes `setCancelButton(None)` (no Cancel button),
-  `windowModality = qt.Qt.NonModal` and `setAttribute(qt.Qt.WA_ShowWithoutActivating)` from PythonQt, and reads
-  `wasCanceled` as a property; `minimumDuration` 1,000 ms keeps it hidden for a short preparation; `reset()` hides it
-  and it does not come back; closed with its title-bar button during a long preparation, it stays closed until the
-  next one.
+- The progress dialog of SLC-51 (`qt.QProgressDialog`) is gone since SLC-55: no window may appear at any step.
+
+| Date | Slicer version | OS | Result | Tester |
+|---|---|---|---|---|
+| | | | | |
+
+## §16 The toolbar: Send scene now and the send mode (SLC-55, SLC-56, SLC-57; FR-11, NFR-02, §7.3)
+
+Preconditions: the test Slicer of §2 with the relay stub or a relay, a phone joined, and the two spheres of §12.
+
+Steps:
+
+1. Start Slicer and look at the main window's toolbars before opening any module.
+2. Open *RemoteView*. Read the text above *Start session* and click its link.
+3. Click *Start session*; wait for "Live". In the toolbar choose *30 s after the last change*. In *Models*, change
+   *Sphere A*'s colour, then its opacity 10 s later, then its colour again 10 s after that. Watch the button.
+4. Choose *Only with Send scene now*. Change *Sphere A*'s colour; wait a minute; click *Send scene now*; click it once
+   more.
+5. Choose *At once*. Change *Sphere A*'s colour.
+6. Choose *15 s after the last change*. Hide *Sphere A*, then *File → Close Scene* within 15 s.
+7. Click *Stop session*, then *Send scene now*. Quit Slicer, start it again and look at the toolbar.
+8. Developer mode: click the module's *Reload* button, then change the mode on the toolbar and start a session.
+
+Expected results:
+
+- Step 1: the toolbar "RemoteView" is there with *Send scene now* (disabled) and *Send changes:* set to *30 s after
+  the last change* (a fresh installation), before the module was ever opened `[TODO verify]` `addToolBar` and
+  `QToolBar.addAction(str)` from PythonQt.
+- Step 2: two sentences and the project link (no long statement, no progress window later); the link opens
+  `https://github.com/dolegadolegowski/SlicerRemoteView` in the browser `[TODO verify]` `openExternalLinks`.
+- Step 3: after the first change the button reads "Send now (30 s)" and counts down; each change restarts it at 30;
+  the phone shows all three changes at once, 30 s after the last one; the panel's detail says "Changes in Slicer wait:
+  RemoteView sends them N s after the last change." meanwhile, nothing after.
+- Step 4: nothing goes to the phone for the minute; the button reads "Send now (changes wait)" and the panel says "Changes in Slicer wait for Send now."; the first click sends the colour (a `scene.update`), the
+  second sends the whole scene again (a snapshot: "Updating the scene", then "Live"), without a progress window.
+- Step 5: the phone shows the colour within about half a second, the button never counts down.
+- Step 6: the closed scene leaves the phone at once (the reset ignores the delay, §7.3); the hidden sphere never had
+  to be sent on its own.
+- Step 7: after Stop the button is disabled, and a click on it does nothing; after the restart the toolbar shows
+  *15 s after the last change* (the setting) `[TODO verify]` `QComboBox.currentIndex`/`addItem(label, data)`.
+- Step 8: one toolbar, not two (the old one is removed); the new mode is saved and the session starts with it.
+- Throughout: no traceback; nothing in the log but exception type names, if anything.
 
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|

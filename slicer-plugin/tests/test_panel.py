@@ -609,9 +609,15 @@ def test_panel_ui_properties():
     assert font.findtext("family") == "Courier New"
     # the node list preview (SLC-18)
     assert prop("nodeListPlaceholderLabel", "text").findtext("string")
+    # plain text everywhere but the consent statement, whose only markup is its fixed project link (SLC-55)
     labels = [name for name, w in widgets.items() if w.get("class") == "QLabel"]
-    assert labels and all(prop(n, "textFormat").findtext("enum") == "Qt::PlainText" for n in labels)
-    assert "openExternalLinks" not in ET.tostring(root, encoding="unicode")
+    rich = [n for n in labels if prop(n, "textFormat").findtext("enum") != "Qt::PlainText"]
+    assert labels and rich == ["consentLabel"]
+    assert prop("consentLabel", "textFormat").findtext("enum") == "Qt::RichText"
+    opens = [
+        n for n in widgets if widgets[n].find("property[@name='openExternalLinks']") is not None
+    ]
+    assert opens == ["consentLabel"]
     assert prop("stopButton", "enabled").findtext("bool") == "false"
     assert widgets["extraCaPathLineEdit"].get("class") == "ctkPathLineEdit"
     assert (

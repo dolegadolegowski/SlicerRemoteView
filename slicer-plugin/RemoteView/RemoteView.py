@@ -31,6 +31,9 @@ EXTRA_CA_SETTING = "RemoteView/ExtraCACertificate"
 #: *Remove small islands* (SLC-54): on unless the user turned it off (the owner's request). Saved at every toggle — a
 #: boolean holds no secret — and read with ``slicer.util.toBool``, which takes a stored ``"false"`` string too.
 REMOVE_ISLANDS_SETTING = "RemoteView/RemoveSmallIslands"
+#: When changes go out (SLC-57): the key of a ``remoteview_core.sendmode.SEND_MODES`` entry, chosen on the toolbar and
+#: saved at every change; an unknown value is the default mode.
+SEND_MODE_SETTING = "RemoteView/SendMode"
 #: NFR-30: the QR code in the panel is at least 240 × 240 px (``remoteview_core.links.MIN_QR_PIXELS``, repeated here
 #: so that nothing but ``qt`` and ``slicer`` is imported when the module loads).
 MIN_QR_PIXELS = 240
@@ -50,11 +53,6 @@ SCAN_HINT = "Scan the QR code with a phone camera, or open the viewer and type t
 TYPE_HINT = "Open the viewer and type the code."
 #: Shown under the status when the link exists but its QR code cannot be drawn.
 QR_NOT_DRAWN = "The QR code could not be drawn. Read the code out or use Copy link."
-#: The progress dialog of the scene's preparation (FR-10, SLC-51): Qt shows it once the preparation is estimated to take
-#: longer than this (``minimumDuration``, judged from the progress after its first tenth of a second), so a live change
-#: of a small scene does not flash it.
-PROGRESS_DIALOG_MS = 1000
-PREPARING_LABEL = "Preparing the scene for the viewers. Slicer stays usable meanwhile."
 
 #
 # RemoteView
@@ -89,6 +87,117 @@ See <a href="https://github.com/dolegadolegowski/SlicerRemoteView">the project p
         self.parent.acknowledgementText = """
 SlicerRemoteView. Module layout follows the 3D Slicer scripted module template.
 """
+        # the toolbar (SLC-57) once the main window exists, like SampleData's menu (Slicer 5.12.4 SampleData.py L102)
+        if not slicer.app.commandOptions().noMainWindow:
+            slicer.app.connect("startupCompleted()", self.addToolbar)
+
+    def addToolbar(self) -> None:
+        """Slicer started: the *Send scene now* button and the send mode on the main window, before the panel is ever
+        opened. A failure is logged by type only; the panel makes the toolbar when it opens, if it can."""
+        try:
+            sendToolbar()
+        except Exception as exc:  # noqa: BLE001 — a Qt slot (T7)
+            _log.error("RemoteView: toolbar not added (%s)", type(exc).__name__)
+
+
+#
+# SendToolbar
+#
+
+_toolbar = None  # the one SendToolbar of this module object (a Reload makes a new module object and a new toolbar)
+
+
+def sendToolbar():
+    """The toolbar of this Slicer run, made on first use (``None`` without a main window)."""
+    global _toolbar  # noqa: PLW0603 — one toolbar per module object, like Slicer's own module-level state
+    if _toolbar is None:
+        window = slicer.util.mainWindow()
+        if window is not None:
+            _toolbar = SendToolbar(window)
+    return _toolbar
+
+
+class SendToolbar:
+    """*Send scene now* and the send mode on Slicer's main window (SLC-57): the button sends the waiting changes (or the
+    scene again) and counts down while they wait; the mode is saved at every change and reaches the panel's controller,
+    live or not. The panel widget registers itself on ``widget`` while it exists; without it (the panel never opened,
+    or no session) the button opens the panel. One per Slicer run: a toolbar of a previous module object (Reload) is
+    removed first. ``[TODO verify]`` in Slicer 5.12.4: ``addToolBar``/``removeToolBar`` on the main window,
+    ``QToolBar.addAction(str)`` returning the action, and ``QComboBox.currentIndex`` from PythonQt (manual §16)."""
+
+    OBJECT_NAME = "RemoteViewToolBar"
+
+    def __init__(self, window) -> None:
+        from remoteview_core import sendmode  # noqa: PLC0415 — standard library and the debouncer only
+
+        self.widget = None
+        for old in window.findChildren("QToolBar"):
+            if old.objectName == self.OBJECT_NAME:
+                window.removeToolBar(old)
+                old.deleteLater()
+        self.toolbar = qt.QToolBar("RemoteView", window)
+        self.toolbar.objectName = self.OBJECT_NAME
+        self.sendAction = self.toolbar.addAction(sendmode.SEND_NOW)
+        self.sendAction.toolTip = sendmode.SEND_NOW_TIP
+        self.sendAction.enabled = False
+        self.sendAction.connect("triggered()", self.onSendNow)
+        label = qt.QLabel(sendmode.MODE_LABEL)
+        label.toolTip = sendmode.MODE_TIP
+        self.toolbar.addWidget(label)
+        self.modeBox = qt.QComboBox()
+        self.modeBox.toolTip = sendmode.MODE_TIP
+        for mode in sendmode.SEND_MODES:
+            self.modeBox.addItem(mode.label, mode.key)
+        self.modeBox.currentIndex = sendmode.mode_index(
+            slicer.util.settingsValue(SEND_MODE_SETTING, sendmode.DEFAULT_SEND_MODE)
+        )
+        self.modeBox.connect("currentIndexChanged(int)", self.onModeChanged)
+        self.toolbar.addWidget(self.modeBox)
+        window.addToolBar(self.toolbar)
+
+    def mode(self):
+        """The chosen ``remoteview_core.sendmode.SendMode``."""
+        from remoteview_core import sendmode  # noqa: PLC0415
+
+        return sendmode.SEND_MODES[self.modeBox.currentIndex]
+
+    def onModeChanged(self, _index: int = 0) -> None:
+        """Saved at once; a panel with a controller follows (its live session too). A Qt slot: failures are logged by
+        type only (T7), and one does not stop the other."""
+        try:
+            qt.QSettings().setValue(SEND_MODE_SETTING, self.mode().key)
+        except Exception as exc:  # noqa: BLE001
+            _log.error("RemoteView: send mode not saved (%s)", type(exc).__name__)
+        try:
+            widget = self.widget
+            if widget is not None and widget.controller is not None:
+                widget.controller.set_send_policy(self.mode().policy)
+                widget.render(widget.controller.view)
+        except Exception as exc:  # noqa: BLE001
+            _log.error("RemoteView: send mode not applied (%s)", type(exc).__name__)
+
+    def onSendNow(self) -> None:
+        """With a running session, send; otherwise open the panel (Start session is there)."""
+        try:
+            widget = self.widget
+            if widget is not None and widget.controller is not None and widget.controller.active:
+                widget.render(widget.controller.send_now())
+            else:
+                slicer.util.selectModule("RemoteView")
+        except Exception as exc:  # noqa: BLE001 — a Qt slot (T7)
+            _log.error("RemoteView: scene not sent (%s)", type(exc).__name__)
+
+    def show(self, view) -> None:
+        """Follow a ``PanelView``: the button is enabled while a session runs and counts down while changes wait."""
+        from remoteview_core import sendmode  # noqa: PLC0415
+
+        self.sendAction.enabled = bool(view.code)
+        self.sendAction.text = sendmode.send_button_text(
+            code=view.code,
+            changes_wait=view.changes_wait,
+            due_in=view.due_in,
+            lanes=self.mode().policy.lanes,
+        )
 
 
 #
@@ -112,7 +221,7 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
         self.shownPixmaps = {}  # label name -> the pixmap it shows (assigned only when it changes)
         self.presentation = None
         self.presentationUi = None
-        self.progressDialog = None  # while the scene is prepared (SLC-51)
+        self.toolbar = None  # the SendToolbar (SLC-57), while the main window has one
         ScriptedLoadableModuleWidget.__init__(self, parent)
 
     def setup(self) -> None:
@@ -158,6 +267,20 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
         self.flushTimer = qt.QTimer()
         self.flushTimer.setSingleShot(True)
         self.flushTimer.connect("timeout()", self.onFlushTimer)
+        try:  # the toolbar follows this panel from now (SLC-57); without one the panel works alone
+            self.toolbar = sendToolbar()
+            if self.toolbar is not None:
+                self.toolbar.widget = self
+        except Exception as exc:  # noqa: BLE001 — T7: type only
+            _log.error("RemoteView: toolbar not attached (%s)", type(exc).__name__)
+
+    def sendPolicy(self):
+        """The send mode saved in the settings (SLC-57), as the controller takes it."""
+        from remoteview_core import sendmode  # noqa: PLC0415 — standard library and the debouncer only
+
+        return sendmode.send_mode(
+            slicer.util.settingsValue(SEND_MODE_SETTING, sendmode.DEFAULT_SEND_MODE)
+        ).policy
 
     def cleanup(self) -> None:
         """Called when the module is unloaded (Reload, exit): a running session is closed (waits up to 3 s), its
@@ -170,7 +293,6 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
         try:
             # no code is left on a projector or in a hidden label
             self.closePresentation()
-            self.closeProgress()
             self.showPixmap("qrLabel", self.ui.qrLabel, None)
             self.forgetQr()
             self.link = ""
@@ -183,6 +305,9 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
             finally:
                 self.controller = None
                 self.logic = None
+                if self.toolbar is not None and self.toolbar.widget is self:
+                    self.toolbar.widget = None  # the toolbar outlives the panel (Reload)
+                    self.toolbar = None
                 if self.flushTimer is not None:
                     self.flushTimer.disconnect("timeout()", self.onFlushTimer)
                 if self.pumpTimer is not None:
@@ -220,6 +345,7 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
                 flush_timer=self.flushTimer,
                 watch=self.makeWatcher,
                 remove_islands=bool(self.ui.removeIslandsCheckBox.checked),
+                send_policy=self.sendPolicy(),
             )
         url = self.ui.relayUrlLineEdit.text.strip()
         caFile = self.ui.extraCaPathLineEdit.currentPath.strip()
@@ -320,39 +446,8 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
             self.ui.detailLabel.text = "\n".join(
                 part for part in (view.detail, QR_NOT_DRAWN) if part
             )
-        self.showProgress(view.progress)
-
-    def showProgress(self, progress) -> None:
-        """A non-modal progress dialog while the scene is prepared (FR-10, SLC-51); ``progress`` is ``(done, total)``
-        or ``None`` (closed). Slicer stays usable — the dialog does not take the focus —, and there is no cancel
-        button: *Stop session* is in the panel. Qt shows it once the preparation looks longer than
-        :data:`PROGRESS_DIALOG_MS`; closed from its title bar it stays closed until the next preparation. A failure here
-        is logged by type only: the panel's texts and the session go on."""
-        try:
-            if progress is None:
-                self.closeProgress()
-                return
-            done, total = progress
-            if self.progressDialog is None:
-                self.progressDialog = dialog = qt.QProgressDialog(slicer.util.mainWindow())
-                dialog.windowTitle = "RemoteView"
-                dialog.labelText = PREPARING_LABEL
-                dialog.windowModality = qt.Qt.NonModal
-                dialog.setAttribute(qt.Qt.WA_ShowWithoutActivating)
-                dialog.setCancelButton(None)
-                dialog.minimumDuration = PROGRESS_DIALOG_MS
-            if self.progressDialog.wasCanceled:  # closed by the user: setValue would show it again
-                return
-            self.progressDialog.maximum = max(total, 1)
-            self.progressDialog.value = min(done, total)
-        except Exception as exc:  # noqa: BLE001 — a dialog must not stop the panel (T7: type only)
-            _log.warning("progress dialog not shown (%s)", type(exc).__name__)
-
-    def closeProgress(self) -> None:
-        dialog, self.progressDialog = self.progressDialog, None
-        if dialog is not None:
-            dialog.reset()  # hides it and stops the timer that would show it later
-            dialog.deleteLater()
+        if self.toolbar is not None:
+            self.toolbar.show(view)
 
     def showLink(self, link: str, code: str) -> bool:
         """The QR code, *Copy link* and the Presentation window follow the session: only while it runs (T6). The
