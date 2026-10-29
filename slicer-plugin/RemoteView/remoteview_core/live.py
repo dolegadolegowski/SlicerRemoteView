@@ -45,10 +45,11 @@ of the session, the first snapshot included:
 - *Hide node names* and the device profile have no MRML event: :meth:`~LiveUpdates.set_anonymize_names` and
   :meth:`~LiveUpdates.request_snapshot` (SLC-18) ask for a snapshot;
 - **IDs** (protocol v1.1 §7.3, SLC-35): every export of the session runs through one
-  :class:`~remoteview_core.ids.SceneIds` (:attr:`~LiveUpdates.ids`), owned by the panel — one per ``session.create`` —
-  and handed in at construction, so a resumed session (SLC-17) cannot lose the aliases the viewers hold, while a new
-  ``session.create`` (Stop → Start) may renumber. ``start()``/``stop()`` never touch it; :meth:`~LiveUpdates.reset`
-  (the scene closed) clears its raw → alias maps and keeps its counters, so no alias is ever reissued.
+  :class:`~remoteview_core.ids.SceneIds` (:attr:`~LiveUpdates.ids`), made by the panel — one per ``session.create`` —
+  and handed in at construction. A resume (SLC-44) keeps this ``LiveUpdates`` and so the aliases the viewers hold; a
+  new ``session.create`` (Stop → Start, or the re-create after a relay restart, SLC-45) gets a new ``LiveUpdates`` with
+  a new registry and may renumber. ``start()``/``stop()`` never touch it; :meth:`~LiveUpdates.reset` (the scene
+  closed) clears its raw → alias maps and keeps its counters, so no alias is ever reissued.
 
 The panel (SLC-32) calls ``start(deferred=True)``, attaches the observers, then :meth:`~LiveUpdates.tick` — all in
 one main-thread call, so a batch process running at Start holds the first snapshot until it ends; it calls

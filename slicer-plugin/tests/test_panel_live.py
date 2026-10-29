@@ -633,6 +633,219 @@ def test_panel_live_resume_recreate_replaces_the_observers_once(fake, caplog, ca
     )
 
 
+# --------------------------------------------------------------------------- SLC-44, SLC-45 with segments: aliases
+
+
+#: What none of these tests may log or print (T7).
+SEGMENT_NEEDLES = (
+    *NAMES,
+    "Sphere",
+    "Cube",
+    "left lung",
+    "Segment_1",
+    "Segment_3",
+    SEG,
+    CODE,
+    TOKEN,
+    SESSION_ID,
+)
+
+
+def of_type_on(connection: int, type_: str) -> list[dict]:
+    return [m for m in sent_on(connection) if isinstance(m, dict) and m["type"] == type_]
+
+
+def segments_rig() -> tuple[Rig, MrmlSegmentation, MrmlModel]:
+    """A live session with a segmentation of two segments (one with an ID that needs an alias) and a model; the
+    first snapshot acknowledged."""
+    seg = MrmlSegmentation(
+        SEG,
+        segments=[
+            FakeSegment("Segment_1", name="Doe^John liver", polydata=sphere(8)),
+            FakeSegment("left lung", name="Doe^John lung", polydata=sphere(8)),
+        ],
+    )
+    model = MrmlModel("Sphere", name="Doe^John sphere")
+    rig = live_rig(seg, model)
+    acked(rig, 1)
+    return rig, seg, model
+
+
+def test_panel_live_resume_keeps_the_aliases_and_sends_segment_marks_made_offline(
+    fake, caplog, capfd
+):
+    """A clean resume keeps the session's live updates and so its alias registry (``SceneIds``): a segment and a
+    model changed while offline go out in one update on the aliases the viewers hold, with no snapshot (§7.3, §8.4)."""
+    caplog.set_level(logging.DEBUG)
+    rig, seg, model = segments_rig()
+    ctl = rig.ctl
+    live_updates, ids, observers = ctl._live, ctl._live.ids, rig.observers()
+    # the scene's, the segmentation's, the model's
+    assert observers == 5 + 8 + 4
+    deliver(ctl, Disconnected(1, NETWORK, 0.5))
+    seg.displays[0].per_segment["left lung"] = {"override_color": (0.0, 0.0, 1.0)}
+    seg.fire("SegmentModified", "left lung")
+    recolor(model, (0.0, 1.0, 0.0))
+    resume_id = reconnect(rig)
+    deliver(ctl, Received(2, resumed(resume_id, scene_version=1, snapshot_version=1)))
+    assert ctl._live is live_updates and ctl._live.ids is ids and rig.observers() == observers
+    rig.pump(1000)
+    assert [m["type"] for m in sent_on(2)] == ["session.resume", "scene.update"]
+    [update] = of_type_on(2, "scene.update")
+    assert (update["baseVersion"], update["sceneVersion"]) == (1, 2)
+    assert sorted(update["changes"], key=lambda c: c["nodeId"]) == [
+        {"nodeId": "m_1", "color": [0.0, 1.0, 0.0]},
+        {"nodeId": f"{SEG}/s_1", "color": [0.0, 0.0, 1.0]},
+    ]
+    assert leaks(caplog, capfd, *SEGMENT_NEEDLES) == []
+
+
+def test_panel_live_resume_a_segmentation_removed_offline_removes_its_segments(fake, caplog, capfd):
+    caplog.set_level(logging.DEBUG)
+    rig, seg, _ = segments_rig()
+    deliver(rig.ctl, Disconnected(1, NETWORK, 0.5))
+    rig.scene.remove(seg)
+    assert rig.observers() == 5 + 4
+    resume_id = reconnect(rig)
+    deliver(rig.ctl, Received(2, resumed(resume_id, scene_version=1, snapshot_version=1)))
+    rig.pump(1000)
+    assert [m["type"] for m in sent_on(2)] == ["session.resume", "scene.nodeRemoved"]
+    [removed] = of_type_on(2, "scene.nodeRemoved")
+    assert sorted(removed["nodeIds"]) == [f"{SEG}/Segment_1", f"{SEG}/s_1"]
+    assert (removed["baseVersion"], removed["sceneVersion"]) == (1, 2)
+    assert leaks(caplog, capfd, *SEGMENT_NEEDLES) == []
+
+
+def test_panel_live_resume_a_segment_added_offline_is_announced_and_sent(fake, caplog, capfd):
+    """§8.2: the hint, then the snapshot it promises; the new segment's raw ID fits the grammar, so it is its node
+    ID."""
+    caplog.set_level(logging.DEBUG)
+    rig, seg, _ = segments_rig()
+    deliver(rig.ctl, Disconnected(1, NETWORK, 0.5))
+    seg.add_segment(FakeSegment("Segment_3", name="Doe^John spleen", polydata=sphere(8)))
+    resume_id = reconnect(rig)
+    deliver(rig.ctl, Received(2, resumed(resume_id, scene_version=1, snapshot_version=1)))
+    rig.pump(1000)
+    assert [m["type"] for m in sent_on(2) if isinstance(m, dict)] == [
+        "session.resume",
+        "scene.nodeAdded",
+        "scene.snapshot.begin",
+        "scene.snapshot.end",
+    ]
+    [added] = of_type_on(2, "scene.nodeAdded")
+    assert added["nodes"] == [{"nodeId": f"{SEG}/Segment_3", "kind": "segment"}]
+    assert (added["baseVersion"], added["sceneVersion"], added["snapshotFollows"]) == (1, 2, True)
+    [begin] = begins_on(2)
+    assert (begin["nodeCount"], begin["sceneVersion"]) == (4, 3)
+    assert leaks(caplog, capfd, *SEGMENT_NEEDLES) == []
+
+
+def test_panel_live_resume_an_owed_snapshot_reuses_the_aliases(fake, caplog, capfd):
+    """The relay lost our snapshot: the export after the resume addresses the aliases of the same registry, so a
+    model added in the meantime gets the next alias, never a reissued one (§7.3)."""
+    caplog.set_level(logging.DEBUG)
+    rig, _, model = segments_rig()
+    ids = rig.ctl._live.ids
+    rig.scene.remove(model)
+    rig.add(MrmlModel("Cube", name="Doe^John cube"))
+    resume_id = reconnect(rig)
+    deliver(rig.ctl, Received(2, resumed(resume_id, scene_version=1, snapshot_version=None)))
+    rig.pump(0)
+    assert rig.ctl._live.ids is ids
+    assert [m["type"] for m in sent_on(2) if isinstance(m, dict)] == [
+        "session.resume",
+        "scene.snapshot.begin",
+        "scene.snapshot.end",
+    ]
+    [begin] = begins_on(2)
+    assert begin["sceneVersion"] == 2
+    # a fresh registry would number the cube m_1, the alias the viewers may still hold for the removed sphere
+    assert [m["nodeId"] for m in manifest(rig.glb())] == ["m_2", f"{SEG}/Segment_1", f"{SEG}/s_1"]
+    assert leaks(caplog, capfd, *SEGMENT_NEEDLES) == []
+
+
+def test_panel_live_resume_recreate_with_segments_starts_a_new_registry(fake, caplog, capfd):
+    """§8.4 after a 4008: the segmentation's observers go and come back once, and the new session gets a new alias
+    registry — the cube, m_2 in the old session, is m_1 in the new one — whose aliases a later segment change
+    addresses."""
+    caplog.set_level(logging.DEBUG)
+    rig, seg, model = segments_rig()
+    ctl = rig.ctl
+    first_ids = ctl._live.ids
+    rig.add(MrmlModel("Cube", name="Doe^John cube"))
+    rig.pump(1000)
+    acked(rig, rig.begins()[-1]["sceneVersion"])
+    assert [m["nodeId"] for m in manifest(rig.glb())] == [
+        "m_1",
+        "m_2",
+        f"{SEG}/Segment_1",
+        f"{SEG}/s_1",
+    ]
+    rig.scene.remove(model)
+    rig.pump(1000)
+    observers = rig.observers()
+    restart = TransportError(ErrorKind.CLOSED, retryable=True, close_code=4008)
+    resume_id = reconnect(rig, restart)
+    deliver(ctl, Received(2, relay_error("SESSION_NOT_FOUND", resume_id)))
+    create = sent_on(2)[-1]
+    assert create["type"] == "session.create" and rig.observers() == 0
+    # nothing follows the scene while the create is on its way
+    seg.displays[0].per_segment["left lung"] = {"override_color": (0.0, 0.0, 1.0)}
+    seg.fire("SegmentModified", "left lung")
+    again = created(create["id"], session_id=OTHER_SESSION_ID, token=OTHER_TOKEN)
+    deliver(ctl, Received(2, again))
+    assert (
+        len(rig.watchers) == 2
+        and rig.watchers[0].observer_count == 0
+        and rig.observers() == observers
+    )
+    assert ctl._live.ids is not first_ids
+    [begin] = begins_on(2)
+    assert begin["sceneVersion"] == 1
+    assert [m["nodeId"] for m in manifest(rig.glb())] == ["m_1", f"{SEG}/Segment_1", f"{SEG}/s_1"]
+    deliver(ctl, Received(2, ack(1)))
+    after_ack = len(sent_on(2))
+    seg.displays[0].per_segment["left lung"] = {"override_color": (1.0, 0.0, 0.0)}
+    seg.fire("SegmentModified", "left lung")
+    rig.pump(1000)
+    [update] = sent_on(2)[after_ack:]
+    assert update["type"] == "scene.update"
+    assert update["changes"] == [{"nodeId": f"{SEG}/s_1", "color": [1.0, 0.0, 0.0]}]
+    assert (update["baseVersion"], update["sceneVersion"]) == (1, 2)
+    assert leaks(caplog, capfd, *SEGMENT_NEEDLES, OTHER_TOKEN, OTHER_SESSION_ID) == []
+
+
+def test_panel_live_resume_a_scene_closed_offline_never_reissues_an_alias(fake, caplog, capfd):
+    """§7.3: the closed scene's reset goes first after the resume; the new scene's aliases continue the counters."""
+    caplog.set_level(logging.DEBUG)
+    rig, seg, model = segments_rig()
+    ctl = rig.ctl
+    ids = ctl._live.ids
+    deliver(ctl, Disconnected(1, NETWORK, 0.5))
+    seg2 = MrmlSegmentation(
+        "vtkMRMLSegmentationNode2",
+        segments=[FakeSegment("left lung", name="Doe^John lung", polydata=sphere(8))],
+    )
+    close_scene(rig, seg, model, added=(seg2, MrmlModel("Sphere", name="Doe^John sphere 2")))
+    assert panel.RESET_PENDING in ctl.pump().detail
+    resume_id = reconnect(rig)
+    deliver(ctl, Received(2, resumed(resume_id, scene_version=1, snapshot_version=1)))
+    rig.pump(0)
+    assert [m["type"] for m in sent_on(2) if isinstance(m, dict)] == [
+        "session.resume",
+        "scene.snapshot.begin",
+        "scene.snapshot.end",
+    ]
+    [begin] = begins_on(2)
+    assert begin["sceneVersion"] == 2
+    assert sorted(m["nodeId"] for m in manifest(rig.glb())) == [
+        "m_2",
+        "vtkMRMLSegmentationNode2/s_2",
+    ]
+    assert ctl._live.ids is ids
+    assert leaks(caplog, capfd, *SEGMENT_NEEDLES, "vtkMRMLSegmentationNode2") == []
+
+
 # --------------------------------------------------------------------------- criterion 3: Start during a batch
 
 

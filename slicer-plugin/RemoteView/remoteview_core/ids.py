@@ -1,9 +1,9 @@
 """Node identity for the GLB manifest and `scene.update` (``docs/protocol.md`` v1.1 §3.3, §7.3; report
 ``2026-10-27-protocol-2`` item 1; threat model T7).
 
-:class:`SceneIds` is the publisher's raw ID → alias registry. Owned by the panel for the life of one session's
-``LiveUpdates`` and handed to every export and to the change classifier, it answers one question for every entity the
-3D view shows: what is its ``nodeId``?
+:class:`SceneIds` is the publisher's raw ID → alias registry. Made by the panel for one session's ``LiveUpdates``,
+which keeps it across a resume, and handed to every export and to the change classifier, it answers one question for
+every entity the 3D view shows: what is its ``nodeId``?
 
 - A model, or the segmentation node whose ID prefixes its segments, keeps its MRML ID only when the ID is what Slicer
   generates — a ``fullmatch`` of :data:`MRML_ID` (``vtkMRMLModelNode4``, ``vtkMRMLSegmentationNode12``). Any other

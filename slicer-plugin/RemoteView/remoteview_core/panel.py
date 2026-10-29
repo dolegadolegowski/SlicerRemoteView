@@ -843,8 +843,8 @@ class PanelController:
                 slicer_version=self._slicer_version,
                 end_session=self._end_live,
                 on_event=self._on_live_event,
-                # one alias registry per session.create (§7.3): every export of this session reuses its aliases, and
-                # a resume (SLC-17) keeps it because the panel, not the controller, owns it
+                # one alias registry per session.create (§7.3): every export of this session reuses its aliases; a
+                # resume keeps this LiveUpdates and so the registry (SLC-44), a re-create comes back here (SLC-45)
                 ids=SceneIds(),
             )
             if self._watch is not None:

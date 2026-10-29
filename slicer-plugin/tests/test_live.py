@@ -2129,6 +2129,55 @@ def test_live_resume_counts_a_change_flushed_before_the_drop_was_observed(strict
     assert len(rig.begins()) == 1
 
 
+def test_live_resume_a_segment_hidden_in_a_flush_before_the_drop_lifts_the_too_large_gate(strict):
+    """Too large because of a big segment: hiding it is a change, even when its flush runs before the drop is
+    observed; the snapshot owed after the resume leaves the hidden segment out."""
+    scene = LiveScene({"id": A}, {"id": SEG, "segment": "left lung", "mesh": BIG})
+    rig = Rig(strict, scene, maxSnapshotBytes=SMALL_LIMIT)
+    rig.live.start()
+    assert rig.kinds() == [LiveEventKind.TOO_LARGE] and rig.live.waits_for_change
+    rig.take()
+    scene.segment(SEG, "left lung")["visible"] = False
+    rig.live.mark_segment(SEG, "left lung", Change.APPEARANCE)
+    rig.client.transport_lost()
+    # the flush runs before the drop is observed
+    rig.timer.advance(150)
+    assert not rig.live.waits_for_change and rig.client.snapshot_needed
+    rig.live.observe()
+    resume(rig, scene=rig.client.versions.last, snapshot=None)
+    rig.live.tick()
+    [begin] = rig.begins()
+    assert (begin["nodeCount"], begin["sceneVersion"]) == (1, 1)
+
+
+def test_live_resume_after_a_reset_offline_never_reissues_a_segment_alias(strict):
+    """Hide node names on: a scene closed offline forgets the aliases; a segment marked after the close gets a new
+    alias, never a reissued one, and the reset's snapshot goes first after a clean resume — with no name or raw
+    segment ID in it (T7)."""
+    scene = LiveScene(
+        {"id": SEG, "segment": "Segment_1", "name": "Liver Smith"},
+        {"id": SEG, "segment": "Segment_2", "name": "Lung Smith"},
+    )
+    rig = Rig(strict, scene, anonymize=True).started()
+    assert sorted(rig.live.sent.under(f"{SEG}/")) == [f"{SEG}/s_1", f"{SEG}/s_2"]
+    drop(rig)
+    rig.live.reset()
+    rig.scene = LiveScene({"id": SEG, "segment": "Segment_1", "name": "Spleen Smith"})
+    rig.live.mark_segment(SEG, "Segment_1", Change.ADDED)
+    resume(rig, scene=1, snapshot=1)
+    rig.advance(1000)
+    _, glb, _ = reassemble(list(rig.sent))
+    messages = [m for m in rig.take() if m["type"] != "scene.snapshot.chunk"]
+    assert [m["type"] for m in messages] == ["scene.snapshot.begin", "scene.snapshot.end"]
+    assert messages[0]["sceneVersion"] == 2
+    assert [(m["nodeId"], m.get("segmentId"), m["name"]) for m in manifest(glb)] == [
+        (f"{SEG}/s_3", None, "Segment 1")
+    ]
+    assert root_extras(glb)["anonymizedNames"] is True
+    assert b"Smith" not in glb and b"Segment_1" not in glb
+    assert sorted(rig.live.sent.under(f"{SEG}/")) == [f"{SEG}/s_3"]
+
+
 # --------------------------------------------------------------------------- F. marks through the registry (SLC-36)
 
 
