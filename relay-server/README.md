@@ -194,8 +194,12 @@ process, so each cycle starts once every viewer is ready, and paces its chunks b
 (≤ 1 MiB) for a reading viewer when the next arrives — below the 4 MiB soft watermark, however much the loopback
 socket buffers take (on macOS the unpaced publisher got reading viewers deferred, report
 `docs/testing/reports/2026-10-27-release-1.md`). A viewer still behind after 5 s is no longer waited for in that
-snapshot, nor is one whose stream is over before `end`, and either fails the run. It prints the relay's memory before
-the first snapshot and one line per cycle, and exits 1 when a check fails:
+snapshot, nor is one whose stream is over before `end`, and either fails the run. A cycle begins only once the relay's
+publisher message budget (`src/ws/budget.ts`, SRV-25) has earned back the previous one's frames — a text frame its
+bytes + 32 KiB at 4 MiB/s, a chunk frame its bytes + 16 KiB at 32 MiB/s (`BudgetSpend`, SRV-32), outside the fan-out
+time: the relay closes a publisher its budget cannot pay `RATE_LIMITED` + `4006`, which back-to-back cycles reached on
+Apple Silicon after ≈ 100 cycles of a 3.4 KB fixture or ≈ 40 of the 4.7 MiB one with 3 viewers. It prints the
+relay's memory before the first snapshot and one line per cycle, and exits 1 when a check fails:
 
 - every cycle, from `scene.snapshot.begin` to the last viewer holding the whole GLB (its `end`, or `ready` plus the
   HTTP download; SHA-256 and `X-Scene-Version` checked) ≤ `--max-fanout-ms` (5,000), every viewer streamed
@@ -215,8 +219,9 @@ exits; a run gives up after 120 s. The relay and every socket are taken down at 
 out. The relay has its own process group, so a Ctrl-C reaches only the smoke; whenever the smoke's process dies, the
 relay's stdin pipe ends and the probe kills the relay (`SIGKILL`: the relay's own exit could hang flushing its log to
 the smoke's closed pipe). Nothing printed carries the session code or a token. `test/load-smoke.test.ts` runs a small
-version (3 viewers), timed-out runs and `sendPaced` with fake viewers in the normal suite. `RELAY_TEST_FAST_TIMERS` is
-not set: no relay timer bounds these checks (SRV-29, report `docs/testing/reports/2026-10-27-server-6.md`).
+version (3 viewers), timed-out runs, `sendPaced` with fake viewers and `BudgetSpend` against the relay's own buckets in
+the normal suite. `RELAY_TEST_FAST_TIMERS` is not set: no relay timer bounds these checks (SRV-29, report
+`docs/testing/reports/2026-10-27-server-6.md`).
 
 ## Test with fake-slicer
 
