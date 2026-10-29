@@ -812,6 +812,8 @@ def _adapter(import_remote_view, slicer_stubs, monkeypatch, *nodes):
     monkeypatch.setattr(slicer.util, "getNodesByClass", slicer.mrmlScene.by_class)
     monkeypatch.setattr(slicer, "vtkMRMLFolderDisplayNode", FakeFolders())
     monkeypatch.setattr(panel, "RelayTransport", FakeTransport)
+    # the lanes, as before SLC-57: these tests time the flushes; the default mode (30 s) is test_sendmode's
+    slicer_stubs["qt"].QSettings().setValue("RemoteView/SendMode", "now")
     module = import_remote_view()
 
     def start():

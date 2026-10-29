@@ -27,6 +27,7 @@ set(MODULE_PYTHON_SCRIPTS
   remoteview_core/observers.py
   remoteview_core/panel.py
   remoteview_core/protocol_client.py
+  remoteview_core/sendmode.py
   remoteview_core/snapshot.py
   remoteview_core/steps.py
   remoteview_core/transport.py

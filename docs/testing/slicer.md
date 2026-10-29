@@ -1317,3 +1317,45 @@ Expected results:
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|
 | | | | | |
+
+## §16 The toolbar: Send scene now and the send mode (SLC-55, SLC-56, SLC-57; FR-11, NFR-02, §7.3)
+
+Preconditions: the test Slicer of §2 with the relay stub or a relay, a phone joined, and the two spheres of §12.
+
+Steps:
+
+1. Start Slicer and look at the main window's toolbars before opening any module.
+2. Open *RemoteView*. Read the text above *Start session* and click its link.
+3. Click *Start session*; wait for "Live". In the toolbar choose *30 s after the last change*. In *Models*, change
+   *Sphere A*'s colour, then its opacity 10 s later, then its colour again 10 s after that. Watch the button.
+4. Choose *Only with Send scene now*. Change *Sphere A*'s colour; wait a minute; click *Send scene now*; click it once
+   more.
+5. Choose *At once*. Change *Sphere A*'s colour.
+6. Choose *15 s after the last change*. Hide *Sphere A*, then *File → Close Scene* within 15 s.
+7. Click *Stop session*, then *Send scene now*. Quit Slicer, start it again and look at the toolbar.
+8. Developer mode: click the module's *Reload* button, then change the mode on the toolbar and start a session.
+
+Expected results:
+
+- Step 1: the toolbar "RemoteView" is there with *Send scene now* (disabled) and *Send changes:* set to *30 s after
+  the last change* (a fresh installation), before the module was ever opened `[TODO verify]` `addToolBar` and
+  `QToolBar.addAction(str)` from PythonQt.
+- Step 2: two sentences and the project link (no long statement, no progress window later); the link opens
+  `https://github.com/dolegadolegowski/SlicerRemoteView` in the browser `[TODO verify]` `openExternalLinks`.
+- Step 3: after the first change the button reads "Send now (30 s)" and counts down; each change restarts it at 30;
+  the phone shows all three changes at once, 30 s after the last one; the panel's detail says "Changes in Slicer wait:
+  RemoteView sends them N s after the last change." meanwhile, nothing after.
+- Step 4: nothing goes to the phone for the minute ("Send now (changes wait)" never appears: that text is for a batch);
+  the panel says "Changes in Slicer wait for Send now."; the first click sends the colour (a `scene.update`), the
+  second sends the whole scene again (a snapshot: "Updating the scene", then "Live"), without a progress window.
+- Step 5: the phone shows the colour within about half a second, the button never counts down.
+- Step 6: the closed scene leaves the phone at once (the reset ignores the delay, §7.3); the hidden sphere never had
+  to be sent on its own.
+- Step 7: after Stop the button is disabled, and a click on it does nothing; after the restart the toolbar shows
+  *15 s after the last change* (the setting) `[TODO verify]` `QComboBox.currentIndex`/`addItem(label, data)`.
+- Step 8: one toolbar, not two (the old one is removed); the new mode is saved and the session starts with it.
+- Throughout: no traceback; nothing in the log but exception type names, if anything.
+
+| Date | Slicer version | OS | Result | Tester |
+|---|---|---|---|---|
+| | | | | |
