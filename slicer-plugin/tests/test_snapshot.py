@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import queue
 import struct
 import sys
 import time
+import weakref
 
 import pytest
 from support import (
     FakeScene,
     ack,
+    created,
     live_client,
     manifest,
     needs_node,
@@ -26,6 +29,10 @@ from support import (
 )
 
 from remoteview_core import snapshot as snapshot_module
+from remoteview_core.changes import NodeChange
+from remoteview_core.collect import collect_scene
+from remoteview_core.decimate import Budget, fit_to_budget
+from remoteview_core.glb_writer import RootExtras, write_glb
 from remoteview_core.ids import SceneIds
 from remoteview_core.protocol_client import (
     ProtocolClient,
@@ -292,6 +299,306 @@ def test_snapshot_far_over_the_limit_is_never_written(monkeypatch):
             client,
             slicer_version="5.12.4",
         )
+
+
+# --------------------------------------------------------------------------- SLC-51: the snapshot in steps
+
+#: A budget that decimates the larger sphere only (448 triangles, a share of at most 200; the others fit).
+SMALL = Budget(
+    total_triangles=400, node_triangles=200, target_bytes=32 * 1_048_576, floor_triangles=50
+)
+
+
+def steps_scene() -> FakeScene:
+    """Two models (one above its share), a segment and a model without a mesh (skipped)."""
+    return FakeScene(
+        {"id": "vtkMRMLModelNode4", "mesh": sphere(16), "name": "Skull"},
+        {"id": "vtkMRMLModelNode5"},
+        {"id": "vtkMRMLModelNode6", "mesh": sphere(8), "name": "Tumor"},
+        {"id": SEG, "segment": "Segment_1", "mesh": sphere(8), "name": "Liver"},
+    )
+
+
+def prepared(
+    preparation: snapshot_module.ScenePreparation,
+) -> tuple[snapshot_module.Snapshot, list]:
+    """Run ``preparation`` to its end: the snapshot and the progress before and after each step."""
+    progress = [preparation.progress]
+    while (snapshot := preparation.step()) is None:
+        progress.append(preparation.progress)
+    progress.append(preparation.progress)
+    return snapshot, progress
+
+
+def test_prepare_step_by_step_builds_what_the_pipeline_builds(monkeypatch):
+    """Criterion 1: the GLB of the steps is the one collect_scene + fit_to_budget + write_glb make in one go, and the
+    snapshot is build_snapshot's (which now runs the same steps: the pipeline is the independent check)."""
+    monkeypatch.setattr(snapshot_module, "PROFILES", {"mobile": SMALL})
+    client = live_client()
+    snapshot, _ = prepared(
+        snapshot_module.ScenePreparation(
+            steps_scene(), client, slicer_version="5.12.4", ids=SceneIds()
+        )
+    )
+    _, glb, _ = reassemble(list(snapshot.frames()))
+    collected = collect_scene(steps_scene())
+    fitted = fit_to_budget(collected.entities, SMALL)
+    root = RootExtras(
+        scene_version=1, profile="mobile", slicer_version="5.12.4", anonymized_names=False
+    )
+    assert glb == write_glb(list(fitted.entities), root, quantize=True)
+    assert snapshot.reduced == fitted.reduced == ("vtkMRMLModelNode4",)
+    assert snapshot.skipped == collected.skipped and snapshot.unreduced == ()
+    other = build_snapshot(steps_scene(), live_client(), slicer_version="5.12.4")
+    _, other_glb, _ = reassemble(list(other.frames()))
+    assert other_glb == glb
+    fields = (
+        "scene_version",
+        "node_count",
+        "triangle_count",
+        "byte_length",
+        "skipped",
+        "reduced",
+        "target_bytes",
+    )
+    assert [getattr(snapshot, f) for f in fields] == [getattr(other, f) for f in fields]
+
+    ids = [m["nodeId"] for m in manifest(glb)]
+
+    def scene_of(sent):  # SentScene has no equality of its own
+        return [sent.get(i) for i in ids], dict(sent.skipped), sent.anonymized, len(sent)
+
+    assert scene_of(snapshot.sent) == scene_of(other.sent) and len(snapshot.sent) == 3
+    assert snapshot.triangle_count <= SMALL.total_triangles
+
+
+def test_prepare_counts_one_step_per_node_and_entity_and_one_last(monkeypatch):
+    monkeypatch.setattr(snapshot_module, "PROFILES", {"mobile": SMALL})
+    _, progress = prepared(
+        snapshot_module.ScenePreparation(
+            steps_scene(), live_client(), slicer_version="5.12.4", ids=SceneIds()
+        )
+    )
+    # 4 nodes (until they are collected each counts for an entity), 3 entities (one node skipped), 1 last step
+    assert progress == [(0, 9), (1, 9), (2, 9), (3, 9), (4, 8), (5, 8), (6, 8), (7, 8), (8, 8)]
+
+
+def test_prepare_reads_only_the_node_lists_before_its_steps():
+    scene = steps_scene()
+    meshes = []
+    scene.polydata = lambda node: meshes.append(node["id"]) or node.get("mesh")
+    preparation = snapshot_module.ScenePreparation(
+        scene, live_client(), slicer_version="5.12.4", ids=SceneIds()
+    )
+    assert scene.asked == 1 and meshes == []
+    preparation.step()
+    assert meshes == ["vtkMRMLModelNode4"]
+
+
+def gone(scene: weakref.ref, preparation: snapshot_module.ScenePreparation) -> bool:
+    """The scene (with its handles and meshes) was let go: an ended preparation holds none of it, nor the decimated
+    meshes, and an owner may keep it for its ``progress``. The caller dropped its own references first."""
+    gc.collect()
+    return scene() is None and not preparation._fitted
+
+
+def test_prepare_ends_with_a_step_that_failed():
+    def boom(node):
+        raise MemoryError
+
+    scene = steps_scene()
+    scene.polydata = boom
+    client = live_client()
+    preparation = snapshot_module.ScenePreparation(
+        scene, client, slicer_version="5.12.4", ids=SceneIds()
+    )
+    ref = weakref.ref(scene)
+    del scene
+    with pytest.raises(MemoryError):
+        preparation.step()
+    with pytest.raises(RuntimeError, match="ended"):
+        preparation.step()
+    assert client.versions.last == 0 and gone(ref, preparation)
+
+
+@pytest.mark.parametrize("steps", range(8))
+def test_prepare_refuses_a_scene_closed_between_its_steps(steps):
+    """T7: after a scene close (the registry reset) no node of the closed scene is collected, aliased or sent — before
+    the first step, while collecting, while fitting and just before the last step. The model "Sphere" and the segment
+    "left lung" would take aliases when collected."""
+    ids = SceneIds()
+    client = acked_client()
+    before = client_state(client)
+    scene = FakeScene(
+        {"id": "vtkMRMLModelNode4", "mesh": sphere(16), "name": "Skull"},
+        {"id": "Sphere", "mesh": sphere(8), "name": "Tumor"},
+        {"id": "vtkMRMLModelNode6"},
+        {"id": SEG, "segment": "left lung", "mesh": sphere(8), "name": "Left lung"},
+    )
+    # a node this scene exports: the last step would build its hint (a version) — it must not come to that
+    preparation = snapshot_module.ScenePreparation(
+        scene, client, slicer_version="5.12.4", announce=[("vtkMRMLModelNode4", "model")], ids=ids
+    )
+    ref = weakref.ref(scene)
+    del scene
+    assert all(preparation.step() is None for _ in range(steps))
+    ids.reset()
+    with pytest.raises(snapshot_module.SceneChangedError):
+        preparation.step()
+    assert "models=0, segments=0" in repr(ids) and client_state(client) == before
+    assert gone(ref, preparation) and preparation.progress[0] == steps
+
+
+def held_client() -> ProtocolClient:
+    """A client with a snapshot in flight (updates held, so no hint can be built) and a held change."""
+    client = live_client()
+    build_snapshot(
+        FakeScene({"id": "vtkMRMLModelNode4", "mesh": sphere(8)}), client, slicer_version="5.12.4"
+    )
+    client.handle(ack(1))
+    build_snapshot(
+        FakeScene({"id": "vtkMRMLModelNode4", "mesh": sphere(8)}), client, slicer_version="5.12.4"
+    )
+    assert client.send_changes([NodeChange("vtkMRMLModelNode4", visible=False)]) == []
+    return client
+
+
+def acked_client() -> ProtocolClient:
+    """A client whose snapshot was acknowledged: nothing held, so a hint would take a version."""
+    client = live_client()
+    build_snapshot(
+        FakeScene({"id": "vtkMRMLModelNode4", "mesh": sphere(8)}), client, slicer_version="5.12.4"
+    )
+    client.handle(ack(1))
+    assert not client.updates_held
+    return client
+
+
+def client_state(client: ProtocolClient) -> tuple:
+    return (
+        client.state,
+        client.next_scene_version,
+        client.snapshot_in_flight,
+        client.snapshot_needed,
+        client.updates_held,
+        client.versions.last,
+    )
+
+
+NEW_NODE = [("vtkMRMLModelNode6", "model")]
+
+
+def test_prepare_on_an_acked_client_builds_its_hint():
+    # the cancel cases below matter: on this client the last step does take a version for the hint
+    snapshot, _ = prepared(
+        snapshot_module.ScenePreparation(
+            steps_scene(),
+            acked_client(),
+            slicer_version="5.12.4",
+            announce=NEW_NODE,
+            ids=SceneIds(),
+        )
+    )
+    assert snapshot.announced is not None and snapshot.scene_version == 3
+
+
+@pytest.mark.parametrize("make", [held_client, acked_client])
+@pytest.mark.parametrize("steps", range(8))
+def test_prepare_cancelled_before_its_last_step_leaves_the_client_as_it_was(steps, make):
+    client = make()
+    before = client_state(client)
+    scene = steps_scene()
+    preparation = snapshot_module.ScenePreparation(
+        scene, client, slicer_version="5.12.4", announce=NEW_NODE, ids=SceneIds()
+    )
+    ref = weakref.ref(scene)
+    del scene
+    assert all(preparation.step() is None for _ in range(steps))
+    preparation.cancel()
+    assert client_state(client) == before and gone(ref, preparation)
+    with pytest.raises(RuntimeError, match="ended"):
+        preparation.step()
+    if make is held_client:
+        # the held change is still there: the ack releases it
+        [update] = client.handle(ack(2))
+        assert update["type"] == "scene.update"
+        assert update["changes"] == [{"nodeId": "vtkMRMLModelNode4", "visible": False}]
+
+
+def test_prepare_takes_its_versions_in_the_last_step():
+    """§8.2, §8.4, SLC-38: an ack between two steps releases a held update (a version); the hint, the GLB's root
+    and the begin still take consecutive versions after it, in the last step."""
+    client = held_client()
+    preparation = snapshot_module.ScenePreparation(
+        steps_scene(), client, slicer_version="5.12.4", announce=NEW_NODE, ids=SceneIds()
+    )
+    for _ in range(3):
+        preparation.step()
+    [update] = client.handle(ack(2))
+    snapshot, _ = prepared(preparation)
+    begin, glb, _ = reassemble(list(snapshot.frames()))
+    assert update["sceneVersion"] == 3
+    assert snapshot.announced["sceneVersion"] == 4
+    assert begin["sceneVersion"] == root_extras(glb)["sceneVersion"] == snapshot.scene_version == 5
+
+
+def test_prepare_ends_with_its_last_step():
+    scene = FakeScene({"id": "vtkMRMLModelNode4", "mesh": sphere(8)})
+    preparation = snapshot_module.ScenePreparation(
+        scene, live_client(), slicer_version="5.12.4", anonymize_names=True, ids=SceneIds()
+    )
+    ref = weakref.ref(scene)
+    del scene
+    assert preparation.progress == (0, 3)
+    assert preparation.step() is None and preparation.step() is None
+    snapshot = preparation.step()
+    assert snapshot is not None and snapshot.node_count == 1 and preparation.progress == (3, 3)
+    assert gone(ref, preparation) and preparation.anonymize_names is True
+    _, glb, _ = reassemble(list(snapshot.frames()))
+    assert root_extras(glb)["anonymizedNames"] is True
+    with pytest.raises(RuntimeError, match="ended"):
+        preparation.step()
+
+
+@pytest.mark.parametrize("end", ["dropped", "closed"])
+def test_prepare_refuses_a_session_that_ended_between_its_steps(end):
+    client = live_client()
+    preparation = snapshot_module.ScenePreparation(
+        steps_scene(),
+        client,
+        slicer_version="5.12.4",
+        announce=[("vtkMRMLModelNode6", "model")],
+        ids=SceneIds(),
+    )
+    preparation.step()
+    if end == "dropped":
+        client.transport_lost()
+        assert client.state is SessionState.GRACE
+    else:
+        client.close()
+    # the other steps touch no client: only the last one finds the session gone
+    for _ in range(6):
+        assert preparation.step() is None
+    with pytest.raises(ProtocolStateError):
+        preparation.step()
+    assert client.versions.last == 0 and client.snapshot_in_flight is None
+
+
+def test_prepare_refuses_a_session_created_again_between_its_steps():
+    """A re-create between ticks (SLC-45) is another session, with its own aliases: nothing goes to it."""
+    client = live_client()
+    preparation = snapshot_module.ScenePreparation(
+        steps_scene(), client, slicer_version="5.12.4", ids=SceneIds()
+    )
+    preparation.step()
+    client.close()
+    create = client.start("mobile")
+    client.handle(created(create["id"], session_id="sess_01K7Q4XMB2TJ9RD7"))
+    assert client.state is SessionState.CREATED
+    with pytest.raises(ProtocolStateError, match="session changed"):
+        while preparation.step() is None:
+            pass
+    assert client.versions.last == 0 and client.snapshot_in_flight is None
 
 
 def _not_live(state: str) -> ProtocolClient:

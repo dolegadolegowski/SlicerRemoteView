@@ -58,6 +58,8 @@ class SceneIds:
         self._segments: dict[tuple[Any, Any], str] = {}
         self._next_m = 1
         self._next_s = 1
+        #: How many times the scene was closed (:meth:`reset`): a preparation started before must not go on (SLC-51).
+        self.generation = 0
 
     def model_node_id(self, raw: Any) -> str | None:
         """The ``nodeId``/``mrmlId`` of a model or segmentation node with MRML ID ``raw``: the ID itself when it is
@@ -116,6 +118,7 @@ class SceneIds:
         """The Slicer scene was closed: forget the raw → alias maps, keep counting (no alias is reissued)."""
         self._models.clear()
         self._segments.clear()
+        self.generation += 1
 
     def __repr__(self) -> str:
         return (

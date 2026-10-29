@@ -482,8 +482,10 @@ def _checked_mesh(polydata: Any, bake: vtkAbstractTransform | None) -> Mesh | Sk
     return mesh if _finite_geometry(mesh) else SkipReason.INVALID_GEOMETRY
 
 
-class _Collector:
-    """One :func:`collect_scene` call: the entities and skips so far, the names and the ID registry it uses."""
+class Collector:
+    """One collection — :func:`collect_scene`'s loop, or ``snapshot.ScenePreparation``'s steps (SLC-51): the entities
+    and skips so far, the names and the ID registry it uses. :meth:`model` and :meth:`segment` take one handle each,
+    models first, in the order of :meth:`SceneApi.visible_model_nodes` and :meth:`SceneApi.visible_segments`."""
 
     def __init__(self, scene_api: SceneApi, ids: SceneIds, *, anonymize: bool) -> None:
         self._scene = scene_api
@@ -581,7 +583,7 @@ def collect_scene(
 ) -> CollectedScene:
     """Collect every exportable model node, then every shown segment, of ``scene_api`` (see the module docstring).
     ``ids`` is the session's alias registry (a fresh one when ``None``)."""
-    collector = _Collector(
+    collector = Collector(
         scene_api, ids if ids is not None else SceneIds(), anonymize=anonymize_names
     )
     for node in scene_api.visible_model_nodes():

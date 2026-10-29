@@ -10,8 +10,9 @@ Profile       Total triangles  Per node        Snapshot size (recommended)
 ``quest3``    1,000,000        100,000         64 MiB (hard)
 ============  ===============  ==============  ==============================
 
-:func:`fit_to_budget` gives every node a share of the total in proportion to its triangles — at least
-:attr:`Budget.floor_triangles` (or all it has), at most the per-node cap — and decimates the nodes above their share.
+:func:`fit_to_budget` gives every node a share of the total in proportion to its triangles (:func:`allocate`) — at
+least :attr:`Budget.floor_triangles` (or all it has), at most the per-node cap — and decimates the nodes above their
+share (:func:`fit_entity`, one node at a time: ``snapshot.ScenePreparation`` calls it once per step, SLC-51).
 Nodes are **never dropped** (§7.5): a node the filters cannot reduce keeps its mesh and is reported. Decimation runs on
 the collected entities (glTF metres, after SLC-07's clean-up), one node per :func:`decimate_entity` call:
 ``vtkQuadricDecimation``; ``vtkDecimatePro`` with ``PreserveTopologyOn`` when the quadric result is unusable (no
@@ -188,6 +189,20 @@ class FitResult:
         return sum(e.triangle_count for e in self.entities)
 
 
+def fit_entity(
+    entity: Entity,
+    target: int,
+    *,
+    filters: Sequence[Callable[[float], Any]] | None = None,
+) -> tuple[Entity, bool | None]:
+    """``entity`` within its share of ``target`` triangles: ``(entity, None)`` when it already is, ``(smaller,
+    True)`` when decimated, ``(entity, False)`` when no filter could reduce it (kept whole, never dropped)."""
+    if entity.triangle_count <= target:
+        return entity, None
+    smaller = decimate_entity(entity, target, filters=filters)
+    return (entity, False) if smaller is None else (smaller, True)
+
+
 def fit_to_budget(
     entities: Sequence[Entity],
     budget: Budget,
@@ -200,16 +215,10 @@ def fit_to_budget(
     reduced: list[str] = []
     unreduced: list[str] = []
     for entity, target in zip(entities, targets, strict=True):
-        if entity.triangle_count <= target:
-            fitted.append(entity)
-            continue
-        smaller = decimate_entity(entity, target, filters=filters)
-        if smaller is None:
-            fitted.append(entity)
-            unreduced.append(entity.node_id)
-        else:
-            fitted.append(smaller)
-            reduced.append(entity.node_id)
+        result, decimated = fit_entity(entity, target, filters=filters)
+        fitted.append(result)
+        if decimated is not None:
+            (reduced if decimated else unreduced).append(entity.node_id)
     return FitResult(tuple(fitted), tuple(reduced), tuple(unreduced))
 
 
