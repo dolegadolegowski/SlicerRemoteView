@@ -39,6 +39,10 @@ of the session, the first snapshot included:
 - *Hide node names*, *Remove small islands* and the device profile have no MRML event:
   :meth:`~LiveUpdates.set_anonymize_names`, :meth:`~LiveUpdates.set_remove_islands` (SLC-54) and
   :meth:`~LiveUpdates.request_snapshot` (SLC-18) ask for a snapshot;
+- **when changes go out** (SLC-56): :meth:`~LiveUpdates.set_send_policy` hands the toolbar's choice to the debouncer
+  (at once by its lanes, a delay after the last change, or only on *Send now*); :meth:`~LiveUpdates.send_now` flushes
+  what waits — or, with nothing waiting and nothing on its way, sends the scene again; :attr:`~LiveUpdates.due_in` and
+  :attr:`~LiveUpdates.changes_wait` feed the countdown. A reset ignores the policy (§7.3, the debouncer's rule);
 - **preparation in steps** (SLC-51, ``docs/research/slicer-prepare.md``): an export is prepared by SLC-28's
   ``prepare_snapshot`` with the session's :class:`~remoteview_core.meshcache.MeshCache` (SLC-50), a slice of
   ``slice_s`` seconds at a time — the first in the call that starts it, the others from :meth:`~LiveUpdates.tick` —
@@ -81,7 +85,7 @@ from typing import Any
 
 from remoteview_core.changes import Plan, SceneReadError, SentScene, classify
 from remoteview_core.collect import SceneApi
-from remoteview_core.debounce import Change, Debouncer, Drained, Timer
+from remoteview_core.debounce import AT_ONCE, Change, Debouncer, Drained, SendPolicy, Timer
 from remoteview_core.ids import SceneIds
 from remoteview_core.meshcache import MeshCache
 from remoteview_core.protocol_client import ProtocolClient, ProtocolStateError, SessionState
@@ -199,6 +203,7 @@ class LiveUpdates:
         prepare: Callable[..., Steps[Snapshot]] = prepare_snapshot,
         ids: SceneIds | None = None,
         slice_s: float | None = None,
+        send_policy: SendPolicy = AT_ONCE,
     ) -> None:
         self._client = client
         self._scene = scene
@@ -214,6 +219,7 @@ class LiveUpdates:
         self._prepare_fn = prepare
         self._slice_s = slice_s
         self._debouncer = Debouncer(timer, self._on_flush, clock)
+        self._debouncer.set_policy(send_policy)
         self._running = False
         self._prep: _Preparation | None = None
         self._forget_session()
@@ -288,6 +294,17 @@ class LiveUpdates:
     def batch_held(self) -> bool:
         """A batch process (loading, closing, a script) holds the marks and any owed snapshot until it ends."""
         return self._depth > 0  # stop() forgets it
+
+    @property
+    def changes_wait(self) -> bool:
+        """Marked changes wait for the policy's delay, for *Send now* or for a hold to end."""
+        return self._running and self._debouncer.pending
+
+    @property
+    def due_in(self) -> float | None:
+        """Seconds until the waiting changes go out by themselves; ``None`` when none wait, they wait for a hold to
+        end, or they wait for *Send now*."""
+        return self._debouncer.due_in(self._clock()) if self._running else None
 
     # ------------------------------------------------------------------ the observers (SLC-31); never raise
 
@@ -507,6 +524,25 @@ class LiveUpdates:
             return
         self._remove_islands = bool(on)
         self.request_snapshot()
+
+    def set_send_policy(self, policy: SendPolicy) -> None:
+        """When changes go out (SLC-56); pending ones follow the new policy from now. Also before :meth:`start`."""
+        self._debouncer.set_policy(policy)
+
+    def send_now(self) -> None:
+        """*Send now* (SLC-56): the waiting changes go out at once (or at the end of the hold that keeps them); with
+        none waiting, the scene goes again unless a snapshot is already being prepared or in flight — a click then
+        would only restart it. Lifts the too-large and flush gates like :meth:`request_snapshot`."""
+        if not self._running:
+            return
+        try:
+            if self._debouncer.send_now():
+                return
+            if self._prep is not None or self._inflight is not None:
+                return
+            self.request_snapshot()
+        except Exception as exc:  # noqa: BLE001 — a Qt slot (T7)
+            _log.error("live: send now failed (%s)", type(exc).__name__)
 
     def request_snapshot(self) -> None:
         """Send the scene again (a new device profile, *Hide node names*, *Remove small islands*): lifts the too-large

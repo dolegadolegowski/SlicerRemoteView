@@ -26,6 +26,12 @@ One timer serves both: while a re-export is pending, appearance changes wait wit
 :data:`GEOMETRY_MAX_MS` after their own mark, a burst on another node notwithstanding) — the re-exported snapshot
 carries them anyway.
 
+A :class:`SendPolicy` (SLC-56, the owner's request) can replace the lanes above: with ``delay_s`` the marks go out that
+long after the **last** mark, with no cap (a countdown the toolbar shows, :meth:`Debouncer.due_in`); with ``manual``
+they wait for :meth:`Debouncer.send_now`. A reset (a closed scene) keeps the lanes above under every policy: a closed
+scene must not stay on the viewers (§7.3). The end of a batch under a policy restarts the delay instead of the 0 ms
+hand-off, unless ``send_now`` was asked meanwhile.
+
 Pure logic: the timer and the clock are injected (``qt.QTimer`` and ``time.monotonic`` in Slicer, fakes in tests). Main
 thread only, like the observers that call it.
 """
@@ -43,6 +49,31 @@ APPEARANCE_MS = 150
 APPEARANCE_MAX_MS = 250
 GEOMETRY_MS = 750
 GEOMETRY_MAX_MS = 2_000
+
+
+@dataclass(frozen=True)
+class SendPolicy:
+    """When marked changes go out (SLC-56): ``delay_s`` seconds after the last mark, only on ``send_now`` when
+    ``manual``, or — both unset — by the lanes of the module docstring."""
+
+    delay_s: float | None = None
+    manual: bool = False
+
+    def __post_init__(self) -> None:
+        if self.delay_s is not None and (
+            isinstance(self.delay_s, bool) or not (0 < float(self.delay_s) < 3_600)
+        ):
+            raise ValueError("delay_s must be None or seconds in (0, 3600)")
+        if self.manual and self.delay_s is not None:
+            raise ValueError("a manual policy has no delay")
+
+    @property
+    def lanes(self) -> bool:
+        """The fast lanes apply (no delay, not manual)."""
+        return self.delay_s is None and not self.manual
+
+
+AT_ONCE = SendPolicy()
 
 
 class Change(enum.Flag):
@@ -111,6 +142,10 @@ class DirtySet:
         """The union of every pending flag (``Change(0)`` when only a reset or nothing is pending)."""
         return self._union
 
+    @property
+    def reset_pending(self) -> bool:
+        return self._reset
+
     def drain(self) -> Drained:
         drained = Drained(MappingProxyType(dict(self._changes)), self._reset)
         self._changes.clear()
@@ -154,6 +189,42 @@ class Debouncer:
         self._since: dict[str | None, float] = {}
         self._holds = 0
         self._handoff = False  # the last release started the timer at 0 ms
+        self._policy = AT_ONCE
+        self._due: float | None = None  # clock seconds of the scheduled flush
+        self._send_asked = False  # send_now came while held: flush at the hold's end
+
+    @property
+    def policy(self) -> SendPolicy:
+        return self._policy
+
+    def set_policy(self, policy: SendPolicy) -> None:
+        """Change when marks go out; pending marks follow the new policy from now (a shorter delay counts from here,
+        ``manual`` stops the timer, the lanes schedule by their caps)."""
+        if not isinstance(policy, SendPolicy):
+            raise TypeError("set_policy needs a SendPolicy")
+        self._policy = policy
+        if self._dirty and not self.held and not self._handoff:
+            self._timer.stop()
+            self._due = None
+            self._schedule(self._clock())
+
+    def due_in(self, now: float) -> float | None:
+        """Seconds until the scheduled flush (0 when overdue), ``None`` when none is scheduled: nothing pending, held,
+        or ``manual`` without a reset."""
+        if self._due is None or self.held:
+            return None
+        return max(0.0, self._due - now)
+
+    def send_now(self) -> bool:
+        """*Send now*: flush the pending marks at once, or at the end of the current hold (then from the timer at 0 ms,
+        whatever the policy). ``False`` when nothing is pending — the caller may send the scene again instead."""
+        if not self._dirty:
+            return False
+        if self.held:
+            self._send_asked = True
+            return True
+        self.flush()
+        return True
 
     @property
     def held(self) -> bool:
@@ -189,6 +260,7 @@ class Debouncer:
         """``StartBatchProcessEvent`` (or another hold): keep the marks until the matching :meth:`release`."""
         self._holds += 1
         self._timer.stop()
+        self._due = None
 
     def release(self) -> None:
         """``EndBatchProcessEvent`` (or the end of another hold): once the last hold ends, flush what was kept — from
@@ -197,14 +269,21 @@ class Debouncer:
             return
         self._holds -= 1
         if self._holds == 0 and self._dirty:
-            self._handoff = True  # a mark before the event loop runs keeps this 0 ms deadline
-            self._timer.start(0)
+            now = self._clock()
+            if self._policy.lanes or self._dirty.reset_pending or self._send_asked:
+                self._handoff = True  # a mark before the event loop runs keeps this 0 ms deadline
+                self._due = now
+                self._timer.start(0)
+            else:
+                self._schedule(now)  # the delay counts from the batch's end; manual keeps waiting
 
     def flush(self) -> None:
         """The timer fired: hand the pending set to ``on_flush``. Does nothing while held. A mark made by ``on_flush``
         itself (or after it raised) starts a fresh window."""
         self._timer.stop()
         self._handoff = False
+        self._due = None
+        self._send_asked = False
         if self.held or not self._dirty:
             return
         drained = self._dirty.drain()
@@ -218,9 +297,21 @@ class Debouncer:
         self._since.clear()
         self._holds = 0
         self._handoff = False
+        self._due = None
+        self._send_asked = False
 
     def _schedule(self, now: float) -> None:
         if self.held or self._handoff:
+            return
+        policy = self._policy
+        if not policy.lanes and not self._dirty.reset_pending:
+            if policy.manual:
+                self._timer.stop()  # a shorter delay that was running, or nothing
+                self._due = None
+                return
+            delay = float(policy.delay_s or 0.0)
+            self._due = now + delay
+            self._timer.start(max(0, round(delay * 1000.0)))
             return
         slow = bool(self._dirty.pending() & SLOW)
         quiet, longest = (
@@ -229,4 +320,6 @@ class Debouncer:
         oldest = min(self._since.values(), default=now)
         left = longest - (now - oldest) * 1000.0
         # a main thread that was busy longer than the longest wait: flush as soon as control returns to the event loop
-        self._timer.start(max(0, round(min(quiet, left))))
+        msec = max(0, round(min(quiet, left)))
+        self._due = now + msec / 1000.0
+        self._timer.start(msec)

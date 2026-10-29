@@ -45,6 +45,7 @@ from support import (
 )
 
 from remoteview_core import live, panel
+from remoteview_core.debounce import SendPolicy
 from remoteview_core.mrml_scene import MrmlSceneApi
 from remoteview_core.observers import MrmlEvents, SceneWatcher
 from remoteview_core.panel import PanelController, Phase
@@ -1189,3 +1190,36 @@ def test_panel_live_segments_end_to_end_with_the_relay_stub(caplog, capfd):
     assert (
         leaks(caplog, capfd, *NAMES, "Sphere", "Liver_DoeJohn", "Segment_1", SEG, code, token) == []
     )
+
+
+def test_panel_live_the_send_policy_shows_the_countdown_and_send_now(fake):
+    """SLC-56: under a delay the view counts down and the detail says so; manual says to use Send now; the policy
+    outlives the session."""
+    a = MrmlModel(A)
+    rig = live_rig(a)
+    ctl = rig.ctl
+    acked(rig, 1)
+    ctl.set_send_policy(SendPolicy(delay_s=15))
+    recolor(a, (0.1, 0.2, 0.3))
+    view = rig.pump(1_000)
+    assert (view.changes_wait, view.due_in) == (True, 14.0)
+    assert view.detail == panel.CHANGES_WAIT_AUTO.format(seconds=14) and _updates(rig) == []
+    view = rig.pump(14_000)
+    assert len(_updates(rig)) == 1 and (view.changes_wait, view.due_in) == (False, None)
+    assert view.detail == ""
+    view = ctl.set_send_policy(SendPolicy(manual=True)) or ctl.view
+    recolor(a, (0.3, 0.2, 0.1))
+    view = rig.pump(600_000)
+    assert (view.changes_wait, view.due_in) == (True, None)
+    assert view.detail == panel.CHANGES_WAIT_SEND_NOW and len(_updates(rig)) == 1
+    view = ctl.send_now()
+    assert len(_updates(rig)) == 2 and not view.changes_wait and view.detail == ""
+    ctl.stop()
+    deliver(ctl, Disconnected(1, None, None, final_sent=True))
+    assert ctl.send_now().status == "Not connected." and not ctl.view.changes_wait
+    ctl.start(URL)
+    deliver(ctl, Connected(1), Received(1, created()))
+    acked(rig, 1)
+    recolor(a, (0.5, 0.2, 0.1))
+    rig.pump(600_000)
+    assert ctl.view.detail == panel.CHANGES_WAIT_SEND_NOW  # the next session keeps the policy

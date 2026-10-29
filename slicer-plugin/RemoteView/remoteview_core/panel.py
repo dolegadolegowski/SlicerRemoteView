@@ -28,6 +28,10 @@
 - The scene is prepared a slice of :data:`PREPARE_SLICE_S` at a time, one slice per pump tick (SLC-51): the code is
   shown at once and the status says "Preparing the scene"; :attr:`PanelView.progress` carries the progress (no dialog
   since SLC-55, the owner's request).
+- When changes go out is the toolbar's choice (SLC-56): :meth:`PanelController.set_send_policy` keeps a
+  :class:`~remoteview_core.debounce.SendPolicy` for every session and hands it to the live one;
+  :meth:`PanelController.send_now` sends what waits; :attr:`PanelView.changes_wait` and :attr:`PanelView.due_in`
+  show the countdown.
 - No automatic ``session.renew``: until ``release`` decides how renewal follows user activity (SLC-17/SLC-18), a
   session nobody joins ends after the relay's idle TTL (NFR-11, T1) instead of living for its 12 h maximum.
 """
@@ -45,7 +49,7 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 from remoteview_core.collect import SceneApi
-from remoteview_core.debounce import Timer
+from remoteview_core.debounce import AT_ONCE, SendPolicy, Timer
 from remoteview_core.deps import DepsResult, Outcome
 from remoteview_core.ids import SceneIds
 from remoteview_core.links import join_url
@@ -139,6 +143,10 @@ class PanelView:
     settings_enabled: bool = True  # relay address and CA file
     #: while the scene is prepared (SLC-51): ``(done, total)`` units of work (the adapter shows no dialog, SLC-55)
     progress: tuple[int, int] | None = None
+    #: changes in Slicer wait to be sent (SLC-56), and in how many seconds they go by themselves (``None``: only on
+    #: *Send now*, or when a hold ends)
+    changes_wait: bool = False
+    due_in: float | None = None
 
 
 #: The first part of the live status, by the state of the scene (no scene factory: "").
@@ -167,6 +175,11 @@ RESTART = "Stop and start the session to try again."
 OBSERVE_FAILED = (
     "Changes in Slicer cannot be followed, so the scene was not sent. Please report this."
 )
+#: Changes wait under the send policy (SLC-56): the toolbar counts down; the panel says so in words.
+CHANGES_WAIT_AUTO = (
+    "Changes in Slicer wait: RemoteView sends them {seconds} s after the last change."
+)
+CHANGES_WAIT_SEND_NOW = "Changes in Slicer wait for Send now."
 #: A batch process (loading, closing, a script) holds the owed snapshot.
 WAITING_FOR_SLICER = (
     "Slicer is still loading or changing the scene: RemoteView sends it when Slicer is done."
@@ -286,6 +299,7 @@ class PanelController:
         watch: Callable[[LiveUpdates], Watcher] | None = None,
         prepare_slice_s: float = PREPARE_SLICE_S,
         remove_islands: bool = False,
+        send_policy: SendPolicy = AT_ONCE,
     ) -> None:
         if watch is not None and (scene is None or flush_timer is None):
             raise ValueError("watch needs a scene factory and a flush_timer")
@@ -300,6 +314,7 @@ class PanelController:
         self._watch = watch
         self._prepare_slice_s = prepare_slice_s
         self._remove_islands = bool(remove_islands)
+        self._send_policy = send_policy
         self._live: LiveUpdates | None = None
         self._watcher: Watcher | None = None
         # ensure_deps blocks inside Qt's event loop (dialogs, pip's progress window): a second click must not start over
@@ -337,6 +352,23 @@ class PanelController:
         self._remove_islands = bool(on)
         if self._live is not None:
             self._live.set_remove_islands(self._remove_islands)
+
+    def set_send_policy(self, policy: SendPolicy) -> None:
+        """The toolbar's choice of when changes go out (SLC-56): the live session follows it from now; the next
+        sessions start with it."""
+        self._send_policy = policy
+        if self._live is not None:
+            self._live.set_send_policy(policy)
+            if self.phase is Phase.LIVE:
+                self._show_live()
+
+    def send_now(self) -> PanelView:
+        """*Send now* (SLC-56): the waiting changes go out, or the scene goes again; nothing without a live session."""
+        if self._live is not None:
+            self._live.send_now()  # never raises
+            if self.phase is Phase.LIVE:
+                self._show_live()
+        return self.view
 
     @property
     def active(self) -> bool:
@@ -576,6 +608,7 @@ class PanelController:
                 ids=SceneIds(),
                 slice_s=self._prepare_slice_s,
                 remove_islands=self._remove_islands,
+                send_policy=self._send_policy,
             )
             if self._watch is not None:
                 watching = True
@@ -672,7 +705,20 @@ class PanelController:
         else:
             state = "live" if self._accepted else "sending"
         waiting = live.batch_held and live.owed and not live.in_flight
-        return state, WAITING_FOR_SLICER if waiting else self._notes
+        if waiting:
+            return state, WAITING_FOR_SLICER
+        return state, " ".join(text for text in (self._notes, self._wait_text(live)) if text)
+
+    def _wait_text(self, live: LiveUpdates) -> str:
+        """What the waiting changes wait for (SLC-56); "" when none wait or they go out by the lanes."""
+        if not live.changes_wait or self._send_policy.lanes:
+            return ""
+        due = live.due_in
+        if due is None:
+            return (
+                CHANGES_WAIT_SEND_NOW if self._send_policy.manual else ""
+            )  # a hold: Slicer is busy
+        return CHANGES_WAIT_AUTO.format(seconds=math.ceil(due))
 
     def _next_step(self, live: LiveUpdates) -> str:
         """What happens next: only a followed change can open the too-large and the flush gates."""
@@ -693,6 +739,8 @@ class PanelController:
             detail="\n".join(part for part in (self._ca_note, detail) if part),
             code=client.code or "",
             progress=None if preparing is None else (preparing.done, preparing.total),
+            changes_wait=self._live.changes_wait if self._live is not None else False,
+            due_in=self._live.due_in if self._live is not None else None,
         )
 
     # ------------------------------------------------------------------ the session's end and the view
@@ -725,13 +773,15 @@ class PanelController:
         except ValueError:
             return "", NO_LINK
 
-    def _show(
+    def _show(  # noqa: PLR0913 — the view's fields, keyword-only
         self,
         status: str,
         *,
         detail: str = "",
         code: str = "",
         progress: tuple[int, int] | None = None,
+        changes_wait: bool = False,
+        due_in: float | None = None,
     ) -> PanelView:
         phase = self.phase
         note = self._ca_note if phase in (Phase.CONNECTING, Phase.LIVE) else ""
@@ -745,6 +795,8 @@ class PanelController:
             stop_enabled=phase in (Phase.CONNECTING, Phase.LIVE),
             settings_enabled=phase is Phase.IDLE,
             progress=progress if phase is Phase.LIVE else None,
+            changes_wait=changes_wait and phase is Phase.LIVE,
+            due_in=due_in if phase is Phase.LIVE else None,
         )
         return self.view
 

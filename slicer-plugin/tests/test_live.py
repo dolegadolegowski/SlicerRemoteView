@@ -27,7 +27,7 @@ from vtkmodules.vtkCommonTransforms import vtkTransform
 from remoteview_core import collect, decimate
 from remoteview_core import snapshot as snapshot_module
 from remoteview_core.collect import polydata_from_triangles
-from remoteview_core.debounce import Change
+from remoteview_core.debounce import Change, SendPolicy
 from remoteview_core.ids import SceneIds
 from remoteview_core.live import (
     RESET_NOT_SENT,
@@ -86,6 +86,7 @@ class Rig:
         remove_islands=False,
         ids=None,
         slice_s=None,
+        send_policy=None,
         **limits,
     ):
         self.timer = FakeTimer()
@@ -126,6 +127,7 @@ class Rig:
             remove_islands=remove_islands,
             ids=ids,
             slice_s=slice_s,
+            **({} if send_policy is None else {"send_policy": send_policy}),
         )
         self.timer.callback = self.live.flush
 
@@ -2501,3 +2503,54 @@ def test_live_a_scene_event_inside_a_step_abandons_the_preparation_safely(strict
     rig.live.tick()
     to_the_end(rig)
     assert calls == ["event"] and [b["sceneVersion"] for b in rig.begins()] == [1]
+
+
+# --------------------------------------------------------------------------- SLC-56: the send policy
+
+
+def test_live_send_now_flushes_the_waiting_changes_or_sends_the_scene_again(strict):
+    """SLC-56: under a delay the changes wait (``changes_wait``, ``due_in``) and *Send now* sends them at once; with
+    nothing waiting it sends the scene again — unless a snapshot is already on its way."""
+    rig = two(strict).started()
+    rig.live.set_send_policy(SendPolicy(delay_s=30))
+    assert not rig.live.changes_wait and rig.live.due_in is None
+    rig.scene.node(A)["color"] = (0.1, 0.2, 0.3)
+    rig.live.mark(A, Change.APPEARANCE)
+    assert rig.live.changes_wait and rig.live.due_in == 30.0
+    rig.advance(20_000)
+    assert rig.take() == [] and rig.live.due_in == 10.0
+    rig.live.send_now()
+    [update] = rig.take()
+    assert update["type"] == "scene.update" and not rig.live.changes_wait
+    rig.live.send_now()  # nothing waits: the scene goes again, from the next tick
+    rig.advance(0)
+    [begin] = rig.begins()
+    assert begin["sceneVersion"] == 3
+    rig.live.send_now()  # in flight: a click does not restart it
+    assert rig.take() == []
+    rig.ack()
+    rig.scene.node(B)["color"] = (0.3, 0.2, 0.1)
+    rig.live.mark(B, Change.APPEARANCE)
+    rig.advance(29_999)
+    assert rig.take() == []
+    rig.advance(1)  # by itself, 30 s after the mark
+    [update] = rig.take()
+    assert update["type"] == "scene.update" and update["changes"][0]["nodeId"] == B
+
+
+def test_live_send_now_during_a_hold_sends_at_its_end_and_manual_never_sends_alone(strict):
+    rig = two(strict, send_policy=SendPolicy(manual=True)).started()
+    rig.scene.node(A)["color"] = (0.4, 0.2, 0.3)
+    rig.live.mark(A, Change.APPEARANCE)
+    rig.wait(120)
+    assert rig.take() == [] and rig.live.changes_wait and rig.live.due_in is None
+    rig.live.hold()  # a batch: Send now is honoured at its end
+    rig.live.send_now()
+    assert rig.take() == []
+    rig.live.release()
+    rig.advance(0)
+    [update] = rig.take()
+    assert update["type"] == "scene.update"
+    rig.live.stop()
+    rig.live.send_now()  # stopped: nothing
+    assert rig.take() == [] and not rig.live.changes_wait

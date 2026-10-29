@@ -14,12 +14,14 @@ from remoteview_core import debounce
 from remoteview_core.debounce import (
     APPEARANCE_MAX_MS,
     APPEARANCE_MS,
+    AT_ONCE,
     GEOMETRY_MAX_MS,
     GEOMETRY_MS,
     Change,
     Debouncer,
     DirtySet,
     Drained,
+    SendPolicy,
 )
 
 
@@ -506,3 +508,128 @@ def test_debounce_imports_nothing_from_slicer_or_qt():
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "[]"
+
+
+# --------------------------------------------------------------------------- SLC-56: the send policy
+
+
+def test_debounce_send_policy_is_checked():
+    assert AT_ONCE.lanes and not SendPolicy(delay_s=15).lanes and not SendPolicy(manual=True).lanes
+    for bad in ({"delay_s": 0}, {"delay_s": -1}, {"delay_s": 3_600}, {"delay_s": True}):
+        with pytest.raises(ValueError):
+            SendPolicy(**bad)
+    with pytest.raises(ValueError):
+        SendPolicy(delay_s=15, manual=True)
+    with pytest.raises(TypeError):
+        Debouncer(FakeTimer(), lambda d: None, lambda: 0.0).set_policy("15")
+
+
+def test_debounce_a_delay_counts_from_the_last_mark_without_a_cap(setup):
+    """SLC-56: ``delay_s`` after the last change, whatever the lane, however long the burst — the countdown the toolbar
+    shows runs from the last mark."""
+    timer, debouncer, flushed = setup
+    debouncer.set_policy(SendPolicy(delay_s=15))
+    assert debouncer.due_in(timer.clock()) is None
+    debouncer.mark("vtkMRMLModelNode1", Change.APPEARANCE)
+    assert timer.starts[-1] == 15_000 and debouncer.due_in(timer.clock()) == 15.0
+    for _ in range(10):  # a burst of 100 s: each mark restarts the wait
+        timer.advance(10_000)
+        debouncer.mark("vtkMRMLModelNode1", Change.GEOMETRY)
+        assert flushed == [] and timer.starts[-1] == 15_000
+    timer.advance(14_999)
+    assert flushed == [] and debouncer.due_in(timer.clock()) == pytest.approx(0.001)
+    timer.advance(1)
+    [(at, drained)] = flushed
+    assert (
+        at == timer.now
+        and drained.changes["vtkMRMLModelNode1"] == Change.APPEARANCE | Change.GEOMETRY
+    )
+    assert debouncer.due_in(timer.clock()) is None and not debouncer.pending
+
+
+def test_debounce_manual_waits_for_send_now(setup):
+    """SLC-56: under ``manual`` the marks wait, with nothing scheduled, until ``send_now``; with nothing pending
+    ``send_now`` says so."""
+    timer, debouncer, flushed = setup
+    debouncer.set_policy(SendPolicy(manual=True))
+    assert debouncer.send_now() is False
+    debouncer.mark("vtkMRMLModelNode1", Change.ADDED)
+    timer.advance(600_000)
+    assert flushed == [] and timer.deadline is None and debouncer.pending
+    assert debouncer.due_in(timer.clock()) is None
+    assert debouncer.send_now() is True
+    [(at, drained)] = flushed
+    assert at == timer.now and dict(drained.changes) == {"vtkMRMLModelNode1": Change.ADDED}
+    assert debouncer.send_now() is False
+
+
+@pytest.mark.parametrize("policy", ["delay", "manual"])
+def test_debounce_a_reset_keeps_the_lanes_under_every_policy(setup, policy):
+    """§7.3: a closed scene must leave the viewers whatever the policy: the reset, with the marks after it, flushes by
+    the lanes."""
+    timer, debouncer, flushed = setup
+    debouncer.set_policy(SendPolicy(delay_s=60) if policy == "delay" else SendPolicy(manual=True))
+    debouncer.mark("vtkMRMLModelNode1", Change.APPEARANCE)
+    debouncer.reset()
+    assert timer.starts[-1] == APPEARANCE_MS
+    debouncer.mark("vtkMRMLModelNode7", Change.ADDED)
+    assert timer.starts[-1] == GEOMETRY_MS
+    timer.advance(GEOMETRY_MS)
+    [(_, drained)] = flushed
+    assert drained.reset and dict(drained.changes) == {"vtkMRMLModelNode7": Change.ADDED}
+    debouncer.mark("vtkMRMLModelNode7", Change.APPEARANCE)  # after the flush: the policy again
+    assert timer.starts[-1] == (60_000 if policy == "delay" else GEOMETRY_MS)
+    assert (timer.deadline is None) == (policy == "manual")
+
+
+def test_debounce_a_hold_ends_by_the_policy_unless_send_now_was_asked(setup):
+    """SLC-56: at the end of a batch the delay counts from there and manual keeps waiting — the 0 ms hand-off is the
+    lanes' and ``send_now``'s."""
+    timer, debouncer, flushed = setup
+    debouncer.set_policy(SendPolicy(delay_s=30))
+    debouncer.hold()
+    debouncer.mark("vtkMRMLModelNode1", Change.ADDED)
+    assert debouncer.due_in(timer.clock()) is None  # held: no countdown
+    debouncer.release()
+    assert timer.starts[-1] == 30_000 and flushed == [] and debouncer.due_in(timer.clock()) == 30.0
+    timer.advance(30_000)
+    assert len(flushed) == 1
+    debouncer.set_policy(SendPolicy(manual=True))
+    debouncer.hold()
+    debouncer.mark("vtkMRMLModelNode2", Change.ADDED)
+    debouncer.release()
+    timer.advance(60_000)
+    assert len(flushed) == 1 and timer.deadline is None and debouncer.pending
+    debouncer.hold()
+    assert (
+        debouncer.send_now() is True
+    )  # asked during a hold: flushed at its end, from the event loop
+    assert flushed[-1:] == flushed[-1:] and len(flushed) == 1
+    debouncer.release()
+    assert timer.starts[-1] == 0
+    timer.advance(0)
+    assert len(flushed) == 2
+    debouncer.set_policy(AT_ONCE)
+    debouncer.hold()
+    debouncer.mark("vtkMRMLModelNode3", Change.APPEARANCE)
+    debouncer.release()
+    assert timer.starts[-1] == 0
+
+
+def test_debounce_a_new_policy_reschedules_the_pending_marks(setup):
+    timer, debouncer, flushed = setup
+    debouncer.mark("vtkMRMLModelNode1", Change.APPEARANCE)
+    assert timer.starts[-1] == APPEARANCE_MS
+    debouncer.set_policy(SendPolicy(delay_s=15))
+    assert timer.starts[-1] == 15_000 and debouncer.due_in(timer.clock()) == 15.0
+    timer.advance(5_000)
+    debouncer.set_policy(SendPolicy(manual=True))
+    assert timer.deadline is None and debouncer.due_in(timer.clock()) is None
+    timer.advance(60_000)
+    assert flushed == []
+    debouncer.set_policy(AT_ONCE)  # the lanes: this mark is long past its cap
+    assert timer.starts[-1] == 0
+    timer.advance(0)
+    assert len(flushed) == 1
+    debouncer.set_policy(SendPolicy(delay_s=15))  # nothing pending: nothing scheduled
+    assert timer.deadline is None and debouncer.due_in(timer.clock()) is None
