@@ -73,13 +73,25 @@ export interface Viewer {
   readonly scene: Scene;
   readonly camera: PerspectiveCamera;
   readonly controls: OrbitControls;
-  /** Shows `model` (replacing the previous one, which the store disposes) and fits it from the front; `null` clears. */
+  /**
+   * Shows `model`, replacing the previous one (which the store disposes); `null` clears. A new snapshot that continues
+   * the scene on screen (`continues`, WEB-25) keeps the camera, in XR the scene's placement, and is re-measured
+   * like `contentChanged`; any other model is fitted from the front (in XR placed in front again).
+   */
   setModel(model: SceneModel | null): void;
+  /**
+   * Whether `model`, a snapshot not shown yet, continues the scene on screen (`continuesScene`, WEB-25): what
+   * `setModel` will decide for it. The node panel's local choices move to it only then (main.ts).
+   */
+  continues(model: SceneModel): boolean;
   /** Frames the visible nodes; `resetDirection` also returns to the front view (on load). */
   fit(resetDirection?: boolean): void;
   /** Requests one frame. */
   invalidate(): void;
-  /** Live updates changed the scene (WEB-12): re-measures the model for the clip planes, draws a frame. */
+  /**
+   * Live updates changed the model under the camera (WEB-12): re-measures it for the clip planes and the zoom limits,
+   * which never move the camera, and draws a frame. The next snapshot is compared with where they put it (WEB-25).
+   */
   contentChanged(): void;
   /** Re-reads the size, pixel ratio and visual viewport and renders at once (also on resize events). */
   resize(): void;
@@ -124,7 +136,10 @@ export interface XrHost {
   /** The stage's transform in the room (metres), and setting it while the user holds the scene (WEB-20). */
   stageMatrix(): Matrix4;
   setStageMatrix(matrix: Matrix4): void;
-  /** The 2D view again, camera as it was (or fitted again when the model changed meanwhile). */
+  /**
+   * The 2D view again, camera as it was: re-measured when the scene changed meanwhile, fitted from the front when
+   * another scene came (WEB-25).
+   */
   end(): void;
   /** Ends the running session, if any (the scene went away: the 2D page says why); `end` follows from it. */
   exit(): void;
@@ -149,6 +164,9 @@ export const DAMPING_FACTOR = 0.1;
 export const PRESENTATION_SCALE = 1000;
 /** Margin around the bounding sphere when fitting. */
 const FIT_MARGIN = 1.15;
+/** Zoom limits (WEB-08, WEB-09): in to 5 % of the framed radius, out to 10× the distance that fits the whole model. */
+const MIN_DISTANCE_RATIO = 0.05;
+const ZOOM_OUT_RATIO = 10;
 /** Double tap: two taps within this many ms and px; a tap is shorter than TAP_MS and moves less than TAP_PX. */
 const DOUBLE_TAP_MS = 300;
 const DOUBLE_TAP_PX = 30;
@@ -160,6 +178,27 @@ const BACKGROUND = 0x0b0f14; // --bg in style.css
 /** Clip planes in XR, in metres: a hand-held model 2 cm from the eyes, the far wall of a large room. */
 const XR_NEAR_M = 0.02;
 const XR_FAR_M = 100;
+
+/**
+ * Whether a new snapshot `next` continues the scene on screen (WEB-25), so the user's camera, and in XR the scene's
+ * placement, stays: it keeps at least one node of `previous`, and its whole extent overlaps the one shown (`extent`,
+ * `shown`: bounding spheres in stage coordinates; touching counts, as in three's `Sphere.intersectsSphere`).
+ * `nodeId` is stable for the life of the Slicer scene (§7.3), and a structure edited in Slicer re-exports the whole
+ * scene under the same ids (§8.2). Ids alone are not enough: closing a scene restarts Slicer's MRML ids, and loading
+ * a scene with a clear is one batch, so the very next snapshot can bring another scene under the old ids
+ * (docs/research/slicer-collect.md, slicer-live.md row 14). The overlap keeps such a scene, placed elsewhere, from
+ * getting a camera aimed at empty space.
+ */
+export function continuesScene(
+  previous: Pick<SceneModel, "nodes">,
+  next: Pick<SceneModel, "nodes">,
+  shown: Sphere | null,
+  extent: Sphere | null,
+): boolean {
+  if (!shown || !extent || !extent.intersectsSphere(shown)) return false;
+  for (const nodeId of next.nodes.keys()) if (previous.nodes.has(nodeId)) return true;
+  return false;
+}
 
 let webgl2: boolean | undefined;
 /** `WebGL.isWebGL2Available()`, evaluated once (each probe creates a context). */
@@ -262,6 +301,13 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
   let radius = 100; // of the framed content, in stage units (mm)
   /** The whole model, hidden nodes included: what a node panel (WEB-09) can show again without a new fit. */
   const bounds = new Sphere(new Vector3(), radius);
+  /**
+   * The whole model where it stands, in stage coordinates (metres, the same in 2D and XR): what the next snapshot is
+   * compared with (`continuesScene`, WEB-25); `null` without a model or for an empty one. Measured when a model comes
+   * and again after live updates (`contentChanged`), which can move it; kept because the previous model cannot be
+   * measured when the next one comes: the store has disposed and detached it.
+   */
+  let extent: Sphere | null = null;
   let frame: number | null = null;
   let disposed = false;
   /** The WebGL context is lost (GPU reset, memory pressure): nothing is drawn until it is restored (WEB-16). */
@@ -279,7 +325,10 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
     };
     eyeHeight: number | null;
     refit: boolean;
-    /** Live updates changed the scene: its 2D bounds are measured again at the end, in millimetres. */
+    /**
+     * Live updates, or a snapshot that continues the scene (WEB-25), changed it: its 2D bounds are measured again at
+     * the end, in millimetres.
+     */
     remeasure: boolean;
   } | null = null;
   let hidden = doc.visibilityState === "hidden";
@@ -368,15 +417,11 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
     return model ? new Box3().setFromObject(model.root) : new Box3();
   }
 
-  function fit(resetDirection = false): void {
-    if (presenting) {
-      presenting.refit = true; // the 2D camera is fitted when the session ends
-      return;
-    }
-    // Apply whatever damped motion is still settling now, so it cannot drift the new framing afterwards.
-    controls.enableDamping = false;
-    controls.update();
-    controls.enableDamping = true;
+  /**
+   * Measures the model as `fit` frames it: `radius` of the visible meshes (all of them when none is visible) and
+   * `bounds`, the whole model with its hidden nodes, in stage units (mm). Returns the sphere of the visible part.
+   */
+  function measure(): Sphere {
     const box = new Box3();
     const all = measureAll();
     // Frame what the user sees; fall back to everything when all nodes are hidden.
@@ -390,6 +435,31 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
     radius = Math.max(sphere.radius, 1);
     if (all.isEmpty()) bounds.copy(sphere);
     else all.getBoundingSphere(bounds);
+    return sphere;
+  }
+
+  /**
+   * The zoom limits for what `measure` found; zooming out can always take in the whole model, also nodes that are
+   * hidden now and shown later (WEB-09). With `keep`, the camera's distance now, they are widened to include it: the
+   * camera stays where it is, as OrbitControls clamps its distance to them on every update.
+   */
+  function setLimits(keep?: number): void {
+    const min = radius * MIN_DISTANCE_RATIO;
+    const max = Math.max(fitDistance(radius), fitDistance(bounds.radius)) * ZOOM_OUT_RATIO;
+    controls.minDistance = keep === undefined ? min : Math.min(min, keep);
+    controls.maxDistance = keep === undefined ? max : Math.max(max, keep);
+  }
+
+  function fit(resetDirection = false): void {
+    if (presenting) {
+      presenting.refit = true; // the 2D camera is fitted when the session ends
+      return;
+    }
+    // Apply whatever damped motion is still settling now, so it cannot drift the new framing afterwards.
+    controls.enableDamping = false;
+    controls.update();
+    controls.enableDamping = true;
+    const sphere = measure();
     const distance = fitDistance(radius);
     const direction = resetDirection
       ? FRONT.clone()
@@ -397,38 +467,72 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
     if (direction.lengthSq() === 0) direction.copy(FRONT);
     controls.target.copy(sphere.center);
     camera.position.copy(sphere.center).addScaledVector(direction, distance);
-    controls.minDistance = radius * 0.05;
-    // Zooming out can always take in the whole model, also nodes that are hidden now and shown later (WEB-09).
-    controls.maxDistance = Math.max(distance, fitDistance(bounds.radius)) * 10;
+    setLimits();
     controls.update();
     updateClipping();
     invalidate();
   }
 
   /**
-   * Live updates moved or removed nodes (WEB-12): the whole-model bounds behind the clip planes and the zoom-out
-   * limit follow, the camera stays where the user put it, and a frame is drawn.
+   * The model changed under the camera: live updates moved or removed nodes (WEB-12), or a new snapshot continues
+   * the scene (WEB-25). The clip planes and the zoom limits follow the model, the camera stays where the user put it
+   * (no fit; a flick that is still settling goes on), and a frame is drawn.
    */
-  function contentChanged(): void {
+  function follow(): void {
     if (presenting) {
       presenting.remeasure = true; // measured now, the bounds would be in metres at the XR position
       return;
     }
-    const all = measureAll();
-    if (!all.isEmpty()) all.getBoundingSphere(bounds);
-    controls.maxDistance = Math.max(controls.maxDistance, fitDistance(bounds.radius) * 10);
+    measure();
+    setLimits(camera.position.distanceTo(controls.target));
     updateClipping();
     invalidate();
   }
 
+  /**
+   * `m`'s whole bounding sphere (hidden nodes included) in stage coordinates, metres (§7.1): on the stage however it
+   * stands (2D or XR; turned by a grab, the room-aligned box gives a larger sphere, which still holds the model), or
+   * off it — a snapshot not shown yet, whose root's own frame is the stage's. `null` when empty.
+   */
+  function extentOf(m: SceneModel): Sphere | null {
+    const onStage = m.root.parent === stage;
+    if (onStage) stage.updateMatrixWorld(true);
+    const box = new Box3().setFromObject(m.root);
+    if (box.isEmpty()) return null;
+    const sphere = box.getBoundingSphere(new Sphere());
+    if (!onStage) return sphere;
+    stage.worldToLocal(sphere.center);
+    sphere.radius /= stage.scale.x; // scaled uniformly: × 1000 in 2D, the grab's 0.1–5× in XR
+    return sphere;
+  }
+
+  function continues(next: SceneModel): boolean {
+    return model !== null && continuesScene(model, next, extent, extentOf(next));
+  }
+
+  /** Live updates changed the model (WEB-12): a transform may have moved it, so its extent is measured again. */
+  function contentChanged(): void {
+    extent = model && extentOf(model);
+    follow();
+  }
+
   function setModel(next: SceneModel | null): void {
-    if (model && model !== next) stage.remove(model.root);
+    const previous = model;
+    // Measured before `next` is on the stage, as `continues` measures it when main.ts asks first.
+    const measured = next && extentOf(next);
+    const kept =
+      previous !== null && next !== null && continuesScene(previous, next, extent, measured);
+    if (previous && previous !== next) stage.remove(previous.root);
     model = next;
     if (model) stage.add(model.root);
     element.dataset["model"] = model ? "loaded" : "none";
+    extent = measured;
     resize(); // fit needs the current aspect (portrait phones need ≈ 2× the distance of a square view)
+    // A new snapshot of the scene on screen (Slicer exports the whole scene again when a structure is edited) keeps
+    // the user's camera, and in XR where the user put the scene: only what depends on the model follows.
+    if (kept) return follow();
     fit(true);
-    // A new scene in XR stands where the first one was put (in front, real size, unturned), whatever was grabbed.
+    // Another scene in XR stands where the first one was put (in front, real size, unturned), whatever was grabbed.
     if (presenting?.eyeHeight != null) place(presenting.eyeHeight);
   }
 
@@ -623,7 +727,7 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
       size = { width: 0, height: 0, ratio: 0 }; // WebXR set the buffer back; draw it again at once
       resize();
       if (refit) fit(true);
-      else if (remeasure) contentChanged();
+      else if (remeasure) follow();
       else invalidate();
     },
     exit() {
@@ -642,6 +746,7 @@ export function createViewer(options: ViewerOptions = {}): CreateViewerResult {
     camera,
     controls,
     setModel,
+    continues,
     fit,
     invalidate,
     contentChanged,

@@ -4,17 +4,29 @@ import type { BufferGeometry, Material } from "three";
 import { createLiveScene } from "../../src/render/apply-update";
 import { applyOpacity, parseSceneModel } from "../../src/render/scene-model";
 import type { SceneModel } from "../../src/render/scene-model";
-import { glb } from "./glb-fixtures";
+import { glb, withJson } from "./glb-fixtures";
+import type { Json } from "./glb-fixtures";
 
 const LIVER = "vtkMRMLSegmentationNode1/Segment_1";
 const TUMOR = "vtkMRMLModelNode2";
 const QUANTIZED = "vtkMRMLModelNode3";
 
-async function load(name = "asymmetric-2nodes.glb"): Promise<SceneModel> {
-  const result = await parseSceneModel(glb(name));
+async function parsed(bytes: Uint8Array): Promise<SceneModel> {
+  const result = await parseSceneModel(bytes);
   if (!result.ok) throw new Error(result.reason);
   return result.model;
 }
+
+const load = (name = "asymmetric-2nodes.glb") => parsed(glb(name));
+
+/** asymmetric-2nodes.glb exported again, with `edit` applied to the manifest entries (`T.extras`) of its nodes. */
+const reexport = (edit: (extras: { liver: Json; tumor: Json }) => void = () => undefined) =>
+  parsed(
+    withJson(glb("asymmetric-2nodes.glb"), (json) => {
+      const nodes = json["nodes"] as { extras: Json }[];
+      edit({ liver: nodes[1]!.extras, tumor: nodes[3]!.extras });
+    }),
+  );
 
 const translation = (x: number, y: number, z: number) => [
   1,
@@ -204,5 +216,88 @@ describe("removal (§8.2)", () => {
       removed: false,
       overridden: [],
     });
+  });
+});
+
+describe("a new snapshot of the scene (WEB-25)", () => {
+  it("keeps a local hide and a local opacity that the snapshot did not change", async () => {
+    const before = await load();
+    const live = createLiveScene(before);
+    before.nodes.get(LIVER)!.T.visible = false; // the node panel's switch
+    applyOpacity(before.nodes.get(TUMOR)!, 1); // its slider at 100 % (the presenter's value is 0.35)
+    before.dispose(); // the store disposes the old model before anyone hears of the new one
+    const next = await reexport();
+    expect(live.carryTo(next)).toEqual({ changed: true, removed: false, overridden: [] });
+    expect(next.nodes.get(LIVER)!.T.visible).toBe(false);
+    const tumor = next.nodes.get(TUMOR)!;
+    expect(tumor.material.opacity).toBe(1);
+    expect(tumor.material.transparent).toBe(false); // opaque again: applyOpacity
+    expect(tumor.material.depthWrite).toBe(true);
+    // The new scene's presenter values are the snapshot's: a presenter change still ends the choice carried over.
+    expect(createLiveScene(next).apply([{ nodeId: LIVER, visible: false }]).overridden).toEqual([
+      LIVER,
+    ]);
+  });
+
+  it("a property the snapshot changed takes its value and names the node; the others' choices stay (FR-40)", async () => {
+    const before = await load();
+    const live = createLiveScene(before);
+    before.nodes.get(LIVER)!.T.visible = false;
+    applyOpacity(before.nodes.get(TUMOR)!, 0.8);
+    const next = await reexport(({ tumor }) => (tumor["opacity"] = 0.6)); // changed in Slicer
+    expect(live.carryTo(next)).toEqual({ changed: true, removed: false, overridden: [TUMOR] });
+    expect(next.nodes.get(TUMOR)!.material.opacity).toBe(0.6);
+    expect(next.nodes.get(LIVER)!.T.visible).toBe(false);
+  });
+
+  it("a hide the presenter made too names the node; its other local value stays", async () => {
+    const before = await load();
+    const live = createLiveScene(before);
+    const liver = before.nodes.get(LIVER)!;
+    liver.T.visible = false;
+    applyOpacity(liver, 0.5);
+    const next = await reexport(({ liver }) => (liver["visible"] = false)); // hidden in Slicer as well
+    expect(live.carryTo(next)).toEqual({ changed: true, removed: false, overridden: [LIVER] });
+    expect(next.nodes.get(LIVER)!.T.visible).toBe(false);
+    expect(next.nodes.get(LIVER)!.material.opacity).toBe(0.5);
+  });
+
+  it("the presenter's last value includes the live updates since the snapshot", async () => {
+    const before = await load();
+    const live = createLiveScene(before);
+    live.apply([{ nodeId: TUMOR, opacity: 0.5 }]); // the presenter, live
+    applyOpacity(before.nodes.get(TUMOR)!, 0.9); // then the user
+    const next = await reexport(({ tumor }) => (tumor["opacity"] = 0.5)); // the snapshot says 0.5 too
+    expect(live.carryTo(next)).toEqual({ changed: true, removed: false, overridden: [] });
+    expect(next.nodes.get(TUMOR)!.material.opacity).toBe(0.9);
+  });
+
+  it("another name under the same id, or no node in common, carries nothing", async () => {
+    const before = await load();
+    const live = createLiveScene(before);
+    before.nodes.get(LIVER)!.T.visible = false;
+    const renamed = await reexport(({ liver }) => (liver["name"] = "Liver (left lobe)"));
+    expect(live.carryTo(renamed)).toEqual({ changed: false, removed: false, overridden: [] });
+    expect(renamed.nodes.get(LIVER)!.T.visible).toBe(true);
+    const other = await load("quantized-1node.glb");
+    expect(live.carryTo(other)).toEqual({ changed: false, removed: false, overridden: [] });
+  });
+
+  it("under hidden names, numbered in export order (§7.3), the id alone decides", async () => {
+    const SEGMENT_2 = "vtkMRMLSegmentationNode1/s_2";
+    const anonymized = glb("anonymized-segments.glb");
+    const before = await parsed(anonymized);
+    const live = createLiveScene(before);
+    before.nodes.get(SEGMENT_2)!.T.visible = false;
+    // The segments were reordered in Slicer: their substitute names swap.
+    const reordered = await parsed(
+      withJson(anonymized, (json) => {
+        const nodes = json["nodes"] as { extras: Json }[];
+        nodes[1]!.extras["name"] = "Segment 2";
+        nodes[3]!.extras["name"] = "Segment 1";
+      }),
+    );
+    expect(live.carryTo(reordered).changed).toBe(true);
+    expect(reordered.nodes.get(SEGMENT_2)!.T.visible).toBe(false);
   });
 });
