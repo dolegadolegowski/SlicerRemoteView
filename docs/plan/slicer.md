@@ -60,7 +60,7 @@ module self-test in Slicer. Rule 10 of `CLAUDE.md` applies: never claim a Slicer
 | SLC-37 | Reconnect in the panel (split from SLC-17): `Phase.RECONNECTING` keeps the code, link and Stop; `session.resume` on `Connected`; back to Live with the same `LiveUpdates` and observers; statuses for a lost connection and a restarting relay (4008, sticky for the outage); the window `min(graceS, 600) + 60 s` after the loss on the monotonic **and** the wall clock (suspend), checked before anything is sent (T1) and the 15 s answer deadline end the session; `UNAUTHORIZED` → "Session lost"; `SESSION_NOT_FOUND` → "ended while offline"; Stop offline ends at once with a text. | M2 | SLC-35, SLC-36, SLC-09 | 1. Panel tests (fake transport, fake clocks): drop → reconnecting with the same code → resume → Live; window boundary at `graceS + 60 s`; a `Connected` after the window or after a wall-clock jump sends nothing; no answer → ended; unauthorized → "Session lost", no `session.close`; Stop offline/resuming; no code or token in logs (T7). Size ≈ 680 (code ≈ 200). | `pytest slicer-plugin -k "panel and resume"` | done |
 | SLC-41 | Date the outage from the connection's last sign of life (SLC-37 review): the transport dates the loss of an open connection on the wall clock (`Disconnected.lost_at`): when it noticed the loss (heartbeat, a read or send error, a close), less the wall-clock time its monotonic clock did not see (a sleep, where that clock stops), and no later than the longest silence the heartbeat allows after the last frame received, pongs included (≈ 212 s with a slow uplink's allowance; for a monotonic clock that runs on through a sleep, as on Windows); the panel starts the reconnect window there on both clocks, so a sleep that begins while Live and outlasts the window (on Windows, about `MAX_SILENCE_S` plus the window) ends the session once the drop is reported after the wake, with nothing sent (T1); a drop noticed in time keeps today's window, and a main thread that handles a drop late no longer stretches it. | M2 | SLC-37 | 1. Transport: the dating rule (awake; asleep with the monotonic clock stopped or running on; the wall clock back); `lost_at` for a lost connection, refreshed by every frame received (not by a send), none for a failed attempt or a stop; a loss noticed after a long upload silence dated when noticed. 2. Panel: a drop dated before the wake of a 3 h sleep → nothing sent, `RECONNECT_GAVE_UP`, also with a `Connected` in the same tick; the window from the dated loss on both clocks, a loss dated in the future not lengthening it; a later drop of the resume's connection does not move it. Size ≈ 250. | `pytest slicer-plugin -k "loss or lost or sign_of_life or silence or clock or terminal_close or panel_resume"` | done |
 | SLC-38 | Relay restart and the scene's texts across a reconnect (split from SLC-17; SLC-09 and SLC-32 reviews): after `SESSION_NOT_FOUND` **and only when close 4008 was seen in this outage, inside the window**, the panel stops the live updates and sends `session.create{preferredCode: <old code>}` on the same socket (again on the next connection if lost); a new session goes live afresh (versions from 1, new watcher, snapshot v1, §8.4); a different code is shown with a note that stays (T4); texts for a snapshot interrupted by the drop and a closed scene still on the viewers; the old code is never sent after Stop (T1). Gap: a relay crash without 4008 ends the session (report). | M2 | SLC-37, SLC-41 | 1. Criterion 1, panel side: 4008 → resume → `SESSION_NOT_FOUND` → `session.create{preferredCode}` → `created` → `begin` v1, observers attached once; without a 4008, or after the window, no create. 2. `test_panel_live`: lost snapshot re-sent, accepted one not, reset first, a reset in flight adopted once, a reset failing at the first tick after the resume ends the session from the pump. Size ≈ 550. | `pytest slicer-plugin -k "panel and resume"` | done |
-| SLC-39 | Resume end to end and manual §7 (split from SLC-17): `relay_stub.mjs` `--grace-ms`, `--ignore-preferred-code`, `--report-sessions` (per handshake: first type, preferredCode none/previous/other, frames as types and versions only) and stdin commands `restart`, `close-publisher`, `pongs on|off|off-until-handshake`, `status`; `NodeProcess` with a reader thread and `command()`; jitter, drop and transport helpers; `docs/testing/slicer.md` §7; report to `tools/fake-slicer`. | M2 | SLC-38 | 1. Stub scenarios: relay restart → Live with the same code within 5 s (worst-case jitter); heartbeat loss → resume, no second snapshot, versions continue; a snapshot cut before its end → re-sent; an ack lost → not re-sent; grace ended → the session ends, no create. 2. Manual §7: Wi-Fi off 40 s → code unchanged, viewers resume (FR-14); sleep ≥ 10 min at the default grace (Windows: more than about 6.5 min, SLC-41) → nothing sent, `RECONNECT_GAVE_UP` up to about 25 s after the wake. Size ≈ 635. | `pytest slicer-plugin -k resume_e2e` · manual: `docs/testing/slicer.md` §7 | todo |
+| SLC-39 | Resume end to end and manual §7 (split from SLC-17): `relay_stub.mjs` `--grace-ms`, `--ignore-preferred-code`, `--report-sessions` (per handshake: first type, preferredCode none/previous/other, frames as types and versions only) and stdin commands `restart`, `close-publisher`, `pongs on|off|off-until-handshake`, `status`; `NodeProcess` with a reader thread and `command()`; jitter, drop and transport helpers; `docs/testing/slicer.md` §7; report to `tools/fake-slicer`. | M2 | SLC-38 | 1. Stub scenarios: relay restart → Live with the same code within 5 s (worst-case jitter); heartbeat loss → resume, no second snapshot, versions continue; a snapshot cut before its end → re-sent; an ack lost → not re-sent; grace ended → the session ends, no create. 2. Manual §7: Wi-Fi off 40 s → code unchanged, viewers resume (FR-14); sleep ≥ 10 min at the default grace (Windows: more than about 6.5 min, SLC-41) → nothing sent, `RECONNECT_GAVE_UP` up to about 25 s after the wake. Size ≈ 635. | `pytest slicer-plugin -k resume_e2e` · manual: `docs/testing/slicer.md` §7 | done |
 | SLC-40 | Idle renewal on panel activity (split from SLC-17; SLC-06 review, branch audit, security review): `session.expiring` validated and recorded; the panel renews automatically once when a panel button was used within 5 min, otherwise (and after that once) shows "Keep session" with a button; scene flushes, reconnects and opening the module are not activity; the client's `auto_renew` default unchanged (report to `release`). | M2 | SLC-37 | 1. Panel tests: renew after a recent click; flushes/reconnects alone → text and button, no renew; second expiring → button; button → `session.renew`; renewed clears it. 2. Manual §7 step 12. Size ≈ 370. | `pytest slicer-plugin -k renew` · manual: `docs/testing/slicer.md` §7 | todo |
 
 ## Follow-ups / later milestones
@@ -799,6 +799,63 @@ module self-test in Slicer. Rule 10 of `CLAUDE.md` applies: never claim a Slicer
   further 4008, next to `RELAY_RESTARTED` (a second "The relay restarted" sentence). Every combination is true, but
   which code is meant is not obvious: say "The code shown stays the same", or give the note a reconnect variant that
   points at the code shown.
+- (SLC-39) Resume end to end and manual §7: `tests/relay_stub.mjs` gains `--grace-ms`, `--ignore-preferred-code` and
+  `--report-sessions` (one entry per publisher handshake: first message, `preferredCode` none/previous/other,
+  `lastSceneVersion`, its frames as types and versions only — no code, token, ID or payload) and reads commands from its
+  input (`restart`, `close-publisher <code>`, `pongs on|off|off-until-handshake`, `status`), answering one line each
+  [plan correction: `restart` and `close-publisher` answer `ok` also without a session or publisher — the stub does not
+  say; `status` also counts updates, the sync point a test needs before Stop, which drops queued frames];
+  `support.NodeProcess` has one reader thread and `command()`; `support.stub_transport` builds `RelayTransport`s with a
+  pinned `rng` (`WorstJitter`, `LeastJitter`), test knobs, one outbound or inbound frame to drop and a record of the
+  frame types the panel sent and of each `stop`. `tests/test_resume_e2e.py` (the `Rig` of `test_panel_live.py`, real
+  transport and watcher, ≈ 8.5 s): a relay restart is Live again with the same code within 5 s at the longest retry
+  delay (≈ 3.1 s from the drop, at least the 3 s jitter bound; create none, resume, create previous); without the old
+  code the new one shows with `NEW_CODE`; unanswered pings resume the session and the next update continues the
+  versions; a snapshot whose end was lost is sent again on a new version after the resume; one whose ack was lost is
+  adopted, not uploaded again; a grace that ended gives `SESSION_GONE_OFFLINE`, no second create and nothing from the
+  panel after the refused resume, not even `session.close` (T1). No code, token, ID or name reaches the log, the test's
+  output or the stub's report. Manual `docs/testing/slicer.md` §7 (11 steps) with §2's relays: (a) the stub, loopback
+  without TLS, so panel texts and its report only; (b) the deployed relay, the only one Wi-Fi or a sleep separates from
+  Slicer, for the phone checks; (c) the local relay-server for the restart; the steps that need `session.resume` or the
+  4008 drain of `relay-server` (SRV-15, SRV-17, both `todo`) are marked blocked until then (relay-server answers a
+  resume `UNSUPPORTED_TYPE` and closes the unbound socket with 4012 after 10 s, so the panel resumes again and again
+  until its window ends and gives up after about 3 minutes). Step 4 closes the scene with `slicer.mrmlScene.Clear(0)`
+  and loads the large scene in one console line, so that the cut snapshot is the closed scene's (Slicer's *File → Close
+  Scene* calls `mrmlScene()->Clear(false)`, and `vtkMRMLScene::Clear` runs the close state inside a batch:
+  `Base/QTApp/qSlicerMainWindow.cxx` `on_FileCloseSceneAction_triggered`, `Libs/MRML/Core/vtkMRMLScene.cxx`
+  `Clear`/`StartState`, `vtkMRMLScene.h` `CloseState`, Slicer `main`). §6's known gap on a reset at a drop is gone.
+  Report `2026-10-28-slicer-2.md` (R2) for `tools/fake-slicer`: the wrapper reaches into the stub's `handshakes` and
+  options, its `ttl.graceS` ignores `publisherGraceMs`, and a ping in the `SESSION_NOT_FOUND` fallback window drops the
+  create (also a question for SRV-15). Reviewed in three rounds (three lenses with adversarial verification): the four
+  confirmed mediums of round 1 were all in manual §7 — relays (b) and (c) cannot resume before SRV-15/SRV-17, step 4 cut
+  an update rather than the closed scene's snapshot, phone checks against the loopback stub, and Wi-Fi and sleep steps
+  against a relay on the same machine — and were fixed with the lows applied (the jitter bound asserted, a sync point
+  before the cut, the ack test pumped before its check, the stub's report searched for secrets, the T1 record,
+  `NodeProcess.finish` no longer waiting 5 s more or raising `BrokenPipeError`, the close codes `ws` allows, the
+  report's base commit, cross-reference and notes, §7's relay letters). Round 2 (security approved): the acceptance and
+  quality lenses confirmed one medium the round-1 fix brought in — §7 said a blocked step ends after 15 s with "did not
+  answer" — fixed; lows applied: the restart timed from before the command, every stop checked and the stop record given
+  a positive control, `NodeProcess.finish` not waiting for an end already read, steps 1, 5, 6, 8, 9 and 10 made
+  executable as written (only step 1's second half is blocked; back to the two models and the stub's own address after
+  step 4; Slicer's threads instead of a relay log that shows no connections at its default level), synthetic data only
+  and (c)'s unencrypted listener said. Round 3: all three lenses approved; lows applied after it (steps 5, 6 and 9
+  worded as executed, the 4012 traced to relay-server's handshake timer, the timing assert split from the code check,
+  the harness test through the public start path), checked by a narrow delta review. Mutants: 15 on the test harness
+  (`relay_stub.mjs`, `support.NodeProcess`, `support.stub_transport`), all killed — one only after the heartbeat test
+  kept the resumed link up for five more pings, seven added in the review (a report holding the code, the send and stop
+  records, a stop record that always says none, an unpinned jitter, an ack that is not dropped, a `finish` that waits
+  for an end already read, which a new harness test for a stub that cannot start kills). SLC-39 is ~820 changed lines
+  (no production code; ≈ 605 tests and test harness, ≈ 215 docs): over rule 3's ≈ 300 (the row said ≈ 635) because of
+  the harness and manual §7.
+- (SLC-39 review, low) The e2e resume tests import `Rig`, `NAMES` and `recolor` from `test_panel_live.py` (the only
+  import between test modules): move them into `support.py`. A Node-only test of `relay_stub.mjs` would pin what the e2e
+  tests cannot reach: a bad command answers `error …`, a `preferredCode` that is neither none nor the previous code
+  reports `other`, a close code `ws` refuses answers `error bad code`.
+- (SLC-39 review round 2, low) For SLC-37's texts (or SLC-21): `RESUME_NO_ANSWER` ends a session whose resume went
+  unanswered, and its `session.close` goes out on the still unbound resume socket, where a relay refuses it; the relay
+  then keeps the session and its scene until its grace ends, but the text, unlike `STOPPED_OFFLINE` and
+  `FINAL_NOT_SENT`, does not add `RELAY_HOLDS_SESSION`. Add it (with a unit test), as the panel's rule asks: while the
+  relay may keep the session, the texts say who can still see the scene.
 - (SLC-36, low, *done in SLC-37*) For SLC-37: `FINAL_NOT_SENT` (and `RESUME_LATER`, which SLC-37 removes) still says
   "up to 2 minutes" — the relay's default grace — while the reconnect texts say "a few minutes"; use
   `RELAY_HOLDS_SESSION` there too when SLC-37 touches the stop path.

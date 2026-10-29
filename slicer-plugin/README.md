@@ -139,7 +139,7 @@ the repository root (Node 22). Without it those tests are skipped (`pytest -rs` 
 The TLS tests of `test_transport.py` make self-signed certificates with the `openssl` CLI and are skipped without it;
 set `REMOTEVIEW_REQUIRE_OPENSSL=1` (CI; report 2026-10-20-slicer-2) to make them fail instead.
 `tests/test_panel.py`, `tests/test_snapshot.py`, `tests/test_panel_snapshot.py`, `tests/test_scene_updates.py` and
-`tests/test_panel_live.py` also run the panel, a snapshot, scene updates and the live panel end to end against the relay stub of `tools/fake-slicer` (Node 22 and
+`tests/test_panel_live.py` also run the panel, a snapshot, scene updates and the live panel end to end against the relay stub of `tools/fake-slicer`, and `tests/test_resume_e2e.py` the resume, a relay restart and a lost heartbeat through it (SLC-39; `relay_stub.mjs` takes commands on its input — `restart`, `close-publisher <code>`, `pongs …`, `status` — and `--report-sessions` prints one entry per publisher handshake) (Node 22 and
 `npm run build -w shared -w tools/fake-slicer` at the repository root; `tests/relay_stub.mjs` starts it); they are skipped
 without them — set `REMOTEVIEW_REQUIRE_RELAY_STUB=1` (CI) to make them fail instead (the same variable covers the
 Node-only `tests/test_throttle_proxy.py`). `tests/throttle_proxy.mjs`, a TCP

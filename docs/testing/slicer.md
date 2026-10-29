@@ -666,12 +666,116 @@ Steps:
     - No publisher token anywhere (a 43+ character `[A-Za-z0-9_-]` string on a RemoteView line).
 
 Known gaps (not failures):
-- A reset not acknowledged when the connection drops stays on the viewers until the session is resumed (then it
-  goes first, SLC-35) or the relay's grace ends; the panel says so while reconnecting (SLC-38).
 - An error answering an update with a busy code shows "Updating the scene" during the relay's wait (SLC-18).
 - A Close Scene missed off the main thread is not handled as a reset: if the new scene is too large, the closed one
   stays on the viewers, and a snapshot of the closed scene already in flight is not superseded.
 - Events off the main thread that keep coming re-send the whole scene about every 60 s (SLC-33).
+
+| Date | Slicer version | OS | Result | Tester |
+|---|---|---|---|---|
+| | | | | |
+
+## §7 Resume and reconnect (SLC-37, SLC-38, SLC-39; FR-14, US-05, NFR-20, protocol §4.3, §6.3, §8.4, §9.1, §9.3; T1, T4)
+
+Preconditions: §2's setup, with its relays (a), (b) and (c); §6's helpers and two of its synthetic models shown in 3D
+(`spheres(2)`; never patient data in §7); a large scene for
+steps 3 and 4: §2 step 16's snippet run in a new scene with its function renamed `big_spheres` (so that it does not
+replace §6's `spheres`) — five spheres, about 5.8 MB. Write down every session code shown; step 11 searches the logs
+for them.
+- (a) the stub with the resume report —
+  `node slicer-plugin/tests/relay_stub.mjs --port 8787 --grace-ms 120000 --report-sessions --report-updates` — whose
+  commands are typed into its input (`restart`, `close-publisher 1001`, `pongs off-until-handshake`, `status`; each
+  answers `ok…`); when its input ends it prints its summary, the update report and, last,
+  `{"sessions": [{"first": …, "preferredCode": …, "lastSceneVersion": …, "frames": [...]}, …], "violations": [...]}`
+  (one entry per handshake; no code, token or name in it). It listens on 127.0.0.1 without TLS: no phone or viewer can
+  join it, so its steps check the panel and the report only, and every one of them expects `violations == []`. Never
+  expose it beyond the loopback interface.
+- (b) the deployed relay with its viewer page and a phone joined with the code: the only relay that turning Wi-Fi off
+  or a sleep separates from this computer, and the one for the visual checks.
+- (c) `relay-server` and `web-viewer` on this machine, the viewer page at `http://localhost:5173`: Wi-Fi and sleep do
+  not separate it from Slicer, so it serves the restart step only. It listens unencrypted on every interface (§2):
+  sample data only, or a host firewall.
+
+Until `relay-server` answers `session.resume` (SRV-15, with the socket kept open 10 s after `SESSION_NOT_FOUND`) and
+closes with 4008 on SIGTERM (SRV-17) — both `todo` in `docs/plan/server.md` — relays (b) and (c) answer a resume with
+`UNSUPPORTED_TYPE` and close the socket with 4012 10 s after it opened (no session is bound to it: the handshake timer
+of `relay-server/src/ws/endpoint.ts`). The panel then resumes again on every new connection ("Reconnecting to the
+session…", "Connection lost — reconnecting in N s.") until its reconnect window ends, about 3 minutes after the loss at
+the default 120 s grace, and shows "Session ended." with "The connection to the relay was lost for too long, …" and
+"Anyone with the code can still see the last scene …" (relay (b) keeps the session until its grace ends). Record the
+steps marked *[SRV-15]* as blocked, not failed. Every step expects no traceback in the Python console.
+
+Steps:
+
+1. **Wi-Fi off for 40 s** (FR-14; relay (b)). Click *Start*, wait for "Live", turn Wi-Fi off.
+   Expected: within 25 s the status reads "Connection lost — reconnecting in N s.", the same code, QR code and
+   Presentation window stay, *Stop* stays enabled; the viewer may show the presenter as offline (the relay notices the
+   loss within 30–60 s, §9.1). Turn Wi-Fi on (*[SRV-15]* from here). Expected: within 40 s (the retry delay grows to
+   30 s) "Live · 1 viewer.", the same code, no "Sending the scene" (nothing is uploaded again); a colour change then
+   reaches the phone.
+2. **Edits while offline** (relay (b); *[SRV-15]*). As step 1, but change a colour and hide a model while Wi-Fi is off.
+   Expected: both reach the phone within 2 s of "Live"; no snapshot is sent again (the panel never shows
+   "Updating the scene").
+3. **Cut while "Sending the scene"** (relay (a) behind §2 step 16's throttle proxy, so that the upload of the large
+   scene lasts at least 10 s). Load the large scene, click *Start*; while "Sending the scene" shows, type
+   `close-publisher 1001`. Expected: "Connection lost — reconnecting…" with "Sending the scene was interrupted:
+   RemoteView sends it again once reconnected."; after the reconnect "Sending the scene", then "Live". The report's
+   resume entry starts with `["scene.snapshot.begin", v]` for a version above the cut one. Repeat once with relay (b)
+   (*[SRV-15]*), turning Wi-Fi off during the upload: after the reconnect the phone shows the whole scene.
+4. **Close the scene while it is sent, then cut** (relay (a) behind the throttle proxy of step 3). With the large
+   scene loaded click *Start* and wait for "Live"; then run `slicer.mrmlScene.Clear(0); big_spheres()` in the Python
+   console, in one line — `Clear(0)` is what *File → Close Scene* does (`qSlicerMainWindow`), and the new spheres are
+   added before the closed scene's snapshot is made, so that snapshot takes long to upload — and, while "Updating the
+   scene" shows, type `close-publisher 1001`. Expected: while reconnecting the panel says "Sending the scene was
+   interrupted: …" and "The scene was closed in Slicer, but anyone with the code still sees it until RemoteView
+   reconnects, …"; after the reconnect the first frame of the resume entry is `scene.snapshot.begin`. Repeat once with
+   relay (b) (*[SRV-15]*), turning Wi-Fi off while "Updating the scene" shows: after the reconnect the phone shows the
+   new spheres and never the closed models again.
+5. **Relay restart.** From here on relay (a) is reached at its own address (`ws://127.0.0.1:8787/ws`, no throttle
+   proxy); first run `slicer.mrmlScene.Clear(0); spheres(2)` for the two models of the preconditions. (a) Wait for
+   "Live", type `restart`. Expected: within 5 s "Live" again with the same code; while reconnecting the panel says "The
+   relay restarted: RemoteView starts the session again, …"; "Sending the scene", then "Live" (the scene is uploaded
+   again: a restarted relay keeps none). Report: `create none`, `resume`, `create previous`. (c) (*[SRV-15]*, SRV-17)
+   Stop the local relay-server (SIGTERM) and start it again within 3 s. Expected: the same code; the viewer page rejoins
+   by itself.
+6. **Restart without the old code** (relay (a) started with `--ignore-preferred-code` added). Type `restart`. Expected:
+   a new code in the panel, the QR code and the Presentation window, with "The relay restarted and could not keep the
+   old code: give the viewers the new code. …" until the session ends. Type `close-publisher 1001`: the note stays while
+   reconnecting (under a second against the stub: watch the detail line).
+7. **Lost longer than the window.** (a) Stop the stub (Ctrl-C) and leave it stopped for 190 s. Expected: the panel
+   keeps "Connection lost — reconnecting…" (every attempt fails); 180 s after the loss "Session ended." with "The
+   connection to the relay was lost for too long, so RemoteView stopped the session. …". Start the stub again on the
+   same port: nothing reaches it (its report has no entry). (b) Wi-Fi off for 4 minutes with relay (b): the same
+   ending; the relay's `/healthz` shows 0 sessions after Wi-Fi returns. (c) Relay (a) started with `--grace-ms 50`:
+   type `close-publisher 1001`. Expected: "Session ended." with "The relay ended the session while RemoteView was
+   offline. …"; the report has `create none` and `resume`, and no second create (a relay that ended the session is
+   not asked for its code again: it may belong to another session).
+8. **Stop while offline** (relay (b)). Wi-Fi off, wait for "Connection lost", click *Stop*. Expected: at once "Session
+   ended." with "RemoteView was not connected to the relay when you stopped. Anyone with the code can still see the last
+   scene until the relay ends the session, after a few minutes."; 3 s later, and again after Wi-Fi returns, no
+   `RemoteView-transport` thread (`[t.name for t in threading.enumerate()]`): nothing can connect. With relay (a): type
+   `close-publisher 1001` and click *Stop* right after the reconnect ("Live" again); the closes count is `1`.
+9. **Laptop sleep** (relay (b)), while "Live" with no edits in progress. Sleep for 1 minute (*[SRV-15]*): after waking
+   the session resumes with the same code. Sleep for 10 minutes: within about 25 s of waking (when the next ping finds
+   the connection gone) "Session ended." with the "lost for too long" text and nothing more (no "Anyone with the code
+   …": no resume went out), and **no frame goes out** after the wake (the reconnect window starts at the connection's
+   last sign of life before the sleep, SLC-41; with the relay at `LOG_LEVEL=debug`, no `websocket closed` line with
+   `role: "publisher"` after the wake — a resume or a create sets that role).
+10. **Reload or exit while reconnecting** (relay (b) with Wi-Fi off, or relay (a) stopped with Ctrl-C). Wait for
+    "Connection lost", then *Developer → Reload*. Bring the relay back, click *Start*, wait for "Live", cut it again
+    the same way and, while reconnecting, *File → Exit*. Expected: no traceback; no `RemoteView-transport` thread 3 s
+    after the reload (`[t.name for t in threading.enumerate()]`); *Start* works after the reload; Slicer exits within
+    3 s.
+11. **Logs** (T7). As §6 step 15, after steps 1-10: no session code written down here, no publisher token (`pt_…`),
+    no `sess_` session ID and no `Doe` on any RemoteView line.
+
+Known gaps (not failures):
+- A relay that crashes without close 4008 and comes back without the session ends it (`SESSION_NOT_FOUND`, no
+  re-create; report `2026-10-28-slicer-1.md` item 4).
+- A fallback create refused by the relay (`CAPACITY`, `RATE_LIMITED`) ends the session; there is no retry loop.
+- On Windows a sleep of roughly 3 to 6.5 minutes (default grace) still resumes at the wake and ends with "The relay
+  ended the session while RemoteView was offline."; a frame that reached Slicer before the sleep but is read only
+  after the wake dates the loss at the wake (SLC-41, `docs/research/slicer-sleep-clocks.md`).
 
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|

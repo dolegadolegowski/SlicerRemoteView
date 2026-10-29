@@ -6,10 +6,12 @@ Pure test code: importing it starts nothing. Fixtures that use these fakes live 
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import json
 import os
 import queue
+import random
 import shutil
 import struct
 import subprocess
@@ -25,7 +27,7 @@ from vtkmodules.vtkCommonCore import vtkObject
 from vtkmodules.vtkFiltersSources import vtkSphereSource
 
 from remoteview_core.protocol_client import ProtocolClient, SessionState, make_client_info
-from remoteview_core.transport import check_relay_url
+from remoteview_core.transport import RelayTransport, check_relay_url
 from remoteview_core.vendored import chunk_header
 from remoteview_protocol import envelope
 
@@ -94,7 +96,9 @@ def validate_glb(tmp_path: Path, files: dict[str, bytes]) -> dict:
 class NodeProcess:
     """A helper script run by Node (fixed argv: ``node`` and repository files); its first stdout line is its address.
 
-    :meth:`finish` closes its stdin, which makes the script print its summary and exit; a script that hangs is killed.
+    One reader thread owns the script's stdout and queues its lines. :meth:`command` writes one line to the script and
+    returns its one-line answer (the relay stub's commands, SLC-39); :meth:`finish` closes its stdin, which makes the
+    script print its summary and exit; a script that hangs is killed.
     """
 
     def __init__(self, script: str, *args: str) -> None:
@@ -104,28 +108,55 @@ class NodeProcess:
             stdout=subprocess.PIPE,
             text=True,
         )
+        self._lines: queue.Queue[str | None] = queue.Queue()
+        self._ended = False  # the reader reached the end of the output
+        threading.Thread(target=self._read, daemon=True).start()
         self.output: str | None = None
-        self.address = self._first_line(timeout=15)
+        self.address = (self._line(timeout=15) or "").strip()
 
-    def _first_line(self, timeout: float) -> str:
-        """The first line the script prints, or ``""`` after ``timeout`` s (never hangs)."""
-        lines: queue.Queue[str] = queue.Queue()
-        threading.Thread(
-            target=lambda: lines.put(self._process.stdout.readline()), daemon=True
-        ).start()
+    def _read(self) -> None:
+        stdout = self._process.stdout
+        if stdout is not None:
+            with stdout:
+                for line in stdout:
+                    self._lines.put(line)
+        self._lines.put(None)  # end of output
+
+    def _line(self, timeout: float) -> str | None:
+        """The next line the script prints, or ``None`` at its end or after ``timeout`` s (never hangs)."""
         try:
-            return lines.get(timeout=timeout).strip()
+            line = self._lines.get(timeout=timeout)
         except queue.Empty:
-            return ""
+            return None
+        self._ended = self._ended or line is None
+        return line
+
+    def command(self, line: str, timeout: float = 10) -> str:
+        """Send one command line; its answer, which must start with ``ok``."""
+        stdin = self._process.stdin
+        assert stdin is not None and self.output is None, "the script has finished"
+        stdin.write(f"{line}\n")
+        stdin.flush()
+        answer = (self._line(timeout) or "").strip()
+        assert answer.startswith("ok"), f"{line!r} answered {answer!r}"
+        return answer
 
     def finish(self) -> str:
-        """Close stdin and return what the script printed after its first line (idempotent)."""
+        """Close stdin and return what the script printed after its first line and its answers (idempotent)."""
         if self.output is None:
-            try:
-                self.output, _ = self._process.communicate(timeout=10)
-            except subprocess.TimeoutExpired:
-                self._process.kill()
-                self.output, _ = self._process.communicate()
+            if self._process.stdin is not None:
+                with contextlib.suppress(BrokenPipeError):  # a script that died
+                    self._process.stdin.close()
+            lines: list[str] = []
+            deadline = time.monotonic() + 10
+            while not self._ended and (line := self._line(max(0.0, deadline - time.monotonic()))):
+                lines.append(line)
+            if not self._ended:
+                self._process.kill()  # a script that hangs
+                while (line := self._line(5)) is not None:
+                    lines.append(line)
+            self._process.wait(timeout=10)
+            self.output = "".join(lines)
         return self.output
 
 
@@ -144,6 +175,70 @@ def start_relay_stub(*options: str) -> NodeProcess:
         "ws://127.0.0.1:",
         "the relay stub",
     )
+
+
+class WorstJitter(random.Random):
+    """The transport's retry delays at their longest (``uniform`` → its upper bound): timing tests stay honest."""
+
+    def uniform(self, a: float, b: float) -> float:
+        return b
+
+
+class LeastJitter(random.Random):
+    """The transport's retry delays at their shortest (``uniform`` → its lower bound): quick, still realistic."""
+
+    def uniform(self, a: float, b: float) -> float:
+        return a
+
+
+def stub_transport(*, rng: random.Random, drop_out=None, drop_in=None, **knobs: Any):
+    """A transport factory for the panel against the relay stub (no proxy, the given ``rng`` and ``knobs`` such as
+    ``ping_interval``). ``drop_out(frame)`` swallows the first outbound frame it matches, as if lost on the way
+    (``transport.dropped_out``); ``drop_in(event)`` swallows the first inbound ``Received`` it matches
+    (``transport.dropped_in``). ``transport.sent_types`` lists ``(connection, type)`` for every frame the panel handed
+    to ``send`` (``"chunk"`` for binary ones) and ``(None, "stop:<type of the final message or none>")`` for each
+    ``stop``. ``factory.made`` lists the transports built."""
+    made: list[RelayTransport] = []
+
+    def factory(
+        url: str, events: queue.Queue, *, extra_ca_file: str | None = None
+    ) -> RelayTransport:
+        transport = RelayTransport(url, events, use_proxy=False, rng=rng, min_uplink=1e12, **knobs)
+        transport.dropped_out = transport.dropped_in = False  # type: ignore[attr-defined]
+        sent_types: list[tuple[int | None, str]] = []
+        transport.sent_types = sent_types  # type: ignore[attr-defined]
+        if drop_in is not None:
+            put = events.put
+
+            def put_unless_dropped(event: Any, *args: Any, **kwargs: Any) -> None:
+                if not transport.dropped_in and drop_in(event):  # type: ignore[attr-defined]
+                    transport.dropped_in = True  # type: ignore[attr-defined]
+                    return
+                put(event, *args, **kwargs)
+
+            events.put = put_unless_dropped  # type: ignore[method-assign]  # the worker thread puts here
+        send, stop = transport.send, transport.stop
+
+        def send_unless_dropped(frame: Any, *, connection: int) -> bool:
+            kind = frame.get("type", "?") if isinstance(frame, dict) else "chunk"
+            sent_types.append((connection, kind))
+            if drop_out is not None and not transport.dropped_out and drop_out(frame):  # type: ignore[attr-defined]
+                transport.dropped_out = True  # type: ignore[attr-defined]
+                return True
+            return send(frame, connection=connection)
+
+        def recorded_stop(final: Any = None, **kwargs: Any) -> Any:
+            kind = final.get("type", "?") if isinstance(final, dict) else "none"
+            sent_types.append((None, f"stop:{kind}"))
+            return stop(final, **kwargs)
+
+        transport.send = send_unless_dropped  # type: ignore[method-assign]
+        transport.stop = recorded_stop  # type: ignore[method-assign]
+        made.append(transport)
+        return transport
+
+    factory.made = made  # type: ignore[attr-defined]
+    return factory
 
 
 def start_throttle_proxy(target: NodeProcess | str, rate: int) -> NodeProcess:
