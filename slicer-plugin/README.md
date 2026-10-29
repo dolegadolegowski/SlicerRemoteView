@@ -60,7 +60,8 @@ Requires 3D Slicer **5.12.x** (Python 3.12).
 4. Optional: enable *Edit → Application Settings → Developer → Enable developer mode* to get the
    *Reload and Test* buttons in the module panel.
 
-The manual checks are in `docs/testing/slicer.md` (§1 module loads; §6 live changes; §13 segments).
+The manual checks are in `docs/testing/slicer.md` (§1 module loads; §6 live changes; §7 resume and reconnect; §13
+segments).
 
 ## Offline installation of the Python packages
 

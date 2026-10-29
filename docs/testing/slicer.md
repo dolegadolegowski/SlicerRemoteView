@@ -262,8 +262,9 @@ Expected results:
   quantised, `KHR_mesh_quantization` — SLC-12), then "Live"; the viewer then shows the five spheres; the panel never
   shows "Relay unreachable", "Connection lost" or "Session ended" on the way, the console shows no reconnect, and the
   proxy passed about 5.8 MB. With the old fixed 10 s deadline the first `ping` (at 15 s) would have been late and the
-  connection cut about 25 s in ("Relay unreachable"). A relay that closes the connection on its own WebSocket ping
-  (SRV-14, report `2026-10-20-slicer-7`) would show as a reconnect here: note it.
+  connection cut about 25 s in ("Relay unreachable"). `relay-server` counts the chunks as signs of life while Slicer's
+  pong to its WebSocket ping waits behind them (SRV-27; closing run in report `2026-10-20-slicer-7`); a relay deployed
+  before SRV-27 may close the connection with 4009 during the upload, which shows as a reconnect here: note it.
 - Step 16, stop during the upload: the panel leaves "Sending the scene". The stop message waits behind the bytes already
   written (several MB at 1 Mbit/s), so after 2 s the connection is aborted and the panel says the stop message could
   not be sent and that anyone with the code can still see the last scene until the relay ends the session, after a
@@ -696,14 +697,14 @@ for them.
   not separate it from Slicer, so it serves the restart step only. It listens unencrypted on every interface (§2):
   sample data only, or a host firewall.
 
-Until `relay-server` answers `session.resume` (SRV-15, with the socket kept open 10 s after `SESSION_NOT_FOUND`) and
-closes with 4008 on SIGTERM (SRV-17) — both `todo` in `docs/plan/server.md` — relays (b) and (c) answer a resume with
-`UNSUPPORTED_TYPE` and close the socket with 4012 10 s after it opened (no session is bound to it: the handshake timer
-of `relay-server/src/ws/endpoint.ts`). The panel then resumes again on every new connection ("Reconnecting to the
-session…", "Connection lost — reconnecting in N s.") until its reconnect window ends, about 3 minutes after the loss at
-the default 120 s grace, and shows "Session ended." with "The connection to the relay was lost for too long, …" and
-"Anyone with the code can still see the last scene …" (relay (b) keeps the session until its grace ends). Record the
-steps marked *[SRV-15]* as blocked, not failed. Every step expects no traceback in the Python console.
+Relays (b) and (c) must run a `relay-server` that answers `session.resume` (SRV-15: the socket stays open 10 s after
+`SESSION_NOT_FOUND` for the fallback create) and closes with 4008 on SIGTERM (SRV-17). Both are done on `main`. A relay
+deployed before SRV-15 answers a resume with `UNSUPPORTED_TYPE` and closes the socket with 4012 10 s after it opened (no
+session is bound to it). The panel then resumes again on every new connection ("Reconnecting to the session…",
+"Connection lost — reconnecting in N s.") until its reconnect window ends, about 3 minutes after the loss at the default
+120 s grace. It then shows "Session ended." with "The connection to the relay was lost for too long, …" and "Anyone with
+the code can still see the last scene …" (relay (b) keeps the session until its grace ends). Against such a relay,
+record the steps marked *[SRV-15]* as blocked, not failed. Every step expects no traceback in the Python console.
 
 Steps:
 
@@ -737,7 +738,13 @@ Steps:
    relay restarted: RemoteView starts the session again, …"; "Sending the scene", then "Live" (the scene is uploaded
    again: a restarted relay keeps none). Report: `create none`, `resume`, `create previous`. (c) (*[SRV-15]*, SRV-17)
    Stop the local relay-server (SIGTERM) and start it again within 3 s. Expected: the same code; the viewer page rejoins
-   by itself.
+   by itself. The relay closes Slicer's socket with 4008 and answers a reconnect during its drain with HTTP `503
+   {"error":"RELAY_RESTARTING"}` (report `2026-10-27-server-5`). If the relay's 4008 close frame has not reached Slicer
+   when the drain ends (about 5 s; rare for a publisher, whose send buffer on the relay holds only short replies),
+   Slicer sees 1006 instead. A resume after that is answered `SESSION_NOT_FOUND`, and without a 4008 the panel ends the
+   session ("The relay ended the session while RemoteView was offline. …"): the known gap below, not a failure. A
+   reconnect that meets the drain may also show "The relay answered HTTP 503 instead of opening the connection. Check
+   the relay address." under the restart text until SLC-49.
 6. **Restart without the old code** (relay (a) started with `--ignore-preferred-code` added). Type `restart`. Expected:
    a new code in the panel, the QR code and the Presentation window, with "The relay restarted and could not keep the
    old code: give the viewers the new code. …" until the session ends. Type `close-publisher 1001`: the note stays while
@@ -770,8 +777,9 @@ Steps:
     no `sess_` session ID and no `Doe` on any RemoteView line.
 
 Known gaps (not failures):
-- A relay that crashes without close 4008 and comes back without the session ends it (`SESSION_NOT_FOUND`, no
-  re-create; report `2026-10-28-slicer-2.md` item 4).
+- A relay that crashes without close 4008, or whose 4008 frame did not reach Slicer before its drain ended (step 5
+  (c)), and comes back without the session ends it (`SESSION_NOT_FOUND`, no re-create; report `2026-10-28-slicer-2.md`
+  item 4).
 - A fallback create refused by the relay (`CAPACITY`, `RATE_LIMITED`) ends the session; there is no retry loop.
 - On Windows a sleep of roughly 3 to 6.5 minutes (default grace) still resumes at the wake and ends with "The relay
   ended the session while RemoteView was offline."; a frame that reached Slicer before the sleep but is read only
