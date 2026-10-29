@@ -400,13 +400,25 @@ def _walk_checks(corners: NDArray[np.float64]) -> float:
     return float(a @ b + b @ c + c @ a)
 
 
+def _walk_budget(triangle_count: int) -> int:
+    return max(WALK_CHECKS_FLOOR, WALK_CHECKS_PER_TRIANGLE * triangle_count)
+
+
+def walk_within_budget(triangles: NDArray[np.int64], point_count: int) -> bool:
+    """Whether a walk over ``triangles`` that asks ``GetCellEdgeNeighbors`` for every edge of every triangle fits the
+    budget (:data:`WALK_CHECKS_PER_TRIANGLE`, :data:`WALK_CHECKS_FLOOR`): the winding walk, and
+    ``vtkQuadricDecimation``'s set-up (``AddBoundaryConstraints``, SLC-52), which is the same loop."""
+    valence = np.bincount(triangles.ravel(), minlength=point_count)
+    return _walk_checks(valence[triangles.T].astype(np.float64)) <= _walk_budget(len(triangles))
+
+
 def _points_to_cut(triangles: NDArray[np.int64], point_count: int) -> NDArray[np.bool_] | None:
     """The points the winding walk has to be kept away from: ``None`` when VTK's walk fits its budget
-    (:data:`WALK_CHECKS_PER_TRIANGLE`, :data:`WALK_CHECKS_FLOOR`), else those of more than T triangles for the largest
-    T that makes the walk on :func:`split_points`' copy fit — where each copy of a cut point has one triangle."""
+    (:func:`walk_within_budget`), else those of more than T triangles for the largest T that makes the walk on
+    :func:`split_points`' copy fit — where each copy of a cut point has one triangle."""
     valence = np.bincount(triangles.ravel(), minlength=point_count)
     corners = valence[triangles.T].astype(np.float64)
-    budget = max(WALK_CHECKS_FLOOR, WALK_CHECKS_PER_TRIANGLE * len(triangles))
+    budget = _walk_budget(len(triangles))
     if _walk_checks(corners) <= budget:
         return None
     # the work only falls as T does; T = 0 cuts every point, which leaves 3 checks a triangle

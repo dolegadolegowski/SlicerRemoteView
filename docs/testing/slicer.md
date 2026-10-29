@@ -1255,3 +1255,52 @@ Expected results:
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|
 | | | | | |
+
+### §14.2 Flat meshes decimate in seconds (SLC-52)
+
+Preconditions: Slicer with the RemoteView module loaded (no session needed). In the Python console of a new scene
+(`RemoteView/remoteview_core` is on the module's path once the module has loaded; `[TODO verify]`):
+
+```python
+import time
+import numpy as np
+import vtk
+from vtkmodules.util.numpy_support import numpy_to_vtk
+from remoteview_core import decimate
+from remoteview_core.collect import mesh_from_polydata
+from remoteview_core.glb_writer import Entity
+
+def node(polydata):
+    mesh = mesh_from_polydata(polydata)
+    return Entity(node_id="n", kind="model", name="n", positions=mesh.positions * 0.001, normals=mesh.normals,
+                  indices=mesh.triangles, color=(1, 1, 1), opacity=1.0, visible=True, mrml_id="n")
+
+def timed(polydata, share):
+    entity = node(polydata)
+    started = time.time()
+    smaller = decimate.decimate_entity(entity, share)
+    print(entity.triangle_count, "->", smaller.triangle_count, "in", round(time.time() - started, 2), "s")
+
+plane = vtk.vtkPlaneSource(); plane.SetPoint1(100, 0, 0); plane.SetPoint2(0, 100, 0); plane.SetResolution(300, 300)
+triangles = vtk.vtkTriangleFilter(); triangles.SetInputConnection(plane.GetOutputPort()); triangles.Update()
+timed(triangles.GetOutput(), 100_000)                      # a flat plane of 180,000 triangles
+side = np.arange(-111, 112); y, x = np.meshgrid(side, side, indexing="ij")
+volume = np.zeros((162, len(side), len(side)), np.uint8); volume[1:-1] = x * x + y * y <= 110 * 110
+image = vtk.vtkImageData(); image.SetDimensions(len(side), len(side), 162)
+image.GetPointData().SetScalars(numpy_to_vtk(volume.ravel(), deep=True))
+surface = vtk.vtkDiscreteFlyingEdges3D(); surface.SetInputData(image); surface.SetValue(0, 1); surface.Update()
+timed(surface.GetOutput(), 100_000)                        # an unsmoothed labelmap cylinder, 434,800 triangles
+sphere = vtk.vtkSphereSource(); sphere.SetThetaResolution(448); sphere.SetPhiResolution(448); sphere.Update()
+timed(sphere.GetOutput(), 100_000)                         # a smooth sphere of 399,616 triangles
+```
+
+Expected results:
+
+- Each line prints the share reached (100000 or just under) and a time: the plane ≈ 1 s, the labelmap cylinder ≈ 4 s,
+  the sphere ≈ 3 s on the development machine (it took over 90 s, over 90 s and ≈ 3 s before SLC-52). Record the times
+  in the Result column: `[TODO verify]` Slicer's own VTK build is as fast as the `vtk` 9.6.2 wheel.
+- Throughout: no traceback in the Python console.
+
+| Date | Slicer version | OS | Result | Tester |
+|---|---|---|---|---|
+| | | | | |

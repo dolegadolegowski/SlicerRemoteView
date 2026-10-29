@@ -14,16 +14,39 @@ Profile       Total triangles  Per node        Snapshot size (recommended)
 least :attr:`Budget.floor_triangles` (or all it has), at most the per-node cap — and decimates the nodes above their
 share (:func:`fit_entity`, one node at a time: ``snapshot.ScenePreparation`` calls it once per step, SLC-51).
 Nodes are **never dropped** (§7.5): a node the filters cannot reduce keeps its mesh and is reported. Decimation runs on
-the collected entities (glTF metres, after SLC-07's clean-up), one node per :func:`decimate_entity` call:
-``vtkQuadricDecimation``; ``vtkDecimatePro`` with ``PreserveTopologyOn`` when the quadric result is unusable (no
-triangle, more than the share, a non-finite normal or a position beyond float32) — a zero normal is repaired to +Y
-like a collected node's; and last ``vtkDecimatePro`` with its defaults —
-topology changes, splitting and boundary deletion allowed — for which VTK documents a guaranteed reduction (not
-reached for duplicated or non-manifold triangles: the node is then sent whole and reported;
-``docs/research/slicer-decimate.md``). The normals are then recomputed like a collected mesh's
-(:func:`~remoteview_core.collect.mesh_from_triangles`). :func:`glb_binary_size` (exact) lets ``build_snapshot`` refuse a
-scene whose binary chunk alone is over the relay's limit before the file is built; :func:`estimate_glb_size` gives the
-size that refusal reports.
+the collected entities (glTF metres, after SLC-07's clean-up), one node per :func:`decimate_entity` call, by a rule
+that keeps exactly flat regions and edges shared by many triangles from taking minutes (SLC-52,
+``docs/research/slicer-decimate.md``):
+
+1. exactly coincident points are merged (``vtkCleanPolyData``, tolerance 0) when there are any, so a triangle soup is
+   decimated as one surface and does not come out with holes — unless merging would join sheets lying on each other
+   (a duplicated shell, two sides or two touching segments with points of their own) into more edges of more than two
+   triangles than the input had (a pure soup is always merged);
+2. the mesh is centred on the bounding box of its used points and every coordinate moved by up to 1e-7 of its diagonal
+   (seeded from a digest of the mesh, so the same mesh gives the same result): on an exactly flat region every collapse
+   of ``vtkQuadricDecimation`` would cost 0, and its queue would then keep collapsing into one point whose valence grows
+   (minutes and gigabytes); the jitter gives every collapse a cost. Every filter gets this input; the centre is added
+   back to its result;
+3. a mesh with an edge shared by more than two triangles (non-manifold) costs the quadric's set-up n(p)·n(q) for every
+   edge — the cube of the triangles on one edge — so it goes to ``vtkDecimatePro`` with ``PreserveTopologyOn`` first;
+   if its result is not usable, the chain below runs on the mesh as it is when that set-up fits SLC-54's budget
+   (:func:`~remoteview_core.collect.walk_within_budget`: a two-sided surface, four triangles on every edge), and last
+   on a copy with a point of its own for every corner at an end of such an edge
+   (:func:`~remoteview_core.collect.split_points`);
+4. the chain: ``vtkQuadricDecimation``; ``vtkDecimatePro`` with ``PreserveTopologyOn``; last ``vtkDecimatePro`` with
+   its defaults — topology changes, splitting and boundary deletion allowed — for which VTK documents a guaranteed
+   reduction (not reached for duplicated or non-manifold triangles: the node is then sent whole and reported).
+
+The first usable result wins: at least one triangle, at most the share, finite normals, positions within float32 — a
+zero normal is repaired to +Y like a collected node's. The normals are recomputed like a collected mesh's
+(:func:`~remoteview_core.collect.mesh_from_triangles`). The rule does not bound the size — a node of ≈ 1M triangles or
+more takes over 10 s (0.8M: 6.6–8.8 s), whichever filter runs (SLC-56) — nor a point used by thousands of triangles,
+around which every filter is super-linear (a fan of 20,000 triangles ≈ 4 s, 4,000 triangles sharing only one point
+≈ 3 s, a book of 40,000 pages on one edge ≈ 12 s in ``vtkDecimatePro``; SLC-55), nor a node whose bounding box one
+far-off triangle stretches: the jitter grows with the box and crumples the dense part (a 400k sphere with one triangle
+10 km away up to ≈ 30 s, depending on that triangle, before SLC-52 2.2–2.7 s; SLC-56).
+:func:`glb_binary_size` (exact) lets ``build_snapshot`` refuse a scene whose binary chunk alone is over the relay's
+limit before the file is built; :func:`estimate_glb_size` gives the size that refusal reports.
 
 Main thread only (VTK). No Slicer or Qt import.
 """
@@ -31,20 +54,24 @@ Main thread only (VTK). No Slicer or Qt import.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import math
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
 import numpy as np
-from vtkmodules.vtkFiltersCore import vtkDecimatePro, vtkQuadricDecimation
+from numpy.typing import NDArray
+from vtkmodules.vtkFiltersCore import vtkCleanPolyData, vtkDecimatePro, vtkQuadricDecimation
 
 from remoteview_core.collect import (
     mesh_from_triangles,
     mesh_points_and_triangles,
     polydata_from_triangles,
+    split_points,
+    walk_within_budget,
 )
 from remoteview_core.coords import unit_normals
 from remoteview_core.glb_writer import MAX_UINT16_VERTICES, Entity
@@ -125,6 +152,165 @@ def _pro_guaranteed(reduction: float) -> Any:
 
 #: The filters :func:`decimate_entity` tries in turn (tests replace them).
 FILTERS: tuple[Callable[[float], Any], ...] = (_quadric, _pro, _pro_guaranteed)
+#: The filter tried first on a mesh with an edge shared by more than two triangles; then :data:`FILTERS` on the mesh as
+#: it is while its set-up fits ``collect.walk_within_budget``, then on its split copy (SLC-52; looked up at the call,
+#: tests replace it).
+NON_MANIFOLD_FIRST: Callable[[float], Any] = _pro
+#: How far the jitter moves a coordinate at most, as a fraction of the bounding-box diagonal (SLC-52): ≈ 13× the
+#: rounding noise of a centred coordinate (√ε·|x| ≤ 0.75e-8 of the diagonal, |x| being at most half of it; 1e-8 still
+#: left hubs), ≈ 180× in the quadric's cost; 1e-6 slowed the quadric on a smooth sphere by 10–15 %. It is 0.011 of the
+#: GLB's position step (``max extent / 65,534``).
+JITTER = 1e-7
+
+
+def _mixed(bits: NDArray[np.uint64]) -> NDArray[np.uint64]:
+    """SplitMix64's finaliser: every input bit moves about half the output bits."""
+    bits = (bits ^ (bits >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
+    bits = (bits ^ (bits >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
+    return bits ^ (bits >> np.uint64(31))
+
+
+def _point_keys(positions: NDArray[np.float64]) -> NDArray[np.uint64]:
+    """One 64-bit key per point, hashed from the coordinates' bits (``+ 0.0`` makes -0.0 the same point as 0.0, as
+    ``vtkMergePoints`` compares them), sorted — ≈ 0.006 s for 200k points. Equal keys are a collision or two coincident
+    points; either way :func:`_merged` runs the merge, which is right in both cases."""
+    bits = np.ascontiguousarray(positions + 0.0, dtype=np.float64).view(np.uint64).reshape(-1, 3)
+    return np.sort(_mixed(_mixed(_mixed(bits[:, 0]) ^ bits[:, 1]) ^ bits[:, 2]))
+
+
+def _coincident(keys: NDArray[np.uint64]) -> bool:
+    """Whether two points may coincide exactly (:func:`_point_keys`)."""
+    return bool(np.any(keys[1:] == keys[:-1]))
+
+
+def _merged(
+    positions: NDArray[np.float64], triangles: NDArray[np.int64], keys: NDArray[np.uint64]
+) -> tuple[NDArray[np.float64], NDArray[np.int64]]:
+    """``triangles`` with exactly coincident points merged and the points no triangle uses dropped — or as they are when
+    no two points coincide (:func:`_coincident`; most meshes: the merge took ≈ 0.07 s for 400k triangles and reordered
+    the points), or when merging would join separate sheets lying on each other — a duplicated shell, two sides with
+    points of their own, touching segments — into more edges of more than two triangles than the input had (decimating
+    those cuts holes: SLC-52 review). A soup (:func:`_soup`) is always merged. Tolerance 0 makes ``vtkCleanPolyData``
+    use ``vtkMergePoints`` (exact coincidence). A triangle left with a repeated point becomes a line and is dropped:
+    only one whose corners already coincided, which has no area (collect drops those)."""
+    if not _coincident(keys):
+        return positions, triangles
+    clean = vtkCleanPolyData()
+    clean.PointMergingOn()
+    clean.SetTolerance(0.0)
+    clean.SetInputData(polydata_from_triangles(positions, triangles))
+    clean.Update()
+    points, merged = mesh_points_and_triangles(clean.GetOutput())
+    joined = _over_shared(merged, len(points)) > _over_shared(triangles, len(positions))
+    # a soup has no surface yet: it is merged whatever the merge makes of it
+    return (positions, triangles) if joined and not _soup(triangles) else (points, merged)
+
+
+def _soup(triangles: NDArray[np.int64]) -> bool:
+    """Whether no point is used by two triangles, a triangle repeated on the same points counted once (an STL read
+    without merging, a facet written twice included)."""
+    corners = np.sort(triangles, axis=1)
+    corners = corners[np.lexsort(corners.T[::-1])]
+    distinct = corners[np.r_[True, np.any(corners[1:] != corners[:-1], axis=1)]]
+    return bool(np.bincount(distinct.ravel()).max(initial=0) <= 1)
+
+
+def _edge_keys(triangles: NDArray[np.int64], point_count: int) -> NDArray[np.int64]:
+    """One key per triangle edge, the same in both directions (IDs in ``[0, point_count)``): edge ``k`` of triangle
+    ``t`` runs from its corner ``k`` to corner ``k + 1`` (mod 3) and has its key at ``3·t + k``."""
+    starts, ends = triangles.ravel(), triangles[:, [1, 2, 0]].ravel()
+    return np.minimum(starts, ends) * np.int64(point_count) + np.maximum(starts, ends)
+
+
+def _non_manifold(triangles: NDArray[np.int64], point_count: int) -> bool:
+    """Whether an edge is shared by more than two triangles."""
+    keys = np.sort(_edge_keys(triangles, point_count))
+    return bool(np.any(keys[2:] == keys[:-2]))
+
+
+def _over_shared(triangles: NDArray[np.int64], point_count: int) -> int:
+    """How many edges are shared by more than two triangles."""
+    _, counts = np.unique(_edge_keys(triangles, point_count), return_counts=True)
+    return int(np.count_nonzero(counts > 2))
+
+
+def _shared_edge_ends(triangles: NDArray[np.int64], point_count: int) -> NDArray[np.bool_]:
+    """The points at an end of an edge shared by more than two triangles."""
+    _, inverse, counts = np.unique(
+        _edge_keys(triangles, point_count), return_inverse=True, return_counts=True
+    )
+    shared = (counts[inverse] > 2).reshape(-1, 3)
+    ends = np.zeros(point_count, dtype=bool)
+    ends[triangles[shared]] = True  # the first corner of each such edge
+    ends[triangles[np.roll(shared, 1, axis=1)]] = True  # and its second: corner k ends edge k − 1
+    return ends
+
+
+def _attempts(
+    points: NDArray[np.float64],
+    triangles: NDArray[np.int64],
+    chain: Sequence[Callable[[float], Any]],
+) -> Iterator[tuple[Any, Callable[[float], Any]]]:
+    """The (input, filter) pairs of the rule in turn: the chain on a manifold mesh; else :data:`NON_MANIFOLD_FIRST`, the
+    chain less that filter on the mesh as it is when its set-up fits the budget, then the chain on a copy with the
+    shared edges' ends cut (made only when it is reached)."""
+    if not _non_manifold(triangles, len(points)):
+        source = polydata_from_triangles(points, triangles)
+        for make in chain:
+            yield source, make
+        return
+    whole = polydata_from_triangles(points, triangles)
+    yield whole, NON_MANIFOLD_FIRST
+    # mildly non-manifold (a two-sided surface: four triangles on every edge): the chain copes, as it did before SLC-52,
+    # when the quadric's set-up — the n(p)·n(q) loop of SLC-54's walk — fits its budget; the split copy would be a soup
+    if walk_within_budget(triangles, len(points)):
+        for make in chain:
+            if make is not NON_MANIFOLD_FIRST:  # it has just run on this input
+                yield whole, make
+    split, origin = split_points(triangles, len(points), _shared_edge_ends(triangles, len(points)))
+    copy = polydata_from_triangles(points[origin], split)
+    for make in chain:
+        yield copy, make
+
+
+def _prepared(
+    entity: Entity,
+) -> tuple[NDArray[np.float64], NDArray[np.int64], NDArray[np.float64]] | None:
+    """The filters' input — the points merged where they coincide, centred and jittered (the module docstring) — its
+    triangles and the centre to add back; ``None`` for indices outside the positions, a triangle that repeats a vertex
+    (collect never makes them; a crash of ``vtkDecimatePro`` on them was reported, not reproduced with 9.6.2) or
+    positions that are not finite (collect's ``_finite_geometry`` keeps them out): VTK does not check them; ``None`` too
+    for positions whose extent overflows float64 (a filter aborted the process on them)."""
+    indices = np.asarray(entity.indices).reshape(-1, 3)
+    if indices.size and (indices.min() < 0 or indices.max() >= len(entity.positions)):
+        return None
+    a, b, c = indices.T
+    positions = np.asarray(entity.positions, dtype=np.float64)
+    if np.any((a == b) | (b == c) | (a == c)) or not np.all(np.isfinite(positions)):
+        return None
+    keys = _point_keys(positions)
+    points, triangles = _merged(positions, indices, keys)
+    if len(triangles) == 0:
+        return None
+    # a point no triangle uses neither moves the centre nor scales the jitter
+    used = np.zeros(len(points), dtype=bool)
+    used[triangles.ravel()] = True
+    low, high = points[used].min(axis=0), points[used].max(axis=0)
+    with np.errstate(over="ignore", invalid="ignore"):
+        centre, diagonal = (low + high) / 2, float(np.linalg.norm(high - low))
+    # finite positions can still lie further apart than float64 holds
+    if not (np.all(np.isfinite(centre)) and math.isfinite(diagonal)):
+        return None
+    # seeded from a digest of the mesh: the same mesh moves the same way, and a crafted one cannot steer the seed to
+    # cancel its jitter in advance (an XOR of the keys could be: SLC-52 review)
+    rng = np.random.default_rng(
+        int.from_bytes(hashlib.blake2b(keys.tobytes(), digest_size=8).digest(), "little")
+    )
+    return (
+        points - centre + rng.uniform(-1.0, 1.0, points.shape) * (JITTER * diagonal),
+        triangles,
+        centre,
+    )
 
 
 def decimate_entity(
@@ -134,32 +320,28 @@ def decimate_entity(
     filters: Sequence[Callable[[float], Any]] | None = None,
 ) -> Entity | None:
     """``entity`` reduced to at most ``target`` triangles (unchanged when it already has no more), or ``None`` when no
-    filter gives a usable result at or below ``target``. A result is usable when it has a triangle, finite normals
-    (:func:`~remoteview_core.collect.mesh_from_triangles`; a zero normal becomes +Y, as for a collected node) and
-    positions that fit float32 (what the GLB stores). Indices outside the positions, or a triangle that repeats a
-    vertex, give ``None`` before any filter runs (VTK does not check them). ``filters``: :data:`FILTERS`, looked up
-    at the call."""
+    filter gives a usable result at or below ``target`` (the rule: see the module docstring). A result is usable when it
+    has a triangle, finite normals (:func:`~remoteview_core.collect.mesh_from_triangles`; a zero normal becomes +Y, as
+    for a collected node) and positions that fit float32 (what the GLB stores). Indices outside the positions, a
+    triangle that repeats a vertex, a position that is not finite or positions whose extent overflows float64 give
+    ``None`` before any filter runs (VTK does not check them). ``filters``: :data:`FILTERS`, looked up at the call, as
+    is :data:`NON_MANIFOLD_FIRST`."""
     count = entity.triangle_count
     if count <= target:
         return entity
-    indices = np.asarray(entity.indices)
-    if indices.size and (indices.min() < 0 or indices.max() >= len(entity.positions)):
+    prepared = _prepared(entity)
+    if prepared is None:
         return None
-    a, b, c = indices.reshape(-1, 3).T
-    if np.any(
-        (a == b) | (b == c) | (a == c)
-    ):  # collect never makes them; a crash of vtkDecimatePro on them was reported, not reproduced (9.6.2)
-        return None
-    source = polydata_from_triangles(entity.positions, indices)
+    jittered, triangles, centre = prepared
     reduction = 1.0 - target / count
-    for make in FILTERS if filters is None else filters:
+    for source, make in _attempts(jittered, triangles, FILTERS if filters is None else filters):
         decimate = make(reduction)
         decimate.SetInputData(source)
         decimate.Update()
-        points, triangles = mesh_points_and_triangles(decimate.GetOutput())
-        if not 0 < len(triangles) <= target:
+        kept_points, kept = mesh_points_and_triangles(decimate.GetOutput())
+        if not 0 < len(kept) <= target:
             continue
-        mesh = mesh_from_triangles(points, triangles)
+        mesh = mesh_from_triangles(kept_points + centre, kept)
         if mesh is None:
             continue
         with np.errstate(over="ignore", invalid="ignore"):
