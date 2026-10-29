@@ -199,8 +199,8 @@ Steps:
 
     start a session, join with the viewer, and turn Slicer's 3D view and the viewer to look from the front (Slicer:
     *Anterior* view).
-16. Slow uplink (SLC-26): with relay (c) — its viewer shows the result; relay (a) works too, without a viewer. In a
-    second terminal start the throttle proxy, `node slicer-plugin/tests/throttle_proxy.mjs --target 127.0.0.1:8787
+16. Slow uplink (SLC-26, SLC-40): with relay (c) — its viewer shows the result; relay (a) works too, without a viewer.
+    In a second terminal start the throttle proxy, `node slicer-plugin/tests/throttle_proxy.mjs --target 127.0.0.1:8787
     --rate 125000 --listen 8788` (1 Mbit/s towards the relay; end its input like the relay's to see how many bytes it
     passed), and enter `ws://127.0.0.1:8788/ws` as the relay address. In a new scene run in the Python console
 
@@ -265,11 +265,19 @@ Expected results:
   connection cut about 25 s in ("Relay unreachable"). `relay-server` counts the chunks as signs of life while Slicer's
   pong to its WebSocket ping waits behind them (SRV-27; closing run in report `2026-10-20-slicer-7`); a relay deployed
   before SRV-27 may close the connection with 4009 during the upload, which shows as a reconnect here: note it.
-- Step 16, stop during the upload: the panel leaves "Sending the scene". The stop message waits behind the bytes already
-  written (several MB at 1 Mbit/s), so after 2 s the connection is aborted and the panel says the stop message could
-  not be sent and that anyone with the code can still see the last scene until the relay ends the session, after a
-  few minutes (SLC-44); the viewer shows the frozen scene as offline until the relay expires it. Quitting Slicer
-  behaves the same and Slicer exits within 3 s. Expected, not a defect (`docs/research/slicer-heartbeat.md`).
+- Step 16, stop during the upload: the panel leaves "Sending the scene". The stop message waits behind up to 4 MiB (≈ 34
+  s at 1 Mbit/s, SLC-40) and the connection is aborted 2 s after *Stop*: stopped with more than about 2 s of the upload
+  still ahead (≈ 240 kB through this proxy; most of the upload), the panel says the stop message could not be sent in
+  time and that anyone with the code can still see the last scene until the relay ends the session, after a few minutes
+  (SLC-44), and the viewer shows the frozen scene as offline until the relay expires it — through the throttle proxy the
+  stop message never arrives then, since the proxy drops what it still holds when Slicer closes the connection. This is
+  a known gap, not a new defect (report `2026-10-20-slicer-6`, second part → SLC-50;
+  `docs/research/slicer-heartbeat.md`). Stopped in the last ≈ 2 s of the upload, the panel says nothing about the stop
+  message and the viewer shows "presentation ended" within 5 s. When quitting, Slicer exits within 3 s; the stop message
+  can be lost the same way, with no panel left to say so — the residual for `release`. Whether a stop message handed
+  over in time survives the abort on a real slow link (`tc netem`, a phone hotspot) is `[TODO verify]` for SLC-50. After
+  *Stop* through the throttle proxy (not when quitting), a panel that says nothing while the viewer keeps the frozen
+  scene offline is a defect (T1): note the time of *Stop* and report it (SLC-50).
 - Throughout: no traceback in the Python console, no session code or token in the console or the application log.
 
 | Date | Slicer version | OS | Result | Tester |

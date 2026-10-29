@@ -27,11 +27,12 @@ that runs on through a sleep is [TODO verify]. Re-check this table when Slicer m
 - `loss_time` subtracts the wall-clock time the monotonic clock did not see since the connection's last frame. Where
   the clock stops, that is the sleep: the loss is dated a few seconds after the sleep began, and any sleep that
   outlasts the reconnect window ends the session once the drop is reported.
-- Where the clock runs on (Windows), nothing is subtracted; the cap — no later than `MAX_SILENCE_S` (≈ 212 s) after the
-  last frame, the longest a connection the heartbeat keeps can stay silent — dates only a sleep longer than that. With
-  the default grace (120 s, window 180 s) a sleep of roughly 3 to 6.5 minutes therefore still resumes at the wake, and
-  a relay that has ended the session answers `SESSION_NOT_FOUND` (the publisher token goes to the relay that issued it,
-  over TLS; nothing else is sent). With a longer grace the band moves up with the window.
+- Where the clock runs on (Windows), nothing is subtracted; the cap — no later than `MAX_SILENCE_S` (205 s since SLC-40,
+  ≈ 212 s before) after the last frame, the longest a connection the heartbeat keeps can stay silent — dates only a
+  sleep longer than that. With the default grace (120 s, window 180 s) a sleep of roughly 3 to 6.5 minutes therefore
+  still resumes at the wake, and a relay that has ended the session answers `SESSION_NOT_FOUND` (the publisher token
+  goes to the relay that issued it, over TLS; nothing else is sent). With a longer grace the band moves up with the
+  window.
 - A frame that reached the socket before the sleep but is read after the wake counts as a sign of life at the wake.
 - A forward wall-clock step between the last frame and the drop reads as a sleep and dates the loss earlier: the
   session can then end at once with no "the relay still holds it" text while the relay holds it for up to its grace
