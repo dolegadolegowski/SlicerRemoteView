@@ -269,19 +269,6 @@ def test_panel_relay_ends_a_live_session(fake, message, close_code, detail, send
     assert message.get("message", "<none>") not in view_text(view)  # relay free text (§9.2)
 
 
-def test_panel_does_not_renew_a_session_by_itself(fake):
-    """NFR-11, T1: until release decides on renewal, a session nobody joins ends after the relay's idle TTL."""
-    ctl = controller()
-    live(ctl)
-    deliver(
-        ctl, Received(1, envelope.make("session.expiring", reason="IDLE", closesAt=1792240260000))
-    )
-    assert [m["type"] for _, m in fake.made[0].sent] == ["session.create"]  # no session.renew
-    deliver(ctl, Received(1, envelope.make("session.expired", sessionId=SESSION_ID, reason="IDLE")))
-    view = deliver(ctl, Disconnected(1, None, None))
-    assert (view.status, view.detail) == (panel.SESSION_ENDED, panel.END_REASONS["IDLE"])
-
-
 def test_panel_ignores_relay_messages_while_stopping(fake):
     ctl = controller()
     live(ctl)
@@ -743,6 +730,8 @@ def test_panel_ui_properties():
     assert labels and all(prop(n, "textFormat").findtext("enum") == "Qt::PlainText" for n in labels)
     assert "openExternalLinks" not in ET.tostring(root, encoding="unicode")
     assert prop("stopButton", "enabled").findtext("bool") == "false"
+    # SLC-47: only when the relay warns
+    assert prop("keepButton", "visible").findtext("bool") == "false"
     assert widgets["extraCaPathLineEdit"].get("class") == "ctkPathLineEdit"
     assert (
         prop("extraCaPathLineEdit", "filters").findtext("set")
@@ -823,6 +812,52 @@ def test_panel_adapter_start_pump_and_stop(widget, slicer_stubs, fake):
     transport.events.put(Disconnected(1, None, None, final_sent=True))
     instance.onPump()
     assert not instance.pumpTimer.isActive() and instance.ui.startButton.enabled is True
+    instance.cleanup()
+
+
+def test_panel_adapter_keep_session_follows_the_relays_warning(widget, fake, monkeypatch):
+    """SLC-47: the button shows while the relay is about to end the idle session; a click renews it."""
+    _, instance = widget
+    monkeypatch.setattr(panel, "ACTIVITY_WINDOW_S", -1.0)  # nobody active: the panel asks
+    instance.ui.relayUrlLineEdit.text = URL
+    instance.ui.extraCaPathLineEdit.currentPath = ""
+    instance.onKeepClicked()  # no session yet
+    instance.onStartClicked()
+    transport = fake.made[0]
+    transport.events.put(Connected(1))
+    transport.events.put(Received(1, created()))
+    instance.onPump()
+    assert instance.ui.keepButton.visible is False
+    expiring = envelope.make("session.expiring", reason="IDLE", closesAt=1792240260000)
+    transport.events.put(Received(1, expiring))
+    instance.onPump()
+    assert instance.ui.keepButton.visible is True
+    assert panel.KEEP_SESSION in instance.ui.detailLabel.text
+    instance.onKeepClicked()
+    assert [m["type"] for _, m in transport.sent if isinstance(m, dict)][-1] == "session.renew"
+    assert instance.ui.keepButton.visible is False
+    assert panel.KEEP_SESSION not in instance.ui.detailLabel.text
+    instance.cleanup()
+
+
+def test_panel_adapter_link_buttons_are_activity_and_timers_are_not(widget, fake, monkeypatch):
+    """SLC-47: Copy link and the Presentation window count as someone at the panel; the pump and flush do not."""
+    _, instance = widget
+    instance.ui.relayUrlLineEdit.text = URL
+    instance.ui.extraCaPathLineEdit.currentPath = ""
+    instance.onCopyLinkClicked()  # no controller yet: nothing to note
+    instance.onStartClicked()
+    transport = fake.made[0]
+    transport.events.put(Connected(1))
+    transport.events.put(Received(1, created()))
+    noted = []
+    monkeypatch.setattr(instance.controller, "note_activity", lambda: noted.append(1))
+    instance.onPump()
+    instance.onFlushTimer()
+    assert noted == []
+    instance.onCopyLinkClicked()
+    instance.onPresentClicked()
+    assert noted == [1, 1]
     instance.cleanup()
 
 

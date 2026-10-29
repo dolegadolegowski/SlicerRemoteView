@@ -676,12 +676,12 @@ Known gaps (not failures):
 |---|---|---|---|---|
 | | | | | |
 
-## §7 Resume and reconnect (SLC-44, SLC-45, SLC-46; FR-14, US-05, NFR-20, protocol §4.3, §6.3, §8.4, §9.1, §9.3; T1, T4)
+## §7 Resume and reconnect (SLC-44 to SLC-47; FR-14, US-05, NFR-11, NFR-20, protocol §4.3, §4.4, §6.3, §8.4, §9.1, §9.3; T1, T4)
 
 Preconditions: §2's setup, with its relays (a), (b) and (c); §6's helpers and two of its synthetic models shown in 3D
 (`spheres(2)`; never patient data in §7); a large scene for
 steps 3 and 4: §2 step 16's snippet run in a new scene with its function renamed `big_spheres` (so that it does not
-replace §6's `spheres`) — five spheres, about 5.8 MB. Write down every session code shown; step 11 searches the logs
+replace §6's `spheres`) — five spheres, about 5.8 MB. Write down every session code shown; step 12 searches the logs
 for them.
 - (a) the stub with the resume report —
   `node slicer-plugin/tests/relay_stub.mjs --port 8787 --grace-ms 120000 --report-sessions --report-updates` — whose
@@ -694,8 +694,8 @@ for them.
 - (b) the deployed relay with its viewer page and a phone joined with the code: the only relay that turning Wi-Fi off
   or a sleep separates from this computer, and the one for the visual checks.
 - (c) `relay-server` and `web-viewer` on this machine, the viewer page at `http://localhost:5173`: Wi-Fi and sleep do
-  not separate it from Slicer, so it serves the restart step only. It listens unencrypted on every interface (§2):
-  sample data only, or a host firewall.
+  not separate it from Slicer, so it serves the restart and the idle renewal steps only. It listens unencrypted on
+  every interface (§2): sample data only, or a host firewall.
 
 Relays (b) and (c) must run a `relay-server` that answers `session.resume` (SRV-15: the socket stays open 10 s after
 `SESSION_NOT_FOUND` for the fallback create) and closes with 4008 on SIGTERM (SRV-17). Both are done on `main`. A relay
@@ -773,8 +773,19 @@ Steps:
     the same way and, while reconnecting, *File → Exit*. Expected: no traceback; no `RemoteView-transport` thread 3 s
     after the reload (`[t.name for t in threading.enumerate()]`); *Start* works after the reload; Slicer exits within
     3 s.
-11. **Logs** (T7). As §6 step 15, after steps 1-10: no session code written down here, no publisher token (`pt_…`),
-    no `sess_` session ID and no `Doe` on any RemoteView line.
+11. **Idle renewal** (SLC-47; relay (c) started with `SESSION_TTL_S=90 LOG_LEVEL=debug` added, so it warns with
+    `session.expiring` 30–40 s after the session's idle period starts (its sweep runs every 10 s) — at creation, when
+    the last viewer leaves, at a renewal; the viewer page not joined until (iii)). (i) Click *Start*. Expected: 30–40 s
+    after "Live" nothing changes in the panel: it renewed the session by itself (relay log: `session renewed`), because
+    *Start* was clicked within 5 minutes. (ii) Do not touch the panel. Expected: 30–40 s later "No viewer is connected,
+    so the relay ends the session in about a minute. Click Keep session to keep it running." with a *Keep session*
+    button (the automatic renewal is used once per Start). Change a model's colour: the text and the button stay. Click
+    *Keep session*. Expected: both go, the relay logs `session renewed`, the code stays. (iii) When the text is back,
+    join with the viewer page. Expected: the text and the button go at once. Close the viewer's tab. Expected: 30–40 s
+    later the text again. Leave it. Expected: about 60 s later "Session ended." with "The session expired because nobody
+    joined for a while."
+12. **Logs** (T7). As §6 step 15, after steps 1-11: no session code written down here, no publisher token (`pt_…`), no
+    `sess_` session ID and no `Doe` on any RemoteView line.
 
 Known gaps (not failures):
 - A relay that crashes without close 4008, or whose 4008 frame did not reach Slicer before its drain ended (step 5

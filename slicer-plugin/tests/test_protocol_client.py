@@ -626,6 +626,61 @@ def test_protocol_client_expiring_auto_renews(live, validators):
         live.build_session_renew()  # no socket in grace
 
 
+def test_protocol_client_renew_records_when_the_idle_session_closes(live):
+    """SLC-47: ``closesAt`` is kept until ``session.renewed`` or a viewer (the idle timer stops, §4.4)."""
+    live.auto_renew = False
+    assert live.closes_at is None
+    live.handle(envelope.make("session.expiring", reason="IDLE", closesAt=1792240260000))
+    assert live.closes_at == 1792240260000
+    live.handle(envelope.make("viewer.count", viewerCount=0, viewerLimit=20, platforms={}))
+    assert live.closes_at == 1792240260000
+    live.handle(envelope.make("viewer.count", viewerCount=1, viewerLimit=20, platforms={"web": 1}))
+    assert live.closes_at is None
+    live.handle(envelope.make("session.expiring", reason="IDLE", closesAt=1792240320000))
+    renew = live.build_session_renew()
+    ttl = {"graceS": 120, "idleS": 1800, "maxLifetimeS": 43200, "expiresAt": 1792290000000}
+    live.handle(envelope.make("session.renewed", replyTo=renew["id"], ttl=ttl))
+    assert live.closes_at is None
+    live.handle(envelope.make("session.expiring", reason="IDLE", closesAt=1792240380000))
+    live.close()
+    live.start("mobile")  # a new session: nothing of the old one's expiry
+    assert live.closes_at is None
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"closesAt": "soon"},
+        {"closesAt": -1},
+        {"closesAt": 1.5},
+        {"closesAt": None},
+        {"reason": "idle"},
+        {},
+    ],
+)
+def test_protocol_client_renew_ignores_an_invalid_expiring(bare, fields):
+    """Without a validator (Slicer) the stdlib checks refuse it: no renew, nothing recorded."""
+    message = envelope.make("session.expiring", reason="IDLE", closesAt=1792240260000)
+    message.update(fields)
+    if not fields:
+        del message["closesAt"]
+    assert bare.handle(message) == []
+    assert bare.closes_at is None and bare.invalid_inbound == 1
+    assert bare.last_invalid_type == "session.expiring"
+
+
+def test_protocol_client_renew_asks_a_callable_at_each_live_expiring(live):
+    answers = [True, False]
+    asked = []
+    live.auto_renew = lambda: asked.append(live.state) or answers.pop(0)
+    expiring = envelope.make("session.expiring", reason="IDLE", closesAt=1792240260000)
+    assert [m["type"] for m in live.handle(expiring)] == ["session.renew"]
+    assert live.handle(expiring) == []
+    live.transport_lost()
+    assert live.handle(expiring) == []  # in grace nothing can be sent: not asked
+    assert asked == [SessionState.CREATED, SessionState.CREATED]
+
+
 def test_protocol_client_ping_pong(live):
     ping = live.build_ping()
     assert live.ping_outstanding

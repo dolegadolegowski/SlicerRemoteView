@@ -38,8 +38,12 @@
   scene — with the reason and what happens next; a scene that cannot go out now (too large, refused, not prepared)
   leaves the session running (the code still works). A closed scene that cannot be cleared off the viewers ends the
   session (§7.3).
-- No automatic ``session.renew``: until ``release`` decides how renewal follows user activity (SLC-47), a
-  session nobody joins ends after the relay's idle TTL (NFR-11, T1) instead of living for its 12 h maximum.
+- Renewal follows the user (SLC-47, §4.4): when the relay is about to end a session no viewer is connected to
+  (``session.expiring``), the panel renews it by itself for one warning per Start (a repeat with the same
+  ``closesAt`` after a resume is the same warning), and only if a panel button was used within
+  :data:`ACTIVITY_WINDOW_S`; otherwise it says so and offers *Keep session*. Scene flushes, reconnects and opening the
+  module are not activity, so a forgotten session still ends after the relay's idle TTL (NFR-11, T1) instead of
+  living for its 12 h maximum.
 """
 
 from __future__ import annotations
@@ -75,6 +79,13 @@ SHUTDOWN_TIMEOUT_S = 3.0
 #: each ``session.resume``. The relay answers at once (§4.1, §4.3); the heartbeat alone would keep a relay that answers
 #: pings but not the request — and the panel — waiting for ever.
 CREATE_TIMEOUT_S = 15.0
+#: A panel button used this recently means someone is at the computer: the first ``session.expiring`` after Start is
+#: then answered with ``session.renew`` without asking (SLC-47). The relay warns 60 s before its idle TTL ends (§4.4).
+ACTIVITY_WINDOW_S = 300.0
+#: How long *Keep session* stays hidden after a ``session.renew`` (SLC-47). The relay answers at once (§4.4); a renew
+#: still unanswered by then was refused or lost (its frame discarded with a snapshot's), and the relay may still end the
+#: session, so the offer comes back. A renew that only waited behind a slow upload costs a second click at most.
+RENEW_TIMEOUT_S = CREATE_TIMEOUT_S
 #: The reconnect window after a lost connection (SLC-44): the relay's grace (``ttl.graceS``, at most MAX_GRACE_S) plus
 #: up to 60 s before the relay notices the drop (§9.1). Then the relay has ended the session, and resuming it later
 #: would publish to nobody (T1). A backward wall-clock step beyond WALL_JUMP_TOLERANCE_S (not an NTP correction) ends
@@ -162,6 +173,11 @@ RESET_PENDING = (
     "The scene was closed in Slicer, but anyone with the code still sees it until RemoteView "
     "reconnects, or until the relay ends the session after a few minutes."
 )
+#: ``session.expiring`` while nobody was active at the panel (SLC-47, §4.4).
+KEEP_SESSION = (
+    "No viewer is connected, so the relay ends the session in about a minute. "
+    "Click Keep session to keep it running."
+)
 #: Why a session ended, by ``ProtocolClient.close_reason`` (§4.5 reasons, §9.2 error codes, §9.3 close codes).
 END_REASONS = {
     "USER_STOPPED": "",
@@ -215,6 +231,7 @@ class PanelView:
     start_enabled: bool = True
     stop_enabled: bool = False
     settings_enabled: bool = True  # relay address and CA file
+    keep_shown: bool = False  # *Keep session*: the relay is about to end the idle session (SLC-47)
 
     def __post_init__(self) -> None:
         # the link holds the code: no link without its code (a code may show alone: NO_LINK)
@@ -405,6 +422,12 @@ class PanelController:
         # clock() by which session.created or session.resumed must arrive (while connecting or reconnecting)
         self._answer_deadline: float | None = None
         self._forget_outage()
+        # renewal (SLC-47): clock() of the last panel button, the closesAt of the warning the one automatic renewal
+        # of a Start answered (None: not used yet), and clock() by which the renew on its way must be answered (None:
+        # none on its way)
+        self._activity_at = -math.inf
+        self._auto_renewed_for: int | None = None
+        self._renew_due: float | None = None
         self._code_note = ""  # NEW_CODE after a re-create that could not keep the code (T4)
         self._interrupted = False  # a snapshot in flight was lost with the connection
         self._scene = ""  # the SCENE_STATES key while no live updates run: "", or "failed" if going live failed
@@ -431,9 +454,9 @@ class PanelController:
         if self.phase is not Phase.IDLE or self._preparing:
             return self.view
         try:
-            # auto_renew=False: see the module docstring (branch-audit follow-up, NFR-11)
+            # the panel decides at each session.expiring: see the module docstring (SLC-47, NFR-11)
             client = ProtocolClient(
-                make_client_info(self._slicer_version, self._platform), auto_renew=False
+                make_client_info(self._slicer_version, self._platform), auto_renew=self._renew_now
             )
         except ValueError:
             return self._idle(CANNOT_START, VERSION_UNUSABLE)
@@ -455,6 +478,8 @@ class PanelController:
         self._ended_reconnecting = False
         self._forget_scene()
         self._code_note = ""
+        self._activity_at = self._clock()  # Start is a panel button
+        self._auto_renewed_for, self._renew_due = None, None
         self.phase = Phase.CONNECTING
         address = urlsplit(transport.url)
         # an extra trust anchor stays visible while it is in use (T5); ws:// to loopback uses no TLS
@@ -496,6 +521,20 @@ class PanelController:
             and not self._restart_seen
         )
         self._finish(STOPPED_OFFLINE if offline else "")
+        return self.view
+
+    def note_activity(self) -> None:
+        """A panel button was used (the adapter's slots; Start and *Keep session* count by themselves)."""
+        self._activity_at = self._clock()
+
+    def keep(self) -> PanelView:
+        """*Keep session*: ``session.renew`` for the idle session the relay is about to end (§4.4)."""
+        self.note_activity()
+        client = self._client
+        if client is not None and self._keep_offered(client):
+            self._send(client.build_session_renew())
+            self._renew_due = self._clock() + RENEW_TIMEOUT_S
+            self._show_live()
         return self.view
 
     def shutdown(self, timeout: float = SHUTDOWN_TIMEOUT_S) -> bool:
@@ -664,6 +703,8 @@ class PanelController:
         client.transport_lost(event.close_code)
         self._observe_live()  # the marks are held; a snapshot in flight is lost (§6.3, SLC-42)
         self._connection, self._answer_deadline = None, None
+        # a renew lost with the connection: Keep session is offered again once back
+        self._renew_due = None
         guidance = event.error.guidance if event.error is not None else ""
         if self.phase is Phase.CONNECTING:
             retrying = f"Relay unreachable — retrying in {retry_seconds(retry_in)} s."
@@ -954,11 +995,39 @@ class PanelController:
     def _show_live(self) -> None:
         client: Any = self._client  # never None while LIVE (the only callers)
         scene, detail = self._scene_state()
+        keep = self._keep_offered(client)
         # the extra-CA note stays next to a scene message (T5); a new code after a restart stays said (T4)
+        parts = (KEEP_SESSION if keep else "", self._ca_note, self._code_note, detail)
         self._show(
             viewers_text(client.viewer_count, scene),
-            detail="\n".join(part for part in (self._ca_note, self._code_note, detail) if part),
+            detail="\n".join(part for part in parts if part),
             code=client.code or "",
+            keep=keep,
+        )
+
+    # ------------------------------------------------------------------ renewal (SLC-47)
+
+    def _renew_now(self) -> bool:
+        """The client's ``auto_renew`` at ``session.expiring`` (§4.4): yes for one warning per Start, after recent
+        activity. The warning relay-server repeats after ``session.resumed`` with the same ``closesAt`` (SRV-15) is the
+        same warning, so a renewal lost with the connection is sent again; a later warning gets the offer."""
+        now = self._clock()
+        warning = self._client.closes_at if self._client is not None else None
+        recent = now - self._activity_at <= ACTIVITY_WINDOW_S
+        # no warning to name (the client records it before asking): never renew blind
+        renew = recent and warning is not None and self._auto_renewed_for in (None, warning)
+        if renew:
+            self._auto_renewed_for = warning
+        self._renew_due = now + RENEW_TIMEOUT_S if renew else None
+        return renew
+
+    def _keep_offered(self, client: ProtocolClient) -> bool:
+        """The session is live (only while the panel is), the relay is about to end it as idle (``closes_at``), and
+        no renew is on its way (none sent, or unanswered for :data:`RENEW_TIMEOUT_S`; the pump redraws the view)."""
+        return (
+            client.state in (SessionState.CREATED, SessionState.ACTIVE)
+            and client.closes_at is not None
+            and (self._renew_due is None or self._clock() >= self._renew_due)
         )
 
     # ------------------------------------------------------------------ the session's end and the view
@@ -1003,7 +1072,9 @@ class PanelController:
         except ValueError:
             return "", NO_LINK
 
-    def _show(self, status: str, *, detail: str = "", code: str = "") -> PanelView:
+    def _show(
+        self, status: str, *, detail: str = "", code: str = "", keep: bool = False
+    ) -> PanelView:
         phase = self.phase
         note = self._ca_note if phase in _RUNNING else ""
         shown = phase in _SHOWS_CODE
@@ -1016,6 +1087,7 @@ class PanelController:
             start_enabled=phase is Phase.IDLE,
             stop_enabled=phase in _RUNNING,
             settings_enabled=phase is Phase.IDLE,
+            keep_shown=keep,
         )
         return self.view
 

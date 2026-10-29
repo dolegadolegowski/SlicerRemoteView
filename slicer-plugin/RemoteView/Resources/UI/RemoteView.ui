@@ -189,6 +189,19 @@
         </property>
        </widget>
       </item>
+      <item>
+       <widget class="QPushButton" name="keepButton">
+        <property name="visible">
+         <bool>false</bool>
+        </property>
+        <property name="toolTip">
+         <string>Keep the session running although no viewer is connected. Shown when the relay is about to end it.</string>
+        </property>
+        <property name="text">
+         <string>Keep session</string>
+        </property>
+       </widget>
+      </item>
      </layout>
     </widget>
    </item>

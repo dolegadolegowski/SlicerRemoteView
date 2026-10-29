@@ -532,6 +532,10 @@ def _valid_error(m: Mapping[str, Any]) -> bool:
 _SESSION_END_TYPES = frozenset({"session.expired", "session.closed"})
 
 
+def _valid_expiring(m: Mapping[str, Any]) -> bool:
+    return _matches(m.get("reason"), _ENUM_VALUE) and _uint(m.get("closesAt"), 0, 2**63 - 1)
+
+
 def _valid_session_end(m: Mapping[str, Any]) -> bool:
     return _matches(m.get("sessionId"), _SESSION_ID) and _matches(m.get("reason"), _ENUM_VALUE)
 
@@ -542,7 +546,7 @@ _INBOUND_CHECKS: Mapping[str, Callable[[Mapping[str, Any]], bool]] = MappingProx
     {
         "session.created": _valid_created,
         "session.resumed": _valid_resumed,
-        "session.expiring": lambda m: True,  # nothing is read from it
+        "session.expiring": _valid_expiring,
         "session.renewed": lambda m: _valid_ttl(m.get("ttl")),
         "viewer.count": _valid_viewer_count,
         "scene.snapshot.ack": lambda m: _uint(m.get("sceneVersion"), 1),
@@ -564,6 +568,8 @@ class ProtocolClient:
     returned (a builder bug fails loudly instead of earning ``INVALID_MESSAGE`` strikes) and every inbound message
     before it changes state. Inbound messages that fail are ignored and counted in :attr:`invalid_inbound`;
     :attr:`last_error` keeps the last real relay error. Builders validate before they change any state.
+    ``auto_renew`` answers a live session's ``session.expiring`` with ``session.renew`` (§4.4): a bool, or a callable
+    asked at each one (the panel renews only after recent user activity, SLC-47).
     """
 
     def __init__(
@@ -571,7 +577,7 @@ class ProtocolClient:
         client_info: Mapping[str, Any],
         *,
         validate: Callable[[dict[str, Any]], Sequence[Any]] | None = None,
-        auto_renew: bool = True,
+        auto_renew: bool | Callable[[], bool] = True,
     ) -> None:
         self.client_info = dict(client_info)
         self._validate = validate
@@ -590,6 +596,9 @@ class ProtocolClient:
         self.viewer_count = 0
         self.platforms: dict[str, int] = {}
         self.ttl: dict[str, Any] | None = None
+        #: ``closesAt`` of the last ``session.expiring`` (§4.4, ms on the relay's clock), until ``session.renewed`` or a
+        #: viewer: the idle timer runs only while no viewer is connected.
+        self.closes_at: int | None = None
         self.limits: dict[str, Any] | None = None
         self.close_reason: str | None = None
         self.last_error: ErrorInfo | None = None
@@ -1103,7 +1112,7 @@ class ProtocolClient:
             self.snapshot_version = self.accepted_version = adopted
         self.versions.continue_from(continue_at)
         self.ttl = dict(m["ttl"])
-        self.viewer_count = m["viewerCount"]
+        self._count_viewers(m["viewerCount"])
         self._pending_resume_id = None
         self._lost_snapshot = None
         # a need from before the drop or set while offline stays in _snapshot_needed
@@ -1114,19 +1123,27 @@ class ProtocolClient:
         return [] if self.updates_held else self._release_held()
 
     def _on_expiring(self, m: Mapping[str, Any]) -> list[dict[str, Any]]:
-        if self.auto_renew and self.state in (SessionState.CREATED, SessionState.ACTIVE):
-            return [self.build_session_renew()]
-        return []
+        self.closes_at = m["closesAt"]
+        if self.state not in (SessionState.CREATED, SessionState.ACTIVE):
+            return []
+        renew = self.auto_renew() if callable(self.auto_renew) else self.auto_renew
+        return [self.build_session_renew()] if renew else []
 
     def _on_renewed(self, m: Mapping[str, Any]) -> list[dict[str, Any]]:
         self.ttl = dict(m["ttl"])
+        self.closes_at = None
         return []
 
     def _on_viewer_count(self, m: Mapping[str, Any]) -> list[dict[str, Any]]:
-        self.viewer_count = m["viewerCount"]
+        self._count_viewers(m["viewerCount"])
         self.viewer_limit = m["viewerLimit"]
         self.platforms = _platform_counts(m["platforms"])
         return []
+
+    def _count_viewers(self, count: int) -> None:
+        self.viewer_count = count
+        if count:  # the idle timer runs only while no viewer is connected (§4.4): no expiry now
+            self.closes_at = None
 
     def _on_ack(self, m: Mapping[str, Any]) -> list[dict[str, Any]]:
         if m["sceneVersion"] != self.snapshot_in_flight:
