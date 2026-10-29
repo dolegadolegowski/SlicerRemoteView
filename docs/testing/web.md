@@ -188,6 +188,34 @@ Joined with `asymmetric-2nodes.glb`, **Structures** open.
 6. Hide the liver yourself while `colour-cycle` plays. **Expect:** its colour changes are applied (seen when you
    show it again) but it stays hidden.
 
+### New snapshot of the same scene (WEB-25)
+
+3D Slicer with the plugin and a segmentation with at least two segments; or, for steps 1, 2 and 4, the fake-slicer CLI
+sharing its scene again every 5 s: save `[{"afterMs": 5000, "type": "scene.snapshot"}]` as a file outside the
+repository and start `node_modules/.bin/fake-slicer --relay wss://<host>/ws --script <file> --loop --code-fd 3
+3>code.txt` (step 7 has a script of its own).
+
+1. Turn the model, zoom in and pan. Paint one stroke in Segment Editor (or wait for the next 5 s). **Expect:**
+   "Scene v<n>" goes up and the model changes in place, seen from the same direction, zoom and pan. The same when the
+   new scene arrives while your finger is still on the screen: the model follows your finger without a jump.
+2. In **Structures**, hide one structure and set another to about 50 %, then edit again. **Expect:** both choices stay,
+   in the rows and in the image, and no notice appears.
+3. In Slicer, paint one stroke, then within half a second change the opacity of the structure you set to 50 % in one
+   step (one click on its slider). Both then come in one new snapshot: while a re-export is pending, an appearance
+   change waits for it, but made first it would arrive on its own as a live update (WEB-13). **Expect:** "The
+   presenter changed <name>" at the top for about 3 s, and the presenter's value in its row; the hidden structure
+   stays hidden, and a later stroke keeps the presenter's value.
+4. Tap **Fit view**. **Expect:** the visible model is framed, still seen from your direction.
+5. Add a segment and paint it. **Expect:** "Updating the scene…" appears, then the new structure; the view stays.
+6. Move the segmentation further than its own size with a linear transform (Transforms module, e.g. 500 mm along R),
+   tap **Fit view**, turn the model, then paint a stroke. **Expect:** the model moves with the transform, and after the
+   stroke it changes in place, still seen from your direction.
+7. File → Close Scene, then load another dataset. **Expect:** the new scene is framed from the front, with the
+   presenter's visibility and opacity in every row. fake-slicer cannot close a scene, and a second run would be a new
+   session, whose first scene is always framed from the front: instead, start one run with a script file holding
+   `[{"afterMs": 30000, "type": "scene.snapshot", "fixture": "quantized-1node.glb"}]` and no `--loop`, join with its
+   code and turn the view before the other scene (no node in common) arrives, 30 s after the start.
+
 ### Reconnect (WEB-14)
 
 Joined with `toggle-visibility --loop` playing.
@@ -334,9 +362,11 @@ its corner at the origin, and the edge between them ≈ 141 mm (`shared/fixtures
 5. Walk around the scene and look at it from behind and from below. **Expect:** it stays where it was put; no
    clipping when your head is 5 cm from a surface.
 6. Leave XR with the Meta button → **Exit**. **Expect:** the 2D page as it was before (same camera view, node
-   panel, status bar); pinch, rotate and Fit work. Enter again and let the presenter share the scene again
-   (snapshot v2) while you are in XR, then exit. **Expect:** the 2D view framed from the front as after any new scene
-   (not zoomed in).
+   panel, status bar); pinch, rotate and Fit work. Enter XR, grab the scene (step 10) and move it aside, then let the
+   presenter edit the scene (WEB-25). **Expect:** it updates where you put it, and after **Exit** the 2D view is as you
+   left it. While you are in XR, let the presenter close the scene (File → Close Scene), then load another dataset.
+   **Expect:** it stands 1.3 m in front of you at real size, and after **Exit** the 2D view shows it framed from the
+   front.
 7. Enter XR and let the presenter end the session. **Expect:** the immersive view closes by itself and the code
    entry says "Presentation ended".
 8. Enter XR again, then take the headset off for 10 s and put it back on. **Expect:** the session resumes or ends

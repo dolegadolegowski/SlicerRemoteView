@@ -6,7 +6,8 @@
 // is applied only when the presenter's value changes: a `scene.state` replayed after a gap or a rejoin repeats
 // values already applied and so does not undo what the user chose locally in the node panel. When the presenter
 // does change `visible` or `opacity`, that replaces the local choice (FR-40, US-09, US-10); the nodes where this
-// happened are returned for the notice (WEB-13). A `color` change never touches a local hide.
+// happened are returned for the notice (WEB-13). A `color` change never touches a local hide. A new snapshot of the
+// scene (WEB-25) takes the local choices along by the same rule (`carryTo`).
 
 import { LinearSRGBColorSpace } from "three";
 import type { Color } from "three";
@@ -28,6 +29,14 @@ export interface LiveScene {
   apply(changes: readonly unknown[]): Applied;
   /** Removes `scene.nodeRemoved.nodeIds` or `scene.state.removed`. */
   remove(nodeIds: readonly unknown[]): Applied;
+  /**
+   * `next` is a new snapshot about to replace this scene on screen (WEB-25): a local visibility or opacity choice —
+   * a value that differs from the presenter's last one — moves to the node of `next` with the same `nodeId` and
+   * name. Where the snapshot itself changed that property (its manifest value is not the presenter's last one), the
+   * snapshot's value stays and the node is named in `overridden` (FR-40). Only reads this scene's model, which the
+   * store may already have disposed (that frees its GPU resources only).
+   */
+  carryTo(next: SceneModel): Applied;
 }
 
 interface Presenter {
@@ -101,6 +110,37 @@ export function createLiveScene(model: SceneModel): LiveScene {
         removed = true;
       }
       return { changed: removed, removed, overridden: [] };
+    },
+    carryTo(next) {
+      let changed = false;
+      const overridden = new Set<string>();
+      if (next === model) return { changed, removed: false, overridden: [] };
+      // Under "Hide node names" the names are substitutes numbered in export order (§7.3): they tell nothing.
+      const anonymized = model.info.anonymizedNames && next.info.anonymizedNames;
+      for (const node of next.nodes.values()) {
+        const old = model.nodes.get(node.nodeId);
+        const p = presenter.get(node.nodeId);
+        // Another name under the same id carries nothing: it may be a rename (which exports the scene again, names
+        // travel in the GLB only), but also an id Slicer reused after closing a scene (§7.3) — not the structure the
+        // user chose for.
+        if (!old || !p || (!anonymized && old.manifest.name !== node.manifest.name)) continue;
+        if (old.T.visible !== p.visible) {
+          if (node.manifest.visible !== p.visible) overridden.add(node.nodeId);
+          else {
+            node.T.visible = old.T.visible;
+            changed = true;
+          }
+        }
+        const opacity = old.material.opacity;
+        if (opacity !== p.opacity) {
+          if (node.manifest.opacity !== p.opacity) overridden.add(node.nodeId);
+          else {
+            applyOpacity(node, opacity);
+            changed = true;
+          }
+        }
+      }
+      return { changed, removed: false, overridden: [...overridden] };
     },
   };
 }

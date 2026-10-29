@@ -4,9 +4,9 @@
 // from the self-hosted `/assets/xr-profiles-<version>/` only, their textures included, under `connect-src 'self'`.
 
 import { createRequire } from "node:module";
-import { expect, test } from "@playwright/test";
+import { devices, expect, test } from "@playwright/test";
 import type { Page, WebSocketRoute } from "@playwright/test";
-import { settled } from "./canvas";
+import { difference, settled } from "./canvas";
 import { fixture, join, joinAndView, sendJson, streamSnapshot } from "./fake-relay";
 
 const require = createRequire(import.meta.url);
@@ -191,24 +191,6 @@ test("hands get the self-hosted hand meshes", async ({ page }) => {
     .toEqual([`${PROFILES}generic-hand/left.glb`, `${PROFILES}generic-hand/right.glb`]);
 });
 
-test("a new snapshot during XR stands in front of the user, and the 2D view is fitted to it afterwards", async ({
-  page,
-}) => {
-  await quest3(page);
-  const socket = await relayWithSocket(page);
-  await page.goto("/");
-  await join(page);
-  const fresh = await settled(page); // a fit from the front, as after any new snapshot
-  await page.locator(".viewer__xr").click();
-  await expect(page.locator(".viewer")).toHaveAttribute("data-xr", "ar");
-  streamSnapshot(socket(), fixture("asymmetric-2nodes.glb"), 2); // the presenter shares the scene again
-  await expect(page.locator(".status-bar__version")).toHaveText("Scene v2");
-  await page.evaluate(() => (window as unknown as { __iwer: Iwer }).__iwer.activeSession?.end());
-  await expect(page.locator(".viewer")).not.toHaveAttribute("data-xr", /.*/);
-  // Fitted with the 2D field of view, not the headset's (three restores it before the viewer refits).
-  await expect.poll(async () => (await settled(page)).equals(fresh)).toBe(true);
-});
-
 test("the end of the presentation during XR takes the user out of XR, to the message", async ({
   page,
 }) => {
@@ -371,6 +353,94 @@ test("a pinching hand drags the scene by its wrist (WEB-20)", async ({ page }) =
   );
   await expect.poll(async () => (await stage(page)).y - placed.y).toBeCloseTo(0.15, 3);
   expect((await stage(page)).scale).toBeCloseTo(1, 6);
+});
+
+/** Enters XR, waits until the scene is placed in front and moves it 20 cm to the right with one controller. */
+async function enterAndMove(page: Page): Promise<{ readonly x: number }> {
+  await page.locator(".viewer__xr").click();
+  await expect(page.locator(".viewer")).toHaveAttribute("data-xr", "ar");
+  await expect.poll(async () => (await stage(page)).z).toBeLessThan(-0.5); // placed in front
+  const placed = await stage(page);
+  const right = await where(page, "right");
+  await controller(page, "right", "trigger", 1);
+  await page.waitForTimeout(100);
+  await controller(page, "right", "move", right.x + 0.2, right.y, right.z);
+  await expect.poll(async () => (await stage(page)).x - placed.x).toBeCloseTo(0.2, 3);
+  await controller(page, "right", "trigger", 0); // let go
+  await page.waitForTimeout(100);
+  return { x: placed.x + 0.2 };
+}
+
+const exitXr = async (page: Page) => {
+  await page.evaluate(() => (window as unknown as { __iwer: Iwer }).__iwer.activeSession?.end());
+  await expect(page.locator(".viewer")).not.toHaveAttribute("data-xr", /.*/);
+};
+
+test("the same scene shared again during XR stays where the user moved it; the 2D view comes back as it was (WEB-25)", async ({
+  page,
+}) => {
+  await quest3(page);
+  const socket = await relayWithSocket(page);
+  await page.goto("/");
+  await join(page);
+  const loaded = await settled(page);
+  // Turn the 2D view first (a mouse drag), so "as it was" is not the load's framing.
+  const box = (await page.locator(".viewer__canvas").boundingBox())!;
+  const [cx, cy] = [box.x + box.width / 2, box.y + box.height / 2];
+  await page.mouse.move(cx - 80, cy);
+  await page.mouse.down();
+  await page.mouse.move(cx + 80, cy, { steps: 12 });
+  await page.mouse.up();
+  const before = await settled(page);
+  expect(before.equals(loaded)).toBe(false);
+  const moved = await enterAndMove(page);
+  streamSnapshot(socket(), fixture("asymmetric-2nodes.glb"), 2); // the presenter edited the scene
+  await expect(page.locator(".status-bar__version")).toHaveText("Scene v2");
+  await page.waitForTimeout(300);
+  expect((await stage(page)).x).toBeCloseTo(moved.x, 3); // not put back in front
+  await exitXr(page);
+  // The 2D camera as it was, up to the damping's last sub-pixel residue (OrbitControls applies it on every update).
+  const changed = await difference(page, before, await settled(page));
+  expect(changed.share).toBeLessThan(1e-4);
+  expect(changed.max).toBeLessThanOrEqual(3);
+});
+
+test("another scene shared during XR is placed in front again; the 2D view frames it from the front (WEB-25)", async ({
+  page,
+  browser,
+  browserName,
+  baseURL,
+}) => {
+  test.skip(
+    browserName !== "chromium",
+    "Quest Browser is Chromium; the reference page is a Pixel 7",
+  );
+  await quest3(page);
+  const socket = await relayWithSocket(page);
+  await page.goto("/");
+  await join(page);
+  const moved = await enterAndMove(page);
+  streamSnapshot(socket(), fixture("asymmetric-2nodes.glb"), 2); // the presenter edited the scene: it stays
+  await expect(page.locator(".status-bar__version")).toHaveText("Scene v2");
+  await page.waitForTimeout(300);
+  expect((await stage(page)).x).toBeCloseTo(moved.x, 3);
+  streamSnapshot(socket(), fixture("quantized-1node.glb"), 3); // then another scene: no node in common
+  await expect(page.locator(".status-bar__version")).toHaveText("Scene v3");
+  await expect.poll(async () => Math.abs((await stage(page)).x - moved.x)).toBeGreaterThan(0.01);
+  expect((await stage(page)).scale).toBeCloseTo(1, 6);
+  await exitXr(page);
+  const after = await settled(page);
+  // A fresh join of that scene on the same device (its XR button over the canvas too).
+  const reference = await browser.newPage({ ...devices["Pixel 7"], baseURL: baseURL! });
+  try {
+    await quest3(reference);
+    await joinAndView(reference, fixture("quantized-1node.glb"));
+    await expect(reference.locator(".viewer__xr")).toBeVisible();
+    // Fitted with the 2D field of view, not the headset's (three restores it before the viewer refits).
+    expect(after.equals(await settled(reference))).toBe(true);
+  } finally {
+    await reference.close();
+  }
 });
 
 /** Text the page draws on canvases (the XR panel is a canvas texture): recorded from `fillText`. */

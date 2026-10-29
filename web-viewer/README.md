@@ -202,7 +202,8 @@ only wires the pieces together.
 ```ts
 const result = createViewer(); // { ok: false, reason: "webgl2Unavailable" } without WebGL 2 or a GL context
 document.body.append(result.viewer.element); // .viewer: full-screen canvas (100dvh), notice, "Fit view" button
-result.viewer.setModel(model);    // adds model.root to a ×1000 (mm) stage and fits it from the front
+result.viewer.setModel(model);    // adds model.root to a ×1000 (mm) stage and fits it from the front; a new
+                                  // snapshot of the scene on screen keeps the camera instead (WEB-25)
 result.viewer.invalidate();       // request one frame after changing the scene (live updates, WEB-12)
 result.viewer.setNotice(describeState({ kind: "snapshotInvalid" })); // message over the scene; null hides it
 ```
@@ -211,9 +212,10 @@ result.viewer.setNotice(describeState({ kind: "snapshotInvalid" })); // message 
   OrbitControls' damping settles it keeps rendering, then stops. Nothing renders while the page is hidden. Near/far
   follow the camera distance.
 - **Touch** (FR-38, US-08): one finger rotates, two fingers zoom and pan, a double tap (or the Fit button, or a
-  double click) re-frames the visible nodes keeping the direction; a new model is framed from the front. Only the
-  canvas blocks browser gestures (`touch-action: none`, Safari `gesturestart`/`gesturechange`), so the code entry
-  stays zoomable; if the page was pinch-zoomed before joining, the viewer covers the visual viewport.
+  double click) re-frames the visible nodes keeping the direction; another scene is framed from the front, while a
+  new snapshot of the scene on screen keeps the user's view (WEB-25, below). Only the canvas blocks browser gestures
+  (`touch-action: none`, Safari `gesturestart`/`gesturechange`), so the code entry stays zoomable; if the page was
+  pinch-zoomed before joining, the viewer covers the visual viewport.
 - **Size**: `.viewer` is `position: fixed` with `100dvh`; the drawing buffer is `min(devicePixelRatio, 2) × page
   zoom × CSS size` (NFR-32; a zoomed viewer keeps the unzoomed resolution), resized from a `ResizeObserver` and
   `visualViewport` events and redrawn at once.
@@ -432,5 +434,24 @@ cancelled too.
 
 ```bash
 npm test -w web-viewer -- status-bar code-entry screens reconnect connection && npm run e2e -w web-viewer -- leave
+```
+
+### New snapshot of the same scene (WEB-25)
+
+Slicer exports the whole scene again when a structure is edited (§8.2). A snapshot that continues the scene on screen
+keeps the user's camera, and in XR the scene where the user put it: `Viewer.setModel` then only re-measures the model
+for the clip planes and the zoom limits, widened so they never move the camera, and draws one frame (`follow()`, also
+run by `contentChanged` for live updates). It continues the scene when it has at least one `nodeId` of it (§7.3) and
+the two whole-model bounding spheres overlap (`continuesScene` in `src/render/viewer.ts`; the scene on screen is
+measured again after live updates, whose transforms can move it): Slicer restarts its ids when a scene is closed, so
+another scene loaded in one step can come under the old ids, elsewhere. Anything else — another scene, a scene after
+an empty one — is framed from the front, in XR placed in front, with the presenter's values, as before. Only for a
+snapshot that continues the scene (`Viewer.continues`, the same decision, asked before the screens show it) do the
+node panel's local hides and opacities move to it by `nodeId` and name (`LiveScene.carryTo`, in `main.ts`), unless
+the snapshot changed that property; then the presenter's value wins and the viewer says `The presenter changed
+<name>` (FR-40, WEB-13).
+
+```bash
+npm test -w web-viewer -- viewer apply-update && npm run e2e -w web-viewer -- new-snapshot xr
 ```
 

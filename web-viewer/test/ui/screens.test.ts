@@ -29,6 +29,7 @@ function fakeViewer() {
     camera: undefined as never,
     controls: undefined as never,
     setModel: vi.fn<Viewer["setModel"]>(),
+    continues: vi.fn<Viewer["continues"]>(() => false),
     fit: vi.fn<Viewer["fit"]>(),
     invalidate: vi.fn<Viewer["invalidate"]>(),
     contentChanged: vi.fn<Viewer["contentChanged"]>(),
