@@ -583,20 +583,27 @@ def fit_steps(
     reduced: list[str] = []
     unreduced: list[str] = []
     for entity, target in zip(entities, targets, strict=True):
-        if entity.triangle_count <= target:
-            fitted.append(entity)
-        else:
-            smaller = yield from decimate_steps(entity, target, quadric=quadric)
-            if smaller is None:
-                fitted.append(entity)
-                unreduced.append(entity.node_id)
-            else:
-                fitted.append(smaller)
-                reduced.append(entity.node_id)
+        result, smaller, whole = yield from fit_node_steps(entity, target, quadric=quadric)
+        fitted.append(result)
+        if smaller:
+            reduced.append(entity.node_id)
+        if whole:
+            unreduced.append(entity.node_id)
         if progress is not None:
             progress.done += 1
         yield
     return FitResult(tuple(fitted), tuple(reduced), tuple(unreduced))
+
+
+def fit_node_steps(
+    entity: Entity, target: int, *, quadric: Callable[[float], Any] | None = None
+) -> Steps[tuple[Entity, bool, bool]]:
+    """One node of :func:`fit_steps` (and of the snapshot's cached fit, SLC-50): ``(entity, reduced, unreduced)`` —
+    decimated to ``target`` when above it, kept whole and reported when nothing can reduce it (never dropped, §7.5)."""
+    if entity.triangle_count <= target:
+        return entity, False, False
+    smaller = yield from decimate_steps(entity, target, quadric=quadric)
+    return (entity, False, True) if smaller is None else (smaller, True, False)
 
 
 #: The GLB container: a 12-byte header and two 8-byte chunk headers.

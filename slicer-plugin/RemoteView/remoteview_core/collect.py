@@ -45,7 +45,7 @@ from __future__ import annotations
 import enum
 import itertools
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 import numpy as np
@@ -67,6 +67,7 @@ from remoteview_core.clustering import edge_work
 from remoteview_core.coords import ras_matrix_to_gltf, ras_to_gltf_normals, ras_to_gltf_points
 from remoteview_core.glb_writer import Entity, is_exportable_matrix
 from remoteview_core.ids import SceneIds
+from remoteview_core.meshcache import CachedMesh, CachedSkip, MeshCache, Stamp, mesh_stamp
 from remoteview_core.names import NameAssigner
 from remoteview_core.steps import Progress, Steps, run
 
@@ -149,13 +150,31 @@ class SkippedNode:
     baked: bool = field(default=False, compare=False)
 
 
+@dataclass(frozen=True, eq=False)
+class Source:
+    """Where an entity's mesh comes from (SLC-50): the polydata and the bake to collect it again, the handle's
+    position (``SkippedNode.index``), its raw name (to name the entities again when one is left out late), the mesh's
+    stamp (``None``: not cached), the triangle count collect gave, and the cache entry the entity was taken from
+    (``None``: collected now). Its repr holds neither the name nor the mesh (T7)."""
+
+    polydata: Any = field(repr=False)
+    bake: vtkAbstractTransform | None = field(repr=False)
+    index: int
+    raw_name: str | bytes | None = field(repr=False)
+    stamp: Stamp | None = field(repr=False)
+    count: int
+    cached: CachedMesh | None = field(default=None, repr=False)
+
+
 @dataclass(frozen=True)
 class CollectedScene:
-    """The entities of one snapshot plus the nodes that were left out (pass ``anonymized_names`` to ``RootExtras``)."""
+    """The entities of one snapshot plus the nodes that were left out (pass ``anonymized_names`` to ``RootExtras``);
+    ``sources`` has one :class:`Source` per entity."""
 
     entities: tuple[Entity, ...]
     skipped: tuple[SkippedNode, ...]
     anonymized_names: bool
+    sources: tuple[Source, ...] = field(default=(), compare=False, repr=False)
 
 
 @dataclass(frozen=True, eq=False)
@@ -587,13 +606,20 @@ class _Collector:
     """One collection (:func:`collect_steps`): the entities and skips so far, the names and the ID registry it
     uses — kept across its steps."""
 
-    def __init__(self, scene_api: SceneApi, ids: SceneIds, *, anonymize: bool) -> None:
+    def __init__(
+        self, scene_api: SceneApi, ids: SceneIds, *, anonymize: bool, cache: MeshCache | None
+    ) -> None:
         self._scene = scene_api
         self._ids = ids
         self._anonymize = anonymize
+        self._cache = cache
         self._names = NameAssigner(anonymize=anonymize)
         self.entities: list[Entity] = []
+        self.sources: list[Source] = []
         self.skipped: list[SkippedNode] = []
+        self.meshes_read: list[
+            str
+        ] = []  # the nodes whose mesh was looked at: their cache entries stay
         self._seen: set[str] = set()
         self._index = -1  # the handle's position across both lists
 
@@ -652,23 +678,35 @@ class _Collector:
             self.skipped.append(SkippedNode(node_id, SkipReason.INVALID_DISPLAY, index))
             return
         polydata = scene.polydata(handle)
-        mesh = yield from _checked_mesh_steps(polydata, bake)
-        if isinstance(mesh, SkipReason):
-            # the bake is to blame only if the mesh passes unbaked (the extra check runs for skipped nodes only)
-            unbaked = (yield from _checked_mesh_steps(polydata, None)) if bake is not None else None
-            baked = bake is not None and not isinstance(unbaked, SkipReason)
-            self.skipped.append(SkippedNode(node_id, mesh, index, baked=baked))
+        stamp = self._stamp(node_id, polydata, world, bake)
+        cached = self._cache.get(node_id, stamp) if self._cache is not None else None
+        if isinstance(cached, CachedSkip):
+            self.skipped.append(SkippedNode(node_id, cached.reason, index, baked=cached.baked))
             return
-        yield
+        if cached is None:
+            outcome = yield from _mesh_or_skip_steps(polydata, bake)
+            if isinstance(outcome, tuple):
+                reason, baked = outcome
+                self.skipped.append(SkippedNode(node_id, reason, index, baked=baked))
+                if stamp is not None and self._cache is not None:
+                    self._cache.put(node_id, CachedSkip(stamp, reason, baked))
+                return
+            yield
+            geometry = _gltf_geometry(outcome)
+        else:
+            # the mesh as the last export sent it; collected again if this export gives the node another share
+            geometry = (cached.positions, cached.normals, cached.indices)
+        positions, normals, indices = geometry
         color, opacity, visible = display
+        name = raw_name(scene.name(handle))
         self.entities.append(
             Entity(
                 node_id=node_id,
                 kind=kind,
-                name=self._names.assign(kind, raw_name(scene.name(handle))),
-                positions=ras_to_gltf_points(mesh.positions, dtype=np.float64),
-                normals=ras_to_gltf_normals(mesh.normals),
-                indices=mesh.triangles,
+                name=self._names.assign(kind, name),
+                positions=positions,
+                normals=normals,
+                indices=indices,
                 color=color,
                 opacity=opacity,
                 visible=visible,
@@ -678,6 +716,61 @@ class _Collector:
                 baked=bake is not None,
             )
         )
+        count = len(indices) if cached is None else cached.count
+        self.sources.append(Source(polydata, bake, index, name, stamp, count, cached))
+
+    def _stamp(self, node_id: str, polydata: Any, world: Any, bake: Any) -> Stamp | None:
+        """The stamp the cache keys ``node_id``'s mesh by (``None``: no cache, no ``vtkPolyData``, or a non-linear
+        chain, whose transform is a new object at every read — the node's entry, if any, goes)."""
+        if self._cache is None:
+            return None
+        self.meshes_read.append(node_id)
+        stamp = None
+        if bake is None or world is not None:
+            sheared = (
+                None
+                if bake is None
+                else tuple(np.asarray(world, dtype=np.float64).ravel().tolist())
+            )
+            stamp = mesh_stamp(polydata, sheared)
+        if stamp is None:
+            self._cache.discard(node_id)
+        return stamp
+
+
+def _mesh_or_skip_steps(
+    polydata: Any, bake: vtkAbstractTransform | None
+) -> Steps[Mesh | tuple[SkipReason, bool]]:
+    """The node's mesh (baked by ``bake``), or why the export leaves it out and whether the bake is to blame — only
+    if the mesh passes unbaked (``SkippedNode.baked``; the extra check runs for skipped nodes only)."""
+    mesh = yield from _checked_mesh_steps(polydata, bake)
+    if not isinstance(mesh, SkipReason):
+        return mesh
+    unbaked = (yield from _checked_mesh_steps(polydata, None)) if bake is not None else None
+    return mesh, bake is not None and not isinstance(unbaked, SkipReason)
+
+
+def _gltf_geometry(
+    mesh: Mesh,
+) -> tuple[NDArray[np.float64], NDArray[np.float32], NDArray[np.int64]]:
+    """A collected mesh's positions, normals and triangles in glTF space."""
+    return (
+        ras_to_gltf_points(mesh.positions, dtype=np.float64),
+        ras_to_gltf_normals(mesh.normals),
+        mesh.triangles,
+    )
+
+
+def recollect_steps(entity: Entity, source: Source) -> Steps[Entity | tuple[SkipReason, bool]]:
+    """``entity`` with its mesh collected again from ``source`` (SLC-50: a decimated node taken from the cache whose
+    share changed), or why that mesh is now left out — it changed since the node was listed — and whether its bake
+    is to blame."""
+    outcome = yield from _mesh_or_skip_steps(source.polydata, source.bake)
+    if isinstance(outcome, tuple):
+        return outcome
+    yield
+    positions, normals, indices = _gltf_geometry(outcome)
+    return replace(entity, positions=positions, normals=normals, indices=indices)
 
 
 def collect_scene(
@@ -694,12 +787,15 @@ def collect_steps(
     anonymize_names: bool = False,
     ids: SceneIds | None = None,
     progress: Progress | None = None,
+    cache: MeshCache | None = None,
 ) -> Steps[CollectedScene]:
     """:func:`collect_scene` in steps (SLC-28): both lists are read first, then each node is collected in the steps
     of its mesh and one more. ``progress`` gets two units of work per node (this collection and its fit) in
-    ``total`` and one in ``done`` per node collected."""
+    ``total`` and one in ``done`` per node collected. With a ``cache`` (SLC-50) a node whose mesh has the stamp of
+    its entry is not collected: it gets the entry's fitted geometry (``Source.cached``), or its skip; entries of the
+    nodes whose mesh was not looked at are dropped."""
     collector = _Collector(
-        scene_api, ids if ids is not None else SceneIds(), anonymize=anonymize_names
+        scene_api, ids if ids is not None else SceneIds(), anonymize=anonymize_names, cache=cache
     )
     models, segments = list(scene_api.visible_model_nodes()), list(scene_api.visible_segments())
     progress = progress if progress is not None else Progress()
@@ -709,7 +805,14 @@ def collect_steps(
             yield from collect(handle)
             progress.done += 1
             yield
-    return CollectedScene(tuple(collector.entities), tuple(collector.skipped), collector.anonymize)
+    if cache is not None:
+        cache.keep_only(collector.meshes_read)
+    return CollectedScene(
+        tuple(collector.entities),
+        tuple(collector.skipped),
+        collector.anonymize,
+        tuple(collector.sources),
+    )
 
 
 def collect_entities(scene_api: SceneApi, *, anonymize_names: bool = False) -> list[Entity]:

@@ -106,12 +106,27 @@ consults it before collecting:
 - **Share.** `allocate` needs every node's triangle count, which a cached node gives without being collected. A
   decimated result is used for the same share only. A node that was not decimated (count ≤ share) is used for any
   share it still fits, since its result does not depend on the share. When a cached node's share changed (the scene
-  is over the profile's total and another node's count changed), it is collected again before it is decimated. Only
-  the fitted geometry is kept (at most the share, 100k triangles), never the collected mesh: the reporter's node
-  would hold about 0.8 GB for the whole session.
+  is over the profile's total and another node's count changed), a node that was decimated is collected again
+  before it is decimated; any other entry holds the mesh as collected, which is decimated directly. Only what the
+  export sent is kept: the fitted geometry (at most the share, 100k triangles), or the whole mesh of a node that
+  fitted its share or that nothing could reduce — never a collected mesh that was decimated (the reporter's node
+  would hold about 0.8 GB for the whole session). When a decimated node is collected again and its mesh has lost
+  every triangle since it was listed (a change between steps), it is left out and the others are named again as a
+  fresh collection names them; their shares are still those of the listed nodes, and the mark of that change
+  re-exports the scene after this snapshot.
+- **A deadline fallback is kept too.** A node whose quadric ran out of its 8 s (SLC-41; under load) keeps the coarser
+  clustering result while its mesh and share are unchanged, where an export without the cache would try the quadric
+  again.
 - **Lifetime.** One cache per live session (`LiveUpdates`); entries of nodes not exported by the last preparation
   are dropped; a reset (scene closed) clears it. The light reads (name, colour, opacity, visibility, transform) are
   made at every export, as before.
+
+Measured natively (dev venv) on a generated 43.8M-triangle surface — the profile harness with a smaller smoothing
+radius — with a sphere of 7,936 triangles next to it, `mobile`: the first export takes 17.8 s; a second one with
+nothing changed 0.00 s; one after the sphere's mesh is replaced 0.01 s, because the surface is neither collected nor
+decimated again. Every snapshot goes through the cache (`prepare_snapshot` makes an empty one for a single export),
+so there is one fitting path for snapshots; its per-node decision is `decimate.fit_node_steps`, which
+`decimate.fit_steps` uses too. The tests compare warm exports with fresh ones byte for byte.
 
 ## Live preparation and the panel (SLC-51)
 
