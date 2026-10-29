@@ -743,7 +743,7 @@ module self-test in Slicer. Rule 10 of `CLAUDE.md` applies: never claim a Slicer
   (`MeshCache.use_settings`); `prepare_snapshot`/`build_snapshot(…, remove_islands=)` and `Snapshot.cleaned`;
   `docs/research/slicer-prepare.md` § Small islands;* (f) `part_sizes` could use two edges per triangle and `bincount`
   like `small_islands`; (g) the user guides and architecture §6 step 4 should mention the island step and SLC-54's
-  checkbox (`release`).
+  checkbox (`release`) — *done by `release` on `main`, 2026-10-29*.
 - (SLC-14 review, low) §7.5's "max visible nodes" (120/60/120) is neither modelled nor warned about, and when the
   2k floors alone exceed the total the scene goes out above the profile's triangle total without a warning: SLC-18's
   panel warnings should cover both (a `FitResult.over_total` flag, `Budget.max_nodes`). `glb_binary_size` repeats

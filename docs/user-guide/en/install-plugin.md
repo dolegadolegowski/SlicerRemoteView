@@ -96,9 +96,10 @@ click **Start session** for a new code.
 ## What is sent
 
 Nothing leaves the computer before you click **Start session**. Then RemoteView sends to the server the
-whole surfaces of the models and segments shown in the 3D view (clipping is not applied; no images or
-volumes), with their names, IDs, colours, opacity, visibility and positions, and the Slicer, RemoteView and
-operating-system versions. Until you click **Stop session** it also sends every change, including models and
+surfaces of the models and segments shown in the 3D view (clipping is not applied; small islands, that is small
+pieces not connected to the rest of a model or segment, are left out while **Remove small islands** is on, as
+it is by default; no images or volumes), with their names, IDs, colours, opacity, visibility and positions,
+and the Slicer, RemoteView and operating-system versions. Until you click **Stop session** it also sends every change, including models and
 segments shown, added or renamed later and any scene you open or load. Hiding, deleting or renaming
 something later does not take back what was already sent: the server keeps the last scene for viewers who
 join later until the scene is sent again or the session ends. Anyone with the code can watch while the
@@ -126,6 +127,7 @@ session runs. The connection is encrypted, but the server itself can read the sc
 | No QR code ("No QR code for this relay address …") | The server name is longer than 48 characters, or the address does not end with `/ws`. The code still works: type it at `https://<your-server>/`. |
 | Phones show "Connection lost" right after **Join**, while Slicer shows a code | The server's `ALLOWED_ORIGINS` setting is missing or wrong: see [Run your own server](own-server.md#troubleshooting). |
 | Phones show "Code not recognised" | The session has ended. Use the code Slicer shows now, or click **Start session**. |
+| A small structure that Slicer shows is missing on the phone | It may be a small island: a small piece not connected to the rest of its model or segment. Uncheck **Remove small islands** in the RemoteView panel; the scene is sent again. |
 
 ### Python packages
 

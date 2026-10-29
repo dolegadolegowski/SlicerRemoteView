@@ -100,10 +100,12 @@ Sesja kończy się również, gdy serwer zostanie uruchomiony ponownie, gdy Slic
 
 ## Co jest wysyłane
 
-Nic nie opuszcza komputera, zanim klikniesz **Start session**. Potem RemoteView wysyła na serwer całe
+Nic nie opuszcza komputera, zanim klikniesz **Start session**. Potem RemoteView wysyła na serwer
 powierzchnie modeli i segmentów pokazanych w widoku 3D (przycięcie, czyli clipping, nie jest uwzględniane;
-bez obrazów i wolumenów, np. skanów TK czy MR) razem z ich nazwami, identyfikatorami, kolorami,
-przezroczystością, widocznością i położeniem, a także wersje Slicera, RemoteView i systemu operacyjnego.
+małe wyspy, czyli drobne kawałki niepołączone z resztą modelu lub segmentu, są pomijane, gdy włączona jest
+opcja **Remove small islands**, a domyślnie jest włączona; bez obrazów i wolumenów, np. skanów TK czy MR)
+razem z ich nazwami, identyfikatorami, kolorami, przezroczystością, widocznością i położeniem, a także wersje
+Slicera, RemoteView i systemu operacyjnego.
 Aż klikniesz **Stop session**, wysyła też każdą zmianę, w tym modele i segmenty pokazane, dodane albo
 przemianowane później oraz każdą scenę, którą otworzysz lub wczytasz. Późniejsze ukrycie, usunięcie albo
 zmiana nazwy nie cofa tego, co już zostało wysłane: serwer trzyma ostatnią scenę dla widzów, którzy dołączą
@@ -134,6 +136,7 @@ oglądać scenę, dopóki trwa sesja. Połączenie jest szyfrowane, ale sam serw
 | Brak kodu QR („No QR code for this relay address …”) | Nazwa serwera ma ponad 48 znaków albo adres nie kończy się na `/ws`. Kod nadal działa: wpisz go na `https://<your-server>/`. |
 | Telefony pokazują „Utracono połączenie” („Connection lost”) zaraz po **Dołącz** (**Join**), choć Slicer pokazuje kod | Na serwerze brakuje ustawienia `ALLOWED_ORIGINS` albo jest ono błędne: zobacz [Własny serwer](own-server.md#rozwiązywanie-problemów). |
 | Telefony pokazują „Nie rozpoznano kodu” („Code not recognised”) | Sesja już się skończyła. Użyj kodu, który Slicer pokazuje teraz, albo kliknij **Start session**. |
+| Na telefonie brakuje małej struktury, którą Slicer pokazuje | To może być mała wyspa: drobny kawałek niepołączony z resztą swojego modelu lub segmentu. Odznacz **Remove small islands** w panelu RemoteView; scena zostanie wysłana ponownie. |
 
 ### Pakiety Pythona
 
