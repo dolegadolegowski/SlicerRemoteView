@@ -1,8 +1,15 @@
 import { decodeChunkHeader } from "@slicerremoteview/shared";
 import { describe, expect, it } from "vitest";
 import { loadGlb, resolveFixture } from "../../tools/fake-slicer/src/index.js";
-import { DEFAULT_SMOKE, runLoadSmoke, sendPaced, smokeOptions } from "../scripts/load-smoke.js";
+import {
+  BudgetSpend,
+  DEFAULT_SMOKE,
+  runLoadSmoke,
+  sendPaced,
+  smokeOptions,
+} from "../scripts/load-smoke.js";
 import type { PacingViewer } from "../scripts/load-smoke.js";
+import { DEFAULT_MESSAGE_BUDGETS, TokenBucket } from "../src/ws/budget.js";
 
 /** Whether a process with this pid (a negative one: process group) still exists. */
 function alive(pid: number): boolean {
@@ -101,6 +108,46 @@ describe("sendPaced (SRV-30, report 2026-10-27-release-1)", () => {
   });
 });
 
+describe("BudgetSpend (SRV-32)", () => {
+  let ids = 0;
+  const nextId = (): string => `p-${++ids}`;
+  /**
+   * The verdicts of the relay's own publisher buckets (`ws/budget.ts`) on `cycles` snapshots of
+   * `fixture`, each cycle's frames charged at once — the fastest a machine can go — and each cycle
+   * `gap(spent)` ms after the one before.
+   */
+  const verdicts = async (fixture: string, cycles: number, gap: (spent: BudgetSpend) => number) => {
+    const glb = await loadGlb(resolveFixture(fixture));
+    const text = new TokenBucket(DEFAULT_MESSAGE_BUDGETS.publisher, 0);
+    const chunks = new TokenBucket(DEFAULT_MESSAGE_BUDGETS.publisherBinary, 0);
+    const seen = new Set<string>();
+    let now = 0;
+    for (let sceneVersion = 1; sceneVersion <= cycles; sceneVersion++) {
+      const spent = new BudgetSpend();
+      const send = async (frame: string | Uint8Array): Promise<void> => {
+        spent.add(frame);
+        if (typeof frame === "string") seen.add(text.take(Buffer.byteLength(frame), now));
+        else seen.add(chunks.take(frame.byteLength, now));
+      };
+      const plan = { glb, sceneVersion, chunkSize: 1_048_576, profile: "mobile" as const };
+      await sendPaced(send, plan, nextId, []);
+      now += gap(spent);
+    }
+    return [...seen];
+  };
+
+  it("cycles begun `refillMs` apart keep within the relay's publisher budget, back to back not", async () => {
+    // 3.4 KB: the two text frames (32 KiB each on top of their bytes) bind; 4.7 MiB: the chunks.
+    for (const [fixture, cycles] of [
+      ["asymmetric-2nodes.glb", 500],
+      ["large-synthetic.glb", 100],
+    ] as const) {
+      expect(await verdicts(fixture, cycles, (spent) => spent.refillMs)).toEqual(["ok"]);
+      expect(await verdicts(fixture, cycles, () => 0)).toContain("limited"); // closed `4006`
+    }
+  });
+});
+
 describe("scripts/load-smoke.ts (SRV-21)", () => {
   it("parses its options onto the defaults and refuses values it cannot use", () => {
     expect(smokeOptions([])).toEqual(DEFAULT_SMOKE);
@@ -142,6 +189,15 @@ describe("scripts/load-smoke.ts (SRV-21)", () => {
     // Every viewer waited for kept the pace (the real `Viewer` takes part: chunk count and wake).
     const cycles = [...result.phase1, ...result.phase2];
     expect(cycles.filter((c) => c.viewersUnpaced !== 0)).toEqual([]);
+    // Each cycle started once the relay's publisher budget had earned back the one before (SRV-32),
+    // its chunks alone taking `snapshotBytes` ÷ 32 MiB/s.
+    const chunksMs = (1000 * result.snapshotBytes) / DEFAULT_MESSAGE_BUDGETS.publisherBinary.rate;
+    for (const [i, c] of cycles.entries()) {
+      expect(c.refillMs).toBeGreaterThan(chunksMs);
+      const previous = cycles[i - 1];
+      if (previous)
+        expect(c.startedAt).toBeGreaterThanOrEqual(previous.startedAt + previous.refillMs);
+    }
     expect(result.stoppedViewerRecovered).toBe(true);
     expect(ownGroup).toBe(true);
     expect(alive(pid)).toBe(false); // the relay is gone with the run
@@ -155,7 +211,8 @@ describe("scripts/load-smoke.ts (SRV-21)", () => {
         viewers: 3,
         // 3.4 KB: it loads at once, so the spawn comes before the timeout, and it never reaches the
         // soft watermark, so phase 2 runs until the timeout — starting, joining or cycling, however
-        // fast the machine (report `2026-10-27-release-1`).
+        // fast the machine (report `2026-10-27-release-1`), its cycles within the publisher's
+        // budget (`BudgetSpend`; back to back, the relay closed it `RATE_LIMITED` first, SRV-32).
         fixture: "asymmetric-2nodes.glb",
         maxDeferCycles: Infinity,
         runTimeoutMs: 2_000,
