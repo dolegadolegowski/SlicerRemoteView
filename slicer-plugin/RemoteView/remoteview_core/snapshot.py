@@ -10,7 +10,9 @@ transport in order.
   extension because the client reads it from the file.
 - The meshes are decimated to the budgets of the session's profile (SLC-14, §7.5, FR-10): :attr:`Snapshot.reduced`
   names the nodes that were, :attr:`Snapshot.unreduced` those nothing could reduce (sent whole), and
-  :attr:`Snapshot.over_target` says the GLB is above the profile's recommended size (NFR-03: warn).
+  :attr:`Snapshot.over_target` says the GLB is above the profile's recommended size (NFR-03: warn). With
+  ``remove_islands`` (SLC-53) every node first loses its small islands (``decimate.island_mask``) and the shares
+  follow the triangles left; :attr:`Snapshot.cleaned` names the nodes that lost some.
 - An empty scene is a snapshot too (no nodes): viewers then show an empty scene instead of an old one.
 - A GLB over the relay's ``maxSnapshotBytes`` raises :class:`SnapshotTooLargeError` before any version is used — before
   the GLB is written when its binary chunk alone is too large (the error then carries the estimated size, which can
@@ -33,6 +35,9 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from typing import Any
+
+import numpy as np
+from numpy.typing import NDArray
 
 from remoteview_core import decimate
 from remoteview_core.changes import SentScene
@@ -79,8 +84,11 @@ class Snapshot:
     triangle_count: int
     byte_length: int
     skipped: tuple[SkippedNode, ...]
-    reduced: tuple[str, ...] = ()
-    unreduced: tuple[str, ...] = ()
+    #: node IDs, out of the repr (T7), like those of ``skipped``
+    reduced: tuple[str, ...] = field(default=(), repr=False)
+    unreduced: tuple[str, ...] = field(default=(), repr=False)
+    #: the nodes whose small islands were left out (SLC-53, ``remove_islands``)
+    cleaned: tuple[str, ...] = field(default=(), repr=False)
     #: the profile's recommended size (0: none)
     target_bytes: int = 0
     #: the viewers' scene after this snapshot (SLC-30): its entities, the skipped nodes, the *Hide node names* setting
@@ -122,13 +130,15 @@ def build_snapshot(  # noqa: PLR0913 — keyword-only options after the scene an
     announce: Iterable[tuple[str, str]] = (),
     ids: SceneIds | None = None,
     cache: MeshCache | None = None,
+    remove_islands: bool = False,
 ) -> Snapshot:
     """Collect ``scene_api`` and build the next snapshot of ``client``'s session (see the module docstring). The GLB
     is quantised (``KHR_mesh_quantization``, FR-09) unless ``quantize`` is false. ``announce`` lists the ``(nodeId,
     kind)`` pairs for :attr:`Snapshot.announced` (``ProtocolClient.announce_added``: none while updates are held).
     ``ids`` is the session's alias registry (§7.3: every export of a session reuses the aliases it issued); ``None``
     makes a fresh one for a single export. ``cache`` is the session's :class:`~remoteview_core.meshcache.MeshCache`
-    (SLC-50): the nodes whose mesh and share are those of their entry are neither collected nor decimated again."""
+    (SLC-50): the nodes whose mesh and share are those of their entry are neither collected nor decimated again.
+    ``remove_islands`` leaves every node's small islands out (SLC-53)."""
     return run(
         prepare_snapshot(
             scene_api,
@@ -139,6 +149,7 @@ def build_snapshot(  # noqa: PLR0913 — keyword-only options after the scene an
             announce=announce,
             ids=ids,
             cache=cache,
+            remove_islands=remove_islands,
         )
     )
 
@@ -154,6 +165,7 @@ def prepare_snapshot(  # noqa: PLR0913 — build_snapshot's options, and the pro
     ids: SceneIds | None = None,
     progress: Progress | None = None,
     cache: MeshCache | None = None,
+    remove_islands: bool = False,
 ) -> Steps[Snapshot]:
     """:func:`build_snapshot` in steps (the module docstring); ``progress`` counts the nodes collected and fitted.
     The session's state and the relay's limits are checked at the first step and read again at the last: a
@@ -161,11 +173,17 @@ def prepare_snapshot(  # noqa: PLR0913 — build_snapshot's options, and the pro
     _live_limits(client)
     progress = progress if progress is not None else Progress()
     cache = cache if cache is not None else MeshCache()  # a single export: every node is a miss
+    # what the fit makes of a mesh depends on the island rule: a cache made with another one starts again
+    cache.use_settings(
+        (remove_islands, decimate.SMALL_ISLAND_TRIANGLES, decimate.SMALL_ISLAND_SHARE)
+    )
     collected = yield from collect_steps(
         scene_api, anonymize_names=anonymize_names, ids=ids, progress=progress, cache=cache
     )
     budget = PROFILES[client.profile]
-    fitted, skipped = yield from _fit_steps(collected, budget, cache, progress)
+    fitted, skipped = yield from _fit_steps(
+        collected, budget, cache, progress, remove_islands=remove_islands
+    )
     progress.done = progress.total  # the nodes left out need no fit
     limits = _live_limits(client)
     if glb_binary_size(fitted.entities, quantize=quantize) > limits["maxSnapshotBytes"]:
@@ -204,6 +222,7 @@ def prepare_snapshot(  # noqa: PLR0913 — build_snapshot's options, and the pro
         skipped=skipped,
         reduced=fitted.reduced,
         unreduced=fitted.unreduced,
+        cleaned=fitted.cleaned,
         target_bytes=budget.target_bytes,
         sent=sent,
         announced=announced,
@@ -223,52 +242,99 @@ def _live_limits(client: ProtocolClient) -> dict[str, Any]:
 
 
 def _fit_steps(
-    collected: CollectedScene, budget: Budget, cache: MeshCache, progress: Progress
+    collected: CollectedScene,
+    budget: Budget,
+    cache: MeshCache,
+    progress: Progress,
+    *,
+    remove_islands: bool,
 ) -> Steps[tuple[FitResult, tuple[SkippedNode, ...]]]:
     """``decimate.fit_steps`` with the cache (SLC-50): the shares come from the triangle counts collect gave (a
     cached node's too); a cached node keeps its entry's result when that fits its share; every other node goes through
-    ``decimate.fit_entity_steps`` — a cached one that was decimated is collected again first (its entry is the mesh
-    fitted to another share; any other entry holds the collected mesh) — and what it gives is stored. Also returns the
-    skipped nodes: a mesh collected again may have become one to leave out since the node was listed, and the entities
-    are then named again, as a fresh collection would name them."""
-    targets = decimate.allocate([source.count for source in collected.sources], budget)
+    ``decimate.fit_entity_steps`` — a cached one whose entry is not its collected mesh (decimated for another share,
+    or without its small islands) is collected again first — and what it gives is stored. With ``remove_islands``
+    (SLC-53) every node collected now gets its ``decimate.island_mask`` before the shares, one step each, and the
+    shares count the triangles left (an entry knows its islands). Also returns the skipped nodes: a mesh collected
+    again may have become one to leave out since the node was listed, and the entities are then named again, as a
+    fresh collection would name them."""
+    drops: list[NDArray[np.bool_] | None] = [None] * len(collected.entities)
+    if remove_islands:
+        for i, (listed, source) in enumerate(
+            zip(collected.entities, collected.sources, strict=True)
+        ):
+            if source.cached is None:
+                drops[i] = decimate.island_mask(listed)
+                yield
+    counts = [
+        source.count - (source.cached.islands if source.cached is not None else _marked(drop))
+        for source, drop in zip(collected.sources, drops, strict=True)
+    ]
+    targets = decimate.allocate(counts, budget)
     fitted: list[Entity] = []
     kept: list[Source] = []
     reduced: list[str] = []
     unreduced: list[str] = []
+    cleaned: list[str] = []
     skipped = list(collected.skipped)
-    for listed, source, target in zip(collected.entities, collected.sources, targets, strict=True):
-        cached = source.cached
-        if cached is not None and cached.fits(target):
-            result, smaller, whole = listed, cached.reduced, cached.unreduced
-        else:
-            entity, count = listed, source.count
-            if cached is not None and cached.reduced:
-                again = yield from recollect_steps(listed, source)
-                if isinstance(again, tuple):
-                    reason, baked = again
-                    skipped.append(SkippedNode(listed.node_id, reason, source.index, baked=baked))
-                    progress.done += 1
-                    continue
-                entity, count = again, again.triangle_count
-            result, decimated = yield from decimate.fit_entity_steps(entity, None, target)
-            smaller, whole = decimated is True, decimated is False
-            if source.stamp is not None:
-                geometry = (result.positions, result.normals, result.indices)
-                entry = CachedMesh(source.stamp, count, target, *geometry, smaller, whole)
-                cache.put(listed.node_id, entry)
+    nodes = zip(collected.entities, collected.sources, drops, targets, strict=True)
+    for listed, source, drop, target in nodes:
+        outcome = yield from _fit_node_steps(
+            listed, source, drop, target, cache=cache, remove_islands=remove_islands
+        )
+        progress.done += 1
+        if isinstance(outcome, SkippedNode):
+            skipped.append(outcome)
+            continue
+        result, smaller, whole, islands = outcome
         fitted.append(result)
         kept.append(source)
-        if smaller:
-            reduced.append(listed.node_id)
-        if whole:
-            unreduced.append(listed.node_id)
-        progress.done += 1
+        for flag, names in ((smaller, reduced), (whole, unreduced), (islands, cleaned)):
+            if flag:
+                names.append(listed.node_id)
         yield
     if len(skipped) > len(collected.skipped):
         fitted = _named_again(fitted, kept, anonymize=collected.anonymized_names)
         skipped.sort(key=lambda node: node.index)
-    return FitResult(tuple(fitted), tuple(reduced), tuple(unreduced)), tuple(skipped)
+    fit = FitResult(tuple(fitted), tuple(reduced), tuple(unreduced), tuple(cleaned))
+    return fit, tuple(skipped)
+
+
+def _fit_node_steps(  # noqa: PLR0913 — one node of _fit_steps, with its cache and rule
+    listed: Entity,
+    source: Source,
+    drop: NDArray[np.bool_] | None,
+    target: int,
+    *,
+    cache: MeshCache,
+    remove_islands: bool,
+) -> Steps[tuple[Entity, bool, bool, int] | SkippedNode]:
+    """One node of :func:`_fit_steps`: ``(entity, reduced, unreduced, islands)`` — ``islands`` the triangles of the
+    small islands left out —, or the node left out because its mesh, collected again, now is one to leave out."""
+    cached = source.cached
+    if cached is not None and cached.fits(target):
+        return listed, cached.reduced, cached.unreduced, cached.islands
+    entity, count = listed, source.count
+    if cached is not None and (cached.reduced or cached.islands):
+        again = yield from recollect_steps(listed, source)
+        if isinstance(again, tuple):
+            reason, baked = again
+            return SkippedNode(listed.node_id, reason, source.index, baked=baked)
+        entity, count = again, again.triangle_count
+        if remove_islands:
+            drop = decimate.island_mask(entity)
+            yield
+    result, decimated = yield from decimate.fit_entity_steps(entity, drop, target)
+    smaller, whole, islands = decimated is True, decimated is False, _marked(drop)
+    if source.stamp is not None:
+        geometry = (result.positions, result.normals, result.indices)
+        entry = CachedMesh(source.stamp, count, target, *geometry, smaller, whole, islands)
+        cache.put(listed.node_id, entry)
+    return result, smaller, whole, islands
+
+
+def _marked(drop: NDArray[np.bool_] | None) -> int:
+    """The triangles ``drop`` marks (an island mask; ``None``: none)."""
+    return 0 if drop is None else int(drop.sum())
 
 
 def _named_again(entities: list[Entity], sources: list[Source], *, anonymize: bool) -> list[Entity]:

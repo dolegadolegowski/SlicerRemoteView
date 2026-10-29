@@ -125,8 +125,42 @@ Measured natively (dev venv) on a generated 43.8M-triangle surface — the profi
 radius — with a sphere of 7,936 triangles next to it, `mobile`: the first export takes 17.8 s; a second one with
 nothing changed 0.00 s; one after the sphere's mesh is replaced 0.01 s, because the surface is neither collected nor
 decimated again. Every snapshot goes through the cache (`prepare_snapshot` makes an empty one for a single export),
-so there is one fitting path for snapshots; its per-node decision is `decimate.fit_node_steps`, which
-`decimate.fit_steps` uses too. The tests compare warm exports with fresh ones byte for byte.
+so there is one fitting path for snapshots; its per-node decision is `decimate.fit_entity_steps` (SLC-53's
+`fit_entity` in steps), which `decimate.fit_steps` uses too. The tests compare warm exports with fresh ones byte for byte.
+
+## Small islands (SLC-53 follow-up (e))
+
+SLC-53 leaves every node's small islands out before the shares are given (`docs/research/slicer-islands.md`). It
+was merged from `ws/slicer-islands` into this branch, and the preparation runs it like this:
+
+- **One step per node.** `snapshot._fit_steps` calls `decimate.island_mask` for every node collected now, one step
+  each, before `allocate`; the shares count the triangles left. Then each node goes through
+  `decimate.fit_entity_steps` (SLC-53's `fit_entity` in steps). A node within its share is sent without its islands,
+  compacted. A node above its share is decimated from an entity that shares the collected positions, with only its
+  triangles filtered (`without_islands(…, compact=False)`, no copy).
+- **The cache counts the islands.** An entry keeps the number of triangles in the islands it left out
+  (`CachedMesh.islands`), so a cached node's share needs no mask. An entry holds the collected mesh only if it was
+  neither decimated nor cleaned. A decimated entry was fitted to another share. A cleaned entry is compacted, while a
+  fresh export decimates an input that still holds the islands' vertices. So either kind is collected again when its
+  share changes, and its islands are looked for again. That keeps a warm export identical, byte for byte, to a fresh
+  one (`test_prepare_cache.py`).
+- **One island rule per cache.** What the fit makes of a mesh depends on the rule: on or off,
+  `SMALL_ISLAND_TRIANGLES` and `SMALL_ISLAND_SHARE`. `prepare_snapshot` passes the rule to `MeshCache.use_settings`,
+  which empties the cache when it changes. Changing the rule during a session (SLC-54's checkbox) therefore
+  collects and fits every node once more.
+
+Measured natively with a local harness (not committed) on a generated surface of 15,384,537 triangles (smoothed
+noise through flying edges, one segment) next to a sphere of 7,936 triangles, `mobile`, one step at a time:
+
+| Islands | Steps | Total | Longest step | Island step of the surface | After the sphere's mesh is replaced |
+|---|---|---|---|---|---|
+| off | 53 | 6.95 s | 1.28 s (the quadric) | none | 0.01 s, no mask |
+| on | 55 | 7.30 s | 1.20 s (the quadric) | 0.54 s | < 0.01 s, the sphere's mask only |
+
+Unlike the quadric's step, whose input the size bound caps (at most 800k triangles for a 100k share), the island
+step grows with the node. On the reporter's mesh SLC-53 measured 0.6 s natively and about 1 s in Slicer under
+Rosetta, against about 1.9 s for the quadric there. On a generated 77.4M-triangle surface it took 2.78 s and was the
+longest step of that export; without islands, the longest step of the same export took 3.19 s.
 
 ## Live preparation and the panel (SLC-51)
 

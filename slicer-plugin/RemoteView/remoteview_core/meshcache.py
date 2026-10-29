@@ -15,6 +15,9 @@ was decimated.
   transform is a new object at every read).
 - A decimated result is used for the same share only; a node that was not decimated (it fitted its share) for any
   share it still fits, since its result does not depend on the share.
+- *Remove small islands* (SLC-53): an entry also counts the triangles of the small islands the fit left out, so a
+  cached node's share follows the triangles left without its islands being found again. The fitted meshes depend on
+  the island rule (on or off, and its thresholds): :meth:`MeshCache.use_settings` drops the entries made with another.
 
 One cache per live session (``LiveUpdates``); the node IDs it keys by stay in memory and out of its repr (T7). Main
 thread only (VTK objects are read).
@@ -22,7 +25,7 @@ thread only (VTK objects are read).
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Hashable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -47,8 +50,9 @@ def mesh_stamp(polydata: Any, bake: Stamp | None = None) -> Stamp | None:
 
 @dataclass(frozen=True, eq=False)
 class CachedMesh:
-    """A node's mesh as the last export fitted it: ``count`` triangles collected, fitted to ``share`` — ``reduced``
-    (decimated), ``unreduced`` (above its share, nothing could reduce it: kept whole) or neither (it fitted)."""
+    """A node's mesh as the last export fitted it: ``count`` triangles collected, ``islands`` of them in the small
+    islands it left out (SLC-53), fitted to ``share`` — ``reduced`` (decimated), ``unreduced`` (above its share,
+    nothing could reduce it: kept whole) or neither (it fitted)."""
 
     stamp: Stamp = field(repr=False)
     count: int
@@ -58,11 +62,17 @@ class CachedMesh:
     indices: NDArray[np.int64] = field(repr=False)
     reduced: bool = False
     unreduced: bool = False
+    islands: int = 0
+
+    @property
+    def kept(self) -> int:
+        """The triangles the share was given for: those collected, without the small islands."""
+        return self.count - self.islands
 
     def fits(self, share: int) -> bool:
         """Whether this result is the one a fit to ``share`` gives: the same share, or a node that was not decimated
         and still fits."""
-        return share == self.share or (self.count <= share and self.count <= self.share)
+        return share == self.share or (self.kept <= share and self.kept <= self.share)
 
 
 @dataclass(frozen=True, eq=False)
@@ -80,6 +90,14 @@ class MeshCache:
 
     def __init__(self) -> None:
         self._entries: dict[str, CachedMesh | CachedSkip] = {}
+        self._settings: Hashable = None
+
+    def use_settings(self, settings: Hashable) -> None:
+        """The fit's settings the entries are made with from now on (the island rule, SLC-53): the entries made with
+        others are dropped, since what the fit made of their meshes depends on them."""
+        if settings != self._settings:
+            self._entries.clear()
+            self._settings = settings
 
     def __repr__(self) -> str:  # counts only (T7)
         return f"MeshCache(nodes={len(self._entries)})"

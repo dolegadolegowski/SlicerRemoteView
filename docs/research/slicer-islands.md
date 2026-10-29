@@ -83,11 +83,12 @@ part tied with it, is never an island, so no node loses everything.
   of them; with the guard all stay, and next to a 50k-triangle body parts of 600 triangles stay while parts of 400 go.
   On the reporter's mesh (1 % of 10.49M = 104,863) and the synthetic mesh it changes nothing. The largest part is
   measured with its position joins, so the charts of an unwelded model count as one part (§ Connectivity, step 4).
-- Where: in `fit_to_budget`, before `allocate`, on every node (models and segments, also those within their share),
-  when `remove_islands` is on; the shares then follow the triangles left. `island_mask` and `fit_entity` are the
-  per-node steps for SLC-28. A node above its share is decimated from an entity that shares the input's positions and
-  normals and has only the kept triangles (`without_islands(…, compact=False)`); every entity `fit_to_budget` returns
-  is compact, so no vertex of a removed island reaches the GLB.
+- Where: in `fit_to_budget`, before `allocate`, on every node (models and segments, also those within their share), when
+  `remove_islands` is on; the shares then follow the triangles left. `island_mask` and `fit_entity` are the per-node
+  steps for SLC-28; on `ws/slicer-prepare`, `snapshot._fit_steps` runs them in steps and through the per-node cache
+  (`docs/research/slicer-prepare.md` § Small islands). A node above its share is decimated from an entity that shares
+  the input's positions and normals and has only the kept triangles (`without_islands(…, compact=False)`); every entity
+  `fit_to_budget` returns is compact, so no vertex of a removed island reaches the GLB.
 - Log: one INFO line per node that loses islands, counts only (T7); INFO, not WARNING, as this is the expected
   behaviour. On the reporter's node:
   `Islands: 14453 small islands (661624 of 16116404 triangles) are left out of a node`.
@@ -245,12 +246,12 @@ triangles: most specks left in the sent mesh are made by the decimation (thin wa
 - Small closed cavities are removed: invisible at opacity 1, missing at opacity below 1.
 - Memory parity is partly allocator-dependent (the island step holds about twice the entity in temporaries); the peak
   inside Slicer must stay at SLC-41's 12.2 GiB (§14 step 6).
-- Time: about 0.6 s natively on the reporter's mesh and an estimated 0.9-1.0 s under Rosetta, on the main thread until
-  SLC-28; the faster `components` offsets most of it inside `fit_to_budget`. The cost grows with the vertices
-  compared, so the worst cases are nodes where every vertex is: about 1 s for 16.4M triangles of dust and 3.7 s for an
-  8.3M-triangle soup (24.9M vertices), next to decimations of 2.7 s and 11.9 s there; on soups the faster
-  `coincident_pairs` pays it back (the 8.3M-triangle soup: 16.69 s with islands off before the review, 16.60 s now
-  with islands on).
+- Time: about 0.6 s natively on the reporter's mesh and an estimated 0.9-1.0 s under Rosetta, on the main thread (one
+  step per node in SLC-28's preparation); the faster `components` offsets most of it inside `fit_to_budget`. The cost
+  grows with the vertices compared, so the worst cases are nodes where every vertex is: about 1 s for 16.4M triangles of
+  dust and 3.7 s for an 8.3M-triangle soup (24.9M vertices), next to decimations of 2.7 s and 11.9 s there; on soups the
+  faster `coincident_pairs` pays it back (the 8.3M-triangle soup: 16.69 s with islands off before the review, 16.60 s
+  now with islands on).
 - The `components` rewrite is on every large mesh's decimation path: same roots (random-graph test), and the SLC-41
   suites pass unchanged.
 - The uncompacted working entity breaks the "every vertex is used" invariant inside `fit_entity`; the tests check that

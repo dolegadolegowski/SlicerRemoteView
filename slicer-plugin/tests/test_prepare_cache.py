@@ -1,5 +1,6 @@
 """SLC-50: the per-node cache of the scene's preparation — a warm cache gives the GLB of a fresh export, and only the
-nodes whose mesh or share changed are collected and decimated again (``remoteview_core.meshcache``)."""
+nodes whose mesh or share changed are collected and decimated again (``remoteview_core.meshcache``); with *Remove small
+islands* (SLC-53) too."""
 
 from __future__ import annotations
 
@@ -10,6 +11,8 @@ import numpy as np
 import pytest
 from support import FakeScene, live_client, manifest, reassemble, sphere
 from vtkmodules.vtkCommonTransforms import vtkTransform
+from vtkmodules.vtkFiltersCore import vtkAppendPolyData
+from vtkmodules.vtkFiltersSources import vtkSphereSource
 
 from remoteview_core import collect, decimate, snapshot
 from remoteview_core.meshcache import MeshCache, mesh_stamp
@@ -272,3 +275,205 @@ def test_prepare_cache_stamp_follows_the_mesh():
     mesh.GetPoints().GetData().Modified()
     assert mesh_stamp(mesh) != stamp
     assert mesh_stamp(None) is None and mesh_stamp("not a mesh") is None
+
+
+# --------------------------------------------------------------------------- small islands (SLC-53 follow-up (e))
+
+
+def specked(resolution: int, specks: int = 6):
+    """``sphere(resolution)`` and ``specks`` spheres of 16 triangles beside it, as one mesh: small islands of a body
+    from ``sphere(32)`` (1,920 triangles, of which 1 % is 19.2) up."""
+    append = vtkAppendPolyData()
+    append.AddInputData(sphere(resolution))
+    for i in range(specks):
+        speck = vtkSphereSource()
+        speck.SetRadius(0.5)
+        speck.SetCenter(150.0 + 5.0 * i, 0.0, 0.0)
+        speck.SetThetaResolution(4)
+        speck.SetPhiResolution(4)
+        speck.Update()
+        append.AddInputData(speck.GetOutput())
+    append.Update()
+    return append.GetOutput()
+
+
+def specked_three() -> Scene:
+    """A: 1,920 + 96 triangles, B: 3,040 + 96, C: 448 and no island."""
+    return Scene(
+        {"id": A, "mesh": specked(32)},
+        {"id": B, "mesh": specked(40)},
+        {"id": C, "mesh": sphere(16)},
+    )
+
+
+@pytest.fixture
+def masked(monkeypatch):
+    """The nodes whose islands were looked for, in order."""
+    seen: list[str] = []
+    island_mask = decimate.island_mask
+    monkeypatch.setattr(
+        decimate, "island_mask", lambda entity: seen.append(entity.node_id) or island_mask(entity)
+    )
+    return seen
+
+
+def glb_and_report(snap) -> tuple:
+    return reassemble(list(snap.frames()))[1], snap.reduced, snap.unreduced, snap.cleaned
+
+
+def test_prepare_cache_islands_in_steps_and_warm_give_the_glb_of_one_call(work, masked):
+    """A and B are decimated without their islands, C fits whole: prepared a step at a time into a cache, then warm,
+    the export is that of one call. Each node's islands are looked for once per collection, one step each, never for a
+    node taken from the cache (its entry counts them)."""
+    scene, cache = specked_three(), MeshCache()
+    one = glb_and_report(snapshot_of(scene, remove_islands=True))
+    assert one[1:] == ((A, B), (), (A, B)) and masked == [A, B, C]
+    masked.clear()
+    progress = Progress()
+    steps = prepare_snapshot(
+        scene,
+        live_client(),
+        slicer_version="5.12.4",
+        cache=cache,
+        progress=progress,
+        remove_islands=True,
+    )
+    stepper = Stepper(steps, time.monotonic)
+    while progress.done < 3:  # collected
+        stepper.advance(0.0)
+    taken = stepper.taken
+    while masked != [A, B, C]:
+        stepper.advance(0.0)
+    assert stepper.taken == taken + 3  # one step per node's islands, before any share is given
+    assert stepper.advance(math.inf) and A not in repr(stepper.result)  # T7
+    assert glb_and_report(stepper.result) == one
+    clear(work)
+    masked.clear()
+    assert glb_and_report(snapshot_of(scene, cache, remove_islands=True)) == one
+    assert work == {"collected": [], "decimated": []} and masked == []
+
+
+def test_prepare_cache_islands_the_shares_follow_the_triangles_left(work, masked, monkeypatch):
+    """Over the total the shares are proportional to the triangles left without the specks: the export is SLC-53's
+    ``fit_to_budget(…, remove_islands=True)`` of the collected nodes, fresh and with A taken from its entry."""
+    monkeypatch.setattr(snapshot, "PROFILES", {**decimate.PROFILES, "mobile": TIGHT})
+    scene, cache = Scene({"id": A, "mesh": specked(32)}, {"id": B, "mesh": sphere(24)}), MeshCache()
+
+    def reference() -> tuple:
+        entities = collect.collect_scene(scene).entities
+        fit = decimate.fit_to_budget(entities, TIGHT, remove_islands=True)
+        return [e.triangle_count for e in fit.entities], (fit.reduced, fit.unreduced, fit.cleaned)
+
+    def exported(snap) -> tuple:
+        _, glb, _ = reassemble(list(snap.frames()))
+        counts = [node["triangleCount"] for node in manifest(glb)]
+        return counts, (snap.reduced, snap.unreduced, snap.cleaned)
+
+    expected = reference()
+    assert expected == ([1_290, 710], ((A, B), (), (A,)))  # counted with the specks: 1,313 and 687
+    assert exported(snapshot_of(scene, cache, remove_islands=True)) == expected
+    scene.nodes[1]["mesh"] = sphere(24)  # B collected again, A from its entry
+    masked.clear()
+    assert exported(snapshot_of(scene, cache, remove_islands=True)) == expected
+    assert masked == [B]
+
+
+def test_prepare_cache_islands_only_a_changed_node_is_looked_at_again(work, masked):
+    scene, cache = specked_three(), MeshCache()
+    snapshot_of(scene, cache, remove_islands=True)
+    scene.nodes[2]["mesh"] = sphere(20)  # C: 720 triangles, now decimated too
+    clear(work)
+    masked.clear()
+    warm = glb_and_report(snapshot_of(scene, cache, remove_islands=True))
+    assert masked == [C] and work["decimated"] == [C] and len(work["collected"]) == 1
+    assert warm == glb_and_report(snapshot_of(scene, remove_islands=True))
+
+
+def test_prepare_cache_islands_another_rule_starts_the_cache_again(work, masked, monkeypatch):
+    """The default profile fits every node whole, so the specks go and nothing else changes. The cache's entries are
+    made for one island rule: an export with another collects every node again and gives what a fresh export gives; a
+    changed threshold is another rule."""
+    monkeypatch.setattr(snapshot, "PROFILES", decimate.PROFILES)  # nothing decimated
+    scene, cache = specked_three(), MeshCache()
+    plain = snapshot_of(scene, cache)
+    assert plain.triangle_count == 2_016 + 3_136 + 448 and plain.cleaned == () and masked == []
+    for rule in ("on", "on again", "a smaller share", "a lower minimum", "off"):
+        if rule == "a smaller share":
+            monkeypatch.setattr(
+                decimate, "SMALL_ISLAND_SHARE", 0.001
+            )  # no speck is below 0.1 % of its body
+        if rule == "a lower minimum":
+            monkeypatch.setattr(decimate, "SMALL_ISLAND_TRIANGLES", 16)  # no speck is below it
+        clear(work)
+        masked.clear()
+        on = rule != "off"
+        snap = snapshot_of(scene, cache, remove_islands=on)
+        assert len(work["collected"]) == (0 if rule == "on again" else 3)
+        assert masked == ([] if rule in ("on again", "off") else [A, B, C])
+        cleaned = rule in ("on", "on again")
+        begin, glb, _ = reassemble(list(snap.frames()))
+        kept = [1_920, 3_040, 448] if cleaned else [2_016, 3_136, 448]
+        assert [node["triangleCount"] for node in manifest(glb)] == kept
+        assert begin["triangleCount"] == snap.triangle_count == sum(kept)
+        assert snap.cleaned == ((A, B) if cleaned else ())
+        assert glb == reassemble(list(snapshot_of(scene, remove_islands=on).frames()))[1]
+
+
+@pytest.mark.parametrize("reduces", [True, False])
+def test_prepare_cache_a_node_without_its_islands_is_collected_again_for_a_new_share(
+    work, masked, monkeypatch, reduces
+):
+    """A's entry holds its mesh without its islands — sent whole within its share, or because nothing reduces it —,
+    not the collected mesh a fresh export decimates (with the islands' vertices still in it): for a new share A is
+    collected again and its islands looked for again, so the export is that of a fresh one."""
+    total = 2_000 if reduces else 1_000
+    budget = decimate.Budget(total, 100_000, 32 << 20, floor_triangles=100)
+    monkeypatch.setattr(snapshot, "PROFILES", {**decimate.PROFILES, "mobile": budget})
+    if not reduces:
+        monkeypatch.setattr(decimate, "decimate_steps", nothing_reduces)
+    scene, cache = Scene({"id": A, "mesh": specked(32)}), MeshCache()
+    first = snapshot_of(scene, cache, remove_islands=True)
+    assert (first.reduced, first.unreduced, first.cleaned) == ((), () if reduces else (A,), (A,))
+    scene.nodes.append({"id": B, "mesh": sphere(24)})  # A's share shrinks
+    clear(work)
+    masked.clear()
+    fit_entity_steps = decimate.fit_entity_steps
+
+    def fitted(entity, *args, **options):
+        masked.append(f"fit {entity.node_id}")
+        return (yield from fit_entity_steps(entity, *args, **options))
+
+    monkeypatch.setattr(decimate, "fit_entity_steps", fitted)
+    steps = prepare_snapshot(
+        scene, live_client(), slicer_version="5.12.4", cache=cache, remove_islands=True
+    )
+    while True:  # a "|" after each step
+        try:
+            next(steps)
+        except StopIteration as stop:
+            warm = stop.value
+            break
+        masked.append("|")
+    assert [id(p) for p in work["collected"]] == [id(n["mesh"]) for n in reversed(scene.nodes)]
+    # B before the shares, A once collected again — each mask a step of its own
+    assert [m for m in masked if m != "|"] == [B, A, f"fit {A}", f"fit {B}"]
+    assert masked[masked.index(B) + 1] == masked[masked.index(A) + 1] == "|"
+    assert (warm.reduced if reduces else warm.unreduced) == (A, B)
+    assert glb_and_report(warm) == glb_and_report(snapshot_of(scene, remove_islands=True))
+
+
+def test_prepare_cache_islands_off_a_node_collected_again_keeps_its_specks(
+    work, masked, monkeypatch
+):
+    """With the rule off, A (2,016 triangles over a total of 2,000) is decimated with its specks; collected again for
+    a new share, no island is looked for either."""
+    budget = decimate.Budget(2_000, 100_000, 32 << 20, floor_triangles=100)
+    monkeypatch.setattr(snapshot, "PROFILES", {**decimate.PROFILES, "mobile": budget})
+    scene, cache = Scene({"id": A, "mesh": specked(32)}), MeshCache()
+    assert snapshot_of(scene, cache).reduced == (A,)
+    scene.nodes.append({"id": B, "mesh": sphere(24)})  # A's share shrinks
+    clear(work)
+    warm = snapshot_of(scene, cache)
+    assert [id(p) for p in work["collected"]] == [id(n["mesh"]) for n in reversed(scene.nodes)]
+    assert masked == [] and warm.cleaned == ()
+    assert glb_and_report(warm) == glb_and_report(snapshot_of(scene))
