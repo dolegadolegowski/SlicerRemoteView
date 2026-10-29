@@ -1213,3 +1213,45 @@ Expected results:
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|
 | | | | | |
+
+### §14.1 A mesh with an edge shared by thousands of triangles (SLC-54)
+
+Preconditions: §14's. In a new scene run in the Python console (a "book" of 3,000 pages, 100 × 150 mm, all on one spine
+edge; 6,000 triangles, so nothing is decimated under `mobile`):
+
+```python
+import numpy as np
+import vtk
+from vtkmodules.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray
+pages = 3000
+a = np.linspace(0.0, np.pi, pages)
+rim = np.c_[100 * np.cos(a), 100 * np.sin(a), np.zeros(pages)]
+points = np.vstack([[0, 0, 0], [0, 0, 150], rim, rim + [0, 0, 150]])
+outer = 2 + np.arange(pages)
+triangles = np.vstack([np.c_[np.zeros(pages), outer, np.ones(pages)],
+                       np.c_[np.ones(pages), outer, outer + pages]]).astype(np.int64)
+book = vtk.vtkPolyData()
+book.SetPoints(vtk.vtkPoints())
+book.GetPoints().SetData(numpy_to_vtk(points, deep=True))
+cells = vtk.vtkCellArray()
+cells.SetData(numpy_to_vtkIdTypeArray(np.arange(0, triangles.size + 1, 3, dtype=np.int64), deep=True),
+              numpy_to_vtkIdTypeArray(triangles.ravel(), deep=True))
+book.SetPolys(cells)
+slicer.modules.models.logic().AddModel(book).SetName("Book")
+```
+
+Steps:
+
+1. Click *Start session*; time how long the code takes to appear (a stopwatch is enough). Join with the viewer.
+
+Expected results:
+
+- Step 1: the code appears within about a second (before SLC-54 Slicer was frozen for more than 10 s here); the viewer
+  shows a half-circle fan of 3,000 thin pages around one edge.
+- Throughout: no traceback in the Python console.
+- `[TODO verify]` in Slicer 5.12.4: `vtkOrientPolyData` from `vtkmodules.vtkFiltersCore` behaves as in the `vtk` 9.6.2
+  wheel (`vtkOrientPolyData.cxx` is byte-identical in Slicer's fork, `docs/research/slicer-collect.md` §2).
+
+| Date | Slicer version | OS | Result | Tester |
+|---|---|---|---|---|
+| | | | | |

@@ -26,6 +26,7 @@ import pytest
 from vtkmodules.vtkCommonCore import vtkObject
 from vtkmodules.vtkFiltersSources import vtkSphereSource
 
+from remoteview_core.collect import polydata_from_triangles
 from remoteview_core.protocol_client import ProtocolClient, SessionState, make_client_info
 from remoteview_core.transport import RelayTransport, check_relay_url
 from remoteview_core.vendored import chunk_header
@@ -451,6 +452,32 @@ def sphere(resolution: int = 16):
     source.SetPhiResolution(resolution)
     source.Update()
     return source.GetOutput()
+
+
+def book(pages: int = 3_000, rows: int = 1, *, alternate: bool = False):
+    """``pages`` flat pages of ``rows`` quads (two triangles each) fanned over 180° around a spine of ``rows`` edges on
+    the S axis, 100 mm wide and 150 mm high: every spine edge is shared by one triangle of each page (non-manifold;
+    SLC-52, SLC-54). Every page is wound the same way, or every second one the other way with ``alternate``."""
+    spine = np.c_[np.zeros(rows + 1), np.zeros(rows + 1), np.linspace(0.0, 150.0, rows + 1)]
+    angles = np.linspace(0.0, np.pi, pages)
+    outer = np.stack(
+        [
+            np.repeat(100.0 * np.cos(angles), rows + 1),
+            np.repeat(100.0 * np.sin(angles), rows + 1),
+            np.tile(spine[:, 2], pages),
+        ],
+        axis=1,
+    )
+    row = np.arange(rows)
+    # each page's outer point of each row
+    first = (rows + 1) * (1 + np.arange(pages))[:, None] + row
+    spine_low, spine_high = np.broadcast_to(row, first.shape), np.broadcast_to(row + 1, first.shape)
+    on_spine = np.stack([spine_low, first, spine_high], axis=-1)  # (pages, rows, 3)
+    outside = np.stack([spine_high, first, first + 1], axis=-1)
+    triangles = np.concatenate([on_spine, outside], axis=1)  # (pages, 2·rows, 3)
+    if alternate:
+        triangles[1::2] = triangles[1::2, :, ::-1]
+    return polydata_from_triangles(np.vstack([spine, outer]), triangles.reshape(-1, 3))
 
 
 class FakeScene:

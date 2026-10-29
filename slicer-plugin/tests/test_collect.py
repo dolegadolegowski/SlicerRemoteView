@@ -6,6 +6,7 @@ import hashlib
 import itertools
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from support import (
     FakeSegmentation,
     FakeView,
     LiveScene,
+    book,
     glb_strings,
     manifest,
 )
@@ -46,7 +48,12 @@ from vtkmodules.vtkCommonTransforms import (
     vtkThinPlateSplineTransform,
     vtkTransform,
 )
-from vtkmodules.vtkFiltersCore import vtkAppendPolyData, vtkStripper
+from vtkmodules.vtkFiltersCore import (
+    vtkAppendPolyData,
+    vtkPolyDataNormals,
+    vtkStripper,
+    vtkTriangleFilter,
+)
 from vtkmodules.vtkFiltersSources import vtkCubeSource, vtkLineSource, vtkSphereSource
 
 from remoteview_core import collect
@@ -1204,6 +1211,400 @@ def test_collect_makes_inconsistent_winding_consistent():
     face_normals = np.cross(b - a, c - a)
     outward = np.einsum("ij,ij->i", face_normals, (a + b + c) / 3)
     assert np.all(outward > 0)  # every triangle wound outward again
+
+
+# --------------------------------------------------------------------------- the winding walk in bounded time (SLC-54)
+
+
+def _reference_normals(polydata: vtkPolyData) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """SLC-07's normals step as it was: ``vtkPolyDataNormals`` with ``ConsistencyOn`` on the whole mesh."""
+    normals = vtkPolyDataNormals()
+    normals.SplittingOff()
+    normals.ConsistencyOn()
+    normals.AutoOrientNormalsOff()
+    normals.SetInputData(polydata)
+    normals.Update()
+    output = normals.GetOutput()
+    return (
+        vtk_to_numpy(output.GetPoints().GetData()).astype(np.float64),
+        vtk_to_numpy(output.GetPointData().GetNormals()).astype(np.float64),
+        vtk_to_numpy(output.GetPolys().GetConnectivityArray()).reshape(-1, 3),
+    )
+
+
+def _triangulated(data: vtkPolyData) -> vtkPolyData:
+    """``data`` triangulated, geometry only (stored normals would be passed through by the normals filter)."""
+    triangulate = vtkTriangleFilter()
+    triangulate.SetInputData(data)
+    triangulate.Update()
+    output = triangulate.GetOutput()
+    connectivity = vtk_to_numpy(output.GetPolys().GetConnectivityArray()).reshape(-1, 3)
+    return _polydata(
+        vtk_to_numpy(output.GetPoints().GetData()), polys=[tuple(t) for t in connectivity]
+    )
+
+
+def _flipped_sphere(resolution: int = 24, center=(0.0, 0.0, 0.0)) -> vtkPolyData:
+    """A sphere with every 7th triangle wound the other way (not the first: it seeds the winding); its two poles are
+    used by ``resolution`` triangles each."""
+    sphere = _sphere(center=center, resolution=resolution)
+    polys = vtk_to_numpy(sphere.GetPolys().GetConnectivityArray()).reshape(-1, 3).copy()
+    polys[1::7] = polys[1::7, ::-1]
+    return _polydata(vtk_to_numpy(sphere.GetPoints().GetData()), polys=[tuple(t) for t in polys])
+
+
+def _fan(triangles: int, *, alternate: bool = False) -> vtkPolyData:
+    """A flat half-disc of ``triangles`` triangles around its centre (used by all of them); every second one wound the
+    other way with ``alternate``."""
+    angles = np.linspace(0.0, np.pi, triangles + 1)
+    points = np.vstack(
+        [[0.0, 0.0, 0.0], np.c_[np.cos(angles), np.sin(angles), np.zeros_like(angles)] * 50.0]
+    )
+    polys = np.c_[
+        np.zeros(triangles, dtype=np.int64), 1 + np.arange(triangles), 2 + np.arange(triangles)
+    ]
+    if alternate:
+        polys[1::2] = polys[1::2, ::-1]
+    return collect.polydata_from_triangles(points, polys)
+
+
+def _bow_tie(triangles: int) -> vtkPolyData:
+    """``triangles`` triangles that share one point and nothing else."""
+    directions = np.random.default_rng(5).normal(size=(2 * triangles, 3))
+    directions /= np.linalg.norm(directions, axis=1)[:, None]
+    polys = np.c_[
+        np.zeros(triangles, dtype=np.int64),
+        1 + 2 * np.arange(triangles),
+        2 + 2 * np.arange(triangles),
+    ]
+    return collect.polydata_from_triangles(np.vstack([[0.0, 0.0, 0.0], 50.0 * directions]), polys)
+
+
+def _outward_faces(mesh, centre, count=None) -> bool:
+    p, t = mesh.positions, mesh.triangles[:count]
+    a, b, c = p[t[:, 0]], p[t[:, 1]], p[t[:, 2]]
+    return bool(np.all(np.einsum("ij,ij->i", np.cross(b - a, c - a), (a + b + c) / 3 - centre) > 0))
+
+
+def _flip_every_7th(points, polys) -> vtkPolyData:
+    polys = np.array(polys)
+    polys[1::7] = polys[1::7, ::-1]
+    return collect.polydata_from_triangles(np.asarray(points, dtype=np.float64), polys)
+
+
+def _rim_fanned_cone(sides: int = 64) -> vtkPolyData:
+    """A closed cone whose base is triangulated as a fan from one rim point, every 7th triangle wound the other way:
+    the apex and that rim point are adjacent and used by ``sides`` triangles each (SLC-54 review)."""
+    angles = np.linspace(0.0, 2 * np.pi, sides, endpoint=False)
+    rim_points = np.c_[30 * np.cos(angles), 30 * np.sin(angles), np.zeros(sides)]
+    rim = np.arange(sides)
+    side = np.c_[np.zeros(sides, dtype=np.int64), 1 + rim, 1 + (rim + 1) % sides]
+    base = np.c_[np.ones(sides - 2, dtype=np.int64), 2 + rim[1:-1], 1 + rim[1:-1]]
+    return _flip_every_7th(np.vstack([[0.0, 0.0, 100.0], rim_points]), np.vstack([side, base]))
+
+
+def _rim_fanned_cylinder(sides: int = 4_000) -> vtkPolyData:
+    """A closed cylinder whose caps are fans from one rim point each (3.5·10⁸ checks for 4,000 sides), every 7th
+    triangle wound the other way (SLC-54 review)."""
+    angles = np.linspace(0.0, 2 * np.pi, sides, endpoint=False)
+    ring = np.c_[30 * np.cos(angles), 30 * np.sin(angles), np.zeros(sides)]
+    i = np.arange(sides)
+    bottom, top, next_ = i, sides + i, (i + 1) % sides
+    walls = np.vstack([np.c_[bottom, next_, sides + next_], np.c_[bottom, sides + next_, top]])
+    j = np.arange(1, sides - 1)
+    caps = np.vstack(
+        [np.c_[np.zeros_like(j), j + 1, j], np.c_[np.full_like(j, sides), sides + j, sides + j + 1]]
+    )
+    lid = ring + np.array([0.0, 0.0, 100.0])
+    return _flip_every_7th(np.vstack([ring, lid]), np.vstack([walls, caps]))
+
+
+def _sphere_with_membrane() -> vtkPolyData:
+    """A sphere split by an equatorial disc (a loop of edges of three triangles), its southern half wound the other
+    way (SLC-54 review: VTK's walk turns it round across those edges)."""
+    source = vtkSphereSource()
+    source.SetRadius(10.0)
+    source.SetThetaResolution(64)
+    source.SetPhiResolution(33)  # 32 bands: a ring of points on the equator
+    source.Update()
+    points, polys = collect.mesh_points_and_triangles(source.GetOutput())
+    equator = np.flatnonzero(np.abs(points[:, 2]) < 1e-9)
+    assert len(equator) == 64
+    equator = equator[np.argsort(np.arctan2(points[equator, 1], points[equator, 0]))]
+    centre = len(points)
+    membrane = np.c_[np.full(len(equator), centre), equator, np.roll(equator, -1)]
+    south = points[polys].mean(axis=1)[:, 2] < 0
+    polys = polys.copy()
+    polys[south] = polys[south, ::-1]
+    return collect.polydata_from_triangles(
+        np.vstack([points, [[0.0, 0.0, 0.0]]]), np.vstack([polys, membrane])
+    )
+
+
+def _sphere_and_book(pages: int, rows: int = 2) -> tuple[vtkPolyData, vtkPolyData, vtkPolyData]:
+    """A sphere with triangles wound the other way next to a book whose every second page is wound the other way: the
+    two together, the sphere and the book."""
+    sphere, leaves = _flipped_sphere(center=(500.0, 0.0, 0.0)), book(pages, rows, alternate=True)
+    append = vtkAppendPolyData()
+    append.AddInputData(sphere)
+    append.AddInputData(leaves)
+    append.Update()
+    return append.GetOutput(), sphere, leaves
+
+
+def _sphere_with_fin() -> vtkPolyData:
+    """A sphere with triangles wound the other way and a fin: one triangle more on one of its edges."""
+    sphere = _flipped_sphere()
+    points = vtk_to_numpy(sphere.GetPoints().GetData())
+    polys = vtk_to_numpy(sphere.GetPolys().GetConnectivityArray()).reshape(-1, 3)
+    a, b, _ = polys[len(polys) // 2]
+    return _polydata(
+        np.vstack([points, [[40.0, 0.0, 0.0]]]), polys=[*map(tuple, polys), (len(points), b, a)]
+    )
+
+
+@pytest.fixture
+def walks_cut(monkeypatch) -> list:
+    """Records each walk on a copy with points cut: how many points were cut."""
+    calls: list = []
+    real = collect._wound_with_points_cut
+
+    def recorded(triangles, point_count, cut):
+        calls.append(int(np.count_nonzero(cut)))
+        return real(triangles, point_count, cut)
+
+    monkeypatch.setattr(collect, "_wound_with_points_cut", recorded)
+    return calls
+
+
+@pytest.mark.parametrize(
+    "mesh",
+    [
+        _flipped_sphere,
+        lambda: _flipped_sphere(64),
+        _sphere,
+        lambda: _sphere(resolution=64),
+        _cube,
+        _rim_fanned_cone,
+        _rim_fanned_cylinder,
+        _sphere_with_membrane,
+        _sphere_with_fin,
+        lambda: _sphere_and_book(40)[0],
+    ],
+    ids=[
+        "flipped-sphere",
+        "flipped-sphere-poles-64",
+        "sphere",
+        "sphere-poles-64",
+        "cube",
+        "rim-fanned-cone",
+        "rim-fanned-cylinder-4000",
+        "sphere-with-membrane",
+        "sphere-with-fin",
+        "sphere-and-book-of-40",
+    ],
+)
+def test_collect_winding_within_the_budget_is_vtks_own(mesh, walks_cut):
+    """A mesh whose walk fits its budget — manifold or not — gets ``vtkPolyDataNormals(ConsistencyOn)``'s positions,
+    normals and triangles, to the bit, without a cut."""
+    data = _triangulated(mesh())
+    collected = mesh_from_polydata(data)
+    positions, normals, triangles = _reference_normals(data)
+    np.testing.assert_array_equal(collected.positions, positions)
+    np.testing.assert_array_equal(collected.normals, normals)
+    np.testing.assert_array_equal(collected.triangles, triangles)
+    assert walks_cut == []
+
+
+@pytest.mark.parametrize(
+    "mesh", [_rim_fanned_cone, _rim_fanned_cylinder], ids=["cone", "cylinder-4000"]
+)
+def test_collect_rim_fanned_mesh_is_made_consistent(mesh):
+    """Closed meshes with busy adjacent points are within the budget, so every reversed triangle is turned round."""
+    collected = mesh_from_polydata(mesh())
+    assert _outward_faces(collected, collected.positions.mean(axis=0))
+
+
+def test_collect_winding_cut_on_a_consistently_wound_mesh_is_vtks_own(monkeypatch, walks_cut):
+    """With the budget at 10⁸, a fan of 6,000 triangles (1.4·10⁸ checks) has its centre cut, and a consistently wound
+    mesh comes out to the bit as VTK's walk leaves it."""
+    monkeypatch.setattr(collect, "WALK_CHECKS_FLOOR", 100_000_000)
+    data = _fan(6_000)
+    collected = mesh_from_polydata(data)
+    positions, normals, triangles = _reference_normals(data)
+    assert walks_cut == [1]
+    np.testing.assert_array_equal(collected.positions, positions)
+    np.testing.assert_array_equal(collected.normals, normals)
+    np.testing.assert_array_equal(collected.triangles, triangles)
+
+
+@pytest.mark.parametrize(
+    ("mesh", "triangles"),
+    [
+        (lambda: book(3_000, 1), 6_000),
+        (lambda: book(3_000, 4), 24_000),
+        (lambda: _fan(100_000), 100_000),
+        (lambda: _bow_tie(100_000), 100_000),
+    ],
+    ids=["book", "book-4-rows", "fan", "bow-tie"],
+)
+def test_collect_winding_walk_is_bounded(mesh, triangles, walks_cut):
+    """``ConsistencyOn``'s walk checked n(p)·n(q) triangle pairs for every edge (p, q) of every triangle: 11 s for a
+    book of 3,000 pages on one edge (m³), minutes for four rows, 13 s for a fan of 80k triangles, 11 s for 100k
+    triangles sharing one point (d²). Over its budget it now walks a copy with the busiest points cut (SLC-54)."""
+    data = mesh()
+    started = time.perf_counter()
+    [entity] = collect_entities(DictScene({"id": "vtkMRMLModelNode4", "mesh": data}))
+    elapsed = time.perf_counter() - started
+    assert entity.triangle_count == triangles
+    assert elapsed < 1.0, elapsed
+    np.testing.assert_allclose(np.linalg.norm(entity.normals, axis=1), 1.0, atol=1e-6)
+    assert len(walks_cut) == 1
+
+
+def test_collect_pages_keep_their_winding_when_the_spine_is_cut(walks_cut):
+    """3,000 pages, every second one wound the other way: the spine's points are cut, so each page keeps its winding
+    (VTK's walk turns every page but the first to run the spine the other way from the page that reached it), while
+    the sphere next to the book is still made consistent."""
+    data, sphere, leaves = _sphere_and_book(3_000)
+    mesh = mesh_from_polydata(data)
+    count = sphere.GetNumberOfPolys()
+    assert len(mesh.triangles) == count + leaves.GetNumberOfPolys()
+    np.testing.assert_array_equal(
+        mesh.triangles[count:] - sphere.GetNumberOfPoints(),
+        vtk_to_numpy(leaves.GetPolys().GetConnectivityArray()).reshape(-1, 3),
+    )
+    assert _outward_faces(mesh, [500.0, 0.0, 0.0], count)
+    assert len(walks_cut) == 1 and walks_cut[0] >= 1
+
+
+def test_collect_part_left_uncut_is_walked_as_vtk_walks_it(walks_cut):
+    """Over the budget elsewhere (a fan of 20,000 triangles, its centre cut), a six-page book that is not cut is walked
+    on the copy as VTK walks it on its own — across its spine too."""
+    fan, leaves = _fan(20_000), book(6, 1, alternate=True)
+    append = vtkAppendPolyData()
+    append.AddInputData(fan)
+    append.AddInputData(leaves)
+    append.Update()
+    mesh = mesh_from_polydata(append.GetOutput())
+    assert walks_cut == [1]
+    _, _, alone = _reference_normals(leaves)
+    np.testing.assert_array_equal(mesh.triangles[20_000:] - fan.GetNumberOfPoints(), alone)
+
+
+@pytest.mark.parametrize(("triangles", "cut"), [(1_000, False), (20_000, True)])
+def test_collect_winding_is_not_carried_through_a_cut_point(triangles, cut, walks_cut):
+    """A fan whose every second triangle is wound the other way: one of 1,000 triangles (4·10⁶ checks) is walked whole
+    and made consistent; around a centre of 20,000 (1.6·10⁹ checks) the centre is cut and each triangle keeps its
+    winding."""
+    data = _fan(triangles, alternate=True)
+    mesh = mesh_from_polydata(data)
+    p, t = mesh.positions, mesh.triangles
+    faces = np.cross(p[t[:, 1]] - p[t[:, 0]], p[t[:, 2]] - p[t[:, 0]])
+    if cut:
+        given = vtk_to_numpy(data.GetPolys().GetConnectivityArray()).reshape(-1, 3)
+        np.testing.assert_array_equal(t, given)
+        assert np.count_nonzero(faces[:, 2] < 0) == triangles // 2
+        assert walks_cut == [1]
+    else:
+        assert np.all(faces[:, 2] > 0) and walks_cut == []
+
+
+def test_collect_normals_at_a_cut_point_are_the_mean_of_its_triangles(walks_cut):
+    """A cut point keeps one normal: the normalised sum of the face normals of its triangles."""
+    mesh = mesh_from_polydata(book(3_000, 1))
+    p, t = mesh.positions, mesh.triangles
+    faces = np.cross(p[t[:, 1]] - p[t[:, 0]], p[t[:, 2]] - p[t[:, 0]])
+    faces /= np.linalg.norm(faces, axis=1)[:, None]
+    for point in (0, 1):  # the spine
+        total = faces[np.any(t == point, axis=1)].sum(axis=0)
+        np.testing.assert_allclose(mesh.normals[point], total / np.linalg.norm(total), atol=1e-6)
+    assert len(p) == 2 + 2 * 3_000  # no point added
+    # cutting the spine's busier end (6,000 triangles) is enough: 2.7·10⁷ checks left
+    assert walks_cut == [1]
+
+
+def _two_fans() -> np.ndarray:
+    """Fans of 100 and 50 triangles over 154 points: centres 0 and 102, rims of points used by 1 or 2 triangles."""
+    first = np.c_[np.zeros(100, dtype=np.int64), 1 + np.arange(100), 2 + np.arange(100)]
+    second = np.c_[np.zeros(50, dtype=np.int64), 1 + np.arange(50), 2 + np.arange(50)] + 102
+    return np.vstack([first, second])
+
+
+def test_collect_walk_checks_count_both_end_points_of_every_edge():
+    triangles = _two_fans()
+    valence = np.bincount(triangles.ravel())
+    # a fan of k: (k − 2)·(4k + 4) + 2·(3k + 2) = 4k² + 2k − 4
+    assert collect._walk_checks(valence[triangles.T].astype(float)) == 40_196 + 10_096
+    assert collect._walk_checks(np.ones((3, 150))) == 3 * 150
+
+
+@pytest.mark.parametrize(
+    ("floor", "cut"),
+    [
+        (50_292, []),  # VTK's walk fits
+        (50_291, [0]),  # cutting the bigger centre is enough: 794 + 10,096
+        (10_890, [0]),
+        (10_889, [0, 102]),  # both centres: 794 + 394
+        (1_188, [0, 102]),
+        (1_187, "rims too"),  # every point used by more than one triangle: 3 checks a triangle
+    ],
+)
+def test_collect_points_to_cut_are_the_busiest_that_bring_the_walk_within_its_budget(
+    monkeypatch, floor, cut
+):
+    monkeypatch.setattr(collect, "WALK_CHECKS_FLOOR", floor)
+    monkeypatch.setattr(collect, "WALK_CHECKS_PER_TRIANGLE", 0)
+    triangles = _two_fans()
+    marked = collect._points_to_cut(triangles, 154)
+    if cut == []:
+        assert marked is None
+    elif cut == "rims too":
+        np.testing.assert_array_equal(marked, np.bincount(triangles.ravel()) > 1)
+    else:
+        np.testing.assert_array_equal(np.flatnonzero(marked), cut)
+
+
+def test_collect_points_to_cut_are_all_when_every_point_is_as_busy(monkeypatch):
+    """An octahedron (every point of 4 triangles: 384 checks) over a budget of 100: only cutting every point fits."""
+    monkeypatch.setattr(collect, "WALK_CHECKS_FLOOR", 100)
+    monkeypatch.setattr(collect, "WALK_CHECKS_PER_TRIANGLE", 0)
+    octahedron = np.array(
+        [[0, 2, 4], [2, 1, 4], [1, 3, 4], [3, 0, 4], [2, 0, 5], [1, 2, 5], [3, 1, 5], [0, 3, 5]]
+    )
+    valence = np.bincount(octahedron.ravel())
+    assert collect._walk_checks(valence[octahedron.T].astype(float)) == 384
+    assert collect._points_to_cut(octahedron, 6).all()
+
+
+def test_collect_points_to_cut_budget_is_the_larger_of_its_two_bounds(monkeypatch):
+    """The budget is the larger of 1,000 checks a triangle and 10⁹ (≈ 0.5 s): a fan of 1,000 needs 4·10⁶, a fan of
+    20,000 1.6·10⁹, the 3,000-page book 5·10¹⁰."""
+    assert (collect.WALK_CHECKS_PER_TRIANGLE, collect.WALK_CHECKS_FLOOR) == (1_000, 1_000_000_000)
+    triangles = _two_fans()  # 150 triangles, 50,292 checks
+    for floor, per_triangle, fits in (
+        (0, 336, True),  # 50,400
+        (0, 335, False),  # 50,250
+        (50_000, 2, False),  # the larger, 50,000 — not the sum, 50,300
+        (50_292, 2, True),
+    ):
+        monkeypatch.setattr(collect, "WALK_CHECKS_FLOOR", floor)
+        monkeypatch.setattr(collect, "WALK_CHECKS_PER_TRIANGLE", per_triangle)
+        marked = collect._points_to_cut(triangles, 154)
+        assert (marked is None) is fits, (floor, per_triangle)
+
+
+def test_collect_split_points_gives_every_corner_at_a_cut_point_its_own():
+    triangles = np.array([[0, 1, 2], [1, 0, 3], [2, 3, 4]])
+    cut = np.array([True, False, False, True, False])
+    split, origin = collect.split_points(triangles, 5, cut)
+    np.testing.assert_array_equal(split, [[5, 1, 2], [1, 6, 7], [2, 8, 4]])
+    np.testing.assert_array_equal(origin, [0, 1, 2, 3, 4, 0, 0, 3, 3])
+    np.testing.assert_array_equal(origin[split], triangles)
+    assert not np.isin([0, 3], split).any()  # left unused
+    nothing, same = collect.split_points(triangles, 5, np.zeros(5, dtype=bool))
+    np.testing.assert_array_equal(nothing, triangles)
+    np.testing.assert_array_equal(same, np.arange(5))
 
 
 # --------------------------------------------------------------------------- determinism and purity

@@ -8,8 +8,10 @@ one code path for both), in glTF space:
 - geometry: a **deep copy** of the node's points (same precision), polygons and strips only (the user's data is
   never touched — ADR 0005 §3; no attribute arrays, vertices or lines) → ``vtkTriangleFilter`` → triangles with a
   repeated vertex dropped → the bake, if any (below) → triangles without area dropped → ``vtkPolyDataNormals``
-  (``SplittingOff``, ``ConsistencyOn``) → owned numpy arrays without the points no triangle uses; positions/normals
-  converted with :mod:`remoteview_core.coords` (RAS mm → glTF m, +Y up);
+  (``SplittingOff``, ``ConsistencyOn``; when its winding walk would check more cell pairs than its budget — points
+  used by thousands of triangles — the walk runs on a copy with the points of the most triangles cut instead, and the
+  triangles joined only through them keep their winding, SLC-54) → owned numpy arrays without the points no triangle
+  uses; positions/normals converted with :mod:`remoteview_core.coords` (RAS mm → glTF m, +Y up);
 - transform: a linear world matrix becomes ``T.matrix = C·M·C⁻¹`` (protocol §7.2), identity becomes no matrix; a
   world transform that is not linear, or linear with shear (glTF ``node.matrix`` must be TRS), is **baked** into the
   vertices instead (SLC-13, protocol §7.3 ``baked: true``, identity ``T.matrix``) — the 3D view applies it the same way,
@@ -55,7 +57,7 @@ from vtkmodules.vtkCommonCore import (
 )
 from vtkmodules.vtkCommonDataModel import vtkCellArray, vtkPolyData
 from vtkmodules.vtkCommonTransforms import vtkAbstractTransform, vtkTransform
-from vtkmodules.vtkFiltersCore import vtkPolyDataNormals, vtkTriangleFilter
+from vtkmodules.vtkFiltersCore import vtkOrientPolyData, vtkPolyDataNormals, vtkTriangleFilter
 
 from remoteview_core.coords import ras_matrix_to_gltf, ras_to_gltf_normals, ras_to_gltf_points
 from remoteview_core.glb_writer import Entity, is_exportable_matrix
@@ -272,8 +274,9 @@ def _baked(
     """``points`` moved by ``transform`` into double-precision points (the 3D view's ``vtkTransformFilter`` applies
     the same transform), and whether the transform mirrors at the centre of the ``seed`` triangle (point IDs).
 
-    ``vtkPolyDataNormals(ConsistencyOn)`` orients each connected part like its lowest-ID triangle, so a mirror is
-    judged where that orientation comes from: the sign of the transform's Jacobian at the first triangle.
+    ``vtkPolyDataNormals(ConsistencyOn)`` orients each connected part like its lowest-ID triangle (so does
+    :func:`_wound_with_points_cut`), so a mirror is judged where that orientation comes from: the sign of the
+    transform's Jacobian at the first triangle.
     """
     moved = vtkPoints()
     moved.SetDataTypeToDouble()
@@ -369,6 +372,82 @@ def mesh_from_triangles(
     return _with_normals(polydata_from_triangles(positions, triangles).GetPoints(), triangles)
 
 
+#: The cell pairs the winding walk may check (SLC-54): the larger of 1,000 per triangle and 10⁹ (≈ 0.5 s). Spheres
+#: need ≈ 120 a triangle, a 100-sided cone 628, an extruded 3,000-gon 1,900–3,300 (its caps' triangulation varies with
+#: the size); the 10⁹ keeps such primitives, and a 4,000-sided cylinder whose caps are fanned from a rim point
+#: (3.5·10⁸), on VTK's walk.
+WALK_CHECKS_PER_TRIANGLE = 1_000
+WALK_CHECKS_FLOOR = 1_000_000_000
+
+
+def split_points(
+    triangles: NDArray[np.int64], point_count: int, cut: NDArray[np.bool_]
+) -> tuple[NDArray[np.int64], NDArray[np.int64]]:
+    """``(split, origin)``: ``triangles`` (``(m, 3)`` IDs in ``[0, point_count)``, not checked) in which every corner at
+    a point marked in ``cut`` (``point_count`` booleans) has a new point of its own, and the point each point of
+    ``split`` copies (``origin[i] == i`` below ``point_count``; a marked point is left unused)."""
+    corners = cut[triangles]
+    split = triangles.copy()
+    split[corners] = point_count + np.arange(np.count_nonzero(corners))
+    return split, np.concatenate([np.arange(point_count), triangles[corners]])
+
+
+def _walk_checks(corners: NDArray[np.float64]) -> float:
+    """The cell pairs the winding walk checks: ``vtkPolyData::GetCellEdgeNeighbors``, asked for every edge (p, q) of
+    every triangle, loops over the triangles of q for each triangle of p — n(p)·n(q), with ``corners`` holding n at
+    the three corners of every triangle, shaped ``(3, m)`` (float: a crafted mesh could overflow int64)."""
+    a, b, c = corners
+    return float(a @ b + b @ c + c @ a)
+
+
+def _points_to_cut(triangles: NDArray[np.int64], point_count: int) -> NDArray[np.bool_] | None:
+    """The points the winding walk has to be kept away from: ``None`` when VTK's walk fits its budget
+    (:data:`WALK_CHECKS_PER_TRIANGLE`, :data:`WALK_CHECKS_FLOOR`), else those of more than T triangles for the largest
+    T that makes the walk on :func:`split_points`' copy fit — where each copy of a cut point has one triangle."""
+    valence = np.bincount(triangles.ravel(), minlength=point_count)
+    corners = valence[triangles.T].astype(np.float64)
+    budget = max(WALK_CHECKS_FLOOR, WALK_CHECKS_PER_TRIANGLE * len(triangles))
+    if _walk_checks(corners) <= budget:
+        return None
+    # the work only falls as T does; T = 0 cuts every point, which leaves 3 checks a triangle
+    levels = np.concatenate([[0.0], np.unique(corners)])
+    fits, too_much = 0, len(levels) - 1
+    while too_much - fits > 1:
+        middle = (fits + too_much) // 2
+        if _walk_checks(np.where(corners > levels[middle], 1.0, corners)) <= budget:
+            fits = middle
+        else:
+            too_much = middle
+    return valence > levels[fits]
+
+
+def _wound_with_points_cut(
+    triangles: NDArray[np.int64], point_count: int, cut: NDArray[np.bool_]
+) -> NDArray[np.int64]:
+    """``triangles`` with every connected part wound like its lowest-ID triangle — ``vtkOrientPolyData``, the walk of
+    ``vtkPolyDataNormals(ConsistencyOn)``, with its settings — walked on a copy in which the ``cut`` points are cut
+    (:func:`split_points`). The triangles joined to the rest of their part only through cut points form parts of
+    their own, of any size and on closed meshes too, each wound like its own lowest-ID triangle: a wrongly wound one
+    there is not turned round, and turns its part round with it. Cell order kept."""
+    walked, origin = split_points(triangles, point_count, cut)
+    # the walk reads only the cells and their point links, never the coordinates (AutoOrientNormals off); the links
+    # are sized by the point count, so the copy needs a point per ID: zeros
+    copies = vtkPoints()
+    copies.SetNumberOfPoints(len(origin))
+    copies.GetData().Fill(0.0)
+    data = vtkPolyData()
+    data.SetPoints(copies)
+    data.SetPolys(_cell_array(walked))
+    del walked
+    orient = vtkOrientPolyData()
+    orient.ConsistencyOn()
+    orient.AutoOrientNormalsOff()
+    orient.NonManifoldTraversalOn()  # vtkPolyDataNormals' default (vtkOrientPolyData's own is off)
+    orient.SetInputData(data)
+    orient.Update()
+    return origin[_triangles(orient.GetOutput().GetPolys())]
+
+
 def _with_normals(points: vtkPoints, triangles: NDArray[np.int64]) -> Mesh | None:
     """The pipeline's last steps: drop triangles without area, compute the point normals, drop unused points."""
     # A triangle without area (collinear points, or flattened by a baked transform) has no normal of its own: as the
@@ -382,12 +461,17 @@ def _with_normals(points: vtkPoints, triangles: NDArray[np.int64]) -> Mesh | Non
     triangles = triangles[np.any(area != 0, axis=1)]
     if len(triangles) == 0:
         return None
+    count = points.GetNumberOfPoints()
+    cut = _points_to_cut(triangles, count)
+    # VTK's walk costs n(p)·n(q) per edge: 11 s for a 3,000-page book, 13 s for a fan of 80k triangles (SLC-54)
+    if cut is not None:
+        triangles = _wound_with_points_cut(triangles, count, cut)
     clean = vtkPolyData()
     clean.SetPoints(points)
     clean.SetPolys(_cell_array(triangles))
     normals = vtkPolyDataNormals()
     normals.SplittingOff()  # no duplicated points along feature edges (§7.4)
-    normals.ConsistencyOn()
+    normals.SetConsistency(cut is None)
     normals.AutoOrientNormalsOff()
     normals.ComputePointNormalsOn()
     normals.ComputeCellNormalsOff()
