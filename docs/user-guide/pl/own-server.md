@@ -92,8 +92,24 @@ najnowsze wdrożenie i poczekaj, aż w jego logu pojawi się `relay listening`.
   i w Slicerze trzeba znowu kliknąć **Start session**. Wprowadzaj zmiany wtedy, gdy nie trwa żadna sesja.
   (Fork aktualizujesz na jego stronie w GitHubie: **Sync fork** → **Update branch**.)
 - Opcjonalnie: aby serwer uruchamiał się ponownie tylko po zmianach w jego plikach, wpisz w **Watch Paths**
-  dokładnie te sześć linii: `/relay-server/**`, `/shared/**`, `/web-viewer/**`, `/package*.json`,
-  `/tools/fake-slicer/package.json` i `/.dockerignore`.
+  dokładnie te jedenaście linii, w tej kolejności. Linia zaczynająca się od `!` pomija to, co obejmuje
+  wcześniejsza linia: tutaj testy serwera, jego skrypty testowe i plik README, które nie zmieniają działania
+  serwera. Folder wymaga dwóch takich linii: jednej dla samego folderu (zakończonej `/`) i jednej dla jego
+  zawartości (zakończonej `/**`).
+
+  ```
+  /relay-server/**
+  !/relay-server/test/
+  !/relay-server/test/**
+  !/relay-server/scripts/
+  !/relay-server/scripts/**
+  !/relay-server/README.md
+  /shared/**
+  /web-viewer/**
+  /package*.json
+  /tools/fake-slicer/package.json
+  /.dockerignore
+  ```
 - Jeśli zmienisz nazwę domeny albo dodasz własną domenę w **Networking** (użyj subdomeny, np.
   `relay.example.org`), wpisz wszystkie domeny w `ALLOWED_ORIGINS`, oddzielone przecinkami
   (`https://<domain-1>,https://<domain-2>`), kliknij **Deploy** i używaj nowego adresu w Slicerze.

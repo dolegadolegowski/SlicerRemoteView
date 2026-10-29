@@ -86,9 +86,24 @@ the newest deployment and wait until its log shows `relay listening`.
   or Sync fork in a fork) and after every variable change.** Running sessions end, and the presenter must
   click **Start session** again. Change things when no session is running. (Update a fork on its GitHub
   page: **Sync fork** → **Update branch**.)
-- Optional: to restart only when server files change, set **Watch Paths** to exactly these six lines:
-  `/relay-server/**`, `/shared/**`, `/web-viewer/**`, `/package*.json`, `/tools/fake-slicer/package.json`
-  and `/.dockerignore`.
+- Optional: to restart only when server files change, set **Watch Paths** to exactly these eleven lines, in
+  this order. A line starting with `!` leaves out what an earlier line takes in: here the server's tests, its
+  test scripts and its README file, which do not change the server. A folder needs two such lines, one for
+  the folder itself (ending in `/`) and one for what is in it (ending in `/**`).
+
+  ```
+  /relay-server/**
+  !/relay-server/test/
+  !/relay-server/test/**
+  !/relay-server/scripts/
+  !/relay-server/scripts/**
+  !/relay-server/README.md
+  /shared/**
+  /web-viewer/**
+  /package*.json
+  /tools/fake-slicer/package.json
+  /.dockerignore
+  ```
 - Renamed the domain, or added your own domain in **Networking** (use a subdomain such as
   `relay.example.org`)? Put every domain into `ALLOWED_ORIGINS`, separated by commas
   (`https://<domain-1>,https://<domain-2>`), click **Deploy**, and use the new address in Slicer.
