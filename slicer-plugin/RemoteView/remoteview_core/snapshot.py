@@ -10,7 +10,9 @@ transport in order.
   extension because the client reads it from the file.
 - The meshes are decimated to the budgets of the session's profile (SLC-14, §7.5, FR-10): :attr:`Snapshot.reduced`
   names the nodes that were, :attr:`Snapshot.unreduced` those nothing could reduce (sent whole), and
-  :attr:`Snapshot.over_target` says the GLB is above the profile's recommended size (NFR-03: warn).
+  :attr:`Snapshot.over_target` says the GLB is above the profile's recommended size (NFR-03: warn). With
+  ``remove_islands`` (SLC-53) every node first loses its small islands (``decimate.island_mask``) and the shares
+  follow the triangles left; :attr:`Snapshot.cleaned` names the nodes that lost some.
 - An empty scene is a snapshot too (no nodes): viewers then show an empty scene instead of an old one.
 - A GLB over the relay's ``maxSnapshotBytes`` raises :class:`SnapshotTooLargeError` before any version is used — before
   the GLB is written when its binary chunk alone is too large (the error then carries the estimated size, which can
@@ -22,26 +24,43 @@ transport in order.
   the caller sends before the frames, for the nodes the export takes. It is built only once the binary chunk is known
   to fit, so a scene too large for the relay leaves no hint without its snapshot on the wire.
 
-Main thread only (VTK, and the client is not thread-safe). The SHA-256 is computed here too (decided in SLC-08).
+:func:`prepare_snapshot` is the same in steps (SLC-28, :mod:`remoteview_core.steps`): the collection and the
+decimation yield between their passes over a mesh, and the client is asked for nothing — no version, no hint — before
+the last step, so a preparation abandoned before it (``close()``) sends nothing and uses no version. Main thread only
+(VTK, and the client is not thread-safe). The SHA-256 is computed here too (decided in SLC-08).
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
+import numpy as np
+from numpy.typing import NDArray
+
+from remoteview_core import decimate
 from remoteview_core.changes import SentScene
-from remoteview_core.collect import SceneApi, SkippedNode, collect_scene
-from remoteview_core.decimate import PROFILES, estimate_glb_size, fit_to_budget, glb_binary_size
-from remoteview_core.glb_writer import RootExtras, write_glb
+from remoteview_core.collect import (
+    CollectedScene,
+    SceneApi,
+    SkippedNode,
+    Source,
+    collect_steps,
+    recollect_steps,
+)
+from remoteview_core.decimate import PROFILES, Budget, FitResult, estimate_glb_size, glb_binary_size
+from remoteview_core.glb_writer import Entity, RootExtras, write_glb
 from remoteview_core.ids import SceneIds
+from remoteview_core.meshcache import CachedMesh, MeshCache
+from remoteview_core.names import NameAssigner
 from remoteview_core.protocol_client import (
     ProtocolClient,
     ProtocolStateError,
     SessionState,
     SnapshotMessages,
 )
+from remoteview_core.steps import Progress, Steps, run
 
 
 class SnapshotTooLargeError(ValueError):
@@ -65,8 +84,11 @@ class Snapshot:
     triangle_count: int
     byte_length: int
     skipped: tuple[SkippedNode, ...]
-    reduced: tuple[str, ...] = ()
-    unreduced: tuple[str, ...] = ()
+    #: node IDs, out of the repr (T7), like those of ``skipped``
+    reduced: tuple[str, ...] = field(default=(), repr=False)
+    unreduced: tuple[str, ...] = field(default=(), repr=False)
+    #: the nodes whose small islands were left out (SLC-53, ``remove_islands``)
+    cleaned: tuple[str, ...] = field(default=(), repr=False)
     #: the profile's recommended size (0: none)
     target_bytes: int = 0
     #: the viewers' scene after this snapshot (SLC-30): its entities, the skipped nodes, the *Hide node names* setting
@@ -107,22 +129,63 @@ def build_snapshot(  # noqa: PLR0913 — keyword-only options after the scene an
     quantize: bool = True,
     announce: Iterable[tuple[str, str]] = (),
     ids: SceneIds | None = None,
+    cache: MeshCache | None = None,
+    remove_islands: bool = False,
 ) -> Snapshot:
     """Collect ``scene_api`` and build the next snapshot of ``client``'s session (see the module docstring). The GLB
     is quantised (``KHR_mesh_quantization``, FR-09) unless ``quantize`` is false. ``announce`` lists the ``(nodeId,
     kind)`` pairs for :attr:`Snapshot.announced` (``ProtocolClient.announce_added``: none while updates are held).
     ``ids`` is the session's alias registry (§7.3: every export of a session reuses the aliases it issued); ``None``
-    makes a fresh one for a single export."""
-    limits = client.limits
-    if (
-        client.state not in (SessionState.CREATED, SessionState.ACTIVE)
-        or not limits
-        or not client.profile
-    ):
-        raise ProtocolStateError(f"cannot send a snapshot in state {client.state.value}")
-    collected = collect_scene(scene_api, anonymize_names=anonymize_names, ids=ids)
+    makes a fresh one for a single export. ``cache`` is the session's :class:`~remoteview_core.meshcache.MeshCache`
+    (SLC-50): the nodes whose mesh and share are those of their entry are neither collected nor decimated again.
+    ``remove_islands`` leaves every node's small islands out (SLC-53)."""
+    return run(
+        prepare_snapshot(
+            scene_api,
+            client,
+            slicer_version=slicer_version,
+            anonymize_names=anonymize_names,
+            quantize=quantize,
+            announce=announce,
+            ids=ids,
+            cache=cache,
+            remove_islands=remove_islands,
+        )
+    )
+
+
+def prepare_snapshot(  # noqa: PLR0913 — build_snapshot's options, and the progress
+    scene_api: SceneApi,
+    client: ProtocolClient,
+    *,
+    slicer_version: str,
+    anonymize_names: bool = False,
+    quantize: bool = True,
+    announce: Iterable[tuple[str, str]] = (),
+    ids: SceneIds | None = None,
+    progress: Progress | None = None,
+    cache: MeshCache | None = None,
+    remove_islands: bool = False,
+) -> Steps[Snapshot]:
+    """:func:`build_snapshot` in steps (the module docstring); ``progress`` counts the nodes collected and fitted.
+    The session's state and the relay's limits are checked at the first step and read again at the last: a
+    preparation in steps spans the event loop."""
+    _live_limits(client)
+    progress = progress if progress is not None else Progress()
+    cache = cache if cache is not None else MeshCache()  # a single export: every node is a miss
+    # what the fit makes of a mesh depends on the island rule: a cache made with another one starts again
+    cache.use_settings(
+        (remove_islands, decimate.SMALL_ISLAND_TRIANGLES, decimate.SMALL_ISLAND_SHARE)
+    )
+    collected = yield from collect_steps(
+        scene_api, anonymize_names=anonymize_names, ids=ids, progress=progress, cache=cache
+    )
     budget = PROFILES[client.profile]
-    fitted = fit_to_budget(collected.entities, budget)
+    fitted, skipped = yield from _fit_steps(
+        collected, budget, cache, progress, remove_islands=remove_islands
+    )
+    progress.done = progress.total  # the nodes left out need no fit
+    limits = _live_limits(client)
     if glb_binary_size(fitted.entities, quantize=quantize) > limits["maxSnapshotBytes"]:
         # too large whatever the JSON: refused before the file is written (NFR-23)
         raise SnapshotTooLargeError(
@@ -145,9 +208,7 @@ def build_snapshot(  # noqa: PLR0913 — keyword-only options after the scene an
         raise SnapshotTooLargeError(len(glb), limits["maxSnapshotBytes"])
     triangles = fitted.triangle_count
     # before begin uses a version: nothing after it can fail but the invariant below
-    sent = SentScene.from_export(
-        fitted.entities, collected.skipped, anonymized=collected.anonymized_names
-    )
+    sent = SentScene.from_export(fitted.entities, skipped, anonymized=collected.anonymized_names)
     messages = client.begin_snapshot(glb, node_count=len(fitted.entities), triangle_count=triangles)
     # invariant: the root extras name the version the begin announces
     if messages.begin["sceneVersion"] != version:
@@ -158,10 +219,129 @@ def build_snapshot(  # noqa: PLR0913 — keyword-only options after the scene an
         node_count=len(fitted.entities),
         triangle_count=triangles,
         byte_length=len(glb),
-        skipped=collected.skipped,
+        skipped=skipped,
         reduced=fitted.reduced,
         unreduced=fitted.unreduced,
+        cleaned=fitted.cleaned,
         target_bytes=budget.target_bytes,
         sent=sent,
         announced=announced,
     )
+
+
+def _live_limits(client: ProtocolClient) -> dict[str, Any]:
+    """The relay's limits of a session that can take a snapshot now (``ProtocolStateError`` otherwise)."""
+    limits = client.limits
+    if (
+        client.state not in (SessionState.CREATED, SessionState.ACTIVE)
+        or not limits
+        or not client.profile
+    ):
+        raise ProtocolStateError(f"cannot send a snapshot in state {client.state.value}")
+    return limits
+
+
+def _fit_steps(
+    collected: CollectedScene,
+    budget: Budget,
+    cache: MeshCache,
+    progress: Progress,
+    *,
+    remove_islands: bool,
+) -> Steps[tuple[FitResult, tuple[SkippedNode, ...]]]:
+    """``decimate.fit_steps`` with the cache (SLC-50): the shares come from the triangle counts collect gave (a
+    cached node's too); a cached node keeps its entry's result when that fits its share; every other node goes through
+    ``decimate.fit_entity_steps`` — a cached one whose entry is not its collected mesh (decimated for another share,
+    or without its small islands) is collected again first — and what it gives is stored. With ``remove_islands``
+    (SLC-53) every node collected now gets its ``decimate.island_mask`` before the shares, one step each, and the
+    shares count the triangles left (an entry knows its islands). Also returns the skipped nodes: a mesh collected
+    again may have become one to leave out since the node was listed, and the entities are then named again, as a
+    fresh collection would name them."""
+    drops: list[NDArray[np.bool_] | None] = [None] * len(collected.entities)
+    if remove_islands:
+        for i, (listed, source) in enumerate(
+            zip(collected.entities, collected.sources, strict=True)
+        ):
+            if source.cached is None:
+                drops[i] = decimate.island_mask(listed)
+                yield
+    counts = [
+        source.count - (source.cached.islands if source.cached is not None else _marked(drop))
+        for source, drop in zip(collected.sources, drops, strict=True)
+    ]
+    targets = decimate.allocate(counts, budget)
+    fitted: list[Entity] = []
+    kept: list[Source] = []
+    reduced: list[str] = []
+    unreduced: list[str] = []
+    cleaned: list[str] = []
+    skipped = list(collected.skipped)
+    nodes = zip(collected.entities, collected.sources, drops, targets, strict=True)
+    for listed, source, drop, target in nodes:
+        outcome = yield from _fit_node_steps(
+            listed, source, drop, target, cache=cache, remove_islands=remove_islands
+        )
+        progress.done += 1
+        if isinstance(outcome, SkippedNode):
+            skipped.append(outcome)
+            continue
+        result, smaller, whole, islands = outcome
+        fitted.append(result)
+        kept.append(source)
+        for flag, names in ((smaller, reduced), (whole, unreduced), (islands, cleaned)):
+            if flag:
+                names.append(listed.node_id)
+        yield
+    if len(skipped) > len(collected.skipped):
+        fitted = _named_again(fitted, kept, anonymize=collected.anonymized_names)
+        skipped.sort(key=lambda node: node.index)
+    fit = FitResult(tuple(fitted), tuple(reduced), tuple(unreduced), tuple(cleaned))
+    return fit, tuple(skipped)
+
+
+def _fit_node_steps(  # noqa: PLR0913 — one node of _fit_steps, with its cache and rule
+    listed: Entity,
+    source: Source,
+    drop: NDArray[np.bool_] | None,
+    target: int,
+    *,
+    cache: MeshCache,
+    remove_islands: bool,
+) -> Steps[tuple[Entity, bool, bool, int] | SkippedNode]:
+    """One node of :func:`_fit_steps`: ``(entity, reduced, unreduced, islands)`` — ``islands`` the triangles of the
+    small islands left out —, or the node left out because its mesh, collected again, now is one to leave out."""
+    cached = source.cached
+    if cached is not None and cached.fits(target):
+        return listed, cached.reduced, cached.unreduced, cached.islands
+    entity, count = listed, source.count
+    if cached is not None and (cached.reduced or cached.islands):
+        again = yield from recollect_steps(listed, source)
+        if isinstance(again, tuple):
+            reason, baked = again
+            return SkippedNode(listed.node_id, reason, source.index, baked=baked)
+        entity, count = again, again.triangle_count
+        if remove_islands:
+            drop = decimate.island_mask(entity)
+            yield
+    result, decimated = yield from decimate.fit_entity_steps(entity, drop, target)
+    smaller, whole, islands = decimated is True, decimated is False, _marked(drop)
+    if source.stamp is not None:
+        geometry = (result.positions, result.normals, result.indices)
+        entry = CachedMesh(source.stamp, count, target, *geometry, smaller, whole, islands)
+        cache.put(listed.node_id, entry)
+    return result, smaller, whole, islands
+
+
+def _marked(drop: NDArray[np.bool_] | None) -> int:
+    """The triangles ``drop`` marks (an island mask; ``None``: none)."""
+    return 0 if drop is None else int(drop.sum())
+
+
+def _named_again(entities: list[Entity], sources: list[Source], *, anonymize: bool) -> list[Entity]:
+    """``entities`` named as a collection without the nodes left out late would name them (``Model <n>`` counts the
+    exported nodes, no gaps)."""
+    names = NameAssigner(anonymize=anonymize)
+    return [
+        replace(entity, name=names.assign(entity.kind, source.raw_name))
+        for entity, source in zip(entities, sources, strict=True)
+    ]

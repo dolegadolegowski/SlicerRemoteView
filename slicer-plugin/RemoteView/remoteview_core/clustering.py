@@ -7,16 +7,21 @@ with agreeing normals (the two sides of a seam) count as connected, so seams do 
 its member closest to the cluster's mean, which lies on the input surface. Winding is kept per triangle: a triangle
 keeps the order of its clusters, a repeated one is kept once, and the two sides of a collapsed fold, whose windings
 cancel, go both. For non-manifold fans (pages sharing one spine) :func:`cluster_by_normal` clusters by grid cell and the
-tetrahedral class of the vertex normal instead.
+tetrahedral class of the vertex normal instead. :func:`small_islands` finds the small connected parts that *Remove
+small islands* leaves out before the shares (SLC-53), with parts joined through shared vertex IDs and through exactly
+equal positions.
 
 Pure numpy (no VTK, no Slicer), deterministic (fixed seed). Indices are int64, positions float64. Sources and
-measurements: ``docs/research/slicer-decimate.md`` § SLC-41.
+measurements: ``docs/research/slicer-decimate.md`` § SLC-41, ``docs/research/slicer-islands.md`` (SLC-53). The
+``*_steps`` functions are the same in steps (SLC-28, :mod:`remoteview_core.steps`): one per pass over the mesh.
 """
 
 from __future__ import annotations
 
 import numpy as np
 from numpy.typing import NDArray
+
+from remoteview_core.steps import Steps, run
 
 #: Four tetrahedral directions: the classes ``argmax(n · d)`` of ``n`` and ``-n`` always differ.
 TETRA = np.array([[1, 1, 1], [1, -1, -1], [-1, 1, -1], [-1, -1, 1]], dtype=np.float64) / np.sqrt(3)
@@ -38,13 +43,24 @@ def components(n: int, a: NDArray[np.int64], b: NDArray[np.int64]) -> NDArray[np
     """The root (smallest vertex ID) of every vertex's connected component under the undirected edges ``(a, b)``.
 
     Hooking of roots by their minimum plus full path compression; edges already inside one component are dropped each
-    round, so the work shrinks quickly (4-5 rounds on 16M triangles)."""
+    round, so the work shrinks quickly (4-5 rounds on 16M triangles). The first round needs no gather (the parents are
+    the identity), and the edges left are taken by index after one scan, so a round that drops none copies nothing
+    (SLC-53: two edges per triangle of a 16.1M-triangle segmentation 0.52-0.56 s → 0.32 s natively, same roots)."""
+    return run(components_steps(n, a, b))
+
+
+def components_steps(
+    n: int, a: NDArray[np.int64], b: NDArray[np.int64]
+) -> Steps[NDArray[np.int64]]:
+    """:func:`components` in steps: one per round."""
     parent = np.arange(n, dtype=np.int64)
     a, b = np.asarray(a, dtype=np.int64), np.asarray(b, dtype=np.int64)
+    pa, pb = a, b
     while len(a):
-        pa, pb = parent[a], parent[b]
         apart = pa != pb
-        a, b, pa, pb = a[apart], b[apart], pa[apart], pb[apart]
+        if not apart.all():
+            keep = np.flatnonzero(apart)
+            a, b, pa, pb = a[keep], b[keep], pa[keep], pb[keep]
         if not len(a):
             break
         np.minimum.at(parent, np.maximum(pa, pb), np.minimum(pa, pb))
@@ -53,6 +69,8 @@ def components(n: int, a: NDArray[np.int64], b: NDArray[np.int64]) -> NDArray[np
             if np.array_equal(compressed, parent):
                 break
             parent = compressed
+        pa, pb = parent[a], parent[b]
+        yield
     return parent
 
 
@@ -120,6 +138,16 @@ def _collapse(
     largest vertex ID on a tie); triangles that repeat a cluster dropped, same-winding duplicates merged, and the
     sides of a fold whose windings cancel dropped. Returns the used clusters' positions and the triangles over them;
     ``kept`` (``k`` booleans), when given, is set for the clusters a kept triangle uses."""
+    return run(_collapse_steps(positions, triangles, cid, k, kept))
+
+
+def _collapse_steps(
+    positions: Positions,
+    triangles: Triangles,
+    cid: NDArray[np.int64],
+    k: int,
+    kept: NDArray[np.bool_] | None = None,
+) -> Steps[tuple[Positions, Triangles]]:
     count = np.bincount(cid, minlength=k).astype(np.float64)
     mean = (
         np.stack([np.bincount(cid, weights=positions[:, j], minlength=k) for j in range(3)], axis=1)
@@ -137,11 +165,13 @@ def _collapse(
     centres = mean.copy()
     chosen = member >= 0
     centres[chosen] = positions[member[chosen]]
+    yield
     mapped = cid[triangles]
     a, b, c = mapped.T
     mapped = mapped[(a != b) & (b != c) & (a != c)]
     if len(mapped) == 0:
         return np.empty((0, 3), dtype=np.float64), np.empty((0, 3), dtype=np.int64)
+    yield
     start = np.argmin(mapped, axis=1)  # rotate to start at the smallest index: the winding is kept
     mapped = np.take_along_axis(mapped, (start[:, None] + np.arange(3)) % 3, axis=1)
     ordered = np.sort(mapped, axis=1)
@@ -168,34 +198,122 @@ def _mix(z: NDArray[np.uint64]) -> NDArray[np.uint64]:
     return z ^ (z >> np.uint64(31))
 
 
+def position_keys(positions: Positions) -> NDArray[np.uint64]:
+    """A 64-bit hash of the coordinate bits of every vertex (``-0.0`` counts as ``0.0``): equal positions have equal
+    keys. One coordinate at a time, so no copy of all the positions is made."""
+
+    def bits(j: int) -> NDArray[np.uint64]:
+        return np.ascontiguousarray(positions[:, j] + 0.0).view(np.uint64)  # + 0.0: -0.0 → 0.0
+
+    with np.errstate(over="ignore"):
+        return _mix(_mix(_mix(bits(0)) ^ bits(1)) ^ bits(2))
+
+
+#: Bits of the key-prefix table of :func:`small_islands` (2²⁴ booleans, 16 MiB): when the threshold is the minimum, it
+#: selects the vertices whose position may be that of a small part's vertex, so only those are sorted (532,616 of
+#: 8,089,163 vertices on a 16.1M-triangle segmentation).
+PREFIX_BITS = 24
+
+
+def _key_order(key: NDArray[np.uint64], candidates: NDArray[np.int64]) -> NDArray[np.int64]:
+    """``candidates`` ordered by ``key``, ties in their given order: ``candidates[np.argsort(key[candidates],
+    kind="stable")]``, as four stable passes over 16 bits each, which numpy radix-sorts (SLC-53: 0.29 s instead of
+    1.64 s on 8M random keys, 1.29 s instead of 8.71 s on 25M)."""
+    order = candidates
+    for shift in range(0, 64, 16):
+        digit = (key[order] >> np.uint64(shift)).astype(np.uint16)  # the 16 bits from ``shift`` up
+        order = order[np.argsort(digit, kind="stable")]
+    return order
+
+
+def _same_position(
+    positions: Positions, key: NDArray[np.uint64], candidates: NDArray[np.int64]
+) -> tuple[NDArray[np.int64], NDArray[np.int64]]:
+    """``(a, b)``: every vertex of ``candidates`` paired with the first candidate of its key, kept when their positions
+    are exactly equal (compared one axis at a time, without ``(p, 3)`` copies)."""
+    order = _key_order(key, candidates)
+    k = key[order]
+    start = np.r_[True, k[1:] != k[:-1]]
+    first = order[np.maximum.accumulate(np.where(start, np.arange(len(order)), 0))]
+    a, b = order[~start], first[~start]
+    same = np.ones(len(a), dtype=bool)
+    for j in range(3):
+        axis = positions[:, j]
+        same &= axis[a] == axis[b]
+    return a[same], b[same]
+
+
+def small_islands(
+    positions: Positions, triangles: Triangles, minimum: int, share: float
+) -> tuple[NDArray[np.bool_], int]:
+    """For every triangle, whether it lies in a small island, and how many islands that makes (SLC-53).
+
+    A part is connected through shared vertex IDs and through vertices at exactly the same position, whatever their
+    normals: an unwelded seam, a double-sided sheet or a triangle soup is one part. A part is a small island when it
+    has fewer than ``minimum`` triangles **and** fewer than ``share`` times the triangles of the largest part, so with
+    ``share <= 1`` the largest part (and any part as large) never is one. The parts by vertex IDs come from
+    :func:`components` on two edges per triangle; the parts that :func:`_same_position` joins are merged by
+    :func:`components` on their roots. Which vertices it compares:
+
+    - every vertex when ``share`` × the largest part by vertex IDs is below ``minimum``: the threshold then follows the
+      largest part, which a join between two larger parts can make larger still (an unwelded seam);
+    - otherwise only the vertices whose :data:`PREFIX_BITS` key prefix is that of a small part's vertex: the threshold
+      is ``minimum``, and a join between two parts of at least ``minimum`` triangles makes no part small.
+
+    Either way the result is the rule's with every coincident pair. The cost grows with the vertices compared, sorted
+    by :func:`_key_order`: 0.6 s natively for 16.1M triangles (532,616 vertices compared), 0.9 s for 16.4M triangles of
+    dust and 0.8 s for a 2.3M-triangle soup (every vertex compared)."""
+    m, n = len(triangles), len(positions)
+    root = components(
+        n,
+        np.concatenate([triangles[:, 0], triangles[:, 1]]),
+        np.concatenate([triangles[:, 1], triangles[:, 2]]),
+    )
+    label = root[triangles[:, 0]]  # every triangle's part, named by its root (a vertex ID)
+    size = np.bincount(label, minlength=n)
+    small = (size > 0) & (size < minimum)
+    if m == 0 or not small.any():
+        return np.zeros(m, dtype=bool), 0
+    key = position_keys(positions)
+    if share * size.max() < minimum:
+        candidates = np.arange(n)
+    else:
+        prefix = key >> np.uint64(64 - PREFIX_BITS)
+        table = np.zeros(1 << PREFIX_BITS, dtype=bool)
+        table[prefix[small[root]]] = True
+        candidates = np.flatnonzero(table[prefix])
+        del prefix, table
+    a, b = _same_position(positions, key, candidates)
+    del key, candidates
+    ra, rb = root[a], root[b]
+    joined = ra != rb
+    if joined.any():
+        # the parts that positions join, each named by its smallest root, and their sizes
+        label = components(n, ra[joined], rb[joined])[label]
+        size = np.bincount(label, minlength=n)
+    island = (size > 0) & (size < min(minimum, share * size.max()))
+    return island[label], int(island.sum())
+
+
 def coincident_pairs(positions: Positions, triangles: Triangles) -> NDArray[np.int64]:
     """``(p, 2)`` pairs of distinct vertices at exactly the same position whose vertex normals (sums of their
     triangles' face normals) agree: the two sides of a seam (a reader's or a normal filter's duplicated points). Each
     vertex is paired with the first of its position. Opposite normals — two coincident layers of a double-sided sheet —
     stay apart, or they would cancel. A 64-bit hash of the coordinate bits finds candidates (one sort, 0.3 s on 8M
-    vertices; only the vertices of repeated hashes are sorted again); the positions are compared exactly."""
+    vertices; only the vertices of repeated hashes are sorted again, by :func:`_same_position`); the positions are
+    compared exactly."""
     empty = np.empty((0, 2), dtype=np.int64)
     if len(positions) < 2:
         return empty
-    bits = (
-        np.ascontiguousarray(positions + 0.0).view(np.uint64).reshape(-1, 3)
-    )  # + 0.0: -0.0 becomes 0.0
-    with np.errstate(over="ignore"):
-        key = _mix(_mix(_mix(bits[:, 0]) ^ bits[:, 1]) ^ bits[:, 2])
+    key = position_keys(positions)
     ordered = np.sort(key)
     repeated = ordered[1:] == ordered[:-1]
     if not repeated.any():
         return empty
     values = np.unique(ordered[1:][repeated])  # the repeated keys; only their vertices are sorted
     slot = np.minimum(np.searchsorted(values, key), len(values) - 1)
-    candidates = np.flatnonzero(values[slot] == key)
-    order = candidates[np.argsort(key[candidates], kind="stable")]
-    key = key[order]
-    start = np.r_[True, key[1:] != key[:-1]]
-    first = order[np.maximum.accumulate(np.where(start, np.arange(len(order)), 0))]
-    a, b = order[~start], first[~start]
-    same = np.all(positions[a] == positions[b], axis=1)
-    a, b = a[same], b[same]
+    a, b = _same_position(positions, key, np.flatnonzero(values[slot] == key))
+    del key, ordered, slot  # not needed for the normals
     if not len(a):
         return empty
     mark = np.zeros(len(positions), dtype=bool)
@@ -227,8 +345,26 @@ def cluster_connected(
     ``rescue``, the input triangles none of whose clusters is used by a kept triangle (islands smaller than a cell,
     also those whose two sides cancel) are clustered again with ``cell / rescue`` and added — unless there are more
     than ``rescue_limit`` of them (a node of dust: the rescue would cost O(lost) and return several times the goal)."""
+    return run(
+        cluster_connected_steps(
+            positions, triangles, cell, rescue=rescue, rescue_limit=rescue_limit
+        )
+    )
+
+
+def cluster_connected_steps(
+    positions: Positions,
+    triangles: Triangles,
+    cell: float,
+    *,
+    rescue: float = RESCUE_DIVISOR,
+    rescue_limit: int | None = None,
+) -> Steps[tuple[Positions, Triangles]]:
+    """:func:`cluster_connected` in steps."""
     key = _grid_keys(positions, cell)
+    yield
     twins = coincident_pairs(positions, triangles)
+    yield
     m = len(triangles)
     e = np.empty(
         (3 * m + len(twins), 2), dtype=np.int64
@@ -238,20 +374,23 @@ def cluster_connected(
     e[3 * m :] = twins
     same = key[e[:, 0]] == key[e[:, 1]]
     a, b = e[same, 0], e[same, 1]
-    del e, same, key  # the largest arrays: not alive during _collapse
-    label = components(len(positions), a, b)
+    del e, same, key  # the largest arrays: not alive during _collapse_steps
+    yield
+    label = yield from components_steps(len(positions), a, b)
     del a, b
     uniq, cid = np.unique(label, return_inverse=True)
     cid = cid.ravel()
+    yield
     alive = np.zeros(len(uniq), dtype=bool)
-    centres, result = _collapse(positions, triangles, cid, len(uniq), alive)
+    centres, result = yield from _collapse_steps(positions, triangles, cid, len(uniq), alive)
     if not rescue:
         return centres, result
     lost = ~alive[cid[triangles]].any(axis=1)
     n_lost = int(lost.sum())
     if not n_lost or (rescue_limit is not None and n_lost > rescue_limit):
         return centres, result
-    more, more_triangles = cluster_connected(
+    yield
+    more, more_triangles = yield from cluster_connected_steps(
         *compact(positions, triangles[lost]), cell / rescue, rescue=0
     )
     return np.concatenate([centres, more]), np.concatenate([result, more_triangles + len(centres)])
@@ -262,6 +401,13 @@ def cluster_by_normal(
 ) -> tuple[Positions, Triangles]:
     """Vertex clustering by grid cell and the tetrahedral class of the area-weighted vertex normal, for non-manifold
     fans where connected clusters do not reduce (every page reaches the spine)."""
+    return run(cluster_by_normal_steps(positions, triangles, cell))
+
+
+def cluster_by_normal_steps(
+    positions: Positions, triangles: Triangles, cell: float
+) -> Steps[tuple[Positions, Triangles]]:
+    """:func:`cluster_by_normal` in steps."""
     first = positions[triangles[:, 0]]
     face = np.cross(positions[triangles[:, 1]] - first, positions[triangles[:, 2]] - first)
     flat = triangles.ravel()
@@ -272,9 +418,11 @@ def cluster_by_normal(
         ],
         axis=1,
     )
+    yield
     key = _grid_keys(positions, cell) * 4 + np.argmax(normals @ TETRA.T, axis=1)
     uniq, cid = np.unique(key, return_inverse=True)
-    return _collapse(positions, triangles, cid.ravel(), len(uniq))
+    yield
+    return (yield from _collapse_steps(positions, triangles, cid.ravel(), len(uniq)))
 
 
 def part_sizes(positions: Positions, triangles: Triangles) -> NDArray[np.int64]:

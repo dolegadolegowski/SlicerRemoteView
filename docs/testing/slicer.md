@@ -714,7 +714,8 @@ Steps:
 Expected results:
 
 - Step 1: the text lists what *Start session* sends (the complete surface meshes of the models shown in the 3D view —
-  clipping is not applied — no images or volumes, names and MRML node IDs, colours, opacity, visibility, position, the
+  clipping is not applied; small islands are left out while *Remove small islands* is on (SLC-54); no images or
+  volumes, names and MRML node IDs, colours, opacity, visibility, position, the
   Slicer/RemoteView/OS versions) and who can see it. It names "the relay whose address you enter above" for the empty
   field and "the relay at relay.example.org" for both `wss://` addresses (never `user` or `secret`); for
   `ws://127.0.0.1:8787/ws` it names "the relay at 127.0.0.1" and ends with "A ws:// address is not encrypted; Start
@@ -1037,7 +1038,7 @@ Known gaps (not failures):
 |---|---|---|---|---|
 | | | | | |
 
-## §14 Decimation to the device profile (SLC-14, SLC-41; FR-10, NFR-03, NFR-04, protocol §7.5)
+## §14 Decimation to the device profile (SLC-14, SLC-41, SLC-53, SLC-54; FR-10, NFR-03, NFR-04, protocol §7.5)
 
 Preconditions: §2's setup with relay (b) or (c) and a viewer joined. The panel uses the `mobile` profile (500k
 triangles in all, 100k per model; the profile selector is SLC-18). In a new scene run in the Python console
@@ -1067,8 +1068,8 @@ Steps:
 
 Expected results:
 
-- Step 1: Slicer is busy for a few seconds while it simplifies "Big" and "Medium", and the code appears only then (SLC-28,
-  §15, shows the code first and a progress dialog); then "Sending the scene", then "Live". The viewer shows the four spheres, round and in
+- Step 1: the code appears at once with "Preparing the scene" while "Big" and "Medium" are simplified in steps (SLC-28,
+  SLC-51, §15: Slicer stays usable and a progress window may appear); then "Sending the scene", then "Live". The viewer shows the four spheres, round and in
   place — "Big" and "Medium" with visibly fewer, larger facets than in Slicer (100,000 triangles at most each; the
   total is at most 500,000), "Small" and "Tiny" unchanged; all lit from outside. The panel shows no warning (the scene
   is about 3 MB, below the 32 MB recommended for `mobile`).
@@ -1121,11 +1122,202 @@ Expected results:
   the node is reduced to ≤ 100,000 triangles and none is unreduced; no `Decimation: …` warning in the Python
   console or the Error Log (that warning means the coarser clustering fallback ran instead of the quadric, and says
   why and with what result; whether the console shows it depends on its log level, `[TODO verify]` for 5.12.4).
-- Step 4: Slicer is busy for about 11-15 s, not about 3 minutes.
+- Step 4: "Live" follows about 11-15 s after the click, not about 3 minutes; since SLC-51 the code shows at once and
+  Slicer stays usable meanwhile (§15 step 6 measures the stalls).
 - Step 5: the phone's view is smooth like Slicer's: no cracks along lines, no shards, no large flat facets, no dark
   speckle pattern. Expected at 100k triangles: the fine grain is smoothed away, and the thinnest perforated walls show
   a few see-through specks.
 - Throughout: no warning or traceback in the Python console (step 3 prints its one line).
+
+Steps (small islands, SLC-53):
+
+Preconditions: the scene of steps 3-5; restart Slicer first, so that the module is loaded fresh and `ru_maxrss` counts
+from this run. Steps 6-7 check the core in the console; the panel's checkbox (SLC-54) follows in steps 8-12.
+
+6. In the Python console, time the island step on its own, then the fit with the islands left out:
+
+   ```python
+   import resource, time
+   from remoteview_core import collect, decimate, mrml_scene
+   scene = mrml_scene.MrmlSceneApi(slicer.util.getNodesByClass, slicer.vtkMRMLFolderDisplayNode)
+   collected = collect.collect_scene(scene, anonymize_names=False)
+   start = time.perf_counter()
+   masks = [decimate.island_mask(e) for e in collected.entities]
+   middle = time.perf_counter()
+   fitted = decimate.fit_to_budget(collected.entities, decimate.PROFILES["mobile"], remove_islands=True)
+   end = time.perf_counter()
+   left_out = sum(int(m.sum()) for m in masks if m is not None)
+   total = sum(e.triangle_count for e in collected.entities)
+   print(f"islands {middle - start:.1f} s, {left_out} of {total} triangles left out;",
+         f"fit {end - middle:.1f} s, {fitted.triangle_count} triangles, cleaned {len(fitted.cleaned)},",
+         f"reduced {len(fitted.reduced)}, unreduced {len(fitted.unreduced)},",
+         f"peak {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20:.0f} MiB")  # macOS: bytes
+   ```
+
+7. Open *View → Error Log* and look for the lines that start with `Islands:`.
+
+Expected results:
+
+- Step 6, on the reporter's scene: the island step about 1 s under Rosetta (natively 0.6 s); 661,624 of 16,116,404
+  triangles left out; the fit with the islands left out about 7 s (it includes the island step, partly paid back by a
+  faster `components`; step 3's fit measured 6.6-6.7 s), at most 100,000 triangles, `cleaned 1`, `reduced 1`,
+  `unreduced 0`; the peak not above step 3's (about 12,500 MiB; 12.2 GiB measured for SLC-41). Another scene gives
+  other counts, at about the same speed per triangle.
+- Step 7: two lines `Islands: 14453 small islands (661624 of 16116404 triangles) are left out of a node` (one from
+  the snippet's own `island_mask` call, one from the call inside `fit_to_budget`), counts only — no node name, ID or
+  coordinate. Whether the Python console shows these INFO lines too depends on its log level: `[TODO verify]` for
+  5.12.4.
+- Throughout: no traceback in the Python console.
+
+Steps (the *Remove small islands* checkbox, SLC-54):
+
+Preconditions: the scene of steps 3-5, §15's stall meter pasted into the Python console, and a viewer on a phone;
+before step 8, forget any stored choice in the Python console with
+`qt.QSettings().remove("RemoteView/RemoveSmallIslands")`, then restart Slicer and load the scene again.
+
+8. Open *RemoteView*: read the checkbox under the consent statement and its tooltip. Start a session and look at the
+   segmentation on the phone; *Stop session*, uncheck *Remove small islands*, start again and look again.
+9. During the session run `longest()`, check the box again and watch the panel's status and the phone; when it says
+   "Live", run `longest()` again. Then uncheck the box and watch the phone.
+10. Restart Slicer and open *RemoteView*.
+11. In the new, empty scene, make in the Python console a model of 8 small spheres, and a model of a large sphere with
+    a 1 mm sphere far from it:
+
+    ```python
+    import vtk
+    def ball(center, radius, n=16):
+        source = vtk.vtkSphereSource()
+        source.SetCenter(*center)
+        source.SetRadius(radius)
+        source.SetThetaResolution(n)
+        source.SetPhiResolution(n)
+        source.Update()
+        return source.GetOutput()
+    append = vtk.vtkAppendPolyData()
+    for i in range(8):
+        append.AddInputData(ball((0, 200 + 10 * i, 0), 2))
+    append.Update()
+    slicer.modules.models.logic().AddModel(append.GetOutput()).SetName("Eight spheres")
+    joined = vtk.vtkAppendPolyData()
+    joined.AddInputData(ball((0, 0, 0), 40, 448))  # 399,616 triangles
+    joined.AddInputData(ball((0, 0, 300), 1))  # 448 triangles, under 1,196 and under 1 % of the large sphere's
+    joined.Update()
+    slicer.modules.models.logic().AddModel(joined.GetOutput()).SetName("Big with a speck")
+    ```
+
+12. With the box checked, start a session and look for both models on the phone.
+
+Expected results:
+
+- Step 8: the box reads "Remove small islands (islands below the minimum size are not sent)" and is checked; the
+  tooltip names 1,196 triangles, 1% of the largest piece and that the largest piece is always sent. With the box
+  checked the phone shows fewer specks around the segmentation than with it unchecked, and Slicer's *Error Log*
+  has an `Islands: …` line (counts only) for the first session and none for the second.
+- Step 9: a toggle empties the cache of the session's meshes, so the status shows "Preparing the scene" (with the
+  progress window after 1 s on a large scene), then "Updating the scene", then "Live"; the specks leave the phone, and
+  come back once the box is unchecked. Each toggle costs one snapshot that collects and fits every node again, in
+  steps: on the reporter's scene the second `longest()` prints at most the quadric's step (about 1.9 s; the island
+  step takes about 1 s).
+- Step 10: the box is as it was left in step 9.
+- Step 12: all eight spheres of *Eight spheres* are on the phone (equal pieces are kept); of *Big with a speck* the
+  large sphere is, complete, and the 1 mm sphere is not.
+
+| Date | Slicer version | OS | Result | Tester |
+|---|---|---|---|---|
+| | | | | |
+
+## §15 Preparing the scene in steps (SLC-28, SLC-50, SLC-51; FR-10, R-05, `docs/research/slicer-prepare.md`)
+
+Preconditions: §2's setup with relay (b) or (c); a phone ready to join. Every step watches the main thread with a
+stall meter, a 10 ms timer that records the longest gap between two of its timeouts (the longest time Slicer could
+not draw or take input). Paste it into the Python console once:
+
+```python
+import time, qt
+stall = {"last": time.perf_counter(), "max": 0.0}
+def _beat():
+    now = time.perf_counter()
+    stall["max"] = max(stall["max"], now - stall["last"])
+    stall["last"] = now
+meter = qt.QTimer()
+meter.setInterval(10)
+meter.connect("timeout()", _beat)
+meter.start()
+def longest():  # prints and restarts the measurement
+    print(f"longest stall {stall['max']:.2f} s")
+    stall["max"] = 0.0
+```
+
+Steps (five large models):
+
+1. In a new scene create five spheres of 399,616 triangles each with §14's `sphere` function:
+   `for i in range(5): sphere((100 * i, 0, 0), 448, f"Big{i}")`. Run `longest()` once to restart the meter.
+2. Click *Start session*. While the panel says "Preparing the scene", rotate the 3D view with the mouse and type in
+   the Python console. When the panel says "Live", run `longest()` and join with the phone.
+3. Click *Stop session*, then *Start session*, and click *Stop session* again within a second, while the panel still
+   says "Preparing the scene". Watch the phone (still on the old session's page) and the relay's log.
+4. Start a session again and join. Replace one sphere's mesh with a smaller one and run `longest()` after the phone
+   shows the change:
+
+   ```python
+   source = vtk.vtkSphereSource()
+   source.SetCenter(200, 0, 0)
+   source.SetRadius(40)
+   source.SetThetaResolution(64)
+   source.SetPhiResolution(64)
+   source.Update()
+   getNode("Big2").SetAndObservePolyData(source.GetOutput())
+   ```
+
+5. With the session live, start a long preparation and load data in the middle of it: give `Big2` a 448-resolution
+   sphere again (step 4's snippet with `SetThetaResolution(448)`/`SetPhiResolution(448)`) and right after it run
+   `qt.QTimer.singleShot(1200, lambda: slicer.util.loadSampleData("MRHead"))`. When the phone shows the scene, do
+   the same with `qt.QTimer.singleShot(1200, lambda: slicer.mrmlScene.Clear(0))` (the scene closed while a
+   preparation runs).
+
+Expected results:
+
+- Step 2: the code appears at once with "Preparing the scene · no viewers yet."; within a second a small
+  "RemoteView" progress window appears (it does not block Slicer, does not take the keyboard focus from the Python
+  console and has no Cancel button) and fills up; the 3D view
+  follows the mouse, a little jerkily, and the console takes input; then "Sending the scene", the progress window
+  closes, then "Live", and the phone shows the five spheres as in §14. `longest()` prints less than 1.5 s (the
+  longest step is one sphere's quadric run, measured natively 0.8 s); the whole preparation takes about as long as
+  before SLC-28 (§14: a few seconds).
+- Step 3: the relay receives no `scene.snapshot.begin` for the stopped session (its log shows the session closed
+  with nothing sent), the panel says "Not connected.", the progress window closes, and no traceback appears.
+- Step 4: only `Big2` is prepared again (the panel says "Preparing the scene" or "Updating the scene" for well under
+  a second, and no progress window appears); the phone shows the coarser `Big2` and the other four unchanged.
+  `longest()` prints less than 1 s.
+- Step 5: loading MRHead (a batch) stops the preparation; one snapshot follows when the load is done, with
+  MRHead's models if any are shown in 3D. Closing the scene stops the next preparation: the closed scene never
+  reaches the phone, which shows the empty scene within a second (an empty snapshot goes first when the new scene
+  takes longer than one slice).
+- Throughout: no `RemoteView`, `live:` or `scene:` error line and no traceback in the Python console.
+
+Steps (large segmentation; the reporter's scene or §14's large-segmentation preconditions):
+
+6. Restart Slicer, load the scene, paste the stall meter, run `longest()`. Click *Start session*; while the panel
+   says "Preparing the scene", rotate the 3D view. Note the time from the click to "Live" and run `longest()`.
+7. With the session live and the phone joined, add a small model next to the segmentation
+   (`sphere((0, 0, 0), 32, "Small")`), then give it another mesh as in step 4 (`getNode("Small")`); time each change
+   to the phone and run `longest()` after each.
+8. Change the segment's colour in the Segment Editor.
+
+Expected results:
+
+- Step 6: the code appears within a second; the progress window appears and fills; the 3D view moves between steps
+  — `longest()` prints less than 3 s (one step: the quadric's run, 1.75 + 0.10 s in §14; every other step about
+  0.75 s at most, from the native profile in the research note); "Live" follows about 11-13 s after the click (§14:
+  collect + fit 10.5-11 s in one call before SLC-28).
+- Step 7: each change re-exports the scene without preparing the segmentation again (SLC-50): the phone shows it in
+  about 1 s, without a progress window; `longest()` prints less than 1 s.
+- Step 8: a `scene.update` only (no "Preparing the scene"), as in §13 step 7.
+- `[TODO verify]` in Slicer 5.12.4: `qt.QProgressDialog` takes `setCancelButton(None)` (no Cancel button),
+  `windowModality = qt.Qt.NonModal` and `setAttribute(qt.Qt.WA_ShowWithoutActivating)` from PythonQt, and reads
+  `wasCanceled` as a property; `minimumDuration` 1,000 ms keeps it hidden for a short preparation; `reset()` hides it
+  and it does not come back; closed with its title-bar button during a long preparation, it stays closed until the
+  next one.
 
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|

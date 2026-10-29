@@ -1,0 +1,222 @@
+# Preparing the scene without freezing Slicer (SLC-28, SLC-50, SLC-51)
+
+At *Start session*, and again at every live change that needs a new snapshot (a geometry edit, an added node, a
+reset: `LiveUpdates._export`), `build_snapshot` used to collect and decimate every node in one call on Slicer's main
+thread. On the reporter's 16M-triangle micro-CT segmentation that call took 10.5-11.0 s in Slicer 5.12.4 under
+Rosetta even after SLC-41 (`docs/research/slicer-decimate.md` § SLC-41). Slicer drew nothing and took no input
+meanwhile, and the transport thread did not get the GIL either. Processing one node per `QTimer` tick (R-05) does not
+help when one node holds most of the triangles. This note records why the work stays on the main thread, how it is cut
+into steps, and how a per-node cache makes a live change cost only the node that changed.
+
+## Threads: checked and rejected
+
+| Fact | Source | Consequence |
+|---|---|---|
+| (a) VTK 9.6 has a wrapping hint that releases the GIL around a call: `VTK_UNBLOCKTHREADS`, on `vtkAlgorithm::Update()`, `Update(int)`, `UpdateExtent`, `UpdateTimeStep`, `UpdateInformation` and `UpdateWholeExtent` (inherited by every filter). The generated code calls `PyEval_SaveThread()` before the call only under `#ifdef VTK_PYTHON_FULL_THREADSAFE`. Other methods keep the GIL, among them `DeepCopy`. | [vtkWrappingHints.h#L32-L33](https://github.com/Kitware/VTK/blob/v9.6.0/Common/Core/vtkWrappingHints.h#L32-L33), [vtkWrapPythonMethod.c#L818-L826](https://github.com/Kitware/VTK/blob/v9.6.0/Wrapping/Tools/vtkWrapPythonMethod.c#L818-L826), [vtkAlgorithm.h#L683-L686](https://github.com/Kitware/VTK/blob/v9.6.0/Common/ExecutionModel/vtkAlgorithm.h#L683-L686), [vtkParseMerge.c#L310-L314](https://github.com/Kitware/VTK/blob/v9.6.0/Wrapping/Tools/vtkParseMerge.c#L310-L314) | a filter's `Update()` could run in a worker thread without holding the GIL |
+| (b) `VTK_PYTHON_FULL_THREADSAFE` defaults to ON since VTK 9.4.0, the release that added the hint. Slicer 5.12.4 does not set it, so its VTK fork (`c9cd17a`, upstream 9.6.2 plus 7 commits that do not touch it) builds with ON. This was not checked against the generated `vtkPythonConfigure.h` of a shipped Slicer (`[TODO verify]`). | [VTK CMakeLists.txt#L173-L174](https://github.com/Kitware/VTK/blob/v9.6.0/CMakeLists.txt#L173-L174), [9.4 release note](https://github.com/Kitware/VTK/blob/v9.6.0/Documentation/release/9.4/python-hint-unblock.md#L3), [External_VTK.cmake#L173-L174](https://github.com/Slicer/Slicer/blob/v5.12.4/SuperBuild/External_VTK.cmake#L173-L174) | idem in Slicer. The repository's earlier note (`slicer.md` §3: "Slicer is not built with `VTK_PYTHON_FULL_THREADSAFE`") was true up to VTK 9.3 |
+| (c) Slicer's main thread holds the GIL at all times, also while it idles in the Qt event loop. Slicer initialises Python itself (`Py_InitializeFromConfig`, which takes the GIL for the calling thread). It then initialises PythonQt with `PythonAlreadyInitialized`. Nothing in Slicer 5.12.4, CTK `5056664` or PythonQt `74dcd67` calls `PyEval_SaveThread`, and PythonQt's thread support is compiled in but switched off (`_globalShouldAllowThreads`, `_enableGILScope` false). CPython hands the GIL to a waiting thread only from its eval loop, every 5 ms. | [qSlicerCorePythonManager.cxx#L64-L74](https://github.com/Slicer/Slicer/blob/v5.12.4/Base/QTCore/qSlicerCorePythonManager.cxx#L64-L74), [PythonQtMethodInfo.cpp#L50](https://github.com/commontk/PythonQt/blob/74dcd675e1515324cd7467a328d63dd25d263679/src/PythonQtMethodInfo.cpp#L50), [PythonQtThreadSupport.cpp#L45](https://github.com/commontk/PythonQt/blob/74dcd675e1515324cd7467a328d63dd25d263679/src/PythonQtThreadSupport.cpp#L45), [ceval_gil.c#L19-L22](https://github.com/python/cpython/blob/v3.12.10/Python/ceval_gil.c#L19-L22); Andras Lasso in the [forum (2023-10-19)](https://discourse.slicer.org/t/using-python-multithreading-in-3d-slicer/32299/5): a worker advances when the mouse moves over a view, because Slicer's Python code then runs and yields the GIL | a worker progresses only while the main thread runs Python or sleeps; when the main thread wants the GIL back, it waits for whatever the worker holds |
+| (d) numpy 2.4.6 (Slicer's) releases the GIL in the loops of `sort`/`argsort`, `take` and integer fancy indexing, ufuncs, `concatenate`, `astype` and `bincount`'s count (above 500 elements). It holds the GIL in the fast path of `ufunc.at` (`np.minimum.at`, `np.maximum.at`: `clustering.components` and `_collapse`) and in `bincount`'s min/max pre-pass. | [item_selection.c#L1295-L1296](https://github.com/numpy/numpy/blob/v2.4.6/numpy/_core/src/multiarray/item_selection.c#L1295-L1296), [ufunc_object.c#L1162-L1163](https://github.com/numpy/numpy/blob/v2.4.6/numpy/_core/src/umath/ufunc_object.c#L1162-L1163), [`trivial_at_loop` #L6128-L6133](https://github.com/numpy/numpy/blob/v2.4.6/numpy/_core/src/umath/ufunc_object.c#L6128-L6133), [compiled_base.c#L229-L249](https://github.com/numpy/numpy/blob/v2.4.6/numpy/_core/src/multiarray/compiled_base.c#L229-L249) | idem |
+| (e) A Python observer (the quadric's deadline observer) always takes the GIL: `vtkPythonCommand::Execute` uses `vtkPythonScopeGilEnsurer(true)`. | [vtkPythonCommand.cxx#L78-L79](https://github.com/Kitware/VTK/blob/v9.6.0/Wrapping/PythonCore/vtkPythonCommand.cxx#L78-L79) | in a worker, every progress event would wait for the main thread to yield |
+
+Measured with the dev venv (VTK 9.6.2 wheel, numpy 2.5.4; a pure-Python counter thread next to the call, its rate
+relative to its rate alone): 0.96-0.99 during the `Update()` of `vtkQuadricDecimation` (3.9M triangles, 11.6 s),
+`vtkPolyDataNormals` and `vtkTriangleFilter`, `np.sort` of 48M int64, `take`, fancy indexing and `bincount`; 0.61 during
+`np.minimum.at` on 48M; 0.06 during `np.unique(axis=0)` on 4M rows. These numbers agree with (a) and (d).
+
+**Decision.** A worker thread would need the main thread to give up the GIL from a timer (the SimpleFilters pattern
+in the forum post). Each stretch in which the worker holds the GIL would then still stall Slicer, as soon as the main
+thread wants the GIL back. Such stretches are `ufunc.at` on 48M elements (0.4 s), `np.unique(axis=0)`, `DeepCopy`,
+and the Python between calls. The project's threading rule keeps VTK on the main thread (`slicer.md` §3), and none of
+this can be tested without Slicer (CLAUDE.md rule 10). The preparation is therefore cut into steps on the main
+thread instead (below). A single numpy or VTK call cannot be cut. The longest is the quadric's run; the others are
+`vtkPolyDataNormals` (0.88 s on 31.4M triangles natively), `vtkTriangleFilter` (long on a polygon of many points:
+SLC-52), the geometry copy's `DeepCopy` and a bake's `TransformPoints` (a bake under a non-linear transform has not
+been measured). Moving only the quadric's `Update()` into a worker is the follow-up of the plan (SLC-51 follow-ups):
+by (a) and (b) it runs without the GIL in Slicer. It must first be
+measured in Slicer, together with a main-thread yield and with VTK's messages from a worker thread
+(`vtkOutputWindow`, `[TODO verify]`).
+
+## Steps (SLC-28)
+
+`remoteview_core.steps`: a *steps* generator yields `None` between its heavy calls and returns its result, and
+`yield from` nests such generators. `run()` takes one to the end in a single call. The one-shot functions are exactly
+that: `collect_scene`, `fit_to_budget`, `decimate_entity`, `cluster_connected`, `components` and `build_snapshot`. The
+one-shot and stepwise paths therefore run the same code and give the same bytes. `Stepper` takes steps a slice of time
+at a time; a step is never split, so a slice ends after the step that crosses it. The steps:
+
+- collect, per mesh: the geometry copy; the cell check; `vtkTriangleFilter`; the bake; the area test, in parts of
+  `CHUNK_TRIANGLES` (4M) triangles; the winding check, a sort of the directed edges in parts of about 4M triangles,
+  split by the first vertex (both copies of a repeated edge share it, so the result is the same);
+  `vtkPolyDataNormals`; the finite check; the conversion to glTF; then one step per node.
+- clustering, per pass: grid keys; coincident pairs; edges; each round of `components`; the labels; the collapse in
+  two steps; the rescue.
+- decimate: the input checks; each size-bound pass; the fan clustering; the fallback's passes. The quadric's runs and
+  `_finished` form **one** step. Its `QUADRIC_SECONDS` deadline therefore counts only their own time, never the event
+  loop's between steps, and the result does not depend on how busy Slicer is.
+- the last step: the size check, the `scene.nodeAdded` hint, `write_glb`, the SHA-256 and `begin`. The client is asked
+  for nothing before it. A preparation abandoned between steps (`close()`) has sent nothing and used no version. It
+  is short: 0.033 s natively for ten models of 99,456 triangles under `quest3` (994,560 triangles, an 11.4 MiB
+  quantised GLB; 0.022 s for the 17.1 MiB unquantised one), so about 0.2 s for the relay's 64 MiB limit. The SHA-256
+  and the chunks therefore stay in it (the SLC-06/SLC-08 follow-up); the chunk frames are encoded only as the
+  transport takes them.
+
+The profile of `prepare_snapshot` on a generated segmentation-like surface (Gaussian-smoothed noise, flying edges,
+one segment, `mobile` budget → 100,000 triangles), measured natively (arm64, dev venv), one step per `advance`. The
+lists of steps are from `step_profile.py`, a local harness that is not committed:
+
+| Input | Steps | Total | Longest step | Next longest | One call (`build_snapshot`) |
+|---|---|---|---|---|---|
+| 4.35M triangles | 29 | 2.77 s | 1.08 s (the quadric's step) | 0.36 s (the winding sort, before the parts) | 2.68 s, same bytes |
+| 31.4M triangles, without the parts | 30 | 12.67 s | 2.68 s (the winding sort of 94M edge keys) | 1.49 s (the area test), 1.27 s (the quadric), 1.17 s (grid keys + coincident pairs) | 13.26 s, same bytes |
+| 31.4M triangles, with the parts | 49 | 13.07 s | 1.24 s (the quadric's step) | 0.98 s (the edges inside one cell, 94M), 0.88 s (`vtkPolyDataNormals`), 0.83 s (coincident pairs), 0.63-0.67 s (a `components` round, a part of the winding sort) | 12.90 s, same bytes |
+
+The steps cost nothing measurable (13.07 s against 12.90 s in one call, within the noise). The quadric's input is
+bounded by the size bound (SLC-41), so its step does not grow with the input: 1.08-1.24 s here, about 1.9 s on the
+reporter's node in Slicer under Rosetta (its two runs took 1.75 + 0.10 s there, §14). The other steps scale with the mesh. On the reporter's 16M triangles
+they are about half of the 31.4M figures, so about 0.5 s natively and an estimated 0.75 s under Rosetta (collect +
+fit ran 1.4-1.5 times slower there, §14). The quadric's step is then the only one above 1 s; manual §15 measures
+it in Slicer.
+
+## Per-node cache (SLC-50)
+
+A live re-export used to collect and decimate every node again (SLC-41 follow-up (g)): about 11 s on the reporter's
+scene for any change, also one to a small model next to it. `MeshCache` keeps, per `nodeId`, what the last export
+made of the node's mesh: the **stamp** of the mesh, the triangle count collect gave, the **share** it was fitted to,
+the fitted geometry (glTF positions, normals, indices) and whether it was reduced or could not be. A re-export
+consults it before collecting:
+
+- **Stamp.** The polydata's C++ address (`GetAddressAsString`), its `GetMTime()`, and the `GetMTime()` of the
+  connectivity and offsets arrays of its polygons and strips. Add the bake for a sheared linear world matrix (the
+  matrix); a non-linear chain is never cached (its transform is a new object at every read). A linear TRS matrix is
+  not part of the stamp, because the collected mesh is in the node's frame and the matrix travels as `T.matrix`.
+- Why that identifies a mesh. Every `Modified()` takes the next value of one global atomic counter
+  ([vtkTimeStamp.cxx#L19-L45](https://github.com/Kitware/VTK/blob/v9.6.0/Common/Core/vtkTimeStamp.cxx#L19-L45)), and
+  a new object calls `Modified()` in its constructor
+  ([vtkObject.cxx#L211-L217](https://github.com/Kitware/VTK/blob/v9.6.0/Common/Core/vtkObject.cxx#L211-L217)). An
+  object at a reused address therefore has a newer time. `vtkPolyData::GetMTime()` covers its four cell arrays
+  ([vtkPolyData.cxx#L2205-L2225](https://github.com/Kitware/VTK/blob/v9.6.0/Common/DataModel/vtkPolyData.cxx#L2205-L2225)),
+  its points and their data array
+  ([vtkPointSet.cxx#L114-L128](https://github.com/Kitware/VTK/blob/v9.6.0/Common/DataModel/vtkPointSet.cxx#L114-L128),
+  [vtkPoints.cxx#L141-L146](https://github.com/Kitware/VTK/blob/v9.6.0/Common/Core/vtkPoints.cxx#L141-L146)), and
+  the point and cell data
+  ([vtkDataSet.cxx#L320-L331](https://github.com/Kitware/VTK/blob/v9.6.0/Common/DataModel/vtkDataSet.cxx#L320-L331)).
+  It does not cover the arrays inside a `vtkCellArray`. Measured with 9.6.2: after `Modified()` on a polygon
+  connectivity array, the polydata's time stays the same. Those arrays are therefore added. The cache misses whenever
+  VTK's own pipeline (and Slicer's 3D view) would see a change, and on a few changes it would not see.
+- **Share.** `allocate` needs every node's triangle count, which a cached node gives without being collected. A
+  decimated result is used for the same share only. A node that was not decimated (count ≤ share) is used for any
+  share it still fits, since its result does not depend on the share. When a cached node's share changed (the scene
+  is over the profile's total and another node's count changed), a node that was decimated is collected again
+  before it is decimated; any other entry holds the mesh as collected, which is decimated directly. Only what the
+  export sent is kept: the fitted geometry (at most the share, 100k triangles), or the whole mesh of a node that
+  fitted its share or that nothing could reduce — never a collected mesh that was decimated (the reporter's node
+  would hold about 0.8 GB for the whole session). When a decimated node is collected again and its mesh has lost
+  every triangle since it was listed (a change between steps), it is left out and the others are named again as a
+  fresh collection names them; their shares are still those of the listed nodes, and the mark of that change
+  re-exports the scene after this snapshot.
+- **A deadline fallback is kept too.** A node whose quadric ran out of its 8 s (SLC-41; under load) keeps the coarser
+  clustering result while its mesh and share are unchanged, where an export without the cache would try the quadric
+  again.
+- **Lifetime.** One cache per live session (`LiveUpdates`); entries of nodes not exported by the last preparation
+  are dropped; a reset (scene closed) clears it. The light reads (name, colour, opacity, visibility, transform) are
+  made at every export, as before.
+
+Measured natively (dev venv) on a generated 43.8M-triangle surface — the profile harness with a smaller smoothing
+radius — with a sphere of 7,936 triangles next to it, `mobile`: the first export takes 17.8 s; a second one with
+nothing changed 0.00 s; one after the sphere's mesh is replaced 0.01 s, because the surface is neither collected nor
+decimated again. Every snapshot goes through the cache (`prepare_snapshot` makes an empty one for a single export),
+so there is one fitting path for snapshots; its per-node decision is `decimate.fit_entity_steps` (SLC-53's
+`fit_entity` in steps), which `decimate.fit_steps` uses too. The tests compare warm exports with fresh ones byte for byte.
+
+## Small islands (SLC-53 follow-up (e))
+
+SLC-53 leaves every node's small islands out before the shares are given (`docs/research/slicer-islands.md`). It
+was merged from `ws/slicer-islands` into this branch, and the preparation runs it like this:
+
+- **One step per node.** `snapshot._fit_steps` calls `decimate.island_mask` for every node collected now, one step
+  each, before `allocate`; the shares count the triangles left. Then each node goes through
+  `decimate.fit_entity_steps` (SLC-53's `fit_entity` in steps). A node within its share is sent without its islands,
+  compacted. A node above its share is decimated from an entity that shares the collected positions, with only its
+  triangles filtered (`without_islands(…, compact=False)`, no copy).
+- **The cache counts the islands.** An entry keeps the number of triangles in the islands it left out
+  (`CachedMesh.islands`), so a cached node's share needs no mask. An entry holds the collected mesh only if it was
+  neither decimated nor cleaned. A decimated entry was fitted to another share. A cleaned entry is compacted, while a
+  fresh export decimates an input that still holds the islands' vertices. So either kind is collected again when its
+  share changes, and its islands are looked for again. That keeps a warm export identical, byte for byte, to a fresh
+  one (`test_prepare_cache.py`).
+- **One island rule per cache.** What the fit makes of a mesh depends on the rule: on or off,
+  `SMALL_ISLAND_TRIANGLES` and `SMALL_ISLAND_SHARE`. `prepare_snapshot` passes the rule to `MeshCache.use_settings`,
+  which empties the cache when it changes. Changing the rule during a session (SLC-54's checkbox) therefore
+  collects and fits every node once more.
+
+Measured natively with a local harness (not committed) on a generated surface of 15,384,537 triangles (smoothed
+noise through flying edges, one segment) next to a sphere of 7,936 triangles, `mobile`, one step at a time:
+
+| Islands | Steps | Total | Longest step | Island step of the surface | After the sphere's mesh is replaced |
+|---|---|---|---|---|---|
+| off | 53 | 6.95 s | 1.28 s (the quadric) | none | 0.01 s, no mask |
+| on | 55 | 7.30 s | 1.20 s (the quadric) | 0.54 s | < 0.01 s, the sphere's mask only |
+
+Unlike the quadric's step, whose input the size bound caps (at most 800k triangles for a 100k share), the island
+step grows with the node. On the reporter's mesh SLC-53 measured 0.6 s natively and about 1 s in Slicer under
+Rosetta, against about 1.9 s for the quadric there. On a generated 77.4M-triangle surface it took 2.78 s and was the
+longest step of that export; without islands, the longest step of the same export took 3.19 s.
+
+## Live preparation and the panel (SLC-51)
+
+- `LiveUpdates(slice_s=…)`: `_export` starts a preparation (`prepare_snapshot` with the session's cache) and runs
+  its first slice; the pump's `tick()` runs one slice per tick until the snapshot begins. The default `None` runs
+  the whole preparation in the call, as before. The panel passes 0.05 s: with the pump's 50 ms period the main
+  thread spends almost all its time on the preparation and handles Qt's events between slices.
+- **The SLC-30 design review.** The debouncer is held from the first step until `begin` has run and
+  `sent = snapshot.sent` is installed. The preparation's hold then becomes the in-flight hold. Marks made meanwhile
+  flush after the ack and are classified against the new scene, so dropping the client's held changes at `begin`
+  stays right.
+- **A preparation runs only while an export may go out.** Stop, a reset (scene closed), a batch, a lost
+  connection, *Hide node names* or a new profile, or a gate that closes (a relay wait) abandon it. It then sends
+  nothing and uses no version. The next tick starts again, and the cache makes the restart cheap: only nodes that
+  were not finished, or whose stamp changed, are prepared again.
+- **A closed scene leaves the viewers first.** When the scene that replaces a closed one (a reset) takes more than
+  one slice, its preparation is dropped, an empty snapshot clears the closed scene off the viewers (§7.3), and the
+  new scene follows as an owed snapshot after that one's ack. Before SLC-51 a reset bounded this with one call; in
+  steps, batches (loading data) could otherwise keep the closed scene on the viewers for as long as they run.
+- **No `processEvents`.** The slices run from the pump, so nothing re-enters `LiveUpdates` in the middle of a step.
+  This answers the SLC-32 review's concern about a progress dialog that runs `processEvents` during an export. If a
+  scene event calls back from inside a step anyway (a read that fires an MRML event), an abandon closes the steps
+  as soon as that step returns, and nothing of them is sent.
+- **The panel.** "Preparing the scene" with the progress (`Progress`: two units per node, collected and fitted);
+  during a retry the last failure's reason stays as the detail. The code is shown from the first tick (SLC-25
+  follow-up). The adapter shows a non-modal `QProgressDialog` with no cancel button (*Stop session* stays in the
+  panel) that does not take the focus (`WA_ShowWithoutActivating`). Qt shows it once its estimate of the
+  preparation's length passes `minimumDuration` (1 s) — after about a tenth of a second on a long preparation
+  (Qt 5.15 `qprogressdialog.cpp`) — so a live change of a small scene does not flash it. Closed from its title bar,
+  it stays closed until the next preparation (`setValue` would show it again). A failure in it is logged by type
+  only. A flush starts a preparation with one slice; the pump runs the others.
+- **A re-sync does not abandon.** Events missed off the main thread (SLC-33) let a running preparation finish and
+  ask for another snapshot after it. Abandoning it at each such event could hold a large scene off for ever.
+- **An abandoned preparation stays owed.** A flush's re-export, or the first snapshot, owes the client nothing, so
+  `_abandon` sets `snapshot_needed` while the session runs: a later tick starts it again. A slice condition
+  (`_may_continue`) without `snapshot_needed` lets a preparation that a flush started go on.
+- **Limits read again.** `prepare_snapshot` checks the session's state and the relay's limits at its first step and
+  again at its last.
+
+**One live geometry change, phase by phase** (the owner's report: every change froze Slicer during a session). On
+`main`, every change that needs a new snapshot collected and decimated every node again on the main thread, in one
+call: about 11 s on the reporter's scene, with Slicer frozen throughout. Measured natively with
+`live_change_profile.py`, a local harness that is not committed. It drives the panel with the real transport and the
+relay stub, pumps every 50 ms like the adapter, and times only each phase's own steps. Scene: a generated surface (one
+segment) and a sphere of 7,936 triangles, `mobile`:
+
+| Change | Until the relay's ack | Longest pump (main thread blocked) | Collect | Decimation | GLB, SHA-256, chunks | Upload |
+|---|---|---|---|---|---|---|
+| Start session, 15.5M-triangle surface | 6.99 s | 1.06 s (the quadric's step) | 3.01 s | 3.51 s | < 0.01 s | in the worker thread |
+| the sphere's mesh replaced (cache: the surface is reused) | 0.12 s | 0.01 s | < 0.01 s | none | < 0.01 s | idem |
+| the surface's mesh changed | 6.75 s | 1.05 s | 2.92 s | 3.48 s | < 0.01 s | idem |
+| the sphere's mesh replaced, 4.35M surface, uplink throttled to 250 KB/s | 5.86 s | 0.01 s | < 0.01 s | none | < 0.01 s | about 5.6 s, none of it on the main thread |
+| the surface's mesh changed, same throttle | 8.40 s | 0.90 s | 0.82 s | 1.61 s | < 0.01 s | idem |
+
+The GLB, its SHA-256 and the chunk frames take milliseconds: the GLB is about 1.2 MB at these budgets. The upload runs
+in the transport's worker thread (`RelayTransport.send` only queues a frame with `call_soon_threadsafe`), so it never
+holds the main thread. In Slicer that thread gets the GIL from the pump's yield; manual §2 step 16 measured an upload
+bound by the bandwidth (5.8 MB at 1 Mbit/s in about 46 s). What blocks the main thread now is one step at a time,
+and the longest step is the quadric's run on the changed node. A change to any other node is served from the cache.

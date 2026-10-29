@@ -24,6 +24,7 @@ import pytest
 from vtkmodules.util.numpy_support import numpy_to_vtk
 from vtkmodules.vtkCommonCore import vtkObject
 from vtkmodules.vtkCommonDataModel import vtkImageData
+from vtkmodules.vtkFiltersCore import vtkAppendPolyData
 from vtkmodules.vtkFiltersGeneral import vtkDiscreteFlyingEdges3D
 from vtkmodules.vtkFiltersSources import vtkSphereSource
 
@@ -308,6 +309,23 @@ def sphere(resolution: int = 16):
     source.SetPhiResolution(resolution)
     source.Update()
     return source.GetOutput()
+
+
+def specked(resolution: int, specks: int = 6):
+    """``sphere(resolution)`` and ``specks`` spheres of 16 triangles beside it, as one mesh: small islands of a body
+    from ``sphere(32)`` (1,920 triangles, of which 1 % is 19.2) up (SLC-53)."""
+    append = vtkAppendPolyData()
+    append.AddInputData(sphere(resolution))
+    for i in range(specks):
+        speck = vtkSphereSource()
+        speck.SetRadius(0.5)
+        speck.SetCenter(150.0 + 5.0 * i, 0.0, 0.0)
+        speck.SetThetaResolution(4)
+        speck.SetPhiResolution(4)
+        speck.Update()
+        append.AddInputData(speck.GetOutput())
+    append.Update()
+    return append.GetOutput()
 
 
 class FakeScene:

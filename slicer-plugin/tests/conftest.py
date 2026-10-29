@@ -137,6 +137,38 @@ class _StubQTimer:
         return self.active
 
 
+class _StubQProgressDialog:
+    """``qt.QProgressDialog``: records its properties and calls (the adapter's progress dialog, SLC-51)."""
+
+    made: ClassVar[list[_StubQProgressDialog]] = []
+
+    def __init__(self, parent=None) -> None:
+        self.parent = parent
+        self.calls: list[str] = []
+        self.values: list[int] = []
+        self.cancel_button = "default"
+        self.attributes: list[object] = []
+        self.wasCanceled = False
+        _StubQProgressDialog.made.append(self)
+
+    def __setattr__(self, name: str, value) -> None:
+        if name == "value":
+            self.values.append(value)
+        object.__setattr__(self, name, value)
+
+    def setCancelButton(self, button) -> None:
+        self.cancel_button = button
+
+    def setAttribute(self, attribute) -> None:
+        self.attributes.append(attribute)
+
+    def reset(self) -> None:
+        self.calls.append("reset")
+
+    def deleteLater(self) -> None:
+        self.calls.append("deleteLater")
+
+
 class _StubQFont:
     """The ``qt.QFont`` enum values the adapter uses."""
 
@@ -296,8 +328,18 @@ def _make_stub_modules() -> dict[str, types.ModuleType]:
         return converter(settings.value(key)) if settings.contains(key) else default
 
     util.settingsValue = settings_value
+
+    def to_bool(value):
+        """``slicer.util.toBool`` as Slicer 5.12.4 has it (Base/Python/slicer/util.py L3634-L3659)."""
+        try:
+            return bool(int(value))
+        except (ValueError, TypeError):
+            return value.lower() in ["true"] if isinstance(value, str) else bool(value)
+
+    util.toBool = to_bool
     # an empty scene (MRML stays manual, docs/testing/slicer.md); tests replace these to add nodes
     util.getNodesByClass = lambda _class_name: []
+    util.mainWindow = lambda: None  # no main window in the tests
     slicer.util = util
     # the scene the observers attach to (SLC-34): VTK's own dispatch, empty until a test adds nodes
     slicer.mrmlScene = MrmlScene()
@@ -352,6 +394,8 @@ def _make_stub_modules() -> dict[str, types.ModuleType]:
         QPainter=_StubQPainter,
         QColor=_StubQColor,
         QApplication=_make_application_class(),
+        QProgressDialog=_StubQProgressDialog,
+        Qt=types.SimpleNamespace(NonModal=0, WA_ShowWithoutActivating=98),
     )
     ctk = _strict_module("ctk")
     return {

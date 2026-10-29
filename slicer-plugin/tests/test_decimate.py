@@ -46,6 +46,7 @@ from remoteview_core.decimate import (
 )
 from remoteview_core.glb_writer import Entity, RootExtras, size_report, write_glb
 from remoteview_core.snapshot import SnapshotTooLargeError, build_snapshot
+from remoteview_core.steps import run
 
 ROOT = RootExtras(scene_version=1, profile="quest2", slicer_version="5.12.4")
 QUEST2 = PROFILES["quest2"]
@@ -264,9 +265,9 @@ def test_decimate_falls_back_to_clustering_when_the_quadric_result_is_unusable(
     [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(64)})
     calls: list = []
     fallbacks: list = []
-    original = decimate._fallback
+    original = decimate._fallback_steps
     monkeypatch.setattr(
-        decimate, "_fallback", lambda *a: fallbacks.append(len(a[1])) or original(*a)
+        decimate, "_fallback_steps", lambda *a: fallbacks.append(len(a[1])) or original(*a)
     )
     with caplog.at_level(logging.WARNING, logger="remoteview_core.decimate"):
         smaller = decimate_entity(entity, 2_000, quadric=lambda r: Degenerate(kind, calls))
@@ -299,9 +300,9 @@ def test_decimate_quadric_deadline_falls_back(monkeypatch, caplog):
     result, quickly, and the log says why (the §14 console check then shows which path ran)."""
     monkeypatch.setattr(decimate, "QUADRIC_SECONDS", 0.0)
     fallbacks: list = []
-    original = decimate._fallback
+    original = decimate._fallback_steps
     monkeypatch.setattr(
-        decimate, "_fallback", lambda *a: fallbacks.append(len(a[1])) or original(*a)
+        decimate, "_fallback_steps", lambda *a: fallbacks.append(len(a[1])) or original(*a)
     )
     [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(200)})
     start = time.perf_counter()
@@ -323,20 +324,46 @@ def test_decimate_deadline_starts_at_the_quadric_step(monkeypatch, caplog):
     clock = Clock()
     monkeypatch.setattr(decimate, "time", clock)
     monkeypatch.setattr(decimate, "CLUSTER_GOAL", 10_000)
-    bounded = decimate._bounded
+    bounded = decimate._bounded_steps
 
     def slow_bound(*args):
         clock.now += 1_000.0
         return bounded(*args)
 
-    monkeypatch.setattr(decimate, "_bounded", slow_bound)
-    fallbacks: list = []
-    monkeypatch.setattr(decimate, "_fallback", lambda *a: fallbacks.append(len(a[1])))
+    monkeypatch.setattr(decimate, "_bounded_steps", slow_bound)
+    monkeypatch.setattr(decimate, "_fallback_steps", no_fallback)
     [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(200)})
     assert entity.triangle_count > 2 * decimate.CLUSTER_GOAL  # the size bound runs
     with caplog.at_level(logging.WARNING, logger="remoteview_core.decimate"):
         smaller = decimate_entity(entity, 2_000)
-    assert clock.now == 1_000.0 and fallbacks == [] and fallback_warnings(caplog) == []
+    assert clock.now == 1_000.0 and fallback_warnings(caplog) == []
+    assert 0 < smaller.triangle_count <= 2_000 and outward(smaller) > 0.9
+
+
+def no_fallback(*args):
+    raise AssertionError("the fallback ran")
+
+
+def test_decimate_steps_the_event_loop_between_them_never_counts(monkeypatch, caplog):
+    """SLC-28: driven a step at a time with the clock jumping 1,000 s between steps (the event loop's time), the
+    quadric still has its run — its runs are one step, and its deadline counts only their own time."""
+    clock = Clock()
+    monkeypatch.setattr(decimate, "time", clock)
+    monkeypatch.setattr(decimate, "CLUSTER_GOAL", 10_000)
+    monkeypatch.setattr(decimate, "_fallback_steps", no_fallback)
+    [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(200)})
+    steps = decimate.decimate_steps(entity, 2_000)
+    taken = 0
+    with caplog.at_level(logging.WARNING, logger="remoteview_core.decimate"):
+        while True:
+            try:
+                next(steps)
+            except StopIteration as stop:
+                smaller = stop.value
+                break
+            taken += 1
+            clock.now += 1_000.0
+    assert taken > 5 and clock.now == 1_000.0 * taken and fallback_warnings(caplog) == []
     assert 0 < smaller.triangle_count <= 2_000 and outward(smaller) > 0.9
 
 
@@ -345,13 +372,13 @@ def test_decimate_deadline_does_not_count_the_fan_clustering(monkeypatch, caplog
     1,000 s) on a book of pages sharing one spine still leaves the quadric its run, and no fallback follows."""
     clock = Clock()
     monkeypatch.setattr(decimate, "time", clock)
-    unfanned = decimate._unfanned
+    unfanned = decimate._unfanned_steps
 
     def slow_fans(*args):
         clock.now += 1_000.0
         return unfanned(*args)
 
-    monkeypatch.setattr(decimate, "_unfanned", slow_fans)
+    monkeypatch.setattr(decimate, "_unfanned_steps", slow_fans)
     runs = spy_runs(monkeypatch)
     positions, triangles = book()
     assert clustering.fan_weight(triangles) > decimate.FAN_LIMIT  # the fan path
@@ -366,7 +393,12 @@ def test_decimate_a_size_bound_that_leaves_nothing_warns_and_falls_back(monkeypa
     same kind of warning as after the quadric: every fallback shows in the log."""
     monkeypatch.setattr(decimate, "CLUSTER_GOAL", 10_000)
     empty = (np.empty((0, 3)), np.empty((0, 3), dtype=np.int64))
-    monkeypatch.setattr(decimate, "_bounded", lambda *args: empty)
+
+    def leaves_nothing(*args):
+        return empty
+        yield  # a steps generator (remoteview_core.steps)
+
+    monkeypatch.setattr(decimate, "_bounded_steps", leaves_nothing)
     [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(200)})
     assert entity.triangle_count > 2 * decimate.CLUSTER_GOAL  # the size bound runs
     with caplog.at_level(logging.WARNING, logger="remoteview_core.decimate"):
@@ -424,9 +456,9 @@ def test_decimate_an_aborted_part_sends_the_whole_node_to_the_fallback(when, mon
         return quadric
 
     fallbacks: list = []
-    original = decimate._fallback
+    original = decimate._fallback_steps
     monkeypatch.setattr(
-        decimate, "_fallback", lambda *a: fallbacks.append(len(a[1])) or original(*a)
+        decimate, "_fallback_steps", lambda *a: fallbacks.append(len(a[1])) or original(*a)
     )
     # 15,000: the islands fit their share and need no run; 4,000: they need one, after the body's
     target = 15_000 if when == "during-the-body" else 4_000
@@ -657,7 +689,7 @@ def test_decimate_quadric_stall_float32_generated(monkeypatch):
     def no_fallback(*args):
         raise AssertionError("the fallback ran")
 
-    monkeypatch.setattr(decimate, "_fallback", no_fallback)
+    monkeypatch.setattr(decimate, "_fallback_steps", no_fallback)
     smaller = decimate_entity(mesh_entity(positions, triangles), 304)
     assert 0 < smaller.triangle_count <= 304 and has_unit_normals(smaller)
 
@@ -755,9 +787,9 @@ def test_decimate_book_routes_around_the_quadric(monkeypatch):
     positions, triangles = book()
     assert clustering.fan_weight(triangles) > 50
     calls: list = []
-    original = clustering.cluster_by_normal
+    original = clustering.cluster_by_normal_steps
     monkeypatch.setattr(
-        clustering, "cluster_by_normal", lambda *a: calls.append(len(a[1])) or original(*a)
+        clustering, "cluster_by_normal_steps", lambda *a: calls.append(len(a[1])) or original(*a)
     )
     start = time.perf_counter()
     smaller = decimate_entity(mesh_entity(positions, triangles), 2_000)
@@ -778,9 +810,9 @@ def test_decimate_a_fan_below_the_fan_limit_is_routed_by_its_quadric_work(
     assert clustering.fan_weight(triangles) < decimate.FAN_LIMIT
     assert clustering.edge_work(triangles) > decimate.QUADRIC_WORK
     calls: list = []
-    original = clustering.cluster_by_normal
+    original = clustering.cluster_by_normal_steps
     monkeypatch.setattr(
-        clustering, "cluster_by_normal", lambda *a: calls.append(len(a[1])) or original(*a)
+        clustering, "cluster_by_normal_steps", lambda *a: calls.append(len(a[1])) or original(*a)
     )
     runs = spy_runs(monkeypatch)
     start = time.perf_counter()
@@ -798,7 +830,7 @@ def test_decimate_fallback_tries_normal_classes_when_connected_clusters_empty_th
     target = 300
     first = clustering.median_edge(positions, triangles) * np.sqrt(len(triangles) / target)
     assert len(clustering.cluster_connected(positions, triangles, first, rescue=0)[1]) == 0
-    coarse = decimate._fallback(positions, triangles, target)
+    coarse = run(decimate._fallback_steps(positions, triangles, target))
     assert coarse is not None and 0 < len(coarse[1]) <= target
 
 
@@ -932,14 +964,19 @@ def test_decimate_fold_repair():
 # --------------------------------------------------------------------------- the whole scene (criterion 1)
 
 
-def test_decimate_quest2_scene_fits_500k_with_no_node_above_100k():
-    """A 400k-triangle sphere and three other nodes under ``quest2`` (FR-10, §7.5)."""
-    nodes = entities(
+def quest2_scene() -> list:
+    """A 400k-triangle sphere and three other nodes, the last a ``vtkCubeSource`` (4 points of its own per face)."""
+    return entities(
         {"id": "vtkMRMLModelNode4", "mesh": sphere(448)},  # 399,616 triangles
         {"id": "vtkMRMLModelNode5", "mesh": sphere(240)},  # 114,240
         {"id": "vtkMRMLModelNode6", "mesh": sphere(160)},  # 50,560
         {"id": "vtkMRMLModelNode7", "mesh": cube()},  # 12
     )
+
+
+def test_decimate_quest2_scene_fits_500k_with_no_node_above_100k():
+    """A 400k-triangle sphere and three other nodes under ``quest2`` (FR-10, §7.5)."""
+    nodes = quest2_scene()
     counts = [e.triangle_count for e in nodes]
     assert counts == [399_616, 114_240, 50_560, 12]
     result = fit_to_budget(nodes, QUEST2)
@@ -951,6 +988,18 @@ def test_decimate_quest2_scene_fits_500k_with_no_node_above_100k():
     )  # within their shares: untouched
     assert all(has_unit_normals(e) and outward(e) > 0.9 for e in result.entities[:3])  # the spheres
     write_glb(list(result.entities), ROOT, quantize=True)
+
+
+def test_decimate_quest2_scene_has_no_small_islands():
+    """SLC-53: with *Remove small islands* the same scene fits with the same counts — every sphere is one part, and
+    the cube's six faces (two triangles each by vertex IDs) are one part by position, the only one of its node."""
+    nodes = quest2_scene()
+    plain = fit_to_budget(nodes, QUEST2)
+    result = fit_to_budget(nodes, QUEST2, remove_islands=True)
+    assert result.cleaned == () and plain.cleaned == ()
+    assert [e.triangle_count for e in result.entities] == [e.triangle_count for e in plain.entities]
+    assert result.reduced == plain.reduced == ("vtkMRMLModelNode4", "vtkMRMLModelNode5")
+    assert result.entities[2] is nodes[2] and result.entities[3] is nodes[3]
 
 
 def test_decimate_fit_to_budget_holds_the_total():
