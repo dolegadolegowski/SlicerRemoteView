@@ -639,6 +639,8 @@ class PanelController:
             self._give_up()
         if self.phase is Phase.LIVE:
             self._tick_live()
+        elif self.phase is Phase.RECONNECTING and self._live is not None:
+            self._live.follow_close()  # a scene closed off the main thread: reset at once, as offline on it (SLC-70)
         # the tick may have ended the session (a closed scene not cleared, §7.3)
         if self.phase is Phase.LIVE:
             self._show_live()  # timer-driven changes show within one pump

@@ -377,3 +377,29 @@ def test_prepare_a_session_dropped_and_resumed_between_steps_completes():
     begin, glb, _ = reassemble(list(snap.frames()))
     assert begin["sceneVersion"] == 1 and begin["nodeCount"] == 3
     assert [e["nodeId"] for e in manifest(glb)] == ["m_1", "vtkMRMLModelNode4", "m_2/DoeTumor"]
+
+
+@pytest.mark.parametrize("during", ["glb_binary_size", "write_glb"])
+def test_prepare_a_scene_closed_off_thread_during_the_last_step_is_never_begun(monkeypatch, during):
+    """SLC-70: ``SceneIds.closed_elsewhere()`` (a close on another thread) while the last step runs — before the
+    ``scene.nodeAdded`` hint, or while the GLB is written — stops it before ``begin_snapshot``: nothing in flight,
+    and before the hint no version used."""
+    client = live_client()
+    build_snapshot(FakeScene(), client, slicer_version="5.12.4")
+    client.handle(ack(1))
+    ids = SceneIds()
+    real = getattr(snapshot, during)
+
+    def closing(*args, **kw):
+        ids.closed_elsewhere()
+        return real(*args, **kw)
+
+    monkeypatch.setattr(snapshot, during, closing)
+    announce = [("vtkMRMLModelNode4", "model")]
+    steps = prepare_snapshot(
+        three_nodes(), client, slicer_version="5.12.4", ids=ids, announce=announce
+    )
+    with pytest.raises(SceneClosedError):
+        run(steps)
+    assert client.snapshot_in_flight is None
+    assert client.next_scene_version == (2 if during == "glb_binary_size" else 3)

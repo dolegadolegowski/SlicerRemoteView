@@ -1,6 +1,7 @@
 """SLC-68: the scene or the session changed between two steps of a preparation (SLC-51), at every step position —
 what ``LiveUpdates`` and the panel do with it: a scene closed (T7), a batch, *Hide node names*, a lost connection and
-a session created again. ``prepare_snapshot``'s own checks are in ``test_prepare.py``."""
+a session created again. ``prepare_snapshot``'s own checks are in ``test_prepare.py``. SLC-70: a scene closed off the
+main thread, between two steps or during one."""
 
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ from support import (
     CODE,
     OTHER_TOKEN,
     TOKEN,
+    URL,
     FakeTransport,
     LiveScene,
     MrmlModel,
@@ -28,12 +30,26 @@ from support import (
     root_extras,
     sphere,
 )
-from test_live import A, Rig, drop, resume, started_in_steps
-from test_panel_live import NETWORK, B, C, begins_on, close_scene, reconnect, sent_on
+from test_live import A, Rig, drop, resume, started_in_steps, to_the_end
+from test_panel_live import (
+    NETWORK,
+    B,
+    C,
+    _in_thread,
+    begins_on,
+    close_scene,
+    recolor,
+    reconnect,
+    sent_on,
+)
 from test_panel_live import Rig as PanelRig
-from test_panel_prepare_resume import RESTART, stepwise
+from test_panel_prepare_resume import RESTART, stepwise, until_begin
 
+from remoteview_core import decimate
+from remoteview_core import live as live_module
+from remoteview_core import snapshot as snapshot_module
 from remoteview_core.debounce import Change
+from remoteview_core.live import LiveEventKind
 from remoteview_core.panel import Phase
 from remoteview_core.protocol_client import SessionState
 from remoteview_core.transport import Connected, Disconnected, Received
@@ -358,3 +374,458 @@ def test_panel_a_session_created_again_at_any_step_of_a_preparation_starts_afres
         assert begin["sceneVersion"] == 1 and begin["nodeCount"] == 2, k
         _, glb, _ = reassemble(sent_on(2)[sent_on(2).index(begin) :])
         assert sorted(e["nodeId"] for e in manifest(glb)) == ["m_1", B], k
+
+
+# --------------------------------------------------------------------------- closed off the main thread (SLC-70)
+
+
+class ClosedInAStep(ClosingScene):
+    """A :class:`ClosingScene` that ``on_read`` (once) when the preparation reads the mesh of node ``at``."""
+
+    def __init__(self, *nodes: dict, at: str, on_read: Callable[[], None]) -> None:
+        super().__init__(*nodes)
+        self._at, self._on_read = at, on_read
+
+    def polydata(self, node):
+        if node["id"] == self._at and self._on_read is not None:
+            hook, self._on_read = self._on_read, None
+            hook()
+        return super().polydata(node)
+
+
+#: where the preparation is when a close finishes off the main thread: a mesh read of the collection, a fit step,
+#: the GLB written in the last step, and ``begin_snapshot`` at its end (after the last check)
+DURING = ("collect", "fit", "glb", "begin")
+
+
+def once(fn: Callable[[], None]) -> Callable[[], None]:
+    pending = [fn]
+
+    def fire() -> None:
+        if pending:
+            pending.pop()()
+
+    return fire
+
+
+def close_during(where: str, fire: Callable[[], None], monkeypatch, client) -> None:
+    """Run ``fire`` inside the step ``where`` (``collect`` is the scene's or a model's own read)."""
+    if where == "fit":
+        real_fit = decimate.fit_entity_steps
+
+        def fit(*args, **kw):
+            fire()
+            return (yield from real_fit(*args, **kw))
+
+        monkeypatch.setattr(decimate, "fit_entity_steps", fit)
+    elif where == "glb":
+        real_write = snapshot_module.write_glb
+        monkeypatch.setattr(
+            snapshot_module, "write_glb", lambda *a, **kw: (fire(), real_write(*a, **kw))[1]
+        )
+    elif where == "begin":
+        real_begin = client.begin_snapshot
+        monkeypatch.setattr(
+            client, "begin_snapshot", lambda *a, **kw: (fire(), real_begin(*a, **kw))[1]
+        )
+
+
+@pytest.mark.parametrize("where", DURING)
+def test_live_a_scene_closed_off_thread_during_a_step_is_an_abandon_not_a_failure(
+    strict, caplog, monkeypatch, where
+):
+    """The scene closed on another thread while a step runs (the whole preparation in one call): that step ends, and
+    nothing of the closed scene goes out — stopped at the next step, before the version, or before the frames of a
+    snapshot already begun —; no error, no failure event; the reset follows at once and the next scene goes out."""
+    rig = Rig(strict, LiveScene(), slice_s=None)
+
+    def close():
+        rig.scene.close_and_open(*ROE)
+        _in_thread(rig.live.scene_closed_off_thread)
+
+    fire = once(close)
+    if where == "collect":
+        rig.scene = ClosedInAStep(*DOE, at=A, on_read=fire)
+    else:
+        rig.scene = ClosingScene(*DOE)
+        close_during(where, fire, monkeypatch, rig.client)
+    with caplog.at_level(logging.DEBUG):
+        rig.live.start()
+        assert rig.live.preparing is None and rig.sent == [] and rig.kinds() == []
+        assert rig.live.reset_owed and rig.client.snapshot_needed
+        reads = len(rig.scene.reads_after_close)
+        settle(rig)
+    assert (
+        reads <= 2 and rig.scene.reads_after_close[reads:] == []
+    )  # the rest of that one step only
+    assert node_counts(rig.sent) == [1] and found(rig.sent, "Doe", "Sphere", "SegDoe") == []
+    assert caplog.text == ""
+
+
+def test_live_a_scene_closed_off_thread_between_steps_stops_the_preparation_at_the_next(strict):
+    """Between two steps (``slice_s=0``): the next tick stops the preparation before any step reads the closed scene,
+    and resets as for a close on the main thread — an empty snapshot first, then the next scene."""
+    for k, rig in at_every_step(strict, re_export=False):
+        rig.scene.close_and_open(*ROE)
+        _in_thread(rig.live.scene_closed_off_thread)
+        rig.live.tick()
+        assert rig.live.preparing is None and rig.sent == [] and rig.kinds() == [], k
+        assert rig.live.reset_owed, k
+        settle(rig)
+        assert rig.scene.reads_after_close == [] and node_counts(rig.sent) == [0, 1], k
+        assert found(rig.sent, "Doe", "Sphere", "SegDoe") == [], k
+
+
+def test_live_a_scene_closed_off_thread_with_its_snapshot_in_flight_is_reset_at_the_next_tick(
+    strict,
+):
+    """No preparation, no flush: the next tick resets as a close on the main thread does — the closed scene's queued
+    chunks dropped, an empty snapshot first, then the next scene (§6.2, §7.3)."""
+    rig = Rig(strict, ClosingScene(*DOE), slice_s=0.0)
+    rig.live.start()
+    to_the_end(rig)
+    assert rig.client.snapshot_in_flight == 1
+    before = len(rig.sent)
+    rig.scene.close_and_open(*ROE)
+    _in_thread(rig.live.scene_closed_off_thread)
+    assert rig.discarded == 0 and not rig.live.reset_owed
+    rig.live.tick()
+    assert rig.discarded == 1 and rig.live.reset_owed and rig.sent[before:] == []
+    settle(rig)
+    after = rig.sent[before:]
+    assert node_counts(after) == [0, 1] and found(after, "Doe", "Sphere", "SegDoe") == []
+
+
+#: the next patient's scene, with the raw IDs of two closed nodes: a red model where the closed scene had a model with
+#: a scripted ID, and a generated ID Slicer restarts counting after a close
+ROE_LIKE_DOE = (
+    {"id": "Sphere", "name": "Roe^Jane sphere", "color": (0.9, 0.1, 0.1)},
+    {"id": A, "name": "Roe^Jane lung", "color": (0.9, 0.1, 0.1)},
+)
+
+
+@pytest.mark.parametrize("trigger", ["timer", "send_now"])
+def test_live_a_flush_after_a_scene_closed_off_thread_resets_first(strict, monkeypatch, trigger):
+    """The flush timer, or *Send now*, between the close off the main thread and the next tick, with changes of the
+    closed scene waiting: the reset comes first, so no update names a closed scene's ID with the next scene's values
+    and no alias of it goes to the next scene's node with the same raw ID (§7.3, T7)."""
+    rig = started_in_steps(Rig(strict, ClosingScene(*DOE), slice_s=0.0))
+    issued = set(rig.live.ids._models.values())
+    followed: list[bool] = []  # at each classification: the close followed first
+    real_classify = live_module.classify
+
+    def classify(*args, **kw):
+        followed.append(rig.live.ids.generation == rig.live._seen_generation)
+        return real_classify(*args, **kw)
+
+    monkeypatch.setattr(live_module, "classify", classify)
+    rig.scene.node(A)["color"] = (0.1, 0.2, 0.3)
+    rig.live.mark(A, Change.APPEARANCE)
+    rig.live.mark("Sphere", Change.GEOMETRY)
+    rig.scene.close_and_open(*ROE_LIKE_DOE)
+    _in_thread(rig.live.scene_closed_off_thread)
+    if trigger == "timer":
+        rig.timer.advance(1_000)
+    else:
+        rig.live.send_now()
+    assert rig.live.reset_owed
+    assert not any(isinstance(m, dict) and m["type"] == "scene.update" for m in rig.sent)
+    assert set(node_counts(rig.sent)) <= {0}  # at most the reset's empty snapshot so far
+    settle(rig)
+    frames = [m for m in rig.sent if isinstance(m, dict)]
+    assert not any(m["type"] in ("scene.update", "scene.nodeRemoved") for m in frames)
+    ids = {e["nodeId"] for _, glb in snapshots(rig.sent) for e in manifest(glb)}
+    assert node_counts(rig.sent)[-1] == 2 and not issued & ids and found(rig.sent, "Doe") == []
+    assert followed and all(followed)  # the closed scene's marks were never classified
+
+
+class ClosedWhileListed(ClosingScene):
+    """A :class:`ClosingScene` that ``on_list`` (once) when its shown models are listed — by the classifier of a
+    flush, once armed."""
+
+    on_list: Callable[[], None] | None = None
+
+    def visible_model_nodes(self):
+        hook, self.on_list = self.on_list, None
+        if hook is not None:
+            hook()
+        return super().visible_model_nodes()
+
+
+@pytest.mark.parametrize("broken", [False, True])
+def test_live_a_scene_closed_off_thread_while_a_flush_is_classified_sends_nothing_of_it(
+    strict, caplog, broken
+):
+    """The close finishes while the classifier reads the scene, after the flush's own check: the plan is dropped —
+    no update under a closed scene's ID with the next scene's values — and the reset follows (§7.3, T7). A listing the
+    finished close broke is no failure either."""
+    rig = started_in_steps(Rig(strict, ClosedWhileListed(*DOE), slice_s=0.0))
+    issued = set(rig.live.ids._models.values())
+    rig.scene.node(A)["color"] = (0.1, 0.2, 0.3)
+    rig.live.mark(A, Change.APPEARANCE)
+    rig.live.mark("Sphere", Change.APPEARANCE)
+
+    def close():
+        rig.scene.close_and_open(*ROE_LIKE_DOE)
+        _in_thread(rig.live.scene_closed_off_thread)
+        if broken:
+            raise RuntimeError("vtkMRMLModelNode4 Doe^John lung: no such node")
+
+    rig.scene.on_list = close
+    with caplog.at_level(logging.DEBUG):
+        rig.timer.advance(1_000)
+        assert rig.live.reset_owed
+        assert not any(isinstance(m, dict) and m["type"] == "scene.update" for m in rig.sent)
+        settle(rig)
+    ids = {e["nodeId"] for _, glb in snapshots(rig.sent) for e in manifest(glb)}
+    assert node_counts(rig.sent)[-1] == 2 and not issued & ids and found(rig.sent, "Doe") == []
+    assert caplog.text == ""
+
+
+class BrokenByTheClose(ClosedInAStep):
+    """A :class:`ClosedInAStep` whose read, once the scene is closed, raises as a node removed under the step would
+    (its text names the node, as VTK's and MRML's do)."""
+
+    def polydata(self, node):
+        mesh = super().polydata(node)
+        if any(node is handle for handle in self.closed):
+            raise AttributeError(f"{node['id']} {node['name']} has no mesh")
+        return mesh
+
+
+def test_live_a_read_the_close_off_thread_broke_is_an_abandon_too(strict, caplog):
+    """A close that has finished leaves a handle whose read raises in the running step: an abandon like the others —
+    no error line, no failure event — and the reset follows."""
+    rig = Rig(strict, LiveScene(), slice_s=None)
+
+    def close():
+        rig.scene.close_and_open(*ROE)
+        _in_thread(rig.live.scene_closed_off_thread)
+
+    rig.scene = BrokenByTheClose(*DOE, at=A, on_read=close)
+    with caplog.at_level(logging.DEBUG):
+        rig.live.start()
+        assert rig.live.preparing is None and rig.sent == [] and rig.kinds() == []
+        assert rig.live.reset_owed
+        settle(rig)
+    assert node_counts(rig.sent) == [1] and found(rig.sent, "Doe", "Sphere", "SegDoe") == []
+    assert caplog.text == ""
+
+
+def test_live_a_read_broken_before_an_off_thread_end_close_is_a_failure_that_sends_nothing_of_it(
+    strict, caplog
+):
+    """``Clear`` removes every node before its ``EndCloseEvent``: a read that breaks meanwhile comes before the close
+    is known — a failure by type (one line, a FAILED event) —, and the close that follows resets as usual: nothing of
+    the closed scene goes out, no ID or name is logged (T7)."""
+    rig = Rig(strict, LiveScene(), slice_s=None)
+    rig.scene = BrokenByTheClose(*DOE, at=A, on_read=lambda: rig.scene.close_and_open(*ROE))
+    with caplog.at_level(logging.DEBUG):
+        rig.live.start()  # the read breaks; EndCloseEvent has not fired yet
+        assert rig.kinds() == [LiveEventKind.FAILED] and rig.sent == []
+        _in_thread(rig.live.scene_closed_off_thread)  # now it does
+        settle(rig)
+    assert node_counts(rig.sent) == [1] and found(rig.sent, "Doe", "Sphere", "SegDoe") == []
+    assert "live: scene not exported (AttributeError)" in caplog.text
+    assert "Doe" not in caplog.text and A not in caplog.text
+
+
+def test_live_a_scene_closed_off_thread_while_the_empty_snapshot_is_built_keeps_the_session(
+    strict, caplog, monkeypatch
+):
+    """A second close, off the main thread, while a reset builds its empty snapshot: the empty scene names nothing,
+    so nothing stops it — the session goes on, and the second close is reset in its turn (§7.3)."""
+    rig = started_in_steps(Rig(strict, ClosingScene(*DOE), slice_s=0.0))
+    real_write = snapshot_module.write_glb
+
+    def second_close():
+        rig.scene.close_and_open({"id": "vtkMRMLModelNode9", "name": "Poe^Ann spleen"})
+        _in_thread(rig.live.scene_closed_off_thread)
+
+    fire = once(second_close)
+
+    def write(entities, *args, **kw):
+        if not entities:
+            fire()
+        return real_write(entities, *args, **kw)
+
+    monkeypatch.setattr(snapshot_module, "write_glb", write)
+    rig.scene.close_and_open(*ROE)
+    with caplog.at_level(logging.DEBUG):
+        rig.live.reset()
+        settle(rig)
+    assert rig.ended == [] and caplog.text == ""
+    assert node_counts(rig.sent)[0] == 0 and node_counts(rig.sent)[-1] == 1
+    assert found(rig.sent, "Doe", "Roe") == []
+
+
+def closed_off_thread(rig: PanelRig, *closed, added=()) -> None:
+    """*File → Close Scene* and a load, run on another thread: the observers see every event off the main thread."""
+    _in_thread(close_scene, rig, *closed)
+    for model in added:
+        _in_thread(rig.add, model)
+
+
+def roe_models() -> list[MrmlModel]:
+    return [
+        MrmlModel("Sphere", name="Roe^Jane sphere", polydata=sphere(11)),
+        MrmlModel("vtkMRMLModelNode7", name="Roe^Jane liver", polydata=sphere(8)),
+    ]
+
+
+def test_panel_a_scene_closed_off_thread_at_any_step_of_a_preparation_never_reaches_the_viewers(
+    fake, caplog, capfd
+):
+    """T7 through the panel and the real observers: a close on another thread, at every position the pump exposes,
+    goes as a close on the main thread does — the viewers get an empty snapshot, then the next scene only, without
+    an alias of the closed one (§7.3: none reissued)."""
+    for k, rig in panel_at_every_step(doe_models):
+        issued = set(rig.ctl._live.ids._models.values())
+        new = roe_models()
+        with caplog.at_level(logging.DEBUG):
+            closed_off_thread(rig, *list(rig.models), added=new)
+            panel_settle(rig, 1)
+        frames = sent_on(1)
+        assert node_counts(frames) == [0, 2], k
+        assert found(frames, "Doe", B) == [], k
+        ids = {e["nodeId"] for e in manifest(snapshots(frames)[-1][1])}
+        assert "vtkMRMLModelNode7" in ids and not issued & ids, k
+        assert leaks(caplog, capfd, "Doe", "Roe", "Sphere", "Traceback", CODE, TOKEN) == [], k
+        assert "live:" not in caplog.text and "scene:" not in caplog.text, k
+
+
+class ReadHook(MrmlModel):
+    """A model that runs ``on_read`` (once) when its mesh is read."""
+
+    def __init__(self, node_id, *, on_read=None, **kw):
+        super().__init__(node_id, **kw)
+        self.on_read = on_read
+
+    def GetPolyData(self):  # noqa: N802 — MRML's name
+        hook, self.on_read = self.on_read, None
+        if hook is not None:
+            hook()
+        return super().GetPolyData()
+
+
+@pytest.mark.parametrize("where", DURING)
+def test_panel_a_scene_closed_off_thread_during_a_step_of_the_default_slice_never_reaches_the_viewers(
+    fake, caplog, capfd, monkeypatch, where
+):
+    """The close finishes on another thread while a step of the panel's own slice runs (the fake clock keeps the
+    whole preparation in one slice) — in the collection, the fit, the GLB's write or the begin: nothing of the closed
+    scene goes out, no error line, and the next scene follows as after a close on the main thread."""
+    hooked = ReadHook("Spleen", name="Doe^John spleen", polydata=sphere(9))
+    rig = PanelRig(*doe_models(), hooked)  # the panel's default slice
+    seen: list[bool] = []
+
+    def close():
+        seen.append(rig.ctl._live.preparing is not None)
+        closed_off_thread(rig, *list(rig.models), added=roe_models())
+
+    fire = once(close)
+    rig.ctl.start(URL)
+    if where == "collect":
+        hooked.on_read = fire
+    else:
+        close_during(where, fire, monkeypatch, rig.ctl._client)
+    with caplog.at_level(logging.DEBUG):
+        deliver(
+            rig.ctl, Connected(1), Received(1, created())
+        )  # the whole preparation runs in this pump
+        assert seen == [True] and begins_on(1) == [] and rig.ctl._live.preparing is None
+        panel_settle(rig, 1)
+    frames = sent_on(1)
+    assert node_counts(frames) == [2] and found(frames, "Doe", B, "Spleen") == []
+    assert leaks(caplog, capfd, "Doe", "Roe", "Spleen", "Traceback", CODE, TOKEN) == []
+    assert "live:" not in caplog.text and "scene:" not in caplog.text
+
+
+def test_panel_a_flush_between_a_scene_closed_off_thread_and_the_pump_resets_first(
+    fake, caplog, capfd
+):
+    """The flush timer fires between the close off the main thread and the next pump, with a colour change of the
+    closed scene waiting: no update addresses the closed scene's IDs, no alias of it is reissued, and the viewers
+    get the empty snapshot first (§7.3, T7)."""
+    rig = stepwise(*doe_models())
+    [first] = until_begin(rig, 1)
+    deliver(rig.ctl, Received(1, ack(first["sceneVersion"])))
+    panel_settle(rig, 1)
+    issued = set(rig.ctl._live.ids._models.values())
+    before = len(sent_on(1))
+    recolor(rig.models[0], (0.1, 0.9, 0.1))
+    recolor(rig.models[1], (0.1, 0.9, 0.1))
+    assert rig.ctl._live.changes_wait
+    with caplog.at_level(logging.DEBUG):
+        closed_off_thread(rig, *list(rig.models), added=roe_models())
+        rig.timer.advance(1_000)  # the flush timer, before the pump
+        assert rig.ctl._live.reset_owed
+        panel_settle(rig, 1)
+    after = sent_on(1)[before:]
+    assert not any(isinstance(m, dict) and m["type"] == "scene.update" for m in after)
+    assert node_counts(after)[0] == 0 and node_counts(after)[-1] == 2
+    ids = {e["nodeId"] for _, glb in snapshots(after) for e in manifest(glb)}
+    assert not issued & ids and found(after, "Doe", B) == []
+    assert leaks(caplog, capfd, "Doe", "Roe", "Traceback", CODE, TOKEN) == []
+    assert "live:" not in caplog.text and "scene:" not in caplog.text
+
+
+def outcome(*, off_thread: bool, in_flight: bool) -> tuple:
+    """A live panel whose first snapshot is in (or still in flight), then *File → Close Scene* and a load, on the main
+    thread or on another one: what the panel sends after the close, and what it drops of the queue."""
+    FakeTransport.made = []
+    rig = stepwise(*doe_models())
+    [begin] = until_begin(rig, 1)
+    if not in_flight:
+        deliver(rig.ctl, Received(1, ack(begin["sceneVersion"])))
+        panel_settle(rig, 1)
+    before = len(sent_on(1))
+    new = roe_models()
+    if off_thread:
+        closed_off_thread(rig, *list(rig.models), added=new)
+        assert not rig.ctl._live.reset_owed and FakeTransport.made[0].discarded == []
+        rig.pump(0)  # the next pump resets
+    else:
+        close_scene(rig, *list(rig.models), added=new)
+    owed = rig.ctl._live.reset_owed
+    panel_settle(rig, 1)
+    after = sent_on(1)[before:]
+    return owed, FakeTransport.made[0].discarded, node_counts(after), found(after, "Doe", B)
+
+
+@pytest.mark.parametrize("in_flight", [False, True])
+def test_panel_a_scene_closed_off_thread_with_no_preparation_goes_as_on_the_main_thread(
+    fake, in_flight
+):
+    """With nothing being prepared, or with the closed scene's snapshot in flight, a close off the main thread is a
+    reset at the next pump: the same frames as on the main thread, the queued chunks dropped (§6.2, §7.3)."""
+    on_main = outcome(off_thread=False, in_flight=in_flight)
+    assert on_main == (True, [1] if in_flight else [], [0, 2], [])
+    assert outcome(off_thread=True, in_flight=in_flight) == on_main
+
+
+def test_panel_a_scene_closed_off_thread_while_reconnecting_is_reset_at_once(fake, caplog, capfd):
+    """Offline, a close off the main thread is a reset at the next pump, as on the main thread (``reset_owed``): the
+    resume sends the new scene's snapshot first and nothing of the closed one; the other missed events are re-synced
+    once the session is live (§7.3, T7)."""
+    rig = stepwise(*doe_models())
+    [first] = until_begin(rig, 1)
+    deliver(rig.ctl, Received(1, ack(first["sceneVersion"])))
+    panel_settle(rig, 1)
+    resume_id = reconnect(rig)
+    with caplog.at_level(logging.DEBUG):
+        closed_off_thread(rig, *list(rig.models), added=roe_models())
+        assert not rig.ctl._live.reset_owed
+        rig.pump(0)
+        assert rig.ctl.phase is Phase.RECONNECTING and rig.ctl._live.reset_owed
+        deliver(rig.ctl, Received(2, resumed(resume_id, scene_version=1, snapshot_version=1)))
+        panel_settle(rig, 2)
+    frames = sent_on(2)
+    assert [m["type"] for m in frames if isinstance(m, dict)][:2] == [
+        "session.resume",
+        "scene.snapshot.begin",
+    ]
+    assert node_counts(frames)[0] == 0 and node_counts(frames)[-1] == 2
+    assert found(frames, "Doe", B) == []
+    assert leaks(caplog, capfd, "Doe", "Roe", "Traceback", CODE, TOKEN) == []
+    assert "live:" not in caplog.text and "scene:" not in caplog.text

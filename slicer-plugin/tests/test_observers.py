@@ -57,6 +57,9 @@ class Recorder:
     def reset(self):
         self.calls.append(("reset",))
 
+    def scene_closed_off_thread(self):
+        self.calls.append(("scene_closed_off_thread",))
+
     def take(self):
         calls, self.calls = self.calls, []
         return calls
@@ -490,6 +493,27 @@ def test_observers_an_event_on_another_thread_forgets_the_poses():
     a.InvokeEvent(EVENTS.transform_modified)
     a.InvokeEvent(EVENTS.transform_modified)
     assert sink.take() == [("mark_transform", A)]
+
+
+def test_observers_an_end_close_off_thread_is_taken_as_a_close(caplog):
+    """SLC-70: off the main thread the sink gets its one call safe there (a preparation running stops at its next
+    step; the sink resets on the main thread before it sends anything again) and the pump re-syncs; on the main
+    thread a close is the sink's reset; a sink that raises is logged by type and the pump still re-syncs."""
+    scene, sink, watcher = watched(Node(A))
+    off_thread(scene.InvokeEvent, EVENTS.end_close)
+    assert sink.take() == [("scene_closed_off_thread",)]
+    assert watcher.take_off_thread() is True and watcher.take_off_thread() is False
+    scene.InvokeEvent(EVENTS.end_close)
+    assert sink.take() == [("reset",)] and watcher.take_off_thread() is False
+
+    def refuse():
+        raise KeyError("vtkMRMLModelNode4 Doe^John")
+
+    sink.scene_closed_off_thread = refuse
+    with caplog.at_level(logging.DEBUG):
+        off_thread(scene.InvokeEvent, EVENTS.end_close)
+    assert watcher.take_off_thread() is True
+    assert "scene observer failed (KeyError)" in caplog.text and "Doe" not in caplog.text
 
 
 def test_observers_a_scene_event_on_another_thread_holds_nothing():

@@ -213,6 +213,8 @@ def prepare_snapshot(  # noqa: PLR0913 — build_snapshot's options, and the pro
     # the hint takes a version before the snapshot's own; once built, a snapshot must follow (§8.2): the client keeps
     # snapshot_needed set if the full GLB below is refused after all, and that message is then never sent. Only IDs
     # this export takes are announced: they passed collect's ID rules (T7)
+    # closed off the main thread during this last step (SLC-70): stopped before any version is used
+    _still_open(ids, generation)
     exported = {e.node_id for e in fitted.entities}
     announced = client.announce_added([(i, kind) for i, kind in announce if i in exported])
     version = client.next_scene_version
@@ -226,6 +228,8 @@ def prepare_snapshot(  # noqa: PLR0913 — build_snapshot's options, and the pro
     if len(glb) > limits["maxSnapshotBytes"]:
         raise SnapshotTooLargeError(len(glb), limits["maxSnapshotBytes"])
     triangles = fitted.triangle_count
+    # the GLB takes long (≈ 1 s near the relay's limit): closed meanwhile, it is never begun (SLC-70)
+    _still_open(ids, generation)
     # before begin uses a version: nothing after it can fail but the invariant below
     sent = SentScene.from_export(fitted.entities, skipped, anonymized=collected.anonymized_names)
     messages = client.begin_snapshot(glb, node_count=len(fitted.entities), triangle_count=triangles)
@@ -248,6 +252,12 @@ def prepare_snapshot(  # noqa: PLR0913 — build_snapshot's options, and the pro
     )
 
 
+def _still_open(ids: SceneIds, generation: int) -> None:
+    """``SceneClosedError`` once the scene was closed (``ids`` reset) since the preparation read ``generation``."""
+    if ids.generation != generation:
+        raise SceneClosedError("the scene was closed while it was prepared")
+
+
 def _same_scene[T](steps: Steps[T], ids: SceneIds, generation: int) -> Steps[T]:
     """``steps``, checked before every step after the first that the scene was not closed (``ids`` reset) since the
     preparation started: its handles may be the next patient's (T7). Checked between steps, not per node — a close
@@ -260,8 +270,7 @@ def _same_scene[T](steps: Steps[T], ids: SceneIds, generation: int) -> Steps[T]:
             except StopIteration as stop:
                 return stop.value
             yield
-            if ids.generation != generation:
-                raise SceneClosedError("the scene was closed while it was prepared")
+            _still_open(ids, generation)
     finally:
         steps.close()
 

@@ -193,7 +193,8 @@ longest step of that export; without islands, the longest step of the same expor
   it stays closed until the next preparation (`setValue` would show it again). A failure in it is logged by type
   only. A flush starts a preparation with one slice; the pump runs the others.
 - **A re-sync does not abandon.** Events missed off the main thread (SLC-33) let a running preparation finish and
-  ask for another snapshot after it. Abandoning it at each such event could hold a large scene off for ever.
+  ask for another snapshot after it. Abandoning it at each such event could hold a large scene off for ever. A scene
+  close among them is the exception (SLC-70, below): it stops the preparation and the pump resets.
 - **An abandoned preparation stays owed.** A flush's re-export, or the first snapshot, owes the client nothing, so
   `_abandon` sets `snapshot_needed` while the session runs: a later tick starts it again. A slice condition
   (`_may_continue`) without `snapshot_needed` lets a preparation that a flush started go on.
@@ -273,7 +274,7 @@ runs two steps, so a close cannot land after the first.
 | Dropped and resumed (the same session) | none needed: its aliases hold, the snapshot begins on it | — | `test_prepare_a_session_dropped_and_resumed_…` |
 | Session closed | `observe()` stops the controller; alone: the state check | `live.py`, `snapshot.py` | `test_live_a_session_closed_at_any_step_…`, `test_prepare_…[closed]` |
 | Session created again (SLC-45) | the panel stops the old live updates before `session.create` and makes new ones (registry, cache); alone: `session_id` compared at the last step, `ProtocolStateError` | `panel.py`, `snapshot.py` | `test_panel_a_session_created_again_at_any_step_…`, `test_prepare_…[created_again]` |
-| Scene closed off the main thread | none yet: a re-sync lets the preparation finish and begin the closed scene | → SLC-70 | — |
+| Scene closed off the main thread (SLC-70) | the observers call `LiveUpdates.scene_closed_off_thread()`, which moves the generation under a lock; the preparation stops at its next step, or in its last step before its `begin` or the frames of a `begin` built meanwhile — an abandon —, and `LiveUpdates` resets before its next tick or flush classifies, prepares or sends anything, and again after a flush's classification (the panel calls `follow_close()` while it reconnects) | `observers.py` `_on_end_close`, `ids.py` `closed_elsewhere`, `snapshot.py` `_still_open`, `live.py` `_follow_close`, `_advance` | `test_live_…closed_off_thread…`, `test_panel_…closed_off_thread…` (every position; during a mesh read, a fit step, the GLB, the begin; a flush or *Send now* before the next tick; no preparation; the snapshot in flight; while reconnecting), `test_prepare_a_scene_closed_off_thread_…`, `test_observers_an_end_close_off_thread_…` |
 | A segmentation removed while it is prepared; a segment removed before its step, read by the real adapter | none yet: its segments stay on the viewers; Slicer's display getters log the segment ID | → SLC-71 | — |
 | A model or segment removed or hidden | each goes out as it was at its step; its mark after the ack makes the viewers match (22 cases) | `live.py` marks | — |
 
@@ -301,3 +302,62 @@ steps when it stops or is closed. The generation is read at the first step, not 
   the panel) would have its last step refused, then prepare again on the new session with the old aliases.
 - No re-listing of the shown nodes in the last step (SLC-60's design, kept): a node hidden or removed meanwhile is in
   the snapshot until its mark goes out after the ack (manual §15 step 9; SLC-71 for segmentations).
+
+## A scene closed off the main thread (SLC-70)
+
+The observers record events off the main thread and touch neither MRML nor the live updates there (SLC-33); the pump
+then asks for a re-sync, which lets a running preparation finish. For a scene close that was not enough: probed, the
+preparation began the closed scene's snapshot with its names, gave a new alias to one of its nodes after the close
+and, with the registry never reset, reused `m_1` for the next patient's node. SLC-70 makes the close count:
+
+- `SceneWatcher._on_end_close` on another thread calls the sink's `scene_closed_off_thread()` — its one method safe
+  off the main thread: it moves `SceneIds.generation` under a lock (`closed_elsewhere`) and nothing else — and sets
+  the missed-events flag as before.
+- A preparation under way stops at its next step boundary (SLC-68's check). The last step has no next boundary, so
+  `prepare_snapshot` checks again before the `scene.nodeAdded` hint and before `begin_snapshot` (the GLB's write,
+  ≈ 1 s near the relay's limit, is the longest step) — before any version is used when the close comes before the
+  hint, otherwise the hint's version is a gap, never sent (§8.4) — and `LiveUpdates._advance` checks once more before
+  it hands over the frames of a snapshot whose `begin` was built meanwhile: it is superseded by the reset's, never
+  sent. A read that raises once the close has finished (an orphaned handle) counts the same. Each is an abandon —
+  nothing sent, no error line, the snapshot still owed. `Clear` removes every node before its `EndCloseEvent`, so a
+  read that breaks while it still runs is a failure by type (one `live:` line, a FAILED event and the back-off),
+  and the reset follows at the next tick: nothing of the closed scene goes out either way. The step during which the
+  close finished runs to its end, as a reset fired from inside a step does (SLC-68's leftovers).
+- `LiveUpdates` follows the moved generation itself (`_seen_generation`): its next tick or flush — the flush timer,
+  *Send now*, a send-mode change, the end of a batch — runs `reset()` before anything is classified, prepared or sent,
+  so no update addresses the closed scene's IDs and no alias of it goes to the next scene's node with the same raw ID
+  (the review of SLC-70 found both with a flush between the close and the next pump). A close that finishes while a
+  flush is classified is followed before the result goes out. The reset is the one of a close on the main thread: the
+  closed scene's queued chunks dropped, the aliases forgotten, an empty snapshot first when the next scene takes more
+  than one slice — built with a registry of its own, which no close stops: it names nothing. While the panel
+  reconnects (no tick) its pump calls `follow_close()`: `reset_owed` at once, as for a close offline on the main
+  thread.
+
+**Can a close come off the main thread at all?** Read in Slicer v5.12.4's sources (tag commit `4e21c19`): no core
+path does it, so SLC-70 guards against extensions and user scripts only.
+
+- `vtkMRMLScene::Clear` is the only code that enters and leaves `CloseState`
+  ([vtkMRMLScene.cxx#L349-L389](https://github.com/Slicer/Slicer/blob/v5.12.4/Libs/MRML/Core/vtkMRMLScene.cxx#L349-L389));
+  `EndState` invokes `EndCloseEvent` inline
+  ([#L747-L773](https://github.com/Slicer/Slicer/blob/v5.12.4/Libs/MRML/Core/vtkMRMLScene.cxx#L747-L773)), and VTK
+  runs the observers inline on the calling thread
+  ([vtkObject.cxx#L834-L841](https://github.com/Slicer/VTK/blob/c9cd17a377cbc7e488329e882a35b70c7f37fe76/Common/Core/vtkObject.cxx#L834-L841),
+  the VTK fork the tag pins); `vtkEventBroker` is synchronous by default
+  ([vtkEventBroker.cxx#L97](https://github.com/Slicer/Slicer/blob/v5.12.4/Libs/MRML/Core/vtkEventBroker.cxx#L97)).
+  So the event comes on whichever thread calls `Clear`.
+- The callers on the main scene are main-thread code: *File → Close Scene* is a slot of the main window
+  ([qSlicerMainWindow.cxx#L985-L998](https://github.com/Slicer/Slicer/blob/v5.12.4/Base/QTApp/qSlicerMainWindow.cxx#L985-L998));
+  a scene load with *clear* and an MRB or DICOM scene bundle go through `vtkMRMLScene::Connect`, which runs `Clear(0)`
+  inside a batch ([#L789-L825](https://github.com/Slicer/Slicer/blob/v5.12.4/Libs/MRML/Core/vtkMRMLScene.cxx#L789-L825));
+  the WebServer's `DELETE /mrml` is served from a `QSocketNotifier`
+  ([SlicerRequestHandler.py#L778-L787](https://github.com/Slicer/Slicer/blob/v5.12.4/Modules/Scripted/WebServer/WebServerLib/SlicerRequestHandler.py#L778-L787));
+  the scene's own teardown at exit runs on the main thread; the rest are tests' `setUp`.
+- Slicer's two worker threads (`vtkSlicerApplicationLogic`'s processing and networking threads,
+  [vtkSlicerApplicationLogic.cxx#L159-L199](https://github.com/Slicer/Slicer/blob/v5.12.4/Base/Logic/vtkSlicerApplicationLogic.cxx#L159-L199))
+  never clear the main scene, and send their MRML events back to the main thread
+  ([vtkSlicerCLIModuleLogic.cxx#L1163-L1175](https://github.com/Slicer/Slicer/blob/v5.12.4/Base/Logic/vtkSlicerCLIModuleLogic.cxx#L1163-L1175)).
+- Nothing in `vtkMRMLScene` checks the thread: an extension or a user script that calls `Clear` from a worker thread
+  (unsupported) fires `EndCloseEvent` there. Slicer's documentation at the tag says nowhere that MRML is main-thread
+  only; the code assumes it. `[TODO verify]` third-party extensions (not audited) and, in Slicer, that a
+  `threading.Thread` calling `slicer.mrmlScene.Clear(0)` reaches `_on_end_close` off the main thread — not a manual
+  step: it is unsupported and may crash Slicer.

@@ -217,7 +217,13 @@ def test_ids_repr_shows_counts_only():
 
 
 def test_ids_module_is_standard_library_only():
-    """Pure core (CLAUDE.md rule 10; ``test_core_purity`` checks the whole package): nothing beyond ``re``."""
+    """Pure core (CLAUDE.md rule 10; ``test_core_purity`` checks the whole package): nothing beyond ``re`` and
+    ``threading`` (the generation's lock, SLC-70)."""
     source = Path(ids_module.__file__).read_text(encoding="utf-8")
     imports = [line for line in source.splitlines() if line.startswith(("import ", "from "))]
-    assert imports == ["from __future__ import annotations", "import re", "from typing import Any"]
+    assert imports == [
+        "from __future__ import annotations",
+        "import re",
+        "import threading",
+        "from typing import Any",
+    ]

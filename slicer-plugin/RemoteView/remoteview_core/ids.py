@@ -26,12 +26,14 @@ every entity the 3D view shows: what is its ``nodeId``?
 
 Standard library only. No method puts a raw ID into an exception text or the ``repr`` (a raw segment ID may be PHI).
 Main thread only (unsynchronised; the collection, the snapshot builder and the classifier share one instance and all
-run on Slicer's main thread).
+run on Slicer's main thread) — except :meth:`SceneIds.closed_elsewhere`, which moves the generation under a lock from
+any thread (SLC-70).
 """
 
 from __future__ import annotations
 
 import re
+import threading
 from typing import Any
 
 #: §7.3: the IDs Slicer generates (class name + counter). Used with ``fullmatch``.
@@ -63,8 +65,11 @@ class SceneIds:
         self._segments: dict[tuple[Any, Any], str] = {}
         self._next_m = 1
         self._next_s = 1
-        #: the scene closes so far (:meth:`reset`): a preparation started before one stops at its next step (SLC-68)
+        #: the scene closes so far (:meth:`reset`, :meth:`closed_elsewhere`): a preparation started before one stops
+        #: at its next step (SLC-68)
         self.generation = 0
+        # closed_elsewhere runs off the main thread (SLC-70)
+        self._generation_lock = threading.Lock()
 
     def model_node_id(self, raw: Any) -> str | None:
         """The ``nodeId``/``mrmlId`` of a model or segmentation node with MRML ID ``raw``: the ID itself when it is
@@ -124,7 +129,15 @@ class SceneIds:
         :attr:`generation`, which stops a preparation begun before the close (SLC-68)."""
         self._models.clear()
         self._segments.clear()
-        self.generation += 1
+        with self._generation_lock:
+            self.generation += 1
+
+    def closed_elsewhere(self) -> None:
+        """The scene was closed off the main thread (SLC-70): move :attr:`generation` only, so a preparation running
+        now stops at its next step; the maps are the main thread's — the owner's :meth:`reset` clears them there
+        before it uses them again. The one method safe on any thread."""
+        with self._generation_lock:
+            self.generation += 1
 
     def __repr__(self) -> str:
         return (

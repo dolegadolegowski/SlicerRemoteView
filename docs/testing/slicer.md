@@ -1610,6 +1610,10 @@ Expected results:
   line from `remoteview_core` or `RemoteView.py` (echoed console commands are allowed), no `RemoteView`, `live:` or
   `scene:` error line; no traceback in the Python console.
 
+SLC-70 (a scene closed off the main thread) has no manual step: no path of Slicer itself closes the scene off the main
+thread, and a script that does is unsupported and may crash Slicer (`docs/research/slicer-prepare.md`, *A scene closed
+off the main thread*); its tests fire the close from a worker thread through the real observers.
+
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|
 | | | | | |
