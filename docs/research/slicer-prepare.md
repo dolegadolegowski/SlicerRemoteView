@@ -1,4 +1,4 @@
-# Preparing the scene without freezing Slicer (SLC-28, SLC-50, SLC-51)
+# Preparing the scene without freezing Slicer (SLC-28, SLC-50, SLC-51, SLC-68)
 
 At *Start session*, and again at every live change that needs a new snapshot (a geometry edit, an added node, a
 reset: `LiveUpdates._export`), `build_snapshot` used to collect and decimate every node in one call on Slicer's main
@@ -198,7 +198,7 @@ longest step of that export; without islands, the longest step of the same expor
   `_abandon` sets `snapshot_needed` while the session runs: a later tick starts it again. A slice condition
   (`_may_continue`) without `snapshot_needed` lets a preparation that a flush started go on.
 - **Limits read again.** `prepare_snapshot` checks the session's state and the relay's limits at its first step and
-  again at its last.
+  again at its last, where the session must still be the same one (SLC-68, below).
 
 **One live geometry change, phase by phase** (the owner's report: every change froze Slicer during a session). On
 `main`, every change that needs a new snapshot collected and decimated every node again on the main thread, in one
@@ -248,6 +248,56 @@ collected per step, one entity fitted per step, the GLB and `begin` in the last 
   closed scene's nodes (merge comparison); a re-sync lets a running preparation finish. Whether every path that
   changes the scene between two steps is guarded in time — also a node removed or hidden meanwhile, which a step
   collects as the adapter reads it (`[TODO verify]` how `MrmlSceneApi` reads a node already removed) — is SLC-68's.
+  *SLC-68 (below) gave `prepare_snapshot` both checks back.*
 - **Kept from SLC-60's design, not from its code:** no re-listing of the shown nodes in the last step (a node hidden or
   removed during the preparation is in its snapshot until its mark goes out after it), and the GLB written and hashed
   on the main thread in the last step — `main` does the same; both are SLC-68's to revisit if Slicer shows a problem.
+
+## The scene changed between steps (SLC-68)
+
+A preparation spans the event loop, so the scene or the session can change between two of its steps. Probed on
+`ws/slicer` after the merge (`9c60565`), for every step position of a preparation of three nodes — a model with a
+scripted ID (aliased `m_<n>`), one with a generated ID, a segment — 18 to 36 positions per case. The guard works on
+the registry it is given: `LiveUpdates.reset` resets the session's at `EndCloseEvent`; `prepare_snapshot` with
+`ids=None` makes its own, which nothing can reset, so an owner that steps it across the event loop passes the
+session's. Through the panel every position the pump exposes is tested: the pump that delivers `session.created`
+runs two steps, so a close cannot land after the first.
+
+| Change between two steps | Guard | Where | Tests (`pytest slicer-plugin -k "prepar and (closed or session)"`) |
+|---|---|---|---|
+| Scene closed on the main thread, `EndCloseEvent` alone or in a batch, with `LiveUpdates` | `reset()` abandons the preparation (`Stepper.close()`) before `SceneIds.reset()`, in one call; an empty snapshot clears the closed scene, the next one follows | `live.py` `reset` | `test_live_a_scene_closed_at_any_step_…`, `test_panel_a_scene_closed_at_any_step_…` |
+| `SceneIds.reset()` with `prepare_snapshot` driven alone | `SceneIds.generation`, moved by `reset()`, checked after every step of the collection and the fit: `SceneClosedError` before the next read | `snapshot.py` `_same_scene`, `ids.py` | `test_prepare_a_scene_closed_between_any_two_steps_…` |
+| A batch (a load, an import) | `hold()` abandons | `live.py` `hold` | `test_live_a_batch_at_any_step_…` |
+| *Hide node names* | the switch abandons; the next preparation hides the names | `live.py` `set_anonymize_names` | `test_live_names_hidden_at_any_step_…` |
+| Connection lost (grace, resuming) | `observe()` abandons; the panel ticks only while live; alone: the state check at the last step | `live.py` `_observe`, `snapshot.py` `_live_limits` | `test_live_a_connection_lost_at_any_step_…`, `test_panel_a_connection_lost_at_any_step_…`, `test_prepare_a_session_changed_…[dropped, resuming]` |
+| Dropped and resumed (the same session) | none needed: its aliases hold, the snapshot begins on it | — | `test_prepare_a_session_dropped_and_resumed_…` |
+| Session closed | `observe()` stops the controller; alone: the state check | `live.py`, `snapshot.py` | `test_live_a_session_closed_at_any_step_…`, `test_prepare_…[closed]` |
+| Session created again (SLC-45) | the panel stops the old live updates before `session.create` and makes new ones (registry, cache); alone: `session_id` compared at the last step, `ProtocolStateError` | `panel.py`, `snapshot.py` | `test_panel_a_session_created_again_at_any_step_…`, `test_prepare_…[created_again]` |
+| Scene closed off the main thread | none yet: a re-sync lets the preparation finish and begin the closed scene | → SLC-70 | — |
+| A segmentation removed while it is prepared; a segment removed before its step, read by the real adapter | none yet: its segments stay on the viewers; Slicer's display getters log the segment ID | → SLC-71 | — |
+| A model or segment removed or hidden | each goes out as it was at its step; its mark after the ack makes the viewers match (22 cases) | `live.py` marks | — |
+
+Before SLC-68, `prepare_snapshot` driven alone with `SceneIds.reset()` between two steps went on: at every one of the 36
+positions it began version 1 with the closed scene's nodes and their "Doe…" names; up to position 32 it also read closed
+handles after the reset, and up to position 22 it gave one of them a new alias. Across a session created again it began
+on the other session with the old session's aliases (SLC-60's check had been lost in the merge). Its owners never did
+that — `LiveUpdates` abandons first — but a second owner (SLC-19's self-test, a script) would have.
+
+**Why every step, not every node.** A check per node in `collect_steps` (tried first) misses a close in the middle of a
+node — its name is still read after the close — and a close once the last node has started: positions 23–36 of 36 still
+began version 1. `_same_scene` wraps the collection and the fit, checks after every resumed step, and closes the inner
+steps when it stops or is closed. The generation is read at the first step, not when the steps are made.
+
+**What remains** (rule 8 defaults, not blocking):
+
+- A reset fired from inside a step (a read that fires an MRML event; no such Slicer path seen): the step finishes its
+  reads after `ids.reset()` and may give a closed node an alias. Nothing of it is sent, but that alias stays in the
+  registry until the next close: a node of the next scene with the same raw ID would take it — an alias no viewer
+  has seen, so §7.3 holds. The same step may also leave a skipped node's entry (no name, no mesh) in the session's
+  cache, which the next collection drops (`keep_only`).
+- A snapshot begun before *Hide node names* still carries the names: it is no longer a preparation. The switch cannot
+  be reached from the UI until SLC-18.
+- The owner contract: `observe()` follows every client event. A controller not observed across a re-create (never
+  the panel) would have its last step refused, then prepare again on the new session with the old aliases.
+- No re-listing of the shown nodes in the last step (SLC-60's design, kept): a node hidden or removed meanwhile is in
+  the snapshot until its mark goes out after the ack (manual §15 step 9; SLC-71 for segmentations).

@@ -9,11 +9,26 @@ import time
 
 import numpy as np
 import pytest
-from support import FakeScene, ack, live_client, reassemble, sphere
+from support import (
+    CODE,
+    OTHER_CODE,
+    OTHER_SESSION_ID,
+    OTHER_TOKEN,
+    SESSION_ID,
+    FakeScene,
+    ack,
+    created,
+    live_client,
+    manifest,
+    reassemble,
+    resumed,
+    sphere,
+)
 from vtkmodules.vtkCommonTransforms import vtkTransform
 
 from remoteview_core import collect, decimate, snapshot
-from remoteview_core.protocol_client import SessionState
+from remoteview_core.ids import SceneClosedError, SceneIds
+from remoteview_core.protocol_client import ProtocolStateError, SessionState
 from remoteview_core.snapshot import build_snapshot, prepare_snapshot
 from remoteview_core.steps import Progress, Stepper, run
 
@@ -207,3 +222,158 @@ def test_stepper_lets_a_step_raise_and_close_abandons_the_rest():
     stepper.advance(0.0)
     stepper.close()
     assert closed == [True] and not stepper.done
+
+
+# --------------------------------------------------------------------------- the scene changed between steps (SLC-68)
+
+
+class ReadLog:
+    """A scene whose every read is recorded by method name."""
+
+    def __init__(self, scene, reads: list[str]) -> None:
+        self._scene, self._reads = scene, reads
+
+    def __getattr__(self, name):
+        method = getattr(self._scene, name)
+
+        def read(*args):
+            self._reads.append(name)
+            return method(*args)
+
+        return read
+
+
+def three_nodes() -> FakeScene:
+    """A model with a scripted ID (aliased ``m_<n>``), one with a generated ID and a segment of a scripted node."""
+    return FakeScene(
+        {"id": "Sphere", "name": "Doe^John liver", "mesh": sphere(8)},
+        {"id": "vtkMRMLModelNode4", "name": "Doe^John lung", "mesh": sphere(10)},
+        {"id": "SegDoe", "segment": "DoeTumor", "name": "Doe tumor", "mesh": sphere(8)},
+    )
+
+
+def steps_in_all() -> int:
+    """How many times ``prepare_snapshot`` of :func:`three_nodes` yields: the positions between two of its steps."""
+    return sum(1 for _ in prepare_snapshot(three_nodes(), live_client(), slicer_version="5.12.4"))
+
+
+@pytest.mark.parametrize("needed", [False, True])
+def test_prepare_a_scene_closed_between_any_two_steps_is_not_read_aliased_or_sent(needed):
+    """T7: ``SceneIds.reset()`` (the scene closed) between any two steps stops the preparation at the next one —
+    no handle of the closed scene read, no alias issued, the client as it was — without its owner's ``close()``."""
+    total = steps_in_all()
+    assert total > 10
+    for k in range(1, total + 1):
+        reads: list[str] = []
+        ids, client = SceneIds(), live_client()
+        if needed:
+            client.require_snapshot()
+        steps = prepare_snapshot(
+            ReadLog(three_nodes(), reads), client, slicer_version="5.12.4", ids=ids
+        )
+        for _ in range(k):
+            next(steps)
+        counters = (ids._next_m, ids._next_s)
+        ids.reset()
+        reads.clear()
+        with pytest.raises(SceneClosedError):
+            next(steps)
+        assert reads == [], k
+        assert (ids._next_m, ids._next_s) == counters and repr(ids).startswith(
+            "SceneIds(models=0, segments=0,"
+        ), k
+        assert (client.next_scene_version, client.snapshot_in_flight, client.snapshot_needed) == (
+            1,
+            None,
+            needed,
+        ), k
+        assert client.state is SessionState.CREATED
+        with pytest.raises(StopIteration):
+            next(steps)
+
+
+def test_prepare_the_inner_steps_end_at_once_when_a_closed_scene_stops_them():
+    """Stopped by the check or abandoned by the owner, the collection or fit under way ends then, with the VTK objects
+    its frames hold — not when the garbage collector gets to it, which a traceback kept for later (``sys.last_exc``)
+    would put off. ``prepare_snapshot``'s own frame in that traceback still holds what it collected until the owner
+    drops the exception (Python prints no locals)."""
+    ended: list[str] = []
+
+    def inner(name):
+        try:
+            while True:
+                yield
+        finally:
+            ended.append(name)
+
+    ids = SceneIds()
+    steps = snapshot._same_scene(inner("stopped"), ids, ids.generation)
+    next(steps)
+    ids.reset()
+    with pytest.raises(SceneClosedError) as stopped:
+        next(steps)
+    # the traceback is still held, with its frames
+    assert ended == ["stopped"] and stopped.value.__traceback__ is not None
+    steps = snapshot._same_scene(inner("abandoned"), ids, ids.generation)
+    next(steps)
+    steps.close()
+    assert ended == ["stopped", "abandoned"]
+
+
+def test_prepare_a_scene_closed_before_the_first_step_is_the_scene_it_prepares():
+    """The generation is read at the first step, not when the steps are made: a close in between is the scene the
+    preparation then reads, and it goes out."""
+    ids = SceneIds()
+    steps = prepare_snapshot(three_nodes(), live_client(), slicer_version="5.12.4", ids=ids)
+    ids.reset()
+    snap = run(steps)
+    assert snap.scene_version == 1 and snap.node_count == 3
+
+
+def recreated(client) -> None:
+    """Stopped (or expired), then a new ``session.create`` on the same client: another session (SLC-45)."""
+    client.close()
+    message = client.start("mobile", CODE)
+    client.handle(
+        created(message["id"], session_id=OTHER_SESSION_ID, code=OTHER_CODE, token=OTHER_TOKEN)
+    )
+
+
+SESSION_CHANGES = {
+    "dropped": lambda client: client.transport_lost(1006),
+    "resuming": lambda client: (client.transport_lost(1006), client.resume()),
+    "closed": lambda client: client.close(),
+    "created_again": recreated,
+}
+
+
+@pytest.mark.parametrize("change", list(SESSION_CHANGES))
+def test_prepare_a_session_changed_between_steps_is_refused_at_the_last(change):
+    """No snapshot of a session that dropped, closed or was created again while it was prepared: the aliases are
+    the old session's (§7.3) and the budget its profile's. ``ProtocolStateError`` at the last step, nothing sent."""
+    for k in (1, steps_in_all() // 2, steps_in_all()):
+        ids, client = SceneIds(), live_client()
+        steps = prepare_snapshot(three_nodes(), client, slicer_version="5.12.4", ids=ids)
+        for _ in range(k):
+            next(steps)
+        SESSION_CHANGES[change](client)
+        version = client.next_scene_version
+        with pytest.raises(ProtocolStateError):
+            run(steps)
+        assert (client.next_scene_version, client.snapshot_in_flight) == (version, None), k
+
+
+def test_prepare_a_session_dropped_and_resumed_between_steps_completes():
+    """The same session again (§4.3): its aliases still hold — the snapshot begins on it."""
+    ids, client = SceneIds(), live_client()
+    steps = prepare_snapshot(three_nodes(), client, slicer_version="5.12.4", ids=ids)
+    for _ in range(steps_in_all() // 2):
+        next(steps)
+    client.transport_lost(1006)
+    resume_id = client.resume()["id"]
+    client.handle(resumed(resume_id, scene_version=0, snapshot_version=None))
+    assert client.session_id == SESSION_ID
+    snap = run(steps)
+    begin, glb, _ = reassemble(list(snap.frames()))
+    assert begin["sceneVersion"] == 1 and begin["nodeCount"] == 3
+    assert [e["nodeId"] for e in manifest(glb)] == ["m_1", "vtkMRMLModelNode4", "m_2/DoeTumor"]

@@ -19,9 +19,10 @@ every entity the 3D view shows: what is its ``nodeId``?
   as UTF-8 with U+FFFD) or is omitted under *Hide node names*.
 - One per-session counter per namespace, never repeating. The raw → alias maps live as long as the Slicer scene:
   :meth:`SceneIds.reset` (scene closed) clears them and keeps the counters, so an alias is never reissued within a
-  session. An alias once issued is kept — also after *Hide node names* is switched off again (§7.3 "never reissued or
-  shadowed" wins over "alias only when needed"): the segment is then exported under its alias with ``segmentId``
-  revealed.
+  session, and moves :attr:`SceneIds.generation`: a preparation in steps begun before the close stops at its next
+  step with :class:`SceneClosedError` (SLC-68). An alias once issued is kept — also after *Hide node names* is
+  switched off again (§7.3 "never reissued or shadowed" wins over "alias only when needed"): the segment is then
+  exported under its alias with ``segmentId`` revealed.
 
 Standard library only. No method puts a raw ID into an exception text or the ``repr`` (a raw segment ID may be PHI).
 Main thread only (unsynchronised; the collection, the snapshot builder and the classifier share one instance and all
@@ -44,6 +45,10 @@ SEGMENT_ALIAS = re.compile(r"s_[0-9]+")
 MAX_NODE_ID = 128
 
 
+class SceneClosedError(RuntimeError):
+    """The scene was closed (:meth:`SceneIds.reset`) while it was prepared: nothing of it may be read or sent (T7)."""
+
+
 def is_generated_id(raw: Any) -> bool:
     """A ``str`` MRML ID of the shape Slicer generates (:data:`MRML_ID`, within :data:`MAX_NODE_ID` characters):
     the only raw ID that goes on the wire as it is (§7.3)."""
@@ -58,6 +63,8 @@ class SceneIds:
         self._segments: dict[tuple[Any, Any], str] = {}
         self._next_m = 1
         self._next_s = 1
+        #: the scene closes so far (:meth:`reset`): a preparation started before one stops at its next step (SLC-68)
+        self.generation = 0
 
     def model_node_id(self, raw: Any) -> str | None:
         """The ``nodeId``/``mrmlId`` of a model or segmentation node with MRML ID ``raw``: the ID itself when it is
@@ -113,9 +120,11 @@ class SceneIds:
         return None if mrml_id is None else f"{mrml_id}/"
 
     def reset(self) -> None:
-        """The Slicer scene was closed: forget the raw → alias maps, keep counting (no alias is reissued)."""
+        """The Slicer scene was closed: forget the raw → alias maps, keep counting (no alias is reissued), and move
+        :attr:`generation`, which stops a preparation begun before the close (SLC-68)."""
         self._models.clear()
         self._segments.clear()
+        self.generation += 1
 
     def __repr__(self) -> str:
         return (

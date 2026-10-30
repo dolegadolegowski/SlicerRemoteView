@@ -1577,16 +1577,38 @@ Steps (the scene changed during a preparation, and the last step near the relay'
     Select the `quest3` profile (until SLC-18's selector: after one *Start session*/*Stop session*, run
     `slicer.modules.remoteview.widgetRepresentation().self().controller.profile = "quest3"`, `[TODO verify]`), run
     `longest()`, click *Start session*, and run `longest()` when the panel says "Live".
+11. (SLC-68) Stop the session. The *Doe scene*: a new scene with step 1's five spheres, renamed like a patient's
+    (`for i in range(5): getNode(f"Big{i}").SetName(f"Doe^John {i}")`). Make it, time a *Start session* to the end
+    of "Preparing the scene" ("Sending the scene"; on a relay on this computer it may go straight to "Live") once,
+    and stop. Then three runs, each from a new Doe scene with the session stopped:
+    (a) close the scene in the middle of the first preparation, with one line in the console:
+    `w = slicer.modules.remoteview.widgetRepresentation().self(); w.onStartClicked();
+    qt.QTimer.singleShot(1500, lambda: slicer.mrmlScene.Clear(0))`; join with the phone as soon as the code shows,
+    and stop the session once the phone shows the empty scene;
+    (b) the same with the delay at about two thirds of the timed preparation;
+    (c) against §7's relay (a) (its step 5: the stub at `ws://127.0.0.1:8787/ws`; no phone can join it): start the
+    session and type `restart` in the stub's input while the panel says "Preparing the scene"; once the panel says
+    "Live", stop the session and end the stub's input.
 
 Expected results:
 
 - Step 9: the snapshot that goes out may still show `Big3` and `Big4` (each is collected as it is at its step; the
   last step does not list the shown nodes again); within about a second after it the phone loses `Big3` and `Big4`
   (their marks go out after the snapshot's ack). No `RemoteView`, `live:` or `scene:` error line and no traceback —
-  `[TODO verify]` how the Slicer adapter reads a model deleted between two steps (SLC-68).
+  `[TODO verify]` how the Slicer adapter reads a model deleted between two steps (SLC-71).
 - Step 10: the GLB is about 45.5 MiB (each soup is under the 100k cap and is sent as it is); the phone shows ten
   spheres; `longest()` prints less than 1.5 s — the last step writes and hashes the GLB on the main thread (≈ 0.9 s for
   45.8 MiB in the sandbox, `docs/research/slicer-prepare.md`). Record the time in the Result column.
+- Step 11: (a) and (b): the phone shows an empty scene and never a sphere, and the panel stays live with the same code
+  until Stop. A run in which the preparation ended before the scene closed ("Sending the scene" or "Live" showed) does
+  not count — the snapshot had begun, so its spheres may reach the phone (when its upload ended before the close;
+  otherwise the empty snapshot's begin aborts it, protocol §6.2): repeat it with a shorter delay. (c): the panel says
+  "The relay restarted: RemoteView starts the session again, …", then "Preparing the scene" and "Live" with the same
+  code; the stub's final report lists `create none`, `resume` and `create previous` (as in §7 step 5) — the first two
+  hold no `scene.snapshot.begin`, the third holds one, version 1 — and `violations == []`. In every run, in Slicer's
+  Error Log window and the application log file (not the console window, which echoes the commands typed): no `Doe` on a
+  line from `remoteview_core` or `RemoteView.py` (echoed console commands are allowed), no `RemoteView`, `live:` or
+  `scene:` error line; no traceback in the Python console.
 
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|
