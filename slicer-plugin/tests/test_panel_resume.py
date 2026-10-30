@@ -435,7 +435,7 @@ def test_panel_resume_after_a_restart_a_clock_reset_warns_nothing(fake, clocks):
 def test_panel_resume_sleep_while_live_ends_the_session_at_the_wake(
     clocks, caplog, capfd, grace_s, connected
 ):
-    """SLC-41: a computer that slept while Live. The transport reports the drop after the wake, dated before it:
+    """SLC-58: a computer that slept while Live. The transport reports the drop after the wake, dated before it:
     the window is over at once, and nothing is sent, not even on a connection made in the same tick (T1)."""
     caplog.set_level(logging.DEBUG)
     ctl = controller(clocks)

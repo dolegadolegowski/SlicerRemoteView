@@ -271,13 +271,13 @@ Expected results:
   time and that anyone with the code can still see the last scene until the relay ends the session, after a few minutes
   (SLC-44), and the viewer shows the frozen scene as offline until the relay expires it — through the throttle proxy the
   stop message never arrives then, since the proxy drops what it still holds when Slicer closes the connection. This is
-  a known gap, not a new defect (report `2026-10-20-slicer-6`, second part → SLC-50;
+  a known gap, not a new defect (report `2026-10-20-slicer-6`, second part → SLC-59;
   `docs/research/slicer-heartbeat.md`). Stopped in the last ≈ 2 s of the upload, the panel says nothing about the stop
   message and the viewer shows "presentation ended" within 5 s. When quitting, Slicer exits within 3 s; the stop message
   can be lost the same way, with no panel left to say so — the residual for `release`. Whether a stop message handed
-  over in time survives the abort on a real slow link (`tc netem`, a phone hotspot) is `[TODO verify]` for SLC-50. After
+  over in time survives the abort on a real slow link (`tc netem`, a phone hotspot) is `[TODO verify]` for SLC-59. After
   *Stop* through the throttle proxy (not when quitting), a panel that says nothing while the viewer keeps the frozen
-  scene offline is a defect (T1): note the time of *Stop* and report it (SLC-50).
+  scene offline is a defect (T1): note the time of *Stop* and report it (SLC-59).
 - Throughout: no traceback in the Python console, no session code or token in the console or the application log.
 
 | Date | Slicer version | OS | Result | Tester |
@@ -774,7 +774,7 @@ Steps:
    the session resumes with the same code. Sleep for 10 minutes: within about 25 s of waking (when the next ping finds
    the connection gone) "Session ended." with the "lost for too long" text and nothing more (no "Anyone with the code
    …": no resume went out), and **no frame goes out** after the wake (the reconnect window starts at the connection's
-   last sign of life before the sleep, SLC-41; with the relay at `LOG_LEVEL=debug`, no `websocket closed` line with
+   last sign of life before the sleep, SLC-58; with the relay at `LOG_LEVEL=debug`, no `websocket closed` line with
    `role: "publisher"` after the wake — a resume or a create sets that role).
 10. **Reload or exit while reconnecting** (relay (b) with Wi-Fi off, or relay (a) stopped with Ctrl-C). Wait for
     "Connection lost", then *Developer → Reload*. Bring the relay back, click *Start*, wait for "Live", cut it again
@@ -797,12 +797,12 @@ Steps:
 
 Known gaps (not failures):
 - A relay that crashes without close 4008, or whose 4008 frame did not reach Slicer before its drain ended (step 5
-  (c)), and comes back without the session ends it (`SESSION_NOT_FOUND`, no re-create; report `2026-10-28-slicer-2.md`
+  (c)), and comes back without the session ends it (`SESSION_NOT_FOUND`, no re-create; report `2026-10-28-slicer-4.md`
   item 4).
 - A fallback create refused by the relay (`CAPACITY`, `RATE_LIMITED`) ends the session; there is no retry loop.
 - On Windows a sleep of roughly 3 to 6.5 minutes (default grace) still resumes at the wake and ends with "The relay
   ended the session while RemoteView was offline."; a frame that reached Slicer before the sleep but is read only
-  after the wake dates the loss at the wake (SLC-41, `docs/research/slicer-sleep-clocks.md`).
+  after the wake dates the loss at the wake (SLC-58, `docs/research/slicer-sleep-clocks.md`).
 
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|
@@ -1214,7 +1214,7 @@ Expected results:
 |---|---|---|---|---|
 | | | | | |
 
-### §14.1 A mesh with an edge shared by thousands of triangles (SLC-54)
+### §14.1 A mesh with an edge shared by thousands of triangles (SLC-63)
 
 Preconditions: §14's. In a new scene run in the Python console (a "book" of 3,000 pages, 100 × 150 mm, all on one spine
 edge; 6,000 triangles, so nothing is decimated under `mobile`):
@@ -1246,7 +1246,7 @@ Steps:
 
 Expected results:
 
-- Step 1: the code appears within about a second (before SLC-54 Slicer was frozen for more than 10 s here); the viewer
+- Step 1: the code appears within about a second (before SLC-63 Slicer was frozen for more than 10 s here); the viewer
   shows a half-circle fan of 3,000 thin pages around one edge.
 - Throughout: no traceback in the Python console.
 - `[TODO verify]` in Slicer 5.12.4: `vtkOrientPolyData` from `vtkmodules.vtkFiltersCore` behaves as in the `vtk` 9.6.2
@@ -1256,7 +1256,7 @@ Expected results:
 |---|---|---|---|---|
 | | | | | |
 
-### §14.2 Flat meshes decimate in seconds (SLC-52)
+### §14.2 Flat meshes decimate in seconds (SLC-61)
 
 Preconditions: Slicer with the RemoteView module loaded (no session needed). In the Python console of a new scene
 (`RemoteView/remoteview_core` is on the module's path once the module has loaded; `[TODO verify]`):
@@ -1297,7 +1297,7 @@ timed(sphere.GetOutput(), 100_000)                         # a smooth sphere of 
 Expected results:
 
 - Each line prints the share reached (100000 or just under) and a time: the plane ≈ 1 s, the labelmap cylinder ≈ 4 s,
-  the sphere ≈ 3 s on the development machine (it took over 90 s, over 90 s and ≈ 3 s before SLC-52). Record the times
+  the sphere ≈ 3 s on the development machine (it took over 90 s, over 90 s and ≈ 3 s before SLC-61). Record the times
   in the Result column: `[TODO verify]` Slicer's own VTK build is as fast as the `vtk` 9.6.2 wheel.
 - Throughout: no traceback in the Python console.
 

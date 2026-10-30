@@ -1213,7 +1213,7 @@ def test_collect_makes_inconsistent_winding_consistent():
     assert np.all(outward > 0)  # every triangle wound outward again
 
 
-# --------------------------------------------------------------------------- the winding walk in bounded time (SLC-54)
+# --------------------------------------------------------------------------- the winding walk in bounded time (SLC-63)
 
 
 def _reference_normals(polydata: vtkPolyData) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -1294,7 +1294,7 @@ def _flip_every_7th(points, polys) -> vtkPolyData:
 
 def _rim_fanned_cone(sides: int = 64) -> vtkPolyData:
     """A closed cone whose base is triangulated as a fan from one rim point, every 7th triangle wound the other way:
-    the apex and that rim point are adjacent and used by ``sides`` triangles each (SLC-54 review)."""
+    the apex and that rim point are adjacent and used by ``sides`` triangles each (SLC-63 review)."""
     angles = np.linspace(0.0, 2 * np.pi, sides, endpoint=False)
     rim_points = np.c_[30 * np.cos(angles), 30 * np.sin(angles), np.zeros(sides)]
     rim = np.arange(sides)
@@ -1305,7 +1305,7 @@ def _rim_fanned_cone(sides: int = 64) -> vtkPolyData:
 
 def _rim_fanned_cylinder(sides: int = 4_000) -> vtkPolyData:
     """A closed cylinder whose caps are fans from one rim point each (3.5·10⁸ checks for 4,000 sides), every 7th
-    triangle wound the other way (SLC-54 review)."""
+    triangle wound the other way (SLC-63 review)."""
     angles = np.linspace(0.0, 2 * np.pi, sides, endpoint=False)
     ring = np.c_[30 * np.cos(angles), 30 * np.sin(angles), np.zeros(sides)]
     i = np.arange(sides)
@@ -1321,7 +1321,7 @@ def _rim_fanned_cylinder(sides: int = 4_000) -> vtkPolyData:
 
 def _sphere_with_membrane() -> vtkPolyData:
     """A sphere split by an equatorial disc (a loop of edges of three triangles), its southern half wound the other
-    way (SLC-54 review: VTK's walk turns it round across those edges)."""
+    way (SLC-63 review: VTK's walk turns it round across those edges)."""
     source = vtkSphereSource()
     source.SetRadius(10.0)
     source.SetThetaResolution(64)
@@ -1451,7 +1451,7 @@ def test_collect_winding_cut_on_a_consistently_wound_mesh_is_vtks_own(monkeypatc
 def test_collect_winding_walk_is_bounded(mesh, triangles, walks_cut):
     """``ConsistencyOn``'s walk checked n(p)·n(q) triangle pairs for every edge (p, q) of every triangle: 11 s for a
     book of 3,000 pages on one edge (m³), minutes for four rows, 13 s for a fan of 80k triangles, 11 s for 100k
-    triangles sharing one point (d²). Over its budget it now walks a copy with the busiest points cut (SLC-54)."""
+    triangles sharing one point (d²). Over its budget it now walks a copy with the busiest points cut (SLC-63)."""
     data = mesh()
     started = time.perf_counter()
     [entity] = collect_entities(DictScene({"id": "vtkMRMLModelNode4", "mesh": data}))

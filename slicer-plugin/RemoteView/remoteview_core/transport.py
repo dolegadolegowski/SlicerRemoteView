@@ -28,8 +28,8 @@ thread talks to it only through a ``queue.Queue`` of events (:class:`Connected`,
   final message is never held, but it still goes behind the bytes written before it and the socket is aborted
   :data:`STOP_GRACE_S` after ``stop()``: ``Disconnected.final_sent`` is true when a link of the minimum speed carries
   it before that, with a margin, and the relay did not refuse it (a close with another code than 1000), or when the
-  relay's close 1000 proves it read it (report ``2026-10-20-slicer-6``, SLC-50).
-- A lost connection is dated (SLC-41): ``Disconnected.lost_at`` is when the transport noticed the loss (the
+  relay's close 1000 proves it read it (report ``2026-10-20-slicer-6``, SLC-59).
+- A lost connection is dated (SLC-58): ``Disconnected.lost_at`` is when the transport noticed the loss (the
   heartbeat, a read or send error, a close), less the wall-clock time its monotonic clock did not see, and no later
   than :data:`MAX_SILENCE_S` after the connection's last frame. The first part dates a sleep where that clock stops
   during it (Linux, macOS); the second, where it runs on (Windows, Python 3.12), dates only a sleep longer than about
@@ -246,7 +246,7 @@ class Disconnected:
     not close with another code than 1000 (a refusal, e.g. 1008, 4006), or the relay's close 1000 followed it; if not,
     the relay may see a drop and keep the session for its grace period (§9.1). ``lost_at`` (an open connection lost to
     ``error``, else ``None``): the wall-clock time it was lost by — before this event if the computer slept (on Windows
-    only after a sleep longer than about :data:`MAX_SILENCE_S`; :func:`loss_time`, SLC-41)."""
+    only after a sleep longer than about :data:`MAX_SILENCE_S`; :func:`loss_time`, SLC-58)."""
 
     connection: int | None
     error: TransportError | None
@@ -520,7 +520,7 @@ class RelayTransport:
         #: ``B`` (§9.1) as last computed, and when, on the loop's clock (see :meth:`_unread`).
         self._backlog = 0.0
         self._backlog_at = 0.0
-        #: The open connection's last sign of life — its opening or its last frame — on both clocks (SLC-41).
+        #: The open connection's last sign of life — its opening or its last frame — on both clocks (SLC-58).
         self._alive = (0.0, 0.0)
         #: Inbound text frames that were not a JSON object, and frames dropped because their connection had ended
         #: (counts only; their content is never logged).

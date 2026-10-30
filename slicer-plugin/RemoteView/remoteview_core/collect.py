@@ -10,7 +10,7 @@ one code path for both), in glTF space:
   repeated vertex dropped → the bake, if any (below) → triangles without area dropped → ``vtkPolyDataNormals``
   (``SplittingOff``, ``ConsistencyOn``; when its winding walk would check more cell pairs than its budget — points
   used by thousands of triangles — the walk runs on a copy with the points of the most triangles cut instead, and the
-  triangles joined only through them keep their winding, SLC-54) → owned numpy arrays without the points no triangle
+  triangles joined only through them keep their winding, SLC-63) → owned numpy arrays without the points no triangle
   uses; positions/normals converted with :mod:`remoteview_core.coords` (RAS mm → glTF m, +Y up);
 - transform: a linear world matrix becomes ``T.matrix = C·M·C⁻¹`` (protocol §7.2), identity becomes no matrix; a
   world transform that is not linear, or linear with shear (glTF ``node.matrix`` must be TRS), is **baked** into the
@@ -372,7 +372,7 @@ def mesh_from_triangles(
     return _with_normals(polydata_from_triangles(positions, triangles).GetPoints(), triangles)
 
 
-#: The cell pairs the winding walk may check (SLC-54): the larger of 1,000 per triangle and 10⁹ (≈ 0.5 s). Spheres
+#: The cell pairs the winding walk may check (SLC-63): the larger of 1,000 per triangle and 10⁹ (≈ 0.5 s). Spheres
 #: need ≈ 120 a triangle, a 100-sided cone 628, an extruded 3,000-gon 1,900–3,300 (its caps' triangulation varies with
 #: the size); the 10⁹ keeps such primitives, and a 4,000-sided cylinder whose caps are fanned from a rim point
 #: (3.5·10⁸), on VTK's walk.
@@ -407,7 +407,7 @@ def _walk_budget(triangle_count: int) -> int:
 def walk_within_budget(triangles: NDArray[np.int64], point_count: int) -> bool:
     """Whether a walk over ``triangles`` that asks ``GetCellEdgeNeighbors`` for every edge of every triangle fits the
     budget (:data:`WALK_CHECKS_PER_TRIANGLE`, :data:`WALK_CHECKS_FLOOR`): the winding walk, and
-    ``vtkQuadricDecimation``'s set-up (``AddBoundaryConstraints``, SLC-52), which is the same loop."""
+    ``vtkQuadricDecimation``'s set-up (``AddBoundaryConstraints``, SLC-61), which is the same loop."""
     valence = np.bincount(triangles.ravel(), minlength=point_count)
     return _walk_checks(valence[triangles.T].astype(np.float64)) <= _walk_budget(len(triangles))
 
@@ -475,7 +475,7 @@ def _with_normals(points: vtkPoints, triangles: NDArray[np.int64]) -> Mesh | Non
         return None
     count = points.GetNumberOfPoints()
     cut = _points_to_cut(triangles, count)
-    # VTK's walk costs n(p)·n(q) per edge: 11 s for a 3,000-page book, 13 s for a fan of 80k triangles (SLC-54)
+    # VTK's walk costs n(p)·n(q) per edge: 11 s for a 3,000-page book, 13 s for a fan of 80k triangles (SLC-63)
     if cut is not None:
         triangles = _wound_with_points_cut(triangles, count, cut)
     clean = vtkPolyData()
@@ -579,7 +579,7 @@ def _checked_mesh(polydata: Any, bake: vtkAbstractTransform | None) -> Mesh | Sk
 
 
 class Collector:
-    """One collection — :func:`collect_scene`'s loop, or ``snapshot.ScenePreparation``'s steps (SLC-51): the entities
+    """One collection — :func:`collect_scene`'s loop, or ``snapshot.ScenePreparation``'s steps (SLC-60): the entities
     and skips so far, the names and the ID registry it uses. :meth:`model` and :meth:`segment` take one handle each,
     models first, in the order of :meth:`SceneApi.visible_model_nodes` and :meth:`SceneApi.visible_segments`."""
 

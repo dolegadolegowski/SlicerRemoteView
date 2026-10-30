@@ -17,7 +17,7 @@
   transport reconnects by itself, each new connection starts with ``session.resume``, and ``session.resumed`` brings
   the session back to Live with the same live updates and observers. The reconnect window — the relay's grace (at most
   :data:`MAX_GRACE_S`) plus :data:`RECONNECT_SLACK_S` — runs from when the transport says the connection was lost
-  (``Disconnected.lost_at``, SLC-41: before the wake for a computer that slept while Live — on Windows only after a
+  (``Disconnected.lost_at``, SLC-58: before the wake for a computer that slept while Live — on Windows only after a
   sleep longer than about ``MAX_SILENCE_S``), on the monotonic and on the wall clock (a computer that sleeps during
   the outage); after it nothing is sent (T1). So a sleep that begins while Live and outlasts the window ends the
   session once the drop is reported after the wake — on Windows, whose monotonic clock runs on through a sleep, only
@@ -712,7 +712,7 @@ class PanelController:
             return
         if self.phase is Phase.LIVE:  # the first drop of this outage
             self.phase = Phase.RECONNECTING
-            # from when the transport lost the connection: before the wake if the computer slept (SLC-41)
+            # from when the transport lost the connection: before the wake if the computer slept (SLC-58)
             now, wall = self._clock(), self._wall()
             age = 0.0 if event.lost_at is None else max(0.0, wall - event.lost_at)
             self._lost_at, self._lost_wall = now - age, wall - age

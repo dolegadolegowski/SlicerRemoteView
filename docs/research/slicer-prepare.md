@@ -1,4 +1,4 @@
-# Research — preparing the scene in steps (SLC-51)
+# Research — preparing the scene in steps (SLC-60)
 
 What `remoteview_core.snapshot.ScenePreparation` relies on, and what one step costs. Measured on 2026-10-29 in the
 sandbox (Linux, 4 cores, VTK 9.6.2 wheel, Python 3.12) with the real collection, decimation and GLB writer and the
@@ -35,7 +35,7 @@ per-node cap, three runs:
 
 Near the relay's 64 MiB limit — reachable with unshared points (a triangle soup) when every node is reduced to its
 share, or with nodes the filters cannot reduce — three runs of the whole last step on `quest3` scenes of 100k-triangle
-soups (SLC-51 review):
+soups (SLC-60 review):
 
 | | Quantised: 10 soups, 45.8 MiB | Not quantised: 7 soups, 56.1 MiB |
 |---|---|---|
@@ -47,7 +47,7 @@ soups (SLC-51 review):
 
 ## Decision
 
-The SHA-256 and the chunking stay in the last step, though they take more than the 0.25 s the SLC-51 row set as the
+The SHA-256 and the chunking stay in the last step, though they take more than the 0.25 s the SLC-60 row set as the
 point to move them (0.29 s for a 64 MiB GLB). Near the limit they are ≈ 0.13 s of a ≈ 1.1 s step quantised and ≈ 0.2 s
 of a ≈ 0.7 s step not (10–30 %); the rest is writing the GLB, and the GLB names the version, so it cannot move to an
 earlier step without being written again whenever an ack or a resume moves the version (above). A step of their own
@@ -55,10 +55,10 @@ would save ≈ 0.1–0.2 s. What would shorten the longest step is writing and h
 the expected version and again only when it moved: left to SLC-28, which measures the steps in Slicer (manual §15, with
 a scene near the limit). For a full `quest3` budget of ordinary meshes the last step is ≈ 0.15 s; a quantised `quest3`
 GLB is at most ≈ 46 MiB (1M triangles of unshared points) when every node is reduced to its share; nodes the filters
-cannot reduce (sent whole, §7.5; SLC-52) can take it to the 64 MiB check, where the last step would take ≈ 1.5 s (the
+cannot reduce (sent whole, §7.5; SLC-61) can take it to the 64 MiB check, where the last step would take ≈ 1.5 s (the
 measured step scaled to 64 MiB: ≈ 1.3 s `write_glb` plus ≈ 0.2 s for the hash; the chunks are encoded as they are sent).
-One node's decimation (minutes for flat or non-manifold input) is SLC-52's; one node's collection (a polygon of a
-million points) is SLC-53's.
+One node's decimation (minutes for flat or non-manifold input) is SLC-61's; one node's collection (a polygon of a
+million points) is SLC-62's.
 
 ## Between the steps
 

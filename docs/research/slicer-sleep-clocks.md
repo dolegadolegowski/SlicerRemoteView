@@ -1,4 +1,4 @@
-# Clocks across a sleep (SLC-41)
+# Clocks across a sleep (SLC-58)
 
 Why `RelayTransport` dates a lost connection the way it does (`Disconnected.lost_at`, `loss_time`, `MAX_SILENCE_S`),
 and what that means on each platform. Checked on 2026-10-28.

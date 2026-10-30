@@ -58,7 +58,7 @@ class SceneIds:
         self._segments: dict[tuple[Any, Any], str] = {}
         self._next_m = 1
         self._next_s = 1
-        #: How many times the scene was closed (:meth:`reset`): a preparation started before must not go on (SLC-51).
+        #: How many times the scene was closed (:meth:`reset`): a preparation started before must not go on (SLC-60).
         self.generation = 0
 
     def model_node_id(self, raw: Any) -> str | None:

@@ -1,4 +1,4 @@
-# Decimation to the profile budgets (SLC-14, SLC-52)
+# Decimation to the profile budgets (SLC-14, SLC-61)
 
 What `remoteview_core.decimate` relies on. Checked against VTK v9.6.0 headers; the dev venv runs VTK 9.6.2, and Slicer
 5.12.4 builds VTK 9.6 by default — Slicer's fork tag `slicer-v9.6.2-2026-05-15-f49a1dbaf`
@@ -20,7 +20,7 @@ of range or repeating a vertex are refused before any filter (VTK does not check
 latter was reported in review but not reproduced with VTK 9.6.2 — `[TODO verify]` with the input that crashed). The
 guaranteed reduction of the third filter was measured not to hold for duplicated or non-manifold triangles; such a node
 is sent whole and reported. The input is the collected entity (glTF metres: RAS → glTF is a rotation and a uniform
-scale, so the quadric error and the winding are unchanged) — since SLC-52 merged, centred and jittered: see *One node in
+scale, so the quadric error and the winding are unchanged) — since SLC-61 merged, centred and jittered: see *One node in
 bounded time*.
 
 ## Measured (dev venv, this container)
@@ -31,13 +31,13 @@ bounded time*.
 | same | 2,000 | 2,000 in 4.7 s | 2,000 in 3.4 s |
 
 A 400k-triangle node therefore blocks Slicer's main thread for a few seconds — up to ≈ 8 s when all three filters run
-(since SLC-52 a non-manifold node can take up to six filter runs: pro, the chain's other two on the mesh as it is, then
+(since SLC-61 a non-manifold node can take up to six filter runs: pro, the chain's other two on the mesh as it is, then
 the three on the split copy). **Worst case (measured by the SLC-14 review, VTK 9.6.2 wheel):** the quadric is
 super-linear on dense, exactly flat regions (tied zero-error collapses): a flat 0.1 m plane of 180k triangles takes 57 s
 to reach 100k and 237 s / 2.3 GB to reach 2k; an unsmoothed segmentation-like surface of 427k triangles with flat caps
 takes 437 s / 3 GB to reach 100k (`vtkDecimatePro(PreserveTopologyOn)`: ≈ 3 s; the same surface smoothed by Slicer's
 default 0.5: ≈ 8 s). A progress observer's `AbortExecuteOn` stops the quadric only after ≈ 16 s (7 progress events).
-SLC-52 (below) bounds one node's time on these shapes, and SLC-28 moves the preparation to one node per `QTimer` tick
+SLC-61 (below) bounds one node's time on these shapes, and SLC-28 moves the preparation to one node per `QTimer` tick
 with a progress dialog (FR-10). Whole-snapshot test (`test_decimate_quest2_scene_fits_500k_…`): about 5 s for 564k input
 triangles.
 
@@ -55,7 +55,7 @@ The JSON chunk is estimated from measured sizes: 420 bytes for an empty scene, 7
 ≈ 1,100 bytes per quantised node (≈ 970 as floats) plus its name and IDs. Measured error: < 0.1 % for meshes of
 thousands of triangles, up to +4 % for 40 cubes of 12 triangles (`tests/test_decimate.py`).
 
-## One node in bounded time (SLC-52)
+## One node in bounded time (SLC-61)
 
 Measured with the VTK 9.6.2 wheel of the dev venv (numpy 2.5.4) on the 4-core / 15 GB sandbox. Each run was its own
 process, killed at 90 s and limited to 6 GB. Other jobs ran at the same time (load average 1–2), so times vary by about
@@ -92,21 +92,21 @@ PD = [`vtkPolyData.cxx`](https://github.com/Kitware/VTK/blob/v9.6.0/Common/DataM
    takes the box over the points the triangles use, refuses positions that are not finite, and seeds the generator with
    a BLAKE2b digest (8 bytes) of the points' sorted keys rather than 0, ≈ 1 ms for 200k points: the same mesh moves the
    same way, but a crafted one can neither subtract a fixed jitter in advance — review: a grid pre-shifted by
-   `default_rng(0)`'s draws was back to the 5 s it took before SLC-52 — nor steer the seed: an XOR of the keys could be
+   `default_rng(0)`'s draws was back to the 5 s it took before SLC-61 — nor steer the seed: an XOR of the keys could be
    steered by one added point whose key was solved by inverting SplitMix64, and two coincident points cancelled in it.)
 3. **Check for non-manifold edges.** Sort the undirected edge keys `min·n + max` of all triangle edges (built from the
-   corner pairs with `np.minimum`/`np.maximum`, no per-row sort: SLC-54 review). The input is non-manifold if a key
+   corner pairs with `np.minimum`/`np.maximum`, no per-row sort: SLC-63 review). The input is non-manifold if a key
    occurs three times or more (`key[i] == key[i + 2]`). This costs ≈ 0.03 s for 400k triangles.
 4. **Try the attempts in order.** The first usable result wins. "Usable" is today's check: at least one triangle, at
    most the share, finite normals, positions within float32.
    - *Manifold input* (the order of ADR 0005 Decision 2 plus SLC-14's third filter, unchanged): `vtkQuadricDecimation`,
      then `vtkDecimatePro(PreserveTopologyOn)`, then `vtkDecimatePro` with its defaults.
    - *Non-manifold input*: first `vtkDecimatePro(PreserveTopologyOn)`. If its result is not usable, the manifold chain
-     on the mesh as it is — when the quadric's set-up fits SLC-54's budget (`collect.walk_within_budget`: the same
+     on the mesh as it is — when the quadric's set-up fits SLC-63's budget (`collect.walk_within_budget`: the same
      n(p)·n(q) loop; review: on a two-sided surface, four triangles on every edge, pro stops short and the split copy
-     is a soup — a two-sided sphere kept 0.19 of its area; now 0.50, as before SLC-52). Last a **split copy**: every
+     is a soup — a two-sided sphere kept 0.19 of its area; now 0.50, as before SLC-61). Last a **split copy**: every
      triangle corner at an end point of a non-manifold edge gets its own copy of that point (`collect.split_points`,
-     SLC-54), made only when it is reached, through the manifold chain.
+     SLC-63), made only when it is reached, through the manifold chain.
    - If no attempt is usable, the node is sent whole and reported, as today (§7.5, never dropped).
 
 The ADR erratum release is asked to write is in report `2026-10-21-slicer-4` (section *The rule*).
@@ -115,7 +115,7 @@ No filter options change. The code is about 200 lines in `decimate.py`, half of 
 guard, jitter, check, split, and an attempts generator in place of the single `source`. The rule uses no timer, no tuned
 threshold and no predictor of flatness.
 The normals step after a filter (`collect.mesh_from_triangles`) was cubic on the result of a non-manifold input (the
-one-row book's: 1,999 triangles on one edge, 3.3 s); SLC-54 bounds it.
+one-row book's: 1,999 triangles on one edge, 3.3 s); SLC-63 bounds it.
 The output is identical across runs: the same SHA-256 for the grid and the book in two runs each. Across numpy versions
 it is not guaranteed to be identical (see the residual risks).
 
@@ -244,8 +244,8 @@ coincident points).
 | Flat plane, `vtkPlaneSource` 120 × 120 | 28,800 → 2,000 | 0.02 | 0.19 | quadric | 480 → 82 | 1.000 |
 | Same, `grid_entity(121, 121)` | 28,800 → 2,000 | 0.02 | 0.16 | quadric | 480 → 85 | 1.000 |
 | Labelmap cylinder r 110 / h 160 (flying edges) | 434,800 → 100,000 | 0.50 | 3.58 | quadric | 0 → 0 | 1.000 |
-| Book, 3,000 pages × 1 row | 6,000 → 2,000 | 0.04 (11 s before SLC-54) | 0.08 | pro | 9,000 → 3,998 | 0.333 |
-| Book, 3,000 pages × 4 rows | 24,000 → 2,000 | 0.15 (minutes before SLC-54) | 1.07 | pro (12,000), quadric on the split copy | 18,000 → 6,000 | 0.084 |
+| Book, 3,000 pages × 1 row | 6,000 → 2,000 | 0.04 (11 s before SLC-63) | 0.08 | pro | 9,000 → 3,998 | 0.333 |
+| Book, 3,000 pages × 4 rows | 24,000 → 2,000 | 0.15 (minutes before SLC-63) | 1.07 | pro (12,000), quadric on the split copy | 18,000 → 6,000 | 0.084 |
 | Sphere, `support.sphere(448)` | 399,616 → 100,000 | 0.22 | 2.58 | quadric | 0 → 0 | 1.000 |
 | Same as a triangle soup | 399,616 → 100,000 | 1.10 | 2.64 | quadric | 0 → 0 (merged) | 1.000 |
 | Same sphere, 100 triangles duplicated | 399,716 → 100,000 | 0.22 | 1.87 | pro | 0 → 0 | 1.000 |
@@ -255,11 +255,11 @@ coincident points).
 
 **Notes on the books.** No filter can fit 3,000 pages into 2,000 triangles: the best is a third of the area, which pro
 reaches on the 1-row book. The split copy of the 4-row book keeps 9 % of the area, as separate triangles. This is the
-price of a bounded time on broken input. The gate to the whole-mesh chain is SLC-54's walk budget (≈ 0.5 s of set-up),
+price of a bounded time on broken input. The gate to the whole-mesh chain is SLC-63's walk budget (≈ 0.5 s of set-up),
 which is conservative for the quadric: over it a book keeps about 20 % of its area where the quadric alone kept 80–100 %
-before SLC-52, in under 10 s (review round 3; area now vs before, and the time before to the share: 400 pages × 4 rows,
+before SLC-61, in under 10 s (review round 3; area now vs before, and the time before to the share: 400 pages × 4 rows,
 1.75× the budget, 0.20 vs 0.80 in 0.87 s; 300 × 8, 1.72×, 0.21 vs 1.0 in 0.78 s; 180 × 40, 2.09×, 0.22 vs 1.0 in 3.5 s;
-1,000 × 4, 27×, 0.20 vs 0.80 in 9.6 s); under it the whole-mesh chain keeps the area it had before. SLC-55's criterion 4
+1,000 × 4, 27×, 0.20 vs 0.80 in 9.6 s); under it the whole-mesh chain keeps the area it had before. SLC-64's criterion 4
 holds such books to that area (e.g. a budget of the decimation's own).
 
 **Criterion 2 (sphere).** Eight interleaved pairs were run with a jitter of 1e-6: today's quadric against the whole
@@ -281,7 +281,7 @@ interleaved runs each (the estimate least moved by other load; ≈ 35 s, marked 
 
 ### Residual risks and `[TODO verify]`
 
-- **Node size (→ SLC-56).** The quadric is not linear in the input on this sandbox:
+- **Node size (→ SLC-65).** The quadric is not linear in the input on this sandbox:
 
   | Sphere, input → 100k | Time |
   |---|---|
@@ -291,11 +291,11 @@ interleaved runs each (the estimate least moved by other load; ≈ 35 s, marked 
 
   `vtkDecimatePro(PreserveTopologyOn)` takes 14.8 s on the 1.6M sphere. A node of about 1M input triangles or more
   therefore exceeds 10 s whichever filter runs (0.8M: 6.6–8.8 s; review, the implementation: 1.6M 16.4 s, 2M 25.3 s).
-  The rule bounds the pathological cases, not size; large CT surfaces of 1–3M triangles are ordinary input. SLC-56 owns
+  The rule bounds the pathological cases, not size; large CT surfaces of 1–3M triangles are ordinary input. SLC-65 owns
   it: a cheap pre-pass to a few times the share, an input cap, or decimation off the main thread. Whether Slicer's VTK
   wrapping releases the GIL during `Update()` is `[TODO verify]`.
-- **Points used by very many triangles (→ SLC-55).** Every filter is super-linear around one: `AddBoundaryConstraints`
-  asks `GetCellEdgeNeighbors` (n(p)·n(q) checks, SLC-54) for every edge, and each collapse at a point of *k* triangles
+- **Points used by very many triangles (→ SLC-64).** Every filter is super-linear around one: `AddBoundaryConstraints`
+  asks `GetCellEdgeNeighbors` (n(p)·n(q) checks, SLC-63) for every edge, and each collapse at a point of *k* triangles
   scans them. Measured with the rule (collected, then decimated to a fifth): a manifold fan around one point of 10k /
   20k / 40k triangles 1.35 / 3.9 / 15.2 s (≈ d²), a cone with two such points of 12,500 3.2 s, triangles sharing only
   one point (a bow-tie) 1k / 2k / 4k 0.09 / 0.41 / 2.75 s (≈ d³; 20k > 120 s). `vtkDecimatePro` is no better here (cone
@@ -303,26 +303,26 @@ interleaved runs each (the estimate least moved by other load; ≈ 35 s, marked 
   [DP#L580](https://github.com/Kitware/VTK/blob/v9.6.0/Filters/Core/vtkDecimatePro.cxx#L580) and
   [DP#L667](https://github.com/Kitware/VTK/blob/v9.6.0/Filters/Core/vtkDecimatePro.cxx#L667)). Bounding it trades
   quality (cutting such points before decimating leaves the fan's triangles unconnected, so decimation deletes them)
-  against reduction (keeping the node whole and reporting it); that choice is SLC-55's. The same holds for
+  against reduction (keeping the node whole and reporting it); that choice is SLC-64's. The same holds for
   `vtkDecimatePro(PreserveTopologyOn)` on a shared edge of many triangles (a book of 10k / 20k / 40k / 100k pages on
   one edge: 0.74 / 3.0 / 12.3 / 77 s, ≈ m²; review) and for points the merge creates: a soup whose triangles share one
-  corner merges into a bow-tie (2k / 4k / 8k triangles: 0.36 / 2.2 / 17 s, against 0.01–0.04 s before SLC-52, which
-  decimated each loose triangle alone and left holes). SLC-55's prediction must run on the merged mesh. SLC-53's
+  corner merges into a bow-tie (2k / 4k / 8k triangles: 0.36 / 2.2 / 17 s, against 0.01–0.04 s before SLC-61, which
+  decimated each loose triangle alone and left holes). SLC-64's prediction must run on the merged mesh. SLC-62's
   polygon cap removes
   the most common source, a big polygon triangulated as a fan (whether `vtkTriangleFilter` fans a convex polygon is
   `[TODO verify]` there).
-- **A far-off triangle stretches the box (→ SLC-56).** The jitter scales with the diagonal of the node's whole bounding
+- **A far-off triangle stretches the box (→ SLC-65).** The jitter scales with the diagonal of the node's whole bounding
   box, so one triangle far from a dense part makes the jitter larger than that part's edges and crumples it, and the
   quadric is super-linear on the crumpled part (review round 3 and its delta check: a 400k sphere of 0.28 mm edges with
   one used triangle in the same node — 1 km 3.0–3.9 s; 10 km 6.2 s, or 22–31 s with another far triangle; 30 km 12 s;
-  100 km 3.3–14.9 s; 1,000 km > 150 s; before SLC-52 2.2–2.7 s). The time depends on the far triangle and does not rise
+  100 km 3.3–14.9 s; 1,000 km > 150 s; before SLC-61 2.2–2.7 s). The time depends on the far triangle and does not rise
   steadily with the distance; the worst seen below 1,000 km is ≈ 30 s at 10 km. It takes crafted or corrupt input
-  (collect accepts it: finite float32 metres, non-zero area). Mitigations for SLC-56: cap the amplitude by a fraction of
+  (collect accepts it: finite float32 metres, non-zero area). Mitigations for SLC-65: cap the amplitude by a fraction of
   the median edge length (the GLB's position step, extent / 65,534, erases such a part anyway), or centre and jitter
   each connected component on its own box.
 - **A soup mixed with other parts.** The soup exception is decided for the whole node: in a node that is not all soup, a
   merge that adds edges of more than two triangles is refused for the soup part as well, which then keeps its holes, as
-  before SLC-52 (review round 3: a soup sphere with a facet written twice next to a connected sphere, area 0.645, the
+  before SLC-61 (review round 3: a soup sphere with a facet written twice next to a connected sphere, area 0.645, the
   same as before). Merging per point class — always for points used only by soup triangles — would close it; criterion
   3's input, a pure soup, is merged.
 - **Quality on non-manifold input.** Pro's error is 2.6× the quadric's (mean) on smooth surfaces, still below the GLB
@@ -330,13 +330,13 @@ interleaved runs each (the estimate least moved by other load; ≈ 35 s, marked 
 - **Positions move slightly.** The jitter moves surviving points by ≤ 1e-7 · diagonal per coordinate, so flat faces are
   no longer exactly flat. The normal tilt is about jitter / edge length — small, except on sliver triangles, which can
   take an arbitrary normal (review: 26 of 50k points more than 1° off, at most 61°, on the 180k plane → 100k; 3 on the
-  labelmap cylinder's caps; the code before SLC-52 makes such slivers too on a tilted plane, up to 5.8°). Tests compare
+  labelmap cylinder's caps; the code before SLC-61 makes such slivers too on a tilted plane, up to 5.8°). Tests compare
   positions with a tolerance, not exactly.
 - **Determinism.** The output is deterministic per numpy build (the seed comes from the mesh). numpy guarantees a
   `Generator` stream only on the same build and environment, and may change it in feature releases
   ([compatibility.rst#L15-L22, #L46-L50, numpy v2.5.4](https://github.com/numpy/numpy/blob/v2.5.4/doc/source/reference/random/compatibility.rst#L15-L22)).
   Tests must check properties (count ≤ share, bounds, holes), not coordinates — and not single draws: the soup test's
-  strict normals check failed for another seed (SLC-52 review round 3). Slicer 5.12.4 ships numpy 2.4.6 and the dev
+  strict normals check failed for another seed (SLC-61 review round 3). Slicer 5.12.4 ships numpy 2.4.6 and the dev
   venv 2.5.4 (`slicer-collect.md`), so Slicer's draws may differ from the tests' (`[TODO verify]` in Slicer: the rule's
   properties, not its coordinates, are what §14.2 checks).
 - **Slicer's VTK versus the wheel.**

@@ -457,7 +457,7 @@ def sphere(resolution: int = 16):
 def book(pages: int = 3_000, rows: int = 1, *, alternate: bool = False):
     """``pages`` flat pages of ``rows`` quads (two triangles each) fanned over 180° around a spine of ``rows`` edges on
     the S axis, 100 mm wide and 150 mm high: every spine edge is shared by one triangle of each page (non-manifold;
-    SLC-52, SLC-54). Every page is wound the same way, or every second one the other way with ``alternate``."""
+    SLC-61, SLC-63). Every page is wound the same way, or every second one the other way with ``alternate``."""
     spine = np.c_[np.zeros(rows + 1), np.zeros(rows + 1), np.linspace(0.0, 150.0, rows + 1)]
     angles = np.linspace(0.0, np.pi, pages)
     outer = np.stack(

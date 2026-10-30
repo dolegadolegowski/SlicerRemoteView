@@ -76,18 +76,18 @@ What follows:
   link it proves what the estimate cannot; a close frame with another code says it did not handle it (e.g. a refusal —
   1008 for a `session.close` that went as the first frame of a new socket, 4006 over the budget — or a drop: 1009, 1011,
   4007, 4009–4011), so `final_sent` is false — also for 4001, 4002 and 4008, after which the relay keeps no session, so
-  the warning is needless there (follow-up for SLC-50). This relies on the relay answering a close only after it has
+  the warning is needless there (follow-up for SLC-59). This relies on the relay answering a close only after it has
   handled the frames before it: `relay-server` does (`ws` parses frames in order and its handlers are synchronous); a
   WebSocket stack with a receive queue (like the tests' fake relay) or a proxy that terminates WebSocket could answer
   first — `[TODO verify]` that Railway's edge forwards close frames and never answers one itself. So on a link of at
   least 1 Mbit/s the panel warns (`FINAL_NOT_SENT`) whenever the relay may keep the session; on a slower one it may not
-  (SLC-50). (SLC-40 review: a writer held at the write-ahead hands the close over at once, behind up to 4 MiB.) On a
+  (SLC-59). (SLC-40 review: a writer held at the write-ahead hands the close over at once, behind up to 4 MiB.) On a
   real slow path the socket buffers hold much less than 4 MiB, so the writer is usually inside the `send()` of a 1 MiB
   chunk (≈ 8 s at 1 Mbit/s) when the abort fires and the close is not sent at all. When it was handed to the socket, the
   abort can still lose it: after the abort the relay's `pong` to a `ping` in the backlog meets a closed socket, which
   answers with a reset that discards the queued bytes (reproduced in the SLC-40 review with a forwarding proxy at a
   scaled 1 MB/s: no `session.close` at the relay in 3 of 3 runs). The relay then keeps the session in grace; report
-  `2026-10-20-slicer-6` (second part) stays open: Stop → SLC-50, Slicer exit (≤ 3 s) a residual for `release`.
+  `2026-10-20-slicer-6` (second part) stays open: Stop → SLC-59, Slicer exit (≤ 3 s) a residual for `release`.
 
 Rejected: sending no `ping` while chunks are queued (the `ping` goes out after the chunk anyway — the problem is the
 bytes already written), and limiting the kernel's send buffer (`SO_SNDBUF`) — it would cap throughput on high-latency
@@ -107,7 +107,7 @@ already in the buffers still go out.
 - `[TODO verify]` Whether a `session.close` handed to the socket before `stop()`'s abort ever reaches the relay on a
   real link: the abort (`transport.abort()`, not in the `websockets` docs) drops what the user-space buffer still
   holds, and a reset from the peer side drops the kernel's queue too. It needs a real slow link (`tc netem`, a phone
-  hotspot) — the throttle proxy of manual §2 step 16 drops its own queue when the client closes — SLC-50.
+  hotspot) — the throttle proxy of manual §2 step 16 drops its own queue when the client closes — SLC-59.
 - The relay's own WebSocket-level ping (every 30 s) while its `pong` waits behind queued chunks: *answered* — since
   SRV-27 a publisher's complete frames excuse a late pong one interval at a time (report `2026-10-27-server-2`), and a
   run against `relay-server` from `main` (6.7 MB at 1 Mbit/s, the real 30 s heartbeat) was acknowledged without a

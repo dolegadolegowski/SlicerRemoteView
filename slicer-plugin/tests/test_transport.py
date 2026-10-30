@@ -1209,7 +1209,7 @@ def test_transport_max_extension_must_be_finite_and_non_negative(value):
     RelayTransport("wss://relay.example.org/ws", queue.Queue(), max_extension=0)
 
 
-# --------------------------------------------------------------------------- SLC-41: when a connection was lost
+# --------------------------------------------------------------------------- SLC-58: when a connection was lost
 
 
 class OffsetClocks:
@@ -1691,7 +1691,7 @@ def test_transport_terminal_close_codes_stop_reconnecting(relay, make_transport,
     )
     drop = next_event(events, Disconnected)
     assert (drop.error.kind, drop.close_code, drop.retry_in) == (ErrorKind.CLOSED, code, None)
-    # a lost connection is dated even when the transport stops (SLC-41)
+    # a lost connection is dated even when the transport stops (SLC-58)
     assert drop.lost_at is not None
     client._thread.join(5)
     assert not client.running and server.connections == 1

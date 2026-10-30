@@ -261,7 +261,7 @@ def test_decimate_result_keeps_only_the_points_its_triangles_use():
     np.testing.assert_array_equal(
         smaller.indices, [[0, 1, 2]]
     )  # the flat triangle and the loose point are gone
-    # the filters see the mesh centred on its bounding box (SLC-52); the centre is added back to their result
+    # the filters see the mesh centred on its bounding box (SLC-61); the centre is added back to their result
     centre = (entity.positions.min(axis=0) + entity.positions.max(axis=0)) / 2
     np.testing.assert_allclose(
         smaller.positions - centre, [[0, 0, 0], [0.01, 0, 0], [0, 0.01, 0]], atol=1e-15
@@ -413,7 +413,7 @@ def test_decimate_profile_names_match_the_protocol():
     assert set(PROFILES) == set(protocol_client.PROFILES) == set(glb_writer.PROFILES)
 
 
-# --------------------------------------------------------------------------- one node in bounded time (SLC-52)
+# --------------------------------------------------------------------------- one node in bounded time (SLC-61)
 
 
 def plane(resolution: int):
@@ -483,9 +483,9 @@ def area(entity) -> float:
         (lambda: grid(121, 121, 1.0), 2_000, 1.0),
         # review: 437 s and 3 GB; > 90 s here
         (labelmap_cylinder, 100_000, 1.0),
-        # 18 s (the review's book: 73 s); collect 11 s before SLC-54
+        # 18 s (the review's book: 73 s); collect 11 s before SLC-63
         (lambda: book(3_000, 1), 2_000, 0.3),
-        # > 90 s; collect minutes before SLC-54
+        # > 90 s; collect minutes before SLC-63
         (lambda: book(3_000, 4), 2_000, 0.05),
     ],
     ids=["plane-180k", "grid-180k", "grid-28.8k", "labelmap-cylinder-435k", "book", "book-4-rows"],
@@ -572,7 +572,7 @@ def _repeated(entity, *, own_points: bool):
 def test_decimate_bounded_triangle_soup_comes_out_without_holes(repeat):
     """Every triangle with points of its own (an STL read without merging): the quadric decimated each triangle
     alone and left 300,000 boundary edges on the 400k sphere; merged, the soup is one surface again (criterion 3) —
-    also with a facet written twice, whose merged edges are shared by three triangles (SLC-52 review: 0.38 of the
+    also with a facet written twice, whose merged edges are shared by three triangles (SLC-61 review: 0.38 of the
     area with 6,000 open edges)."""
     source = sphere(64)
     points, triangles = mesh_points_and_triangles(source)
@@ -598,7 +598,7 @@ def test_decimate_bounded_triangle_soup_comes_out_without_holes(repeat):
 
 def test_decimate_bounded_soup_of_a_two_sided_surface_keeps_one_sides_area():
     """The soup of a two-sided sphere is merged into the two-sided sphere and decimated like it (0.19 of the area
-    unmerged: SLC-52 review)."""
+    unmerged: SLC-61 review)."""
     [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(64)})
     soup = _soup(_two_sheets(entity, reversed_=True, own_points=False))
     smaller = decimate_entity(soup, 2_000)
@@ -745,7 +745,7 @@ def _two_sheets(entity, *, reversed_: bool, own_points: bool):
         (
             lambda e: _two_sheets(e, reversed_=True, own_points=False),
             0.45,
-        ),  # one sheet's area: as before SLC-52
+        ),  # one sheet's area: as before SLC-61
         (lambda e: _two_sheets(e, reversed_=True, own_points=True), 0.99),
         (lambda e: _two_sheets(e, reversed_=False, own_points=True), 0.99),
         # one edge of three triangles already: the merge would add thousands (0.50 before the per-edge guard)
@@ -767,7 +767,7 @@ def _two_sheets(entity, *, reversed_: bool, own_points: bool):
     ],
 )
 def test_decimate_bounded_sheets_on_each_other_keep_their_area(make, kept):
-    """A surface with a second sheet on it (SLC-52 review): every edge shared by four triangles, so the topology-kept
+    """A surface with a second sheet on it (SLC-61 review): every edge shared by four triangles, so the topology-kept
     filter stops short, and the split copy would be a soup the quadric empties (area 0.19 and 0.38 before the fix) —
     the chain runs on the mesh as it is when its set-up fits the budget, and sheets with points of their own are not
     merged into one."""
@@ -824,7 +824,7 @@ def test_decimate_bounded_touching_segments_keep_their_area(repeat):
     """The two halves of a ball as two labels in one flying-edges run (40³ voxels, radius 16): each label's surface
     has the disc between them on points of its own; merged, the two discs would be sheets on each other and lose area
     (0.85 with the guard off, and with a facet written twice under the whole-mesh guard of round 2; boxes lose none, so
-    they cannot tell: SLC-52 review). The node keeps its area."""
+    they cannot tell: SLC-61 review). The node keeps its area."""
     z, y, x = np.mgrid[0:40, 0:40, 0:40]
     ball = (x - 20) ** 2 + (y - 20) ** 2 + (z - 20) ** 2 <= 16**2
     volume = np.where(ball, np.where(x < 20, 1, 2), 0).astype(np.uint8)
@@ -889,7 +889,7 @@ def _first_use_order(entity):
 def test_decimate_bounded_jitter_is_seeded_from_the_mesh():
     """The same mesh moves the same way (deterministic). The same mesh moved elsewhere, or with two coincident unused
     points added, moves differently: the seed is a digest of every point, so a crafted mesh cannot steer it to cancel
-    its jitter in advance (an XOR of the keys could be: SLC-52 review)."""
+    its jitter in advance (an XOR of the keys could be: SLC-61 review)."""
     [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(64)})
     entity = _first_use_order(entity)  # so that the merge of the added pair keeps the points' order
     count = len(entity.positions)
@@ -965,7 +965,7 @@ def test_decimate_bounded_non_manifold_mesh_tries_topology_kept_first(
 
 def test_decimate_bounded_whole_mesh_chain_skips_the_filter_that_just_ran(monkeypatch):
     """A two-sided sphere: topology-kept pro stops short, the quadric (here unusable) runs on the mesh as it is, the
-    same pro is not run again on the same input (deterministic: a wasted run, SLC-52 review), the guaranteed one
+    same pro is not run again on the same input (deterministic: a wasted run, SLC-61 review), the guaranteed one
     is."""
     log: list = []
     first = Recording(decimate._pro, log)

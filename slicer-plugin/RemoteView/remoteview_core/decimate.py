@@ -12,10 +12,10 @@ Profile       Total triangles  Per node        Snapshot size (recommended)
 
 :func:`fit_to_budget` gives every node a share of the total in proportion to its triangles (:func:`allocate`) — at
 least :attr:`Budget.floor_triangles` (or all it has), at most the per-node cap — and decimates the nodes above their
-share (:func:`fit_entity`, one node at a time: ``snapshot.ScenePreparation`` calls it once per step, SLC-51).
+share (:func:`fit_entity`, one node at a time: ``snapshot.ScenePreparation`` calls it once per step, SLC-60).
 Nodes are **never dropped** (§7.5): a node the filters cannot reduce keeps its mesh and is reported. Decimation runs on
 the collected entities (glTF metres, after SLC-07's clean-up), one node per :func:`decimate_entity` call, by a rule
-that keeps exactly flat regions and edges shared by many triangles from taking minutes (SLC-52,
+that keeps exactly flat regions and edges shared by many triangles from taking minutes (SLC-61,
 ``docs/research/slicer-decimate.md``):
 
 1. exactly coincident points are merged (``vtkCleanPolyData``, tolerance 0) when there are any, so a triangle soup is
@@ -29,7 +29,7 @@ that keeps exactly flat regions and edges shared by many triangles from taking m
    back to its result;
 3. a mesh with an edge shared by more than two triangles (non-manifold) costs the quadric's set-up n(p)·n(q) for every
    edge — the cube of the triangles on one edge — so it goes to ``vtkDecimatePro`` with ``PreserveTopologyOn`` first;
-   if its result is not usable, the chain below runs on the mesh as it is when that set-up fits SLC-54's budget
+   if its result is not usable, the chain below runs on the mesh as it is when that set-up fits SLC-63's budget
    (:func:`~remoteview_core.collect.walk_within_budget`: a two-sided surface, four triangles on every edge), and last
    on a copy with a point of its own for every corner at an end of such an edge
    (:func:`~remoteview_core.collect.split_points`);
@@ -40,11 +40,11 @@ that keeps exactly flat regions and edges shared by many triangles from taking m
 The first usable result wins: at least one triangle, at most the share, finite normals, positions within float32 — a
 zero normal is repaired to +Y like a collected node's. The normals are recomputed like a collected mesh's
 (:func:`~remoteview_core.collect.mesh_from_triangles`). The rule does not bound the size — a node of ≈ 1M triangles or
-more takes over 10 s (0.8M: 6.6–8.8 s), whichever filter runs (SLC-56) — nor a point used by thousands of triangles,
+more takes over 10 s (0.8M: 6.6–8.8 s), whichever filter runs (SLC-65) — nor a point used by thousands of triangles,
 around which every filter is super-linear (a fan of 20,000 triangles ≈ 4 s, 4,000 triangles sharing only one point
-≈ 3 s, a book of 40,000 pages on one edge ≈ 12 s in ``vtkDecimatePro``; SLC-55), nor a node whose bounding box one
+≈ 3 s, a book of 40,000 pages on one edge ≈ 12 s in ``vtkDecimatePro``; SLC-64), nor a node whose bounding box one
 far-off triangle stretches: the jitter grows with the box and crumples the dense part (a 400k sphere with one triangle
-10 km away up to ≈ 30 s, depending on that triangle, before SLC-52 2.2–2.7 s; SLC-56).
+10 km away up to ≈ 30 s, depending on that triangle, before SLC-61 2.2–2.7 s; SLC-65).
 :func:`glb_binary_size` (exact) lets ``build_snapshot`` refuse a scene whose binary chunk alone is over the relay's
 limit before the file is built; :func:`estimate_glb_size` gives the size that refusal reports.
 
@@ -153,10 +153,10 @@ def _pro_guaranteed(reduction: float) -> Any:
 #: The filters :func:`decimate_entity` tries in turn (tests replace them).
 FILTERS: tuple[Callable[[float], Any], ...] = (_quadric, _pro, _pro_guaranteed)
 #: The filter tried first on a mesh with an edge shared by more than two triangles; then :data:`FILTERS` on the mesh as
-#: it is while its set-up fits ``collect.walk_within_budget``, then on its split copy (SLC-52; looked up at the call,
+#: it is while its set-up fits ``collect.walk_within_budget``, then on its split copy (SLC-61; looked up at the call,
 #: tests replace it).
 NON_MANIFOLD_FIRST: Callable[[float], Any] = _pro
-#: How far the jitter moves a coordinate at most, as a fraction of the bounding-box diagonal (SLC-52): ≈ 13× the
+#: How far the jitter moves a coordinate at most, as a fraction of the bounding-box diagonal (SLC-61): ≈ 13× the
 #: rounding noise of a centred coordinate (√ε·|x| ≤ 0.75e-8 of the diagonal, |x| being at most half of it; 1e-8 still
 #: left hubs), ≈ 180× in the quadric's cost; 1e-6 slowed the quadric on a smooth sphere by 10–15 %. It is 0.011 of the
 #: GLB's position step (``max extent / 65,534``).
@@ -190,7 +190,7 @@ def _merged(
     no two points coincide (:func:`_coincident`; most meshes: the merge took ≈ 0.07 s for 400k triangles and reordered
     the points), or when merging would join separate sheets lying on each other — a duplicated shell, two sides with
     points of their own, touching segments — into more edges of more than two triangles than the input had (decimating
-    those cuts holes: SLC-52 review). A soup (:func:`_soup`) is always merged. Tolerance 0 makes ``vtkCleanPolyData``
+    those cuts holes: SLC-61 review). A soup (:func:`_soup`) is always merged. Tolerance 0 makes ``vtkCleanPolyData``
     use ``vtkMergePoints`` (exact coincidence). A triangle left with a repeated point becomes a line and is dropped:
     only one whose corners already coincided, which has no area (collect drops those)."""
     if not _coincident(keys):
@@ -261,8 +261,8 @@ def _attempts(
         return
     whole = polydata_from_triangles(points, triangles)
     yield whole, NON_MANIFOLD_FIRST
-    # mildly non-manifold (a two-sided surface: four triangles on every edge): the chain copes, as it did before SLC-52,
-    # when the quadric's set-up — the n(p)·n(q) loop of SLC-54's walk — fits its budget; the split copy would be a soup
+    # mildly non-manifold (a two-sided surface: four triangles on every edge): the chain copes, as it did before SLC-61,
+    # when the quadric's set-up — the n(p)·n(q) loop of SLC-63's walk — fits its budget; the split copy would be a soup
     if walk_within_budget(triangles, len(points)):
         for make in chain:
             if make is not NON_MANIFOLD_FIRST:  # it has just run on this input
@@ -302,7 +302,7 @@ def _prepared(
     if not (np.all(np.isfinite(centre)) and math.isfinite(diagonal)):
         return None
     # seeded from a digest of the mesh: the same mesh moves the same way, and a crafted one cannot steer the seed to
-    # cancel its jitter in advance (an XOR of the keys could be: SLC-52 review)
+    # cancel its jitter in advance (an XOR of the keys could be: SLC-61 review)
     rng = np.random.default_rng(
         int.from_bytes(hashlib.blake2b(keys.tobytes(), digest_size=8).digest(), "little")
     )

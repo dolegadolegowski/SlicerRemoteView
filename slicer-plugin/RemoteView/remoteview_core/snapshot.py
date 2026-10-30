@@ -21,13 +21,13 @@ transport in order.
 - ``announce`` (a re-export's new nodes, SLC-29) gives :attr:`Snapshot.announced`, the ``scene.nodeAdded`` hint (§8.2)
   the caller sends before the frames, for the nodes the export takes. It is built only once the binary chunk is known
   to fit, so a scene too large for the relay leaves no hint without its snapshot on the wire.
-- :class:`ScenePreparation` does the same in steps (SLC-51), so the panel can run one per ``QTimer`` tick (SLC-28): one
+- :class:`ScenePreparation` does the same in steps (SLC-60), so the panel can run one per ``QTimer`` tick (SLC-28): one
   node collected per step, then one entity fitted to its share per step, then one last step that writes the GLB and
   builds the frames — the only one that touches the client (the hint, the version, ``begin``). Before it,
   :meth:`~ScenePreparation.cancel` leaves the client as it was. :func:`build_snapshot` runs all the steps in one call.
 
 Main thread only (VTK, and the client is not thread-safe). The SHA-256 is computed here too, in the last step
-(decided in SLC-08, kept in SLC-51): that step takes ≈ 0.15 s for a full ``quest3`` budget, ≈ 1.1–1.3 s for a
+(decided in SLC-08, kept in SLC-60): that step takes ≈ 0.15 s for a full ``quest3`` budget, ≈ 1.1–1.3 s for a
 46 MiB GLB and ≈ 1.5 s at the relay's 64 MiB limit, mostly writing the GLB (``docs/research/slicer-prepare.md``).
 """
 
@@ -128,7 +128,7 @@ class SceneChangedError(RuntimeError):
 
 
 class ScenePreparation:
-    """:func:`build_snapshot` in steps (SLC-51; see the module docstring): call :meth:`step` until it returns the
+    """:func:`build_snapshot` in steps (SLC-60; see the module docstring): call :meth:`step` until it returns the
     :class:`Snapshot`. The scene's node lists are read here (no geometry), and *Hide node names* is fixed here
     (:attr:`anonymize_names`): the owner calls :meth:`cancel` and starts a new preparation when the setting changes or
     the scene is closed. ``ids`` is the session's registry, the one a scene close resets: a closed scene is then refused

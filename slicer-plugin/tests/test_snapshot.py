@@ -301,7 +301,7 @@ def test_snapshot_far_over_the_limit_is_never_written(monkeypatch):
         )
 
 
-# --------------------------------------------------------------------------- SLC-51: the snapshot in steps
+# --------------------------------------------------------------------------- SLC-60: the snapshot in steps
 
 #: A budget that decimates the larger sphere only (448 triangles, a share of at most 200; the others fit).
 SMALL = Budget(
