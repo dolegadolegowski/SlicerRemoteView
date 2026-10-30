@@ -1,7 +1,7 @@
 """SLC-68: the scene or the session changed between two steps of a preparation (SLC-51), at every step position —
 what ``LiveUpdates`` and the panel do with it: a scene closed (T7), a batch, *Hide node names*, a lost connection and
 a session created again. ``prepare_snapshot``'s own checks are in ``test_prepare.py``. SLC-70: a scene closed off the
-main thread, between two steps or during one."""
+main thread, between two steps or during one. SLC-71: nodes removed or hidden while the scene is prepared."""
 
 from __future__ import annotations
 
@@ -15,9 +15,11 @@ from support import (
     OTHER_TOKEN,
     TOKEN,
     URL,
+    FakeSegment,
     FakeTransport,
     LiveScene,
     MrmlModel,
+    MrmlSegmentation,
     ack,
     created,
     deliver,
@@ -32,6 +34,7 @@ from support import (
 )
 from test_live import A, Rig, drop, resume, started_in_steps, to_the_end
 from test_panel_live import (
+    EVENTS,
     NETWORK,
     B,
     C,
@@ -828,4 +831,178 @@ def test_panel_a_scene_closed_off_thread_while_reconnecting_is_reset_at_once(fak
     assert node_counts(frames)[0] == 0 and node_counts(frames)[-1] == 2
     assert found(frames, "Doe", B) == []
     assert leaks(caplog, capfd, "Doe", "Roe", "Traceback", CODE, TOKEN) == []
+    assert "live:" not in caplog.text and "scene:" not in caplog.text
+
+
+# --------------------------------------------------------------------------- nodes removed meanwhile (SLC-71)
+
+SEG = "vtkMRMLSegmentationNode1"
+
+
+def viewers_hold(frames: list) -> dict[str, bool]:
+    """``nodeId → visible`` on the viewers: the last snapshot in ``frames``, then the updates and removals after it."""
+    messages = [m for m in frames if isinstance(m, dict)]
+    last = max(i for i, m in enumerate(messages) if m["type"] == "scene.snapshot.begin")
+    shown = {e["nodeId"]: e["visible"] for e in manifest(snapshots(frames)[-1][1])}
+    for m in messages[last:]:
+        if m["type"] == "scene.update":
+            for change in m["changes"]:
+                if "visible" in change and change["nodeId"] in shown:
+                    shown[change["nodeId"]] = change["visible"]
+        elif m["type"] == "scene.nodeRemoved":
+            for node_id in m["nodeIds"]:
+                shown.pop(node_id, None)
+    return shown
+
+
+def preparing_with_a_segmentation(strict, k: int, *, re_export: bool) -> Rig:
+    """A stepwise rig whose preparation of a model and a segmentation of two segments has taken ``k`` steps: the
+    first snapshot's, or (``re_export``) a re-export after the segmentation was added to a live session."""
+    segments = ({"id": SEG, "segment": "Segment_1"}, {"id": SEG, "segment": "Segment_2"})
+    if not re_export:
+        rig = Rig(strict, LiveScene({"id": A}, *segments), slice_s=0.0)
+        rig.live.start()
+    else:
+        rig = started_in_steps(Rig(strict, LiveScene({"id": A}), slice_s=0.0))
+        for segment in segments:
+            rig.scene.add(SEG, segment=segment["segment"])
+            rig.live.mark_segment(SEG, segment["segment"], Change.ADDED)
+        rig.timer.advance(750)  # the flush: the re-export's first step
+    for _ in range(k - 1):
+        rig.live.tick()
+    return rig
+
+
+@pytest.mark.parametrize("re_export", [False, True])
+def test_live_a_segmentation_removed_at_any_step_of_a_preparation_is_removed_after_its_ack(
+    strict, re_export
+):
+    """The segmentation node removed while the scene is prepared (the observers' whole-node mark): its segments may
+    be in the snapshot — collected before the removal, or read from the handles listed before it —, and the viewers'
+    scene from before that snapshot does not hold them yet; the mark finds them in the snapshot's scene, so they leave
+    the viewers after its ack."""
+    for k in range(1, MAX_STEPS):
+        rig = preparing_with_a_segmentation(strict, k, re_export=re_export)
+        if rig.live.preparing is None:
+            assert k > 10
+            break
+        rig.scene.remove(SEG)
+        rig.live.mark_held_segments(SEG, Change.REMOVED)
+        settle(rig)
+        viewers = viewers_hold(rig.sent)
+        assert A in viewers and not any(i.startswith(f"{SEG}/") for i in viewers), (k, viewers)
+    else:
+        raise AssertionError("still preparing")
+
+
+@pytest.mark.parametrize("removed_first", [False, True])
+def test_live_whole_segmentation_marks_while_preparing_keep_every_change_removed_included(
+    strict, removed_first
+):
+    """Two whole-node marks of a segmentation while the snapshot that carries it is prepared both reach that
+    snapshot's segments after the ack, whatever their order — merged per node, never one for the other: its meshes
+    changed and its colour (the geometry goes again), or its colour changed and the node removed (no segment of it is
+    left on the viewers)."""
+    segments = ({"id": SEG, "segment": "Segment_1"}, {"id": SEG, "segment": "Segment_2"})
+    rig = Rig(strict, LiveScene({"id": A}, *segments), slice_s=0.0)
+    rig.live.start()
+    for _ in range(MAX_STEPS):
+        if rig.live.preparing.done >= 3:  # the three nodes collected, none fitted yet
+            break
+        rig.live.tick()
+    for segment in segments:
+        rig.scene.segment(SEG, segment["segment"])["color"] = (0.1, 0.2, 0.3)
+    if removed_first:
+        rig.live.mark_held_segments(SEG, Change.APPEARANCE)
+        rig.scene.remove(SEG)
+        rig.live.mark_held_segments(SEG, Change.REMOVED)
+    else:
+        for segment in segments:
+            rig.scene.segment(SEG, segment["segment"])["mesh"] = sphere(9)
+        rig.live.mark_held_segments(SEG, Change.GEOMETRY)
+        rig.live.mark_held_segments(SEG, Change.APPEARANCE)
+    settle(rig)
+    if removed_first:
+        viewers = viewers_hold(rig.sent)
+        assert A in viewers and not any(i.startswith(f"{SEG}/") for i in viewers), viewers
+    else:
+        # the first snapshot, then the re-export its geometry change needs
+        assert node_counts(rig.sent) == [3, 3]
+
+
+#: a scripted segment ID, aliased ``s_<n>``
+SEG_X = "left lung"
+
+
+def scene_with_a_segmentation():
+    a = MrmlModel(A, name="Doe^John heart", polydata=sphere(12))
+    b = MrmlModel(B, name="Doe^John liver", polydata=sphere(10))
+    seg = MrmlSegmentation(
+        SEG,
+        segments=[
+            FakeSegment("Segment_1", name="kidney", polydata=sphere(8)),
+            FakeSegment(SEG_X, name="lung", polydata=sphere(9)),
+        ],
+    )
+    return a, b, seg
+
+
+def remove_or_hide(rig: PanelRig, what: str, b, seg) -> None:
+    if what == "model removed":
+        rig.scene.remove(b)
+    elif what == "model hidden":
+        b.displays[0].visible = 0
+        b.InvokeEvent(EVENTS.display_modified)
+    elif what == "segment removed":
+        seg.remove_segment(SEG_X)
+    elif what == "segment hidden":
+        seg.displays[0].per_segment[SEG_X] = {"visible": 0}
+        seg.InvokeEvent(EVENTS.display_modified)
+    else:
+        rig.scene.remove(seg)
+
+
+@pytest.mark.parametrize("collected", [False, True], ids=["listed", "collected"])
+@pytest.mark.parametrize(
+    "what",
+    ["model removed", "model hidden", "segment removed", "segment hidden", "segmentation removed"],
+)
+def test_panel_a_node_removed_or_hidden_while_preparing_is_not_shown_after_the_ack(
+    fake, caplog, capfd, what, collected
+):
+    """Through the panel and the real observers: a node removed or hidden between two steps — before its own step,
+    or after it — is not shown on the viewers once the snapshot is acknowledged and the marks made meanwhile have
+    flushed; nothing is logged."""
+    a, b, seg = scene_with_a_segmentation()
+    rig = stepwise(a, b, seg)
+    live = rig.ctl._live
+    for _ in range(MAX_STEPS):
+        if not collected or live.preparing.done >= live.preparing.total // 2:
+            break
+        rig.pump(0)
+    else:
+        raise AssertionError("still collecting")
+    display = seg.displays[0]
+    with caplog.at_level(logging.DEBUG):
+        remove_or_hide(rig, what, b, seg)
+        display.asked.clear()
+        [begin] = until_begin(rig, 1)
+        deliver(rig.ctl, Received(1, ack(begin["sceneVersion"])))
+        for _ in range(3):
+            rig.pump(1_000)
+    target = {
+        "model removed": [B],
+        "model hidden": [B],
+        "segment removed": [f"{SEG}/s_1"],
+        "segment hidden": [f"{SEG}/s_1"],
+        "segmentation removed": [f"{SEG}/Segment_1", f"{SEG}/s_1"],
+    }[what]
+    viewers = viewers_hold(sent_on(1))
+    assert all(not viewers.get(node_id, False) for node_id in target), viewers
+    assert viewers[A] is True
+    if (
+        what == "segment removed"
+    ):  # no per-segment getter is asked about it: Slicer's would log its ID (T7)
+        assert SEG_X not in display.asked
+    assert leaks(caplog, capfd, "Doe", "lung", "kidney", "Traceback", CODE, TOKEN) == []
     assert "live:" not in caplog.text and "scene:" not in caplog.text

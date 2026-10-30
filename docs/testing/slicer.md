@@ -1589,13 +1589,38 @@ Steps (the scene changed during a preparation, and the last step near the relay'
     (c) against §7's relay (a) (its step 5: the stub at `ws://127.0.0.1:8787/ws`; no phone can join it): start the
     session and type `restart` in the stub's input while the panel says "Preparing the scene"; once the panel says
     "Live", stop the session and end the stub's input.
+12. (SLC-71) Stop the session. The *Segs scene*: a new scene with step 1's five spheres and a segmentation of two
+    segments whose IDs are their names, one named like a patient's (a segment ID is what Slicer's log lines quote):
+
+    ```python
+    seg = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Segs")
+    seg.CreateDefaultDisplayNodes()
+    for i, name in enumerate(["Segment A", "Doe tumour"]):
+        source = vtk.vtkSphereSource()
+        source.SetCenter(100 * i, 150, 0)
+        source.SetRadius(30)
+        source.Update()
+        seg.AddSegmentFromClosedSurfaceRepresentation(source.GetOutput(), name, [0.9, 0.2, 0.2], name)
+    ```
+
+    Keep *At once* in the toolbar (step 9). Make it, time a *Start session* once — to the code (`c`) and to the end of
+    "Preparing the scene" (`p`, as in step 11) — and stop. Then two runs, each from a new Segs scene with the session
+    stopped, joining with the phone as soon as the code shows:
+    (a) delete the segmentation late in the first preparation, after its segments were read — with `t` about two
+    thirds of `p`, in ms: `w = slicer.modules.remoteview.widgetRepresentation().self();
+    w.onStartClicked(); qt.QTimer.singleShot(t, lambda: slicer.mrmlScene.RemoveNode(getNode("Segs")))`;
+    (b) remove `Doe tumour` early in the first preparation, after the nodes are listed but before its segment is read
+    (the segments come right after the five spheres are collected, about a tenth into the preparation): the same line
+    with `t` about `c` plus a twentieth of `p`, and
+    `lambda: getNode("Segs").GetSegmentation().RemoveSegment("Doe tumour")`.
 
 Expected results:
 
 - Step 9: the snapshot that goes out may still show `Big3` and `Big4` (each is collected as it is at its step; the
   last step does not list the shown nodes again); within about a second after it the phone loses `Big3` and `Big4`
   (their marks go out after the snapshot's ack). No `RemoteView`, `live:` or `scene:` error line and no traceback —
-  `[TODO verify]` how the Slicer adapter reads a model deleted between two steps (SLC-71).
+  `[TODO verify]` that the adapter reads a model deleted between two steps as hidden, with no error line, and that
+  `Big3` is gone from the phone after the ack (`docs/research/slicer-prepare.md`, SLC-71).
 - Step 10: the GLB is about 45.5 MiB (each soup is under the 100k cap and is sent as it is); the phone shows ten
   spheres; `longest()` prints less than 1.5 s — the last step writes and hashes the GLB on the main thread (≈ 0.9 s for
   45.8 MiB in the sandbox, `docs/research/slicer-prepare.md`). Record the time in the Result column.
@@ -1609,6 +1634,20 @@ Expected results:
   Error Log window and the application log file (not the console window, which echoes the commands typed): no `Doe` on a
   line from `remoteview_core` or `RemoteView.py` (echoed console commands are allowed), no `RemoteView`, `live:` or
   `scene:` error line; no traceback in the Python console.
+- Step 12: (a) the first snapshot may show both segments; within about a second after its ack the phone drops them; the
+  spheres stay. A run does not count when "Sending the scene" or "Live" showed before `Segs` left Slicer's 3D view
+  (repeat with a shorter delay) or when the panel says "2 models or segments shown in 3D could not be shared." (the
+  removal came before the segments were read: repeat with a longer one). (b) the phone never shows `Doe tumour`, and
+  the panel says "1 model or segments shown in 3D could not be shared." until the next snapshot (the segment was left
+  out). A run without that note does not count: the removal came after the segment's step (repeat with a shorter delay)
+  or before the code showed (`Doe tumour` was never listed: repeat with a longer one). In both, in Slicer's Error Log
+  window and the application log file (not the console window, which echoes the commands typed): no `Doe tumour`
+  (echoed console commands are allowed) — Slicer's segment getters would log the ID ("No display properties found" or
+  "segment not found by id") —, no `RemoteView`, `live:` or `scene:` error line, no traceback. Then, in run (b)'s
+  scene, as a control, type `getNode("Segs").GetDisplayNode().GetSegmentOpacity3D("Doe tumour")`: its "No display
+  properties found for segment with ID Doe tumour" line must appear in the Error Log window and the log file (record
+  it; this closes the `[TODO verify]` that such VTK lines reach them). Without it, the log checks of steps 11 and 12 do
+  not count.
 
 SLC-70 (a scene closed off the main thread) has no manual step: no path of Slicer itself closes the scene off the main
 thread, and a script that does is unsupported and may crash Slicer (`docs/research/slicer-prepare.md`, *A scene closed

@@ -275,8 +275,8 @@ runs two steps, so a close cannot land after the first.
 | Session closed | `observe()` stops the controller; alone: the state check | `live.py`, `snapshot.py` | `test_live_a_session_closed_at_any_step_…`, `test_prepare_…[closed]` |
 | Session created again (SLC-45) | the panel stops the old live updates before `session.create` and makes new ones (registry, cache); alone: `session_id` compared at the last step, `ProtocolStateError` | `panel.py`, `snapshot.py` | `test_panel_a_session_created_again_at_any_step_…`, `test_prepare_…[created_again]` |
 | Scene closed off the main thread (SLC-70) | the observers call `LiveUpdates.scene_closed_off_thread()`, which moves the generation under a lock; the preparation stops at its next step, or in its last step before its `begin` or the frames of a `begin` built meanwhile — an abandon —, and `LiveUpdates` resets before its next tick or flush classifies, prepares or sends anything, and again after a flush's classification (the panel calls `follow_close()` while it reconnects) | `observers.py` `_on_end_close`, `ids.py` `closed_elsewhere`, `snapshot.py` `_still_open`, `live.py` `_follow_close`, `_advance` | `test_live_…closed_off_thread…`, `test_panel_…closed_off_thread…` (every position; during a mesh read, a fit step, the GLB, the begin; a flush or *Send now* before the next tick; no preparation; the snapshot in flight; while reconnecting), `test_prepare_a_scene_closed_off_thread_…`, `test_observers_an_end_close_off_thread_…` |
-| A segmentation removed while it is prepared; a segment removed before its step, read by the real adapter | none yet: its segments stay on the viewers; Slicer's display getters log the segment ID | → SLC-71 | — |
-| A model or segment removed or hidden | each goes out as it was at its step; its mark after the ack makes the viewers match (22 cases) | `live.py` marks | — |
+| A segmentation removed while it is prepared; a segment removed before its step, read by the real adapter (SLC-71) | the whole-node mark is kept with the preparation and resolved again against its scene once it begins, so its segments leave the viewers after the ack; `_segment_props` asks no per-segment getter about a segment `GetSegment` no longer has (it reads as hidden, without a mesh) | `live.py` `mark_held_segments`, `_advance`; `mrml_scene.py` `_segment_props` | `test_live_a_segmentation_removed_at_any_step_…`, `test_panel_a_node_removed_or_hidden_while_preparing_…`, `test_mrml_scene_a_segment_removed_while_preparing_…` |
+| A model or segment removed or hidden | each goes out as it was at its step; its mark after the ack makes the viewers match (22 cases) | `live.py` marks | `test_panel_a_node_removed_or_hidden_while_preparing_…` |
 
 Before SLC-68, `prepare_snapshot` driven alone with `SceneIds.reset()` between two steps went on: at every one of the 36
 positions it began version 1 with the closed scene's nodes and their "Doe…" names; up to position 32 it also read closed
@@ -301,7 +301,10 @@ steps when it stops or is closed. The generation is read at the first step, not 
 - The owner contract: `observe()` follows every client event. A controller not observed across a re-create (never
   the panel) would have its last step refused, then prepare again on the new session with the old aliases.
 - No re-listing of the shown nodes in the last step (SLC-60's design, kept): a node hidden or removed meanwhile is in
-  the snapshot until its mark goes out after the ack (manual §15 step 9; SLC-71 for segmentations).
+  the snapshot until its mark goes out after the ack (manual §15 steps 9 and 12; SLC-71 for segmentations). A node
+  hidden before its own step goes out with `visible: false` and its mesh, though the adapter leaves a hidden node out
+  of a listing (`mrml_scene.py`, SLC-22): the snapshot still shows nothing hidden; whether to drop it there is the
+  owner's choice (rule 8, default kept).
 
 ## A scene closed off the main thread (SLC-70)
 
@@ -361,3 +364,38 @@ path does it, so SLC-70 guards against extensions and user scripts only.
   only; the code assumes it. `[TODO verify]` third-party extensions (not audited) and, in Slicer, that a
   `threading.Thread` calling `slicer.mrmlScene.Clear(0)` reaches `_on_end_close` off the main thread — not a manual
   step: it is unsupported and may crash Slicer.
+
+## Nodes removed while the scene is prepared (SLC-71)
+
+The collection lists the shown nodes in its first step and reads each handle at its own step (the alias, the world
+matrix, the display properties, the mesh, the name), so a node removed or hidden meanwhile is read as it is then; its
+mark (the observers', on the main thread) goes out after the snapshot's ack. Probed through the panel with the real
+observers, 22 cases (`ws/slicer` at `9c60565`): models removed or hidden, and segments removed or hidden, before or
+after their step, converge. Two did not:
+
+- **A segmentation node removed** while the snapshot that first carries it is prepared (the first snapshot, or a
+  re-export that adds it), after its segments were read: the observers mark it whole (`mark_held_segments`), which
+  resolved against the viewers' scene from before this snapshot, so the segments the snapshot carried got no
+  `scene.nodeRemoved` and stayed on the viewers. (Removed before its segments are read, a segmentation's segments are
+  left out anyway through Slicer's adapter — its display node no longer resolves, read in the sources, below —; a
+  segmentation the viewers already hold was removed correctly.) Now the mark is also kept with the preparation and
+  resolved again against its scene once it is installed (held until the ack, like every mark made meanwhile). The
+  observers' per-node alternative (marking the node's cached segments) was rejected: it issues `s_<n>` aliases to
+  segments never exported, scene closes included.
+- **A segment removed before its step**, read by the real adapter: Slicer v5.12.4's per-segment display getters log
+  the ID of a segment they no longer know with `vtkErrorMacro` — `GetSegmentVisibility`, `GetSegmentVisibility3D` and
+  `GetSegmentOpacity3D` ("no display properties"), `GetSegmentColor` ("segment not found by id")
+  ([vtkMRMLSegmentationDisplayNode.cxx](https://github.com/Slicer/Slicer/blob/v5.12.4/Libs/MRML/Core/vtkMRMLSegmentationDisplayNode.cxx),
+  lines 397–440, 505–515, 538–548, 637–647), and a removed segment's properties go with it
+  (`RemoveUnusedDisplayProperties`, on by default, `vtkMRMLSegmentationDisplayNode.h` line 388); a segment ID may be
+  name-derived (T7). `_segment_props` now asks `GetSegment` first, which returns nullptr without a word
+  ([vtkSegmentation.cxx](https://github.com/Slicer/Slicer/blob/v5.12.4/Libs/vtkSegmentationCore/vtkSegmentation.cxx),
+  lines 836–845): the segment reads as hidden, its mesh as none (`GetSegmentRepresentation`, silent too, lines
+  1430–1438), and the collection leaves it out as without triangles — the panel's "could not be shared" note until the
+  next snapshot.
+
+Read in the sources, not run (`[TODO verify]`, manual §15 steps 9 and 12): after `RemoveNode` a node's references
+resolve to nothing (`vtkMRMLNode.cxx` lines 1488–1514), so a removed model reads as hidden at an identity pose with its
+old mesh (`vtkMRMLModelNode.cxx` lines 240–258) and a removed segmentation's display node is gone; whether the
+per-segment getters' lines reach Slicer's Error Log window and its log file; whether `UpdateNthNodeReference` on a
+removed node fires events during a preparation.

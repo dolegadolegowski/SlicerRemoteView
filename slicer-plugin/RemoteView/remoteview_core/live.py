@@ -6,14 +6,15 @@ of the session, the first snapshot included:
 - **marks** (:meth:`~LiveUpdates.mark`, :meth:`~LiveUpdates.mark_transform`, and for segments
   :meth:`~LiveUpdates.mark_segment`, :meth:`~LiveUpdates.mark_segment_transform`,
   :meth:`~LiveUpdates.mark_held_segments`) arrive with the **raw** MRML and segment IDs the observers read and are
-  resolved here, never in the watcher, through the session's registry (SLC-36, §7.3): a model ``Sphere`` is marked
-  as ``m_1`` — allocated on first sight, so a model added mid-session under a scripted ID is announced and exported
-  under its alias —, a segment as ``<mrmlId>/<segmentId>`` or ``<mrmlId>/s_<n>`` under the current *Hide node names*
-  setting, and a segmentation node's transform or removal reaches every segment of it the viewers hold
-  (``SentScene.under``). The debouncer's keys are therefore the viewers' ``nodeId`` (T7: a raw ID never reaches a
-  plan). The resolved marks go to SLC-15's :class:`~remoteview_core.debounce.Debouncer`; its flush is classified by
-  SLC-30's :func:`~remoteview_core.changes.classify` against :attr:`~LiveUpdates.sent` (what the viewers hold) and
-  sent with SLC-16's client — an update plan as ``scene.update``/``scene.nodeRemoved``, a re-export as
+  resolved here, never in the watcher, through the session's registry (SLC-36, §7.3): a model ``Sphere`` is marked as
+  ``m_1`` — allocated on first sight, so a model added mid-session under a scripted ID is announced and exported under
+  its alias —, a segment as ``<mrmlId>/<segmentId>`` or ``<mrmlId>/s_<n>`` under the current *Hide node names* setting,
+  and a segmentation node's transform or removal reaches every segment of it the viewers hold (``SentScene.under``) — a
+  removal or whole-node change (:meth:`~LiveUpdates.mark_held_segments`) made while a snapshot is prepared also those of
+  that snapshot, once it begins (SLC-71). The debouncer's keys are therefore the viewers' ``nodeId`` (T7: a raw ID never
+  reaches a plan). The resolved marks go to SLC-15's :class:`~remoteview_core.debounce.Debouncer`; its flush is
+  classified by SLC-30's :func:`~remoteview_core.changes.classify` against :attr:`~LiveUpdates.sent` (what the viewers
+  hold) and sent with SLC-16's client — an update plan as ``scene.update``/``scene.nodeRemoved``, a re-export as
   ``scene.nodeAdded`` and a new snapshot whose scene becomes :attr:`~LiveUpdates.sent` in the same call
   (``changes.py``'s contract); a mark that resolves to an ID neither shown nor held is dropped there (T7);
 - **holds**: the debouncer is held during a batch process (its own count, so a stray ``release`` cannot end another
@@ -172,6 +173,9 @@ class _Preparation:
     progress: Progress
     #: events were missed off the main thread while it ran (SLC-33): a re-sync follows its snapshot
     stale: bool = False
+    #: whole-segmentation marks made while it ran, ``prefix → flags`` (one entry per node, flags merged): its scene may
+    #: hold segments the viewers' does not yet, so they are resolved again against it once it is installed (SLC-71)
+    held_marks: dict[str, Change] = field(default_factory=dict)
 
 
 class _EmptyScene:
@@ -387,7 +391,8 @@ class LiveUpdates:
 
     def mark_held_segments(self, node_id: str, flags: Change) -> None:
         """Every segment of the segmentation node ``node_id`` the viewers hold changed (``flags``): a whole-node event
-        without a segment ID, or the node removed."""
+        without a segment ID, or the node removed. Made while a snapshot is prepared, the mark reaches that snapshot's
+        segments too once it begins: they may be in it only (SLC-71)."""
         if not self._accepts(node_id, flags):
             return
         try:
@@ -399,6 +404,9 @@ class LiveUpdates:
             return
         for resolved in self._sent.under(prefix):
             self._mark_resolved(resolved, flags)
+        if self._prep is not None:
+            held = self._prep.held_marks
+            held[prefix] = held.get(prefix, Change(0)) | flags
 
     def _accepts(self, node_id: Any, flags: Any) -> bool:
         """The entry check of every mark: running, a non-empty ``str`` ID and non-empty ``Change`` flags."""
@@ -820,6 +828,11 @@ class LiveUpdates:
             self._install(
                 prep.stepper.result
             )  # the in-flight hold is taken before the preparation's ends
+            # a segmentation removed (or changed whole) while it was prepared: its segments may be in this snapshot
+            # only — the marks, held until the ack like every other, now find them (SLC-71)
+            for prefix, flags in prep.held_marks.items():
+                for resolved in self._sent.under(prefix):
+                    self._mark_resolved(resolved, flags)
         finally:
             self._debouncer.release()
         if prep.stale and self._running:
