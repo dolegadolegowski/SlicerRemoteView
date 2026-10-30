@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Box3, BoxGeometry, Group, Matrix4, Mesh, TOUCH, Vector3 } from "three";
+import { Box3, BoxGeometry, Group, Matrix4, Mesh, Sphere, TOUCH, Vector3 } from "three";
 import type { Object3D } from "three";
+import { createLiveScene } from "../../src/render/apply-update";
 import { parseSceneModel } from "../../src/render/scene-model";
-import type { SceneModel } from "../../src/render/scene-model";
+import type { SceneModel, SceneNode } from "../../src/render/scene-model";
 import {
+  continuesScene,
   createViewer,
   DAMPING_FACTOR,
   MAX_PIXEL_RATIO,
@@ -16,7 +18,8 @@ import type {
   VisualViewportLike,
 } from "../../src/render/viewer";
 import { describe as describeCode, describeState } from "../../src/state/errors";
-import { glb } from "./glb-fixtures";
+import { buildGlb, emptySceneJson, glb, withJson } from "./glb-fixtures";
+import type { Json } from "./glb-fixtures";
 
 /** Gives an element a layout size (jsdom has no layout). */
 function size(element: HTMLElement, width: number, height: number): void {
@@ -94,6 +97,44 @@ async function model(name = "asymmetric-2nodes.glb"): Promise<SceneModel> {
   if (!result.ok) throw new Error(result.reason);
   return result.model;
 }
+
+/**
+ * asymmetric-2nodes.glb exported again, with `edit` applied to its glTF nodes (1: the Liver's T, 3: the Tumor's): the
+ * same scene under the same node ids, as Slicer shares it after an edit (WEB-25).
+ */
+async function again(edit: (nodes: Json[]) => void = () => undefined): Promise<SceneModel> {
+  const bytes = withJson(glb("asymmetric-2nodes.glb"), (json) => edit(json["nodes"] as Json[]));
+  const result = await parseSceneModel(bytes);
+  if (!result.ok) throw new Error(result.reason);
+  return result.model;
+}
+/** A glTF node matrix: uniform `scale`, then a translation (metres). */
+const placed = (scale: number, x = 0, y = 0, z = 0) =>
+  new Matrix4().makeScale(scale, scale, scale).setPosition(x, y, z).toArray();
+/** Both structures `dx` metres further along x than in the fixture (the Tumor sits at 0.02, 0.01, −0.03). */
+const moved = (dx: number) => (nodes: Json[]) => {
+  nodes[1]!["matrix"] = placed(1, dx);
+  nodes[3]!["matrix"] = placed(1, 0.02 + dx, 0.01, -0.03);
+};
+/** Both structures scaled by `scale` where they stand. */
+const scaled = (scale: number) => (nodes: Json[]) => {
+  nodes[1]!["matrix"] = placed(scale);
+  nodes[3]!["matrix"] = placed(scale, 0.02, 0.01, -0.03);
+};
+const LIVER = "vtkMRMLSegmentationNode1/Segment_1";
+const TUMOR = "vtkMRMLModelNode2";
+/** The presenter moves both structures of `m` (asymmetric-2nodes) `dx` metres along x with live updates (WEB-12). */
+const moveLive = (viewer: Viewer, m: SceneModel, dx: number) => {
+  createLiveScene(m).apply([
+    { nodeId: LIVER, matrix: placed(1, dx) },
+    { nodeId: TUMOR, matrix: placed(1, 0.02 + dx, 0.01, -0.03) },
+  ]);
+  viewer.contentChanged();
+};
+/** Lets damped motion run out completely: OrbitControls applies a decaying residue on every update. */
+const drain = (viewer: Viewer) => {
+  for (let i = 0; i < 300; i++) viewer.controls.update();
+};
 
 /** Bounding box of the visible meshes, in world (stage) space. */
 function visibleBox(m: SceneModel): Box3 {
@@ -387,6 +428,19 @@ describe("camera and clipping", () => {
     expect(viewer.controls.target.length()).toBeLessThan(1e-6); // the camera was not refitted
   });
 
+  it("a live removal that shrinks the model leaves a camera zoomed out beyond the new limit where it is (WEB-12, WEB-25)", async () => {
+    const { viewer, flush } = harness();
+    const m = await model();
+    viewer.setModel(m);
+    viewer.controls.dollyIn(1e6); // as far out as the limits allow
+    flush();
+    const far = distance(viewer);
+    createLiveScene(m).remove([LIVER]); // the presenter deleted the large structure
+    viewer.contentChanged();
+    flush();
+    expect(distance(viewer)).toBeCloseTo(far, 6);
+  });
+
   it("zooming out after a fit on a tiny visible part still takes in the whole model", () => {
     const { viewer, flush } = harness();
     // A 2 mm part and a 200 mm part (metres, like §7.1 data): the large one hidden, then shown again.
@@ -427,7 +481,7 @@ describe("fit to view", () => {
     expect(viewer.element.dataset["model"]).toBe("loaded");
   });
 
-  it("a new model is shown from the front even after the user turned the previous one", async () => {
+  it("another scene (no node in common) is shown from the front even after the user turned the previous one", async () => {
     const { viewer, flush } = harness();
     viewer.setModel(await model());
     viewer.controls.rotateLeft(1);
@@ -535,6 +589,196 @@ describe("fit to view", () => {
     flush();
     expect(Number.isFinite(viewer.camera.position.length())).toBe(true);
     expect(viewer.element.dataset["model"]).toBe("none");
+  });
+});
+
+describe("a new snapshot of the scene on screen (WEB-25)", () => {
+  it("keeps the user's camera and draws one frame", async () => {
+    const { viewer, r, flush, frames } = harness();
+    viewer.setModel(await model());
+    flush();
+    viewer.controls.rotateLeft(1);
+    viewer.controls.dollyOut(1.5);
+    flush();
+    drain(viewer);
+    flush();
+    const position = viewer.camera.position.clone();
+    const target = viewer.controls.target.clone();
+    r.render.mockClear();
+    viewer.setModel(await again()); // Slicer exported the scene again after an edit
+    expect(frames.size).toBe(1);
+    flush();
+    expect(r.render).toHaveBeenCalledTimes(1);
+    expect(viewer.camera.position.distanceTo(position)).toBeLessThan(1e-9);
+    expect(viewer.controls.target.distanceTo(target)).toBeLessThan(1e-9);
+  });
+
+  it("a larger model: the camera is not pushed out, and zooming out still takes all of it in", async () => {
+    const { viewer, flush } = harness();
+    viewer.setModel(await model());
+    viewer.controls.dollyOut(1e6); // as close as the limits allow
+    flush();
+    const close = distance(viewer);
+    // The tumour 100× larger: far beyond the old zoom-out limit and far plane.
+    const larger = await again((nodes) => (nodes[3]!["matrix"] = placed(100, 0.02, 0.01, -0.03)));
+    viewer.setModel(larger);
+    flush();
+    expect(distance(viewer)).toBeCloseTo(close, 9);
+    viewer.controls.dollyIn(1e6); // as far out as the limits allow
+    flush();
+    larger.root.updateWorldMatrix(true, true);
+    expect(inView(viewer, new Box3().setFromObject(larger.root))).toBe(true);
+  });
+
+  it("a smaller model keeps the camera, and zooming in goes as close as a fit of it would allow", async () => {
+    const shrunk = scaled(0.2);
+    const { viewer, flush } = harness();
+    viewer.setModel(await model());
+    viewer.controls.rotateLeft(1);
+    flush();
+    drain(viewer);
+    const turned = direction(viewer);
+    viewer.setModel(await again(shrunk));
+    flush();
+    expect(direction(viewer).distanceTo(turned)).toBeLessThan(1e-9);
+    viewer.controls.dollyOut(1e6);
+    flush();
+    const fresh = harness().viewer;
+    fresh.setModel(await again(shrunk));
+    expect(distance(viewer)).toBeCloseTo(fresh.controls.minDistance, 6);
+  });
+
+  it("a smaller model while zoomed out beyond what fits it: the camera keeps its distance", async () => {
+    const { viewer, flush } = harness();
+    viewer.setModel(await model());
+    viewer.controls.dollyIn(1e6); // as far out as the limits allow
+    flush();
+    const far = distance(viewer);
+    viewer.setModel(await again(scaled(0.05))); // its own zoom-out limit is a quarter of that distance
+    flush();
+    expect(distance(viewer)).toBeCloseTo(far, 6);
+  });
+
+  it("after the presenter moved the scene live, it is shared again where it now stands: the camera stays", async () => {
+    const { viewer, flush } = harness();
+    const m = await model();
+    viewer.setModel(m);
+    viewer.controls.rotateLeft(1);
+    flush();
+    drain(viewer);
+    moveLive(viewer, m, 1); // a transform moved it 1 m, far more than its own size (WEB-12)
+    flush();
+    const turned = direction(viewer);
+    const next = await again(moved(1)); // then a structure was edited
+    expect(viewer.continues(next)).toBe(true); // the node panel's choices go along too (main.ts)
+    viewer.setModel(next);
+    flush();
+    expect(direction(viewer).distanceTo(turned)).toBeLessThan(1e-9);
+  });
+
+  it("continues() tells beforehand what setModel will decide, and changes nothing", async () => {
+    const { viewer, flush } = harness();
+    expect(viewer.continues(await again())).toBe(false); // nothing on screen yet
+    viewer.setModel(await model());
+    viewer.controls.rotateLeft(1);
+    flush();
+    drain(viewer);
+    const turned = direction(viewer);
+    const near = await again(moved(0.05));
+    const far = await again(moved(5));
+    expect(viewer.continues(far)).toBe(false);
+    expect(viewer.continues(await model("quantized-1node.glb"))).toBe(false);
+    expect(viewer.continues(near)).toBe(true);
+    expect(direction(viewer).distanceTo(turned)).toBeLessThan(1e-9);
+    viewer.setModel(near);
+    flush();
+    expect(direction(viewer).distanceTo(turned)).toBeLessThan(1e-9); // kept, as answered
+    expect(viewer.continues(far)).toBe(false);
+    viewer.setModel(far);
+    expect(direction(viewer).z).toBeCloseTo(1, 9); // framed from the front, as answered
+  });
+
+  it("in the middle of a flick: no jump, and the damped motion goes on", async () => {
+    const { viewer, flush } = harness();
+    viewer.setModel(await model());
+    flush();
+    viewer.controls.rotateLeft(1.5);
+    flush(3); // still moving
+    const moving = viewer.camera.position.clone();
+    viewer.setModel(await again());
+    expect(viewer.camera.position.distanceTo(moving)).toBeLessThan(1e-9);
+    expect(flush()).toBeGreaterThan(3);
+  });
+
+  it("the same ids moved a little keep the camera; far from the scene shown they are another scene, framed from the front", async () => {
+    const { viewer, flush } = harness();
+    viewer.setModel(await model());
+    viewer.controls.rotateLeft(1);
+    flush();
+    drain(viewer);
+    const turned = direction(viewer);
+    viewer.setModel(await again(moved(0.05))); // 5 cm: still the scene on screen
+    flush();
+    expect(direction(viewer).distanceTo(turned)).toBeLessThan(1e-9);
+    const elsewhere = await again(moved(5)); // 5 m away: ids Slicer reused for another scene (§7.3)
+    viewer.setModel(elsewhere);
+    flush();
+    expect(direction(viewer).z).toBeCloseTo(1, 9);
+    expect(inView(viewer, visibleBox(elsewhere))).toBe(true);
+  });
+
+  it("after an empty snapshot (a closed scene) the next one is a new scene, framed from the front", async () => {
+    const { viewer, flush } = harness();
+    viewer.setModel(await model());
+    viewer.controls.rotateLeft(1);
+    flush();
+    drain(viewer);
+    const turned = direction(viewer);
+    viewer.setModel(await again());
+    flush();
+    expect(direction(viewer).distanceTo(turned)).toBeLessThan(1e-9); // the same scene: kept
+    const empty = await parseSceneModel(buildGlb(emptySceneJson()));
+    if (!empty.ok) throw new Error(empty.reason);
+    viewer.setModel(empty.model); // File → Close Scene
+    viewer.controls.rotateLeft(1);
+    flush();
+    viewer.setModel(await again()); // a scene loaded afterwards, whatever its ids
+    flush();
+    expect(direction(viewer).z).toBeCloseTo(1, 9);
+  });
+
+  it("Fit afterwards frames the model from the user's direction, as before", async () => {
+    const { viewer, flush } = harness();
+    viewer.setModel(await model());
+    flush();
+    const fitted = distance(viewer);
+    viewer.controls.rotateLeft(0.8);
+    viewer.controls.dollyOut(3);
+    flush();
+    const turned = direction(viewer);
+    viewer.setModel(await again());
+    flush();
+    viewer.fit();
+    flush();
+    expect(distance(viewer)).toBeCloseTo(fitted, 6);
+    expect(direction(viewer).distanceTo(turned)).toBeLessThan(0.02); // up to the settled damping's residual
+  });
+});
+
+describe("continuesScene (WEB-25)", () => {
+  const ids = (...nodeIds: string[]): Pick<SceneModel, "nodes"> => ({
+    nodes: new Map(nodeIds.map((id) => [id, {} as SceneNode])),
+  });
+  const at = (x: number, radius: number) => new Sphere(new Vector3(x, 0, 0), radius);
+  it.each([
+    ["a node in common, overlapping", true, ids("a", "b"), ids("b", "c"), at(0, 1), at(1.5, 1)],
+    ["a node in common, touching", true, ids("a"), ids("a"), at(0, 1), at(2, 1)],
+    ["no node in common", false, ids("a"), ids("b"), at(0, 1), at(0, 1)],
+    ["a node in common, apart", false, ids("a"), ids("a"), at(0, 1), at(2.01, 1)],
+    ["nothing shown before", false, ids("a"), ids("a"), null, at(0, 1)],
+    ["an empty snapshot", false, ids("a"), ids(), at(0, 1), null],
+  ])("%s → %s", (_name, expected, previous, next, shown, extent) => {
+    expect(continuesScene(previous, next, shown, extent)).toBe(expected);
   });
 });
 
@@ -807,7 +1051,7 @@ describe("WebXR host (WEB-19)", () => {
     expect(viewer.scene.background).not.toBeNull(); // VR keeps the dark room
   });
 
-  it("a new scene while presenting stands where the old one did; the 2D view is fitted to it afterwards", async () => {
+  it("another scene (no node in common) while presenting stands where the first one was put; the 2D view is fitted to it afterwards", async () => {
     const { viewer, flush } = xrHarness();
     viewer.setModel(await model());
     viewer.xr!.begin({ ar: false });
@@ -899,5 +1143,75 @@ describe("WebXR host (WEB-19)", () => {
     xr.setStageMatrix(grabbed);
     xr.end(); // the 2D stage is unturned again
     expect(xr.stageMatrix().equals(new Matrix4().makeScale(1000, 1000, 1000))).toBe(true);
+  });
+
+  it("a new snapshot of the scene stays where the user put it; the 2D camera comes back as it was (WEB-25)", async () => {
+    const { viewer, flush } = xrHarness();
+    viewer.setModel(await model());
+    viewer.controls.rotateLeft(1);
+    flush();
+    drain(viewer);
+    const position = viewer.camera.position.clone();
+    const target = viewer.controls.target.clone();
+    const xr = viewer.xr!;
+    xr.begin({ ar: false });
+    xr.place(1.5);
+    const grabbed = new Matrix4()
+      .makeTranslation(0.3, 1.2, -0.7)
+      .multiply(new Matrix4().makeRotationY(0.8))
+      .multiply(new Matrix4().makeScale(2, 2, 2));
+    xr.setStageMatrix(grabbed);
+    const next = await again(); // the presenter edited the scene
+    expect(viewer.continues(next)).toBe(true); // however the user holds it
+    viewer.setModel(next);
+    xr.stageMatrix().elements.forEach((v, i) => expect(v).toBeCloseTo(grabbed.elements[i]!, 12));
+    xr.end();
+    flush();
+    expect(viewer.camera.position.distanceTo(position)).toBeLessThan(1e-9);
+    expect(viewer.controls.target.distanceTo(target)).toBeLessThan(1e-9);
+  });
+
+  it("moved live during XR and then shared again where it now stands, the scene stays where the user put it (WEB-25)", async () => {
+    const { viewer, flush } = xrHarness();
+    const m = await model();
+    viewer.setModel(m);
+    viewer.controls.rotateLeft(1);
+    flush();
+    drain(viewer);
+    const position = viewer.camera.position.clone();
+    const xr = viewer.xr!;
+    xr.begin({ ar: false });
+    xr.place(1.5);
+    const grabbed = new Matrix4()
+      .makeTranslation(0.3, 1.2, -0.7)
+      .multiply(new Matrix4().makeRotationY(0.8));
+    xr.setStageMatrix(grabbed);
+    moveLive(viewer, m, 1); // a transform moved it 1 m in Slicer
+    viewer.setModel(await again(moved(1))); // then a structure was edited
+    xr.stageMatrix().elements.forEach((v, i) => expect(v).toBeCloseTo(grabbed.elements[i]!, 12));
+    xr.end();
+    flush();
+    expect(viewer.camera.position.distanceTo(position)).toBeLessThan(1e-9);
+  });
+
+  it("another scene after a kept one is placed in front again; the 2D view is fitted to it afterwards (WEB-25)", async () => {
+    const { viewer, flush } = xrHarness();
+    viewer.setModel(await model());
+    viewer.controls.rotateLeft(1);
+    flush();
+    const xr = viewer.xr!;
+    xr.begin({ ar: false });
+    xr.place(1.5);
+    const grabbed = new Matrix4().makeTranslation(0.3, 1.2, -0.7);
+    xr.setStageMatrix(grabbed);
+    viewer.setModel(await again()); // the presenter edited the scene: it stays where the user put it
+    xr.stageMatrix().elements.forEach((v, i) => expect(v).toBeCloseTo(grabbed.elements[i]!, 12));
+    const elsewhere = await again(moved(5)); // then another scene under the same ids, 5 m away
+    viewer.setModel(elsewhere);
+    expect(centreInWorld(elsewhere).distanceTo(new Vector3(0, 1.5, -1.3))).toBeLessThan(1e-6);
+    xr.end();
+    flush();
+    expect(direction(viewer).z).toBeCloseTo(1, 9); // fitted from the front, in millimetres again
+    expect(viewer.controls.target.distanceTo(centreInWorld(elsewhere))).toBeLessThan(1e-6);
   });
 });

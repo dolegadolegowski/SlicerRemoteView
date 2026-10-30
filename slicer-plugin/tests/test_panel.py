@@ -29,7 +29,7 @@ from support import (
     viewer_count,
 )
 
-from remoteview_core import panel
+from remoteview_core import decimate, panel
 from remoteview_core.panel import PanelController, PanelView, Phase
 from remoteview_core.protocol_client import TERMINAL_CLOSE_CODES
 from remoteview_core.transport import (
@@ -726,9 +726,15 @@ def test_panel_ui_properties():
     assert font.findtext("family") == "Courier New"
     # the node list preview (SLC-18)
     assert prop("nodeListPlaceholderLabel", "text").findtext("string")
+    # plain text everywhere but the consent statement, whose only markup is its fixed project link (SLC-55)
     labels = [name for name, w in widgets.items() if w.get("class") == "QLabel"]
-    assert labels and all(prop(n, "textFormat").findtext("enum") == "Qt::PlainText" for n in labels)
-    assert "openExternalLinks" not in ET.tostring(root, encoding="unicode")
+    rich = [n for n in labels if prop(n, "textFormat").findtext("enum") != "Qt::PlainText"]
+    assert labels and rich == ["consentLabel"]
+    assert prop("consentLabel", "textFormat").findtext("enum") == "Qt::RichText"
+    opens = [
+        n for n in widgets if widgets[n].find("property[@name='openExternalLinks']") is not None
+    ]
+    assert opens == ["consentLabel"]
     assert prop("stopButton", "enabled").findtext("bool") == "false"
     # SLC-47: only when the relay warns
     assert prop("keepButton", "visible").findtext("bool") == "false"
@@ -740,6 +746,20 @@ def test_panel_ui_properties():
     declared = {c.findtext("class") for c in root.iter("customwidget")}
     used = {w.get("class") for w in widgets.values()}
     assert {c for c in used if not c.startswith("Q")} <= declared
+
+
+def test_panel_ui_remove_islands_checkbox_follows_the_consent_and_names_the_rule():
+    """SLC-54: checked by default, right after the consent statement, its tooltip naming the rule's numbers."""
+    root = ET.parse(UI_FILE).getroot()  # noqa: S314 — the module's own file
+    widgets = {w.get("name"): w for w in root.iter("widget")}
+    box = widgets["removeIslandsCheckBox"]
+    assert box.get("class") == "QCheckBox"
+    assert box.find("property[@name='checked']").findtext("bool") == "true"
+    tip = box.find("property[@name='toolTip']").findtext("string")
+    assert f"{decimate.SMALL_ISLAND_TRIANGLES:,} triangles" in tip
+    assert f"{decimate.SMALL_ISLAND_SHARE:.0%} of the triangles of the largest piece" in tip
+    session = [w.get("name") for w in widgets["sessionCollapsibleButton"].iter("widget")]
+    assert session[session.index("consentLabel") + 1] == "removeIslandsCheckBox"
 
 
 # --------------------------------------------------------------------------- the Qt adapter against the stubs
@@ -778,6 +798,73 @@ def test_panel_adapter_setup_loads_the_ui_and_settings(
         "clicked(bool)", instance.onStartClicked
     )
     instance.ui.stopButton.connect.assert_called_once_with("clicked(bool)", instance.onStopClicked)
+
+
+@pytest.mark.parametrize(
+    ("stored", "checked"),
+    [(None, True), ("false", False), ("true", True), (False, False), (True, True)],
+)
+def test_panel_adapter_remove_islands_is_on_unless_turned_off(
+    import_remote_view, slicer_stubs, stored, checked
+):
+    """SLC-54: on with nothing stored; a stored choice as Slicer's settings give it back — a boolean in the same run
+    (after a Reload), a string from the settings file."""
+    if stored is not None:
+        slicer_stubs["qt"].QSettings().setValue("RemoteView/RemoveSmallIslands", stored)
+    instance = import_remote_view().RemoteViewWidget(parent=parent_widget())
+    instance.setup()
+    assert instance.ui.removeIslandsCheckBox.checked is checked
+    instance.ui.removeIslandsCheckBox.connect.assert_called_once_with(
+        "toggled(bool)", instance.onRemoveIslandsToggled
+    )
+
+
+@pytest.mark.parametrize("checked", [True, False])
+def test_panel_adapter_remove_islands_is_saved_and_reaches_the_session(
+    widget, slicer_stubs, monkeypatch, caplog, checked
+):
+    """A toggle is saved at once; Start hands the box's state to the controller (on, the default, or off), a toggle
+    after it reaches the controller; a failing save or hand-over is logged by its type only (T7) and does not stop the
+    other."""
+    _, instance = widget
+    settings = slicer_stubs["qt"].QSettings()
+    instance.ui.removeIslandsCheckBox.checked = checked
+    instance.onRemoveIslandsToggled(checked)  # no controller yet: saved only
+    assert settings.value("RemoteView/RemoveSmallIslands") is checked
+    made = []
+    controller = panel.PanelController
+    monkeypatch.setattr(panel, "PanelController", lambda **kw: made.append(kw) or controller(**kw))
+    instance.ui.relayUrlLineEdit.text = URL
+    instance.ui.extraCaPathLineEdit.currentPath = ""
+    instance.onStartClicked()
+    assert [kw["remove_islands"] for kw in made] == [checked]
+    toggles = []
+    monkeypatch.setattr(instance.controller, "set_remove_islands", toggles.append)
+    instance.onRemoveIslandsToggled(not checked)
+    assert toggles == [not checked]
+    assert settings.value("RemoteView/RemoveSmallIslands") is (not checked)
+
+    def fails(*args):
+        raise KeyError("vtkMRMLModelNode4 Doe^John")
+
+    save = type(settings).setValue
+    monkeypatch.setattr(type(settings), "setValue", fails)
+    with caplog.at_level(logging.ERROR):
+        instance.onRemoveIslandsToggled(checked)
+    assert toggles == [not checked, checked]  # handed over although not saved
+    monkeypatch.setattr(type(settings), "setValue", save)
+    monkeypatch.setattr(instance.controller, "set_remove_islands", fails)
+    with caplog.at_level(logging.ERROR):
+        instance.onRemoveIslandsToggled(not checked)
+    assert settings.value("RemoteView/RemoveSmallIslands") is (
+        not checked
+    )  # saved although not handed over
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR] == [
+        "RemoteView: Remove small islands not saved (KeyError)",
+        "RemoteView: Remove small islands not applied (KeyError)",
+    ]
+    assert "Doe" not in caplog.text and "vtkMRMLModelNode4" not in caplog.text
+    instance.cleanup()
 
 
 def test_panel_adapter_start_pump_and_stop(widget, slicer_stubs, fake):
@@ -841,7 +928,8 @@ def test_panel_adapter_keep_session_follows_the_relays_warning(widget, fake, mon
 
 
 def test_panel_adapter_link_buttons_are_activity_and_timers_are_not(widget, fake, monkeypatch):
-    """SLC-47: Copy link and the Presentation window count as someone at the panel; the pump and flush do not."""
+    """SLC-47: Copy link, the Presentation window and *Remove small islands* count as someone at the panel; the pump
+    and flush do not."""
     _, instance = widget
     instance.ui.relayUrlLineEdit.text = URL
     instance.ui.extraCaPathLineEdit.currentPath = ""
@@ -857,7 +945,8 @@ def test_panel_adapter_link_buttons_are_activity_and_timers_are_not(widget, fake
     assert noted == []
     instance.onCopyLinkClicked()
     instance.onPresentClicked()
-    assert noted == [1, 1]
+    instance.onRemoveIslandsToggled(False)  # the panel's checkbox too (the toolbar: test_sendmode)
+    assert noted == [1, 1, 1]
     instance.cleanup()
 
 

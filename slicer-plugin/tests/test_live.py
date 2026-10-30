@@ -23,12 +23,15 @@ from support import (
     reassemble,
     resumed,
     root_extras,
+    specked,
     sphere,
 )
 from vtkmodules.vtkCommonTransforms import vtkTransform
 
+from remoteview_core import collect, decimate
+from remoteview_core import snapshot as snapshot_module
 from remoteview_core.collect import polydata_from_triangles
-from remoteview_core.debounce import Change
+from remoteview_core.debounce import Change, SendPolicy
 from remoteview_core.ids import SceneIds
 from remoteview_core.live import (
     RESET_NOT_SENT,
@@ -37,7 +40,7 @@ from remoteview_core.live import (
     LiveUpdates,
 )
 from remoteview_core.protocol_client import NodeChange, ProtocolStateError, SessionState
-from remoteview_core.snapshot import build_snapshot
+from remoteview_core.snapshot import build_snapshot, prepare_snapshot
 from remoteview_protocol import envelope, schemas
 
 A, B, C, D = (f"vtkMRMLModelNode{i}" for i in (4, 5, 6, 7))
@@ -74,16 +77,20 @@ def error(code: str, reply_to: str | None = None, **details) -> dict:
 
 class Rig:
     """A live session: ``LiveUpdates`` on a validating client, a fake timer and clock, and a scene that changes like
-    MRML. ``sent`` records what the controller and the client hand to the transport."""
+    MRML. ``sent`` records what the controller and the client hand to the transport. ``export`` (a one-call
+    ``build_snapshot`` lookalike) replaces the real preparation as one step; ``slice_s`` as in ``LiveUpdates``."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — the rig's options
         self,
         strict,
         scene: LiveScene,
         *,
-        export=build_snapshot,
+        export=None,
         anonymize=False,
+        remove_islands=False,
         ids=None,
+        slice_s=None,
+        send_policy=None,
         **limits,
     ):
         self.timer = FakeTimer()
@@ -94,9 +101,14 @@ class Rig:
         self.ended: list[str] = []
         self.events: list = []
         self.exports = 0  # export attempts (a too-large one sends nothing)
+        self.islands: list[bool] = []  # the island rule of every preparation, in order (SLC-54)
 
         def counted(*args, **options):
             self.exports += 1
+            self.islands.append(options["remove_islands"])
+            if export is None:
+                return (yield from prepare_snapshot(*args, **options))
+            options.pop("progress", None)
             return export(*args, **options)
 
         # the panel's side, replaceable by a test
@@ -114,9 +126,12 @@ class Rig:
             slicer_version="5.12.4",
             end_session=self._end_session,
             on_event=self._on_event,
-            export=counted,
+            prepare=counted,
             anonymize_names=anonymize,
+            remove_islands=remove_islands,
             ids=ids,
+            slice_s=slice_s,
+            **({} if send_policy is None else {"send_policy": send_policy}),
         )
         self.timer.callback = self.live.flush
 
@@ -922,6 +937,53 @@ def test_live_hide_names_switch_reexports_when_allowed(strict):
     assert rig.begins() == []
 
 
+def test_live_remove_small_islands_switch_reexports_when_allowed(strict):
+    """SLC-54, like *Hide node names*: the switch waits for the snapshot in flight, then the scene goes again with
+    the specks left out (the body's 1,920 triangles of 2,016); a wait the relay asked for is honoured, the too-large
+    gate allows one attempt and an unchanged value does nothing."""
+    rig = Rig(strict, LiveScene({"id": A, "mesh": specked(32)}))
+    rig.live.start()
+    assert [b["triangleCount"] for b in rig.begins()] == [2_016]
+    rig.live.set_remove_islands(True)
+    rig.wait(2)
+    assert rig.take() == []  # in flight
+    rig.ack()
+    rig.live.tick()
+    begin, glb, _ = reassemble(list(rig.sent))
+    assert begin["triangleCount"] == 1_920 and [n["triangleCount"] for n in manifest(glb)] == [
+        1_920
+    ]
+    rig.take()
+    rig.ack()
+    # a wait the relay asked for is honoured
+    failed = refuse_next_snapshot(rig, "CAPACITY", retryAfterS=30)
+    rig.live.set_remove_islands(False)
+    first_begin_at(rig, failed + 30)
+    assert rig.islands[-1] is False  # the scene with its islands again
+    rig.ack()
+    # under the too-large gate: one attempt
+    refuse_next_snapshot(rig, "PAYLOAD_TOO_LARGE")
+    rig.live.set_remove_islands(True)
+    rig.live.tick()
+    assert len(rig.begins()) == 1 and rig.islands[-1] is True
+    prepared = len(rig.islands)
+    rig.live.set_remove_islands(True)  # unchanged: nothing
+    rig.ack()
+    rig.wait(2)
+    assert rig.begins() == [] and len(rig.islands) == prepared
+
+
+def test_live_every_preparation_gets_the_island_rule_the_empty_one_of_a_reset_too(strict):
+    """``_build`` (the empty snapshot that clears a closed scene off the viewers, SLC-51) gets the rule like
+    ``_export``."""
+    rig = started_in_steps(stepwise(strict, {"id": A}, {"id": B}, remove_islands=True))
+    closed_and_replaced(rig)
+    rig.live.reset()
+    rig.advance(750)
+    assert after_a_reset(rig) == [(2, 0), (3, 1)]
+    assert len(rig.islands) >= 4 and set(rig.islands) == {True}
+
+
 SEG = "vtkMRMLSegmentationNode1"
 
 
@@ -1030,6 +1092,7 @@ def test_live_stopped_controller_ignores_everything(strict):
         rig.live.flush,
         rig.live.request_snapshot,
         lambda: rig.live.set_anonymize_names(True),
+        lambda: rig.live.set_remove_islands(True),
     ):
         call()
     rig.wait(2)
@@ -2530,3 +2593,538 @@ def test_live_a_verbatim_name_like_segment_id_reaches_no_log_or_repr(
     )
     assert plans and "Liver_DoeJohn" not in text and "lung" not in text and "Doe" not in text
     assert leaks(caplog, capfd, "Liver_DoeJohn", "left lung", "Doe", "Smith", SEG, A) == []
+
+
+# --------------------------------------------------------------------------- SLC-51: the preparation in steps
+
+
+def stepwise(strict, *nodes: dict, **kw) -> Rig:
+    """A rig whose exports are prepared one step per ``tick`` (``slice_s=0``)."""
+    return Rig(strict, LiveScene(*nodes), slice_s=0.0, **kw)
+
+
+def started_in_steps(rig: Rig) -> Rig:
+    """``Rig.started`` for a stepwise rig: the first snapshot prepared over ticks, begun and acknowledged."""
+    rig.live.start()
+    to_the_end(rig)
+    rig.ack()
+    rig.take()
+    return rig
+
+
+def to_the_end(rig: Rig, ticks: int = 1_000) -> int:
+    """Pump ticks until the preparation is over; how many it took."""
+    for n in range(ticks):
+        if rig.live.preparing is None:
+            return n
+        rig.live.tick()
+    raise AssertionError("still preparing")
+
+
+def counting(monkeypatch, module, name: str) -> list:
+    """Replace the steps function ``module.name`` with one that records its first argument."""
+    original, seen = getattr(module, name), []
+
+    def recorded(first, *args, **options):
+        seen.append(first)
+        return (yield from original(first, *args, **options))
+
+    monkeypatch.setattr(module, name, recorded)
+    return seen
+
+
+def test_live_prepares_over_ticks_and_a_stop_between_them_sends_nothing(strict):
+    rig = stepwise(strict, {"id": A}, {"id": B})
+    rig.live.start()
+    for _ in range(3):
+        rig.live.tick()
+    progress = rig.live.preparing
+    assert progress is not None and 0 <= progress.done < progress.total == 4
+    assert rig.sent == [] and "preparing=True" in repr(rig.live)
+    rig.live.stop()
+    assert rig.sent == [] and rig.kinds() == [] and rig.live.preparing is None
+    assert rig.client.next_scene_version == 1 and rig.client.snapshot_in_flight is None
+    rig.live.tick()
+    assert rig.sent == []
+    # without a stop the same preparation ends in the session's first snapshot
+    rig = stepwise(strict, {"id": A}, {"id": B})
+    rig.live.start()
+    assert to_the_end(rig) > 10
+    [begin] = rig.begins()
+    assert begin["sceneVersion"] == 1 and begin["nodeCount"] == 2
+
+
+def test_live_marks_while_preparing_wait_for_the_ack_and_meet_its_scene(strict):
+    """SLC-30 design review: the debouncer is held from the first step until ``begin``; a change to a node already
+    collected flushes after the ack, against the scene the snapshot holds."""
+    rig = stepwise(strict, {"id": A}, {"id": B})
+    rig.live.start()
+    while rig.live.preparing.done < 1:  # A collected, B not yet
+        rig.live.tick()
+    rig.scene.node(A)["color"] = (0.1, 0.2, 0.3)
+    rig.live.mark(A, Change.APPEARANCE)
+    rig.timer.advance(2_500)  # past every debounce deadline: held
+    assert rig.sent == []
+    to_the_end(rig)
+    [begin] = rig.begins()
+    assert begin["sceneVersion"] == 1 and rig.live.sent.get(A).color == (0.8, 0.3, 0.2)
+    rig.wait(1)
+    assert rig.take() == []  # held while in flight
+    rig.ack()
+    rig.advance(0)
+    [update] = rig.take()
+    assert update["changes"] == [{"nodeId": A, "color": [0.1, 0.2, 0.3]}]
+
+
+def closed_and_replaced(rig: Rig) -> None:
+    """The scene is closed and another one (a model C) appears."""
+    rig.scene.remove(A)
+    rig.scene.remove(B)
+    rig.scene.add(C)
+
+
+def after_a_reset(rig: Rig) -> list[tuple[int, int]]:
+    """``(sceneVersion, nodeCount)`` of the snapshots that follow a reset: the closed scene leaves the viewers in an
+    empty snapshot when the new one takes more than one slice (§7.3), and the new one follows that snapshot's ack."""
+    to_the_end(rig)
+    seen = [(b["sceneVersion"], b["nodeCount"]) for b in rig.begins()]
+    rig.ack()
+    rig.live.tick()
+    to_the_end(rig)
+    return seen + [(b["sceneVersion"], b["nodeCount"]) for b in rig.begins()]
+
+
+@pytest.mark.parametrize("in_a_batch", [True, False])
+def test_live_a_scene_closed_while_preparing_never_reaches_the_viewers(strict, in_a_batch):
+    """Slicer closes a scene inside a batch; ``reset()`` abandons the preparation itself too (an ``EndCloseEvent``
+    whose batch went unseen, off the main thread)."""
+    rig = stepwise(strict, {"id": A}, {"id": B})
+    rig.live.start()
+    rig.live.tick()
+    if in_a_batch:
+        rig.live.hold()
+        assert rig.live.preparing is None  # abandoned at the batch's start
+    closed_and_replaced(rig)
+    rig.live.reset()
+    assert rig.live.preparing is None
+    if in_a_batch:
+        rig.live.release()
+    rig.advance(0 if in_a_batch else 750)
+    assert after_a_reset(rig) == [(1, 0), (2, 1)] and rig.discarded == 0
+    assert C in rig.live.sent and A not in rig.live.sent and B not in rig.live.sent
+
+
+def test_live_a_batch_abandons_the_preparation_and_the_next_one_reuses_the_cache(
+    strict, monkeypatch
+):
+    collected = counting(monkeypatch, collect, "mesh_steps")
+    a, b = sphere(8), sphere(10)
+    rig = stepwise(strict, {"id": A, "mesh": a}, {"id": B, "mesh": b})
+    rig.live.start()
+    while rig.live.preparing.done < 3:  # both collected, A fitted (and stored)
+        rig.live.tick()
+    rig.live.hold()
+    assert rig.live.preparing is None and rig.sent == []
+    rig.live.release()
+    collected.clear()
+    rig.live.tick()
+    to_the_end(rig)
+    [begin] = rig.begins()
+    assert begin["sceneVersion"] == 1 and [p is b for p in collected] == [True]
+
+
+def test_live_hide_node_names_while_preparing_starts_again_with_it(strict):
+    rig = stepwise(strict, {"id": A, "name": "Doe^John"})
+    rig.live.start()
+    rig.live.tick()
+    rig.live.set_anonymize_names(True)
+    assert rig.live.preparing is None and rig.sent == []
+    rig.live.tick()
+    to_the_end(rig)
+    _, glb, _ = reassemble(list(rig.sent))
+    assert root_extras(glb)["anonymizedNames"] is True and b"Doe" not in glb
+
+
+def test_live_remove_small_islands_while_preparing_starts_again_with_it(strict):
+    """SLC-54: the switch abandons a preparation made with the other rule; the next one leaves the specks out."""
+    rig = stepwise(strict, {"id": A, "mesh": specked(32)})
+    rig.live.start()
+    rig.live.tick()
+    rig.live.set_remove_islands(True)
+    assert rig.live.preparing is None and rig.sent == []
+    rig.live.tick()
+    to_the_end(rig)
+    assert [b["triangleCount"] for b in rig.begins()] == [1_920]
+    assert rig.islands == [False, True]
+
+
+def test_live_a_resync_while_preparing_lets_it_finish_and_follows_it(strict):
+    """Events missed off the main thread (SLC-33) do not abandon a preparation — abandoning it each time could hold a
+    large scene off for ever —; a re-sync follows its snapshot."""
+    rig = stepwise(strict, {"id": A}, {"id": B})
+    rig.live.start()
+    rig.live.tick()
+    rig.live.request_resync(batch=False)
+    assert rig.live.preparing is not None
+    to_the_end(rig)
+    assert [b["sceneVersion"] for b in rig.begins()] == [1]
+    rig.ack()
+    rig.live.tick()
+    to_the_end(rig)
+    assert [b["sceneVersion"] for b in rig.begins()] == [2]
+
+
+def test_live_after_a_geometry_change_only_that_node_is_decimated_again(strict, monkeypatch):
+    """SLC-50 through the live session: the cache of ``LiveUpdates`` keeps the other node's decimated mesh."""
+    monkeypatch.setattr(
+        snapshot_module,
+        "PROFILES",
+        {**decimate.PROFILES, "mobile": decimate.Budget(500_000, 50, 1 << 25)},
+    )
+    decimated = counting(monkeypatch, decimate, "decimate_steps")
+    rig = two(strict).started()  # 96 triangles each: both decimated to 50
+    assert [e.node_id for e in decimated] == [A, B]
+    decimated.clear()
+    rig.scene.node(B)["mesh"] = sphere(9)
+    rig.live.mark(B, Change.GEOMETRY)
+    rig.advance(750)
+    assert [b["sceneVersion"] for b in rig.begins()] == [2]
+    assert [e.node_id for e in decimated] == [B]
+
+
+def test_live_a_relay_wait_that_comes_while_preparing_abandons_it(strict):
+    """An error with ``retryAfterS`` answering an earlier update closes the gate: the preparation is abandoned and its
+    snapshot begins only once the wait is over (T2)."""
+    rig = started_in_steps(stepwise(strict, {"id": A}, {"id": B}))
+    update = update_id(rig)
+    rig.scene.node(B)["mesh"] = sphere(9)
+    rig.live.mark(B, Change.GEOMETRY)
+    rig.timer.advance(750)
+    assert rig.live.preparing is not None and rig.take() == []
+    rig.relay(error("CAPACITY", update, retryAfterS=30))
+    rig.live.tick()
+    assert rig.live.preparing is None
+    rig.wait(29)
+    assert rig.begins() == []
+    rig.wait(2)
+    to_the_end(rig)
+    assert [b["sceneVersion"] for b in rig.begins()] == [3]
+
+
+def test_live_a_connection_lost_while_preparing_sends_nothing_until_it_is_back(strict):
+    """A drop abandons the preparation — nothing sent, no hold left but the pause's — and the real resume (no snapshot
+    ever began) prepares the scene again and sends it once (merge review: it used to stay frozen across the outage)."""
+    rig = stepwise(strict, {"id": A}, {"id": B})
+    rig.live.start()
+    rig.live.tick()
+    assert rig.live.preparing is not None
+    drop(rig)
+    assert rig.live.preparing is None and rig.sent == []
+    assert rig.live._debouncer._holds == 1  # the pause hold only
+    rig.live.tick()
+    assert rig.live.preparing is None and rig.sent == []
+    resume(rig, scene=0, snapshot=None)
+    rig.live.tick()
+    to_the_end(rig)
+    assert [b["sceneVersion"] for b in rig.begins()] == [1] and rig.live._debouncer._holds == 1
+
+
+def test_live_a_re_export_abandoned_by_a_drop_goes_once_after_a_clean_resume(strict):
+    """A flush's re-export owes the client nothing until it begins: abandoned by the drop, it stays owed through a
+    resume that owes nothing itself, and goes once."""
+    rig = started_in_steps(stepwise(strict, {"id": A}, {"id": B}))
+    rig.scene = LiveScene({"id": A}, {"id": B}, {"id": C})
+    rig.live.mark(C, Change.ADDED)
+    rig.advance(750)  # the flush: the re-export's first step
+    assert rig.live.preparing is not None
+    drop(rig)
+    assert rig.live.preparing is None
+    rig.live.tick()
+    resume(rig, scene=1, snapshot=1)
+    rig.live.tick()
+    to_the_end(rig)
+    [begin] = rig.begins()
+    assert begin["sceneVersion"] == 2 and begin["nodeCount"] == 3
+
+
+def test_live_a_step_that_raises_is_a_failure_with_the_back_off(strict, caplog):
+    rig = stepwise(strict, {"id": A}, {"id": B})
+
+    def prepare(*args, **options):
+        yield
+        yield
+        raise KeyError(f"{A} Liver Smith")
+
+    rig.live._prepare_fn = prepare
+    with caplog.at_level(logging.DEBUG):
+        rig.live.start()
+        for _ in range(4):
+            rig.live.tick()
+    assert rig.kinds() == [LiveEventKind.FAILED] and rig.live.preparing is None
+    assert rig.client.snapshot_needed and rig.live._debouncer._holds == 0
+    assert rig.live._until == pytest.approx(rig.timer.clock() + 2.0)
+    assert "KeyError" in caplog.text and "Smith" not in caplog.text
+
+
+def test_live_a_re_export_abandoned_by_a_batch_goes_out_after_it(strict):
+    rig = started_in_steps(stepwise(strict, {"id": A}, {"id": B}))
+    rig.scene.add(C)
+    rig.live.mark(C, Change.ADDED)
+    rig.timer.advance(750)
+    assert rig.live.preparing is not None
+    rig.live.hold()
+    rig.live.release()
+    rig.timer.advance(0)
+    rig.live.tick()
+    to_the_end(rig)
+    [begin] = rig.begins()
+    assert (begin["sceneVersion"], begin["nodeCount"]) == (2, 3) and C in rig.live.sent
+
+
+def test_live_a_scene_event_inside_a_step_abandons_the_preparation_safely(strict):
+    """A step that calls back into the controller (an MRML event fired by a scene read starts a batch): the
+    preparation stops after that step, nothing of it is sent, the holds stay right, and the snapshot follows the
+    batch."""
+    rig = stepwise(strict, {"id": A}, {"id": B})
+    calls = []
+
+    def prepare(*args, **options):
+        yield
+        calls.append("event")
+        rig.live.hold()  # inside the step
+        yield
+        calls.append("after the event")
+
+    rig.live._prepare_fn = prepare
+    rig.live.start()
+    rig.live.tick()
+    assert calls == ["event"] and rig.live.preparing is None and rig.sent == []
+    assert rig.live._debouncer._holds == 1  # the batch's, not the preparation's
+    rig.live._prepare_fn = prepare_snapshot
+    rig.live.release()
+    rig.timer.advance(0)
+    rig.live.tick()
+    to_the_end(rig)
+    assert calls == ["event"] and [b["sceneVersion"] for b in rig.begins()] == [1]
+
+
+# --------------------------------------------------------------------------- SLC-56: the send policy
+
+
+def test_live_send_now_flushes_the_waiting_changes_or_sends_the_scene_again(strict):
+    """SLC-56: under a delay the changes wait (``changes_wait``, ``due_in``) and *Send now* sends them at once; with
+    nothing waiting it sends the scene again — unless a snapshot is already on its way."""
+    rig = two(strict).started()
+    rig.live.set_send_policy(SendPolicy(delay_s=30))
+    assert not rig.live.changes_wait and rig.live.due_in is None
+    rig.scene.node(A)["color"] = (0.1, 0.2, 0.3)
+    rig.live.mark(A, Change.APPEARANCE)
+    assert rig.live.changes_wait and rig.live.due_in == 30.0
+    rig.advance(20_000)
+    assert rig.take() == [] and rig.live.due_in == 10.0
+    rig.live.send_now()
+    [update] = rig.take()
+    assert update["type"] == "scene.update" and not rig.live.changes_wait
+    rig.live.send_now()  # nothing waits: the scene goes again, from the next tick
+    rig.advance(0)
+    [begin] = rig.begins()
+    assert begin["sceneVersion"] == 3
+    rig.live.send_now()  # in flight: a click does not restart it
+    assert rig.take() == []
+    rig.ack()
+    rig.scene.node(B)["color"] = (0.3, 0.2, 0.1)
+    rig.live.mark(B, Change.APPEARANCE)
+    rig.advance(29_999)
+    assert rig.take() == []
+    rig.advance(1)  # by itself, 30 s after the mark
+    [update] = rig.take()
+    assert update["type"] == "scene.update" and update["changes"][0]["nodeId"] == B
+
+
+@pytest.mark.parametrize(
+    "policy", [SendPolicy(manual=True), SendPolicy(delay_s=30)], ids=["manual", "delay"]
+)
+def test_live_resume_without_the_snapshot_sends_it_at_once_whatever_the_policy(strict, policy):
+    """A snapshot the drop cut goes again right after the resume, with the change that waits — the send policy
+    would otherwise keep that pending mark, and with it the owed snapshot, for its delay or until *Send now* (merge
+    review)."""
+    rig = two(strict, send_policy=policy).started()
+    rig.live.send_now()  # nothing waits: the scene goes again
+    rig.advance(0)
+    [begin] = rig.begins()
+    rig.scene.node(A)["color"] = (0.9, 0.1, 0.1)
+    rig.live.mark(A, Change.APPEARANCE)  # during the upload: it waits
+    drop(rig)
+    resume(rig, scene=begin["sceneVersion"], snapshot=1)  # the relay does not hold it
+    rig.live.tick()
+    rig.advance(0)
+    [again] = rig.begins()
+    assert again["sceneVersion"] == begin["sceneVersion"] + 1 and not rig.live.changes_wait
+
+
+@pytest.mark.parametrize(
+    "policy", [SendPolicy(manual=True), SendPolicy(delay_s=30)], ids=["manual", "delay"]
+)
+def test_live_a_clean_resume_keeps_the_send_policy(strict, policy):
+    """Only what the drop cut goes at once: after a resume that owes nothing a change that waits still waits for its
+    delay or for *Send now* (merge review)."""
+    rig = two(strict, send_policy=policy).started()
+    rig.scene.node(A)["color"] = (0.9, 0.1, 0.1)
+    rig.live.mark(A, Change.APPEARANCE)
+    drop(rig)
+    resume(rig, scene=1, snapshot=1)
+    rig.live.tick()
+    rig.advance(0)
+    rig.advance(1000)
+    assert rig.take() == [] and rig.live.changes_wait and not rig.live._debouncer._send_asked
+
+
+def test_live_a_preparation_cut_by_a_drop_goes_at_once_under_the_manual_policy(strict):
+    """*Send now* started a preparation; a change made while it ran waits for the next click; the drop abandons the
+    preparation, and the resume sends the scene at once, with that change (merge review)."""
+    rig = started_in_steps(
+        stepwise(strict, {"id": A}, {"id": B}, send_policy=SendPolicy(manual=True))
+    )
+    rig.live.send_now()  # nothing waits: the scene again, prepared over ticks
+    rig.live.tick()
+    assert rig.live.preparing is not None
+    rig.scene.node(A)["color"] = (0.9, 0.1, 0.1)
+    rig.live.mark(A, Change.APPEARANCE)
+    drop(rig)
+    assert rig.live.preparing is None
+    resume(rig, scene=1, snapshot=1)
+    rig.advance(0)
+    rig.live.tick()
+    to_the_end(rig)
+    [begin] = rig.begins()
+    assert begin["sceneVersion"] == 2 and not rig.live.changes_wait
+
+
+@pytest.mark.parametrize(
+    "policy", [SendPolicy(manual=True), SendPolicy(delay_s=30)], ids=["manual", "delay"]
+)
+def test_live_an_update_lost_with_the_connection_is_re_sent_at_once_whatever_the_policy(
+    strict, policy
+):
+    """*Send now* sent an update the relay never got; a change waits; the resume owes a re-sync, which goes at once
+    with the change (merge review)."""
+    rig = two(strict, send_policy=policy).started()
+    rig.scene.node(A)["color"] = (0.9, 0.1, 0.1)
+    rig.live.mark(A, Change.APPEARANCE)
+    rig.live.send_now()
+    [update] = rig.take()
+    assert update["type"] == "scene.update"
+    rig.scene.node(B)["color"] = (0.1, 0.9, 0.1)
+    rig.live.mark(B, Change.APPEARANCE)  # waits
+    drop(rig)
+    resume(rig, scene=1, snapshot=1)  # the relay never got the update
+    rig.live.tick()
+    rig.advance(0)
+    [begin] = rig.begins()
+    assert begin["nodeCount"] == 2 and not rig.live.changes_wait
+
+
+def test_live_an_update_lost_with_the_connection_is_not_hidden_by_a_setting_changed_offline(strict):
+    """*Remove small islands* toggled while reconnecting asks for a snapshot too; the update lost with the connection
+    still makes the resume's re-sync go at once (merge review)."""
+    rig = two(strict, send_policy=SendPolicy(manual=True)).started()
+    rig.scene.node(A)["color"] = (0.9, 0.1, 0.1)
+    rig.live.mark(A, Change.APPEARANCE)
+    rig.live.send_now()
+    [update] = rig.take()
+    assert update["type"] == "scene.update"
+    rig.scene.node(B)["color"] = (0.1, 0.9, 0.1)
+    rig.live.mark(B, Change.APPEARANCE)  # waits for Send now
+    drop(rig)
+    rig.live.set_remove_islands(True)  # offline
+    resume(rig, scene=1, snapshot=1)  # the relay never got the update
+    rig.live.tick()
+    rig.advance(0)
+    [begin] = rig.begins()
+    assert begin["nodeCount"] == 2 and not rig.live.changes_wait
+
+
+@pytest.mark.parametrize(
+    "policy", [SendPolicy(manual=True), SendPolicy(delay_s=30)], ids=["manual", "delay"]
+)
+def test_live_a_snapshot_owed_before_the_drop_keeps_the_send_policy(strict, policy):
+    """A snapshot owed and waiting for the relay's back-off before the drop is not the drop's: after a consistent
+    resume a change that waits still waits for its delay or for *Send now* (merge review)."""
+    rig = two(strict, send_policy=policy).started()
+    rig.live.request_snapshot()
+    rig.live.tick()
+    begin_id = rig.begin_id()
+    version = rig.client.snapshot_in_flight
+    rig.take()
+    rig.relay(error("CAPACITY", begin_id, retryAfterS=20))
+    rig.scene.node(A)["color"] = (0.9, 0.1, 0.1)
+    rig.live.mark(A, Change.APPEARANCE)
+    drop(rig)
+    resume(rig, scene=version, snapshot=1)
+    rig.live.tick()
+    rig.advance(0)
+    assert rig.take() == [] and rig.live.changes_wait
+
+
+def test_live_a_reset_s_empty_snapshot_cut_by_a_drop_goes_again_at_once_under_the_manual_policy(
+    strict,
+):
+    """§7.3: the empty snapshot that clears a closed scene whose own export failed is cut by the drop; a change waits
+    for *Send now*; after the resume the empty snapshot goes again at once — the closed scene may be another
+    patient's (merge review)."""
+    broken = []
+
+    def export(scene_api, client, **options):
+        if broken and scene_api is rig.scene:  # the scene's export fails, not the empty one
+            raise KeyError(f"{A} Liver Smith")
+        return build_snapshot(scene_api, client, **options)
+
+    rig = two(strict, export=export, send_policy=SendPolicy(manual=True)).started()
+    broken.append(True)
+    rig.live.hold()
+    rig.live.reset()
+    rig.live.release()
+    rig.advance(0)
+    [begin] = rig.begins()
+    assert begin["nodeCount"] == 0
+    rig.live.mark(A, Change.APPEARANCE)  # waits for Send now
+    drop(rig)
+    resume(
+        rig, scene=begin["sceneVersion"], snapshot=1
+    )  # the relay does not hold the empty snapshot
+    rig.live.tick()
+    rig.advance(0)
+    [again] = rig.begins()
+    assert again["nodeCount"] == 0 and again["sceneVersion"] > begin["sceneVersion"]
+
+
+def test_live_send_now_while_reconnecting_leaves_a_lost_snapshot_to_the_resume(strict):
+    """*Send now* while the connection is lost: the snapshot in flight at the drop is the resume's to adopt or owe —
+    a click must not add a second upload when the relay had it (merge review)."""
+    rig = two(strict).started()
+    version = in_flight_snapshot(rig)
+    rig.take()
+    drop(rig)
+    rig.live.send_now()
+    resume(rig, scene=version, snapshot=version)  # the relay had it
+    rig.live.tick()
+    rig.advance(0)
+    assert rig.begins() == [] and not rig.live.owed
+
+
+def test_live_send_now_during_a_hold_sends_at_its_end_and_manual_never_sends_alone(strict):
+    rig = two(strict, send_policy=SendPolicy(manual=True)).started()
+    rig.scene.node(A)["color"] = (0.4, 0.2, 0.3)
+    rig.live.mark(A, Change.APPEARANCE)
+    rig.wait(120)
+    assert rig.take() == [] and rig.live.changes_wait and rig.live.due_in is None
+    rig.live.hold()  # a batch: Send now is honoured at its end
+    rig.live.send_now()
+    assert rig.take() == []
+    rig.live.release()
+    rig.advance(0)
+    [update] = rig.take()
+    assert update["type"] == "scene.update"
+    rig.live.stop()
+    rig.live.send_now()  # stopped: nothing
+    assert rig.take() == [] and not rig.live.changes_wait

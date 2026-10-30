@@ -267,7 +267,7 @@ export function bindScreens(options: ScreensOptions): Screens {
       xrNotice = false;
       loading = false;
       clearStatus(); // the notice and the hint talk about the previous scene
-      viewer.setModel(model); // a new model is fitted from the front
+      viewer.setModel(model); // framed from the front unless it continues the scene on screen (WEB-25)
       panel?.setModel(model);
     } else {
       viewer.resize(); // the same model again (rejoin after a drop) keeps the user's camera

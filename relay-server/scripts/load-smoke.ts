@@ -9,10 +9,11 @@
  * plays the fixture with fake-slicer's frames (`tools/fake-slicer`, PRO-14) in this process, so each
  * cycle starts once every viewer is ready, and paces its chunks by the viewers it waits for: the relay
  * then never holds more than one chunk for a reading viewer, whatever the loopback socket buffers take
- * (report `2026-10-27-release-1`, `sendPaced`). Per cycle it measures the time from
- * `scene.snapshot.begin` to the last viewer holding the whole GLB: its `scene.snapshot.end`, or for
- * a deferred viewer its `scene.snapshot.ready` plus the HTTP download (§6.4, §6.5) — SHA-256 and
- * version checked.
+ * (report `2026-10-27-release-1`, `sendPaced`). A cycle begins only once the relay's publisher
+ * budget has earned back the previous one's frames (`BudgetSpend`, SRV-32). Per cycle it measures
+ * the time from `scene.snapshot.begin` to the last viewer holding the whole GLB: its
+ * `scene.snapshot.end`, or for a deferred viewer its `scene.snapshot.ready` plus the HTTP download
+ * (§6.4, §6.5) — SHA-256 and version checked.
  * - Phase 1 (criteria 1–2): every viewer reads and is streamed; each cycle within `--max-fanout-ms`;
  *   after a full GC the relay's live buffers grow by less than `--max-growth-factor` × the snapshot from
  *   before the first cycle to after the last, and hold less than two snapshots after every cycle
@@ -29,6 +30,7 @@ import type { ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { createInterface } from "node:readline";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { WebSocket } from "ws";
@@ -43,6 +45,7 @@ import {
 } from "../../tools/fake-slicer/src/index.js";
 import type { LoadedGlb, SnapshotPlan } from "../../tools/fake-slicer/src/index.js";
 import { ENV_VARIABLES, PLATFORM_INPUTS } from "../src/config.js";
+import { DEFAULT_MESSAGE_BUDGETS } from "../src/ws/budget.js";
 
 /** `relay-server/`, the relay's working directory. */
 const RELAY_DIR = fileURLToPath(new URL("..", import.meta.url));
@@ -62,8 +65,9 @@ export interface SmokeOptions {
   chunkSize: number;
   /**
    * Phase 2 runs at least one and at most this many cycles until the stopped viewer is deferred
-   * (`Infinity`: until it is — with a fixture below the watermark, until the run times out, or,
-   * after about 60 s, until the relay's heartbeat closes the stopped viewer, which answers no ping).
+   * (`Infinity`: until it is — with a fixture below the watermark only once its queue adds up to it,
+   * ≈ 1,270 cycles of the 3.4 KB fixture on macOS (≈ 22 s), unless the run times out first or, after
+   * about 60 s, the relay's heartbeat closes the stopped viewer, which answers no ping).
    */
   maxDeferCycles: number;
   /** The run gives up after this long; a stuck viewer must not hang CI. */
@@ -93,6 +97,10 @@ export interface Memory {
 export interface CycleResult {
   sceneVersion: number;
   fanoutMs: number;
+  /** `performance.now()` when its `begin` went out. */
+  startedAt: number;
+  /** What its frames cost the relay's publisher budget, in refill time (`BudgetSpend`). */
+  refillMs: number;
   viewersStreamed: number;
   viewersDeferred: number;
   /** Viewers `sendPaced` could not pace (5 s behind, or stream over early); 0 is a pass. */
@@ -305,6 +313,34 @@ export async function sendPaced(
   return paced - pacing.size;
 }
 
+const { publisher: TEXT_BUDGET, publisherBinary: CHUNK_BUDGET } = DEFAULT_MESSAGE_BUDGETS;
+
+/**
+ * What frames cost the relay's publisher budget, counted as the relay counts them (`ws/budget.ts`,
+ * SRV-25; T3): a text frame its bytes plus 32 KiB from a bucket that refills 4 MiB/s, a chunk frame
+ * its bytes plus 16 KiB from one that refills 32 MiB/s. A publisher the budget cannot pay is closed
+ * `RATE_LIMITED` + `4006` at once, so a cycle begins only `refillMs` after the previous one began:
+ * the publisher never sends faster than the buckets refill, and they stay within about a cycle's
+ * frames of full — far inside their bursts — however fast the machine and however many cycles.
+ * Back to back, a fast machine spent them before the run was over: the text bucket after ≈ 100
+ * cycles of the 3.4 KB fixture (6 ms each on Apple Silicon), the chunk bucket after ≈ 40 of the
+ * 4.7 MiB one with 3 viewers (SRV-32).
+ */
+export class BudgetSpend {
+  #text = 0;
+  #binary = 0;
+
+  add(frame: string | Uint8Array): void {
+    if (typeof frame === "string") this.#text += Buffer.byteLength(frame) + TEXT_BUDGET.frameCost;
+    else this.#binary += frame.byteLength + CHUNK_BUDGET.frameCost;
+  }
+
+  /** How long the relay takes to earn it back: its two buckets refill side by side. */
+  get refillMs(): number {
+    return 1000 * Math.max(this.#text / TEXT_BUDGET.rate, this.#binary / CHUNK_BUDGET.rate);
+  }
+}
+
 /** What the run must take down on every path: the relay process and every socket. */
 interface Resources {
   child: ChildProcess | undefined;
@@ -468,16 +504,25 @@ async function smoke(options: SmokeOptions, resources: Resources): Promise<Smoke
   const before = await memory();
 
   let sceneVersion = 0;
+  let refilled = 0; // when the relay has earned back the last cycle's frames (`BudgetSpend`)
   const cycle = async (waitFor: Viewer[]): Promise<CycleResult> => {
+    // Not before `refilled` (a timer can fire a millisecond early), and before `started`: the wait
+    // is no part of the fan-out time.
+    while (performance.now() < refilled) await delay(refilled - performance.now());
     sceneVersion += 1;
     const version = sceneVersion;
     const started = performance.now();
+    const spent = new BudgetSpend();
     const unpaced = await sendPaced(
-      (frame) => sendFrame(publisher, frame),
+      (frame) => {
+        spent.add(frame);
+        return sendFrame(publisher, frame);
+      },
       { glb, sceneVersion: version, chunkSize: options.chunkSize, profile: "mobile" },
       nextId,
       waitFor,
     );
+    refilled = started + spent.refillMs;
     const ack = await next("scene.snapshot.ack");
     if (ack.sceneVersion !== version)
       throw new Error(`ack for ${String(ack.sceneVersion)}, not ${version}`);
@@ -492,6 +537,8 @@ async function smoke(options: SmokeOptions, resources: Resources): Promise<Smoke
     return {
       sceneVersion: version,
       fanoutMs: Math.round(last - started),
+      startedAt: started,
+      refillMs: spent.refillMs,
       viewersStreamed: ack.viewersStreamed as number,
       viewersDeferred: ack.viewersDeferred as number,
       viewersUnpaced: unpaced,

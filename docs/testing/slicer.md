@@ -633,7 +633,7 @@ Steps:
     - Until `EndState`, the status reads "Sending the scene · no viewers yet." with the detail "Slicer is still loading
       or changing the scene: RemoteView sends it when Slicer is done.", and the stub has no snapshot.
     - Within 0.1 s after `EndState`, one snapshot with all three spheres; updates `[]`.
-    - Variant: click Start during a large `.mrb` load, if the panel accepts the click while the progress dialog is open
+    - Variant: click Start during a large `.mrb` load, if the panel accepts the click while Slicer's load dialog is open
       `[TODO verify]`. Expected: one snapshot after the load.
 12. **Events off the main thread** (SLC-33; research note §5 `[TODO verify]`). Do not run MRML calls on a thread:
     Slicer's own observers (displayable managers, subject hierarchy, Qt scene models) are not thread-safe. A missed
@@ -728,9 +728,10 @@ Steps:
 3. **Cut while "Sending the scene"** (relay (a) behind §2 step 16's throttle proxy, so that the upload of the large
    scene lasts at least 10 s). Load the large scene, click *Start*; while "Sending the scene" shows, type
    `close-publisher 1001`. Expected: "Connection lost — reconnecting…" with "Sending the scene was interrupted:
-   RemoteView sends it again once reconnected."; after the reconnect "Sending the scene", then "Live". The report's
-   resume entry starts with `["scene.snapshot.begin", v]` for a version above the cut one. Repeat once with relay (b)
-   (*[SRV-15]*), turning Wi-Fi off during the upload: after the reconnect the phone shows the whole scene.
+   RemoteView sends it again once reconnected."; after the reconnect "Preparing the scene" (briefly), "Sending the
+   scene", then "Live". The report's resume entry starts with `["scene.snapshot.begin", v]` for a version above the cut
+   one. Repeat once with relay (b) (*[SRV-15]*), turning Wi-Fi off during the upload: after the reconnect the phone
+   shows the whole scene.
 4. **Close the scene while it is sent, then cut** (relay (a) behind the throttle proxy of step 3). With the large
    scene loaded click *Start* and wait for "Live"; then run `slicer.mrmlScene.Clear(0); big_spheres()` in the Python
    console, in one line — `Clear(0)` is what *File → Close Scene* does (`qSlicerMainWindow`), and the new spheres are
@@ -743,10 +744,11 @@ Steps:
 5. **Relay restart.** From here on relay (a) is reached at its own address (`ws://127.0.0.1:8787/ws`, no throttle
    proxy); first run `slicer.mrmlScene.Clear(0); spheres(2)` for the two models of the preconditions. (a) Wait for
    "Live", type `restart`. Expected: within 5 s "Live" again with the same code; while reconnecting the panel says "The
-   relay restarted: RemoteView starts the session again, …"; "Sending the scene", then "Live" (the scene is uploaded
-   again: a restarted relay keeps none). Report: `create none`, `resume`, `create previous`. (c) (*[SRV-15]*, SRV-17)
-   Stop the local relay-server (SIGTERM) and start it again within 3 s. Expected: the same code; the viewer page rejoins
-   by itself. The relay closes Slicer's socket with 4008 and answers a reconnect during its drain with HTTP `503
+   relay restarted: RemoteView starts the session again, …"; "Preparing the scene" (for seconds with large models: the
+   new session prepares the whole scene again), "Sending the scene", then "Live" (the scene is uploaded again: a
+   restarted relay keeps none). Report: `create none`, `resume`, `create previous`. (c) (*[SRV-15]*, SRV-17) Stop the
+   local relay-server (SIGTERM) and start it again within 3 s. Expected: the same code; the viewer page rejoins by
+   itself. The relay closes Slicer's socket with 4008 and answers a reconnect during its drain with HTTP `503
    {"error":"RELAY_RESTARTING"}` (report `2026-10-27-server-5`). If the relay's 4008 close frame has not reached Slicer
    when the drain ends (about 5 s; rare for a publisher, whose send buffer on the relay holds only short replies),
    Slicer sees 1006 instead. A resume after that is answered `SESSION_NOT_FOUND`, and without a 4008 the panel ends the
@@ -845,13 +847,15 @@ Steps:
 
 Expected results:
 
-- Step 1: the text lists what *Start session* sends (the complete surface meshes of the models shown in the 3D view —
-  clipping is not applied — no images or volumes, names and MRML node IDs, colours, opacity, visibility, position, the
-  Slicer/RemoteView/OS versions) and who can see it. It names "the relay whose address you enter above" for the empty
+- Step 1 (SLC-55): the text says nothing leaves the computer before *Start session*, that RemoteView then sends the
+  models and segments shown in the 3D view and every later change to them, and ends with a clickable project link
+  (`https://github.com/dolegadolegowski/SlicerRemoteView`: a click opens it in the browser `[TODO verify]`
+  `openExternalLinks` from a `.ui` file in Slicer 5.12.4). The full statement (what is sent, who can see it) is in the
+  module's *Help* tab. It names "the relay whose address you enter above" for the empty
   field and "the relay at relay.example.org" for both `wss://` addresses (never `user` or `secret`); for
   `ws://127.0.0.1:8787/ws` it names "the relay at 127.0.0.1" and ends with "A ws:// address is not encrypted; Start
-  session accepts it only for a relay on this computer (development)." The status stays "Not connected."; nothing is
-  sent.
+  session accepts it only for a relay on this computer (development)." before the link. The status stays
+  "Not connected."; nothing is sent.
 - Step 3: the first line is `['Sphere A']` — no slice planes (*Red/Green/Yellow Volume Slice*), no *Sphere B* (hidden
   folder), nothing from *MRHead* (a volume). The second line is `[('Sphere A', 0.5, 0.08)] ()`: opacity as shown, the
   80 mm of the two transforms as 0.08 m along glTF +X.
@@ -1169,7 +1173,7 @@ Known gaps (not failures):
 |---|---|---|---|---|
 | | | | | |
 
-## §14 Decimation to the device profile (SLC-14; FR-10, NFR-03, protocol §7.5)
+## §14 Decimation to the device profile (SLC-14, SLC-41, SLC-53, SLC-54; FR-10, NFR-03, NFR-04, protocol §7.5)
 
 Preconditions: §2's setup with relay (b) or (c) and a viewer joined. The panel uses the `mobile` profile (500k
 triangles in all, 100k per model; the profile selector is SLC-18). In a new scene run in the Python console
@@ -1199,22 +1203,165 @@ Steps:
 
 Expected results:
 
-- Step 1: Slicer is busy for a few seconds while it simplifies "Big" and "Medium", and the code appears only then (SLC-28,
-  §15, shows the code first and a progress dialog); then "Sending the scene", then "Live". The viewer shows the four spheres, round and in
+- Step 1: the code appears at once with "Preparing the scene" while "Big" and "Medium" are simplified in steps (SLC-28,
+  SLC-51, §15: Slicer stays usable; no progress window since SLC-55); then "Sending the scene", then "Live". The viewer shows the four spheres, round and in
   place — "Big" and "Medium" with visibly fewer, larger facets than in Slicer (100,000 triangles at most each; the
   total is at most 500,000), "Small" and "Tiny" unchanged; all lit from outside. The panel shows no warning (the scene
   is about 3 MB, below the 32 MB recommended for `mobile`).
 - Step 2: "Big" still has 399,616 cells in Slicer: only the copy that is sent is simplified.
 - Throughout: no traceback in the Python console.
-- `[TODO verify]` in Slicer 5.12.4: `vtkQuadricDecimation` and `vtkDecimatePro` from `vtkmodules.vtkFiltersCore` behave
+- `[TODO verify]` in Slicer 5.12.4: `vtkQuadricDecimation` from `vtkmodules.vtkFiltersCore` behaves
   as in the `vtk` 9.6.2 wheel (Slicer builds VTK 9.6.2, `docs/research/slicer-decimate.md`); how long the scene takes to
   prepare (≈ 6 s on the development machine, which sends 250,656 triangles, 3.0 MB).
+
+Steps (large segmentation, SLC-41):
+
+Preconditions: a micro-CT or CT labelmap segmentation whose closed surface has more than 10M triangles, built with the
+smoothing factor of your choice and decimation factor 0 in *Show 3D*'s surface settings — for example the reporter's
+scene, or a CT bone threshold (e.g. *CTChest* from Sample Data, threshold 200 HU) with the segmentation geometry
+oversampled × 2-4 (*Specify geometry*; that it passes 10M is `[TODO verify]`); MRHead at its native resolution is
+very likely far below 10M. Check the count before step 3:
+`seg.GetClosedSurfaceInternalRepresentation(sid).GetNumberOfPolys()` (`seg` the segmentation node, `sid` the
+segment ID). Restart Slicer first so the module is loaded fresh; a phone joined in
+step 4. The memory reading below is for macOS (`ru_maxrss` is in bytes there; on Linux it is in KiB, and
+`resource` does not exist on Windows — use the system monitor instead). `ru_maxrss` is the process peak since
+start, so it also counts Slicer's own conversion of the labelmap to a surface: note it once before and once after
+the snippet.
+
+3. In the Python console, run the snapshot's steps by hand and time them:
+
+   ```python
+   import resource, time
+   from remoteview_core import collect, decimate, mrml_scene
+   start = time.perf_counter()
+   scene = mrml_scene.MrmlSceneApi(slicer.util.getNodesByClass, slicer.vtkMRMLFolderDisplayNode)
+   collected = collect.collect_scene(scene, anonymize_names=False)
+   middle = time.perf_counter()
+   fitted = decimate.fit_to_budget(collected.entities, decimate.PROFILES["mobile"])
+   end = time.perf_counter()
+   print(f"collect {middle - start:.1f} s, fit {end - middle:.1f} s, {fitted.triangle_count} triangles,",
+         f"reduced {len(fitted.reduced)}, unreduced {len(fitted.unreduced)},",
+         f"peak {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20:.0f} MiB")  # macOS: bytes
+   ```
+
+   (The scene adapter is built as `RemoteView.py` builds it; peak memory can also be read in Activity Monitor.)
+4. Click *Start session*, time it from the click to "Live", and join with the phone.
+5. On the phone, orbit to the same view as Slicer's 3D view and take a screenshot of both.
+
+Expected results:
+
+- Step 3: collect < 5 s, fit < 8 s and both together about 11 s on the development Mac under Rosetta (measured
+  2026-10-28 on the reporter's scene with a script doing the same steps: 3.8-4.4 s + 6.6-6.7 s; natively 3.4 s +
+  4.5 s; before SLC-41: 6.3 s + 169.6 s and 16 GB); peak memory about 12 GiB (measured 12.2 GiB, of which 7.2 GiB is
+  Slicer with the scene loaded, so the snippet prints about 12,500 MiB; natively the same flow peaks at 7.3 GiB);
+  the node is reduced to ≤ 100,000 triangles and none is unreduced; no `Decimation: …` warning in the Python
+  console or the Error Log (that warning means the coarser clustering fallback ran instead of the quadric, and says
+  why and with what result; whether the console shows it depends on its log level, `[TODO verify]` for 5.12.4).
+- Step 4: "Live" follows about 11-15 s after the click, not about 3 minutes; since SLC-51 the code shows at once and
+  Slicer stays usable meanwhile (§15 step 6 measures the stalls).
+- Step 5: the phone's view is smooth like Slicer's: no cracks along lines, no shards, no large flat facets, no dark
+  speckle pattern. Expected at 100k triangles: the fine grain is smoothed away, and the thinnest perforated walls show
+  a few see-through specks.
+- Throughout: no warning or traceback in the Python console (step 3 prints its one line).
+
+Steps (small islands, SLC-53):
+
+Preconditions: the scene of steps 3-5; restart Slicer first, so that the module is loaded fresh and `ru_maxrss` counts
+from this run. Steps 6-7 check the core in the console; the panel's checkbox (SLC-54) follows in steps 8-12.
+
+6. In the Python console, time the island step on its own, then the fit with the islands left out:
+
+   ```python
+   import resource, time
+   from remoteview_core import collect, decimate, mrml_scene
+   scene = mrml_scene.MrmlSceneApi(slicer.util.getNodesByClass, slicer.vtkMRMLFolderDisplayNode)
+   collected = collect.collect_scene(scene, anonymize_names=False)
+   start = time.perf_counter()
+   masks = [decimate.island_mask(e) for e in collected.entities]
+   middle = time.perf_counter()
+   fitted = decimate.fit_to_budget(collected.entities, decimate.PROFILES["mobile"], remove_islands=True)
+   end = time.perf_counter()
+   left_out = sum(int(m.sum()) for m in masks if m is not None)
+   total = sum(e.triangle_count for e in collected.entities)
+   print(f"islands {middle - start:.1f} s, {left_out} of {total} triangles left out;",
+         f"fit {end - middle:.1f} s, {fitted.triangle_count} triangles, cleaned {len(fitted.cleaned)},",
+         f"reduced {len(fitted.reduced)}, unreduced {len(fitted.unreduced)},",
+         f"peak {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20:.0f} MiB")  # macOS: bytes
+   ```
+
+7. Open *View → Error Log* and look for the lines that start with `Islands:`.
+
+Expected results:
+
+- Step 6, on the reporter's scene: the island step about 1 s under Rosetta (natively 0.6 s); 661,624 of 16,116,404
+  triangles left out; the fit with the islands left out about 7 s (it includes the island step, partly paid back by a
+  faster `components`; step 3's fit measured 6.6-6.7 s), at most 100,000 triangles, `cleaned 1`, `reduced 1`,
+  `unreduced 0`; the peak not above step 3's (about 12,500 MiB; 12.2 GiB measured for SLC-41). Another scene gives
+  other counts, at about the same speed per triangle.
+- Step 7: two lines `Islands: 14453 small islands (661624 of 16116404 triangles) are left out of a node` (one from
+  the snippet's own `island_mask` call, one from the call inside `fit_to_budget`), counts only — no node name, ID or
+  coordinate. Whether the Python console shows these INFO lines too depends on its log level: `[TODO verify]` for
+  5.12.4.
+- Throughout: no traceback in the Python console.
+
+Steps (the *Remove small islands* checkbox, SLC-54):
+
+Preconditions: the scene of steps 3-5, §15's stall meter pasted into the Python console, and a viewer on a phone;
+before step 8, forget any stored choice in the Python console with
+`qt.QSettings().remove("RemoteView/RemoveSmallIslands")`, then restart Slicer and load the scene again.
+
+8. Open *RemoteView*: read the checkbox under the consent statement and its tooltip. Start a session and look at the
+   segmentation on the phone; *Stop session*, uncheck *Remove small islands*, start again and look again.
+9. During the session run `longest()`, check the box again and watch the panel's status and the phone; when it says
+   "Live", run `longest()` again. Then uncheck the box and watch the phone.
+10. Restart Slicer and open *RemoteView*.
+11. In the new, empty scene, make in the Python console a model of 8 small spheres, and a model of a large sphere with
+    a 1 mm sphere far from it:
+
+    ```python
+    import vtk
+    def ball(center, radius, n=16):
+        source = vtk.vtkSphereSource()
+        source.SetCenter(*center)
+        source.SetRadius(radius)
+        source.SetThetaResolution(n)
+        source.SetPhiResolution(n)
+        source.Update()
+        return source.GetOutput()
+    append = vtk.vtkAppendPolyData()
+    for i in range(8):
+        append.AddInputData(ball((0, 200 + 10 * i, 0), 2))
+    append.Update()
+    slicer.modules.models.logic().AddModel(append.GetOutput()).SetName("Eight spheres")
+    joined = vtk.vtkAppendPolyData()
+    joined.AddInputData(ball((0, 0, 0), 40, 448))  # 399,616 triangles
+    joined.AddInputData(ball((0, 0, 300), 1))  # 448 triangles, under 1,196 and under 1 % of the large sphere's
+    joined.Update()
+    slicer.modules.models.logic().AddModel(joined.GetOutput()).SetName("Big with a speck")
+    ```
+
+12. With the box checked, start a session and look for both models on the phone.
+
+Expected results:
+
+- Step 8: the box reads "Remove small islands (islands below the minimum size are not sent)" and is checked; the
+  tooltip names 1,196 triangles, 1% of the largest piece and that the largest piece is always sent. With the box
+  checked the phone shows fewer specks around the segmentation than with it unchecked, and Slicer's *Error Log*
+  has an `Islands: …` line (counts only) for the first session and none for the second.
+- Step 9: a toggle empties the cache of the session's meshes, so the status shows "Preparing the scene" (with the
+  no progress window since SLC-55), then "Updating the scene", then "Live"; the specks leave the phone, and
+  come back once the box is unchecked. Each toggle costs one snapshot that collects and fits every node again, in
+  steps: on the reporter's scene the second `longest()` prints at most the quadric's step (about 1.9 s; the island
+  step takes about 1 s).
+- Step 10: the box is as it was left in step 9.
+- Step 12: all eight spheres of *Eight spheres* are on the phone (equal pieces are kept); of *Big with a speck* the
+  large sphere is, complete, and the 1 mm sphere is not.
 
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|
 | | | | | |
 
-### §14.1 A mesh with an edge shared by thousands of triangles (SLC-63)
+### §14.1 A mesh with an edge shared by thousands of triangles (SLC-41; written for `ws/slicer`'s SLC-63)
 
 Preconditions: §14's. In a new scene run in the Python console (a "book" of 3,000 pages, 100 × 150 mm, all on one spine
 edge; 6,000 triangles, so nothing is decimated under `mobile`):
@@ -1246,17 +1393,16 @@ Steps:
 
 Expected results:
 
-- Step 1: the code appears within about a second (before SLC-63 Slicer was frozen for more than 10 s here); the viewer
-  shows a half-circle fan of 3,000 thin pages around one edge.
+- Step 1: the code appears within about a second (Slicer was frozen for more than 10 s here when collect's normals
+  step walked the winding of every page; SLC-41 skips that walk on a non-manifold fan and keeps the given winding);
+  the viewer shows a half-circle fan of 3,000 thin pages around one edge.
 - Throughout: no traceback in the Python console.
-- `[TODO verify]` in Slicer 5.12.4: `vtkOrientPolyData` from `vtkmodules.vtkFiltersCore` behaves as in the `vtk` 9.6.2
-  wheel (`vtkOrientPolyData.cxx` is byte-identical in Slicer's fork, `docs/research/slicer-collect.md` §2).
 
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|
 | | | | | |
 
-### §14.2 Flat meshes decimate in seconds (SLC-61)
+### §14.2 Flat meshes decimate in seconds (SLC-41; written for `ws/slicer`'s SLC-61)
 
 Preconditions: Slicer with the RemoteView module loaded (no session needed). In the Python console of a new scene
 (`RemoteView/remoteview_core` is on the module's path once the module has loaded; `[TODO verify]`):
@@ -1296,10 +1442,192 @@ timed(sphere.GetOutput(), 100_000)                         # a smooth sphere of 
 
 Expected results:
 
-- Each line prints the share reached (100000 or just under) and a time: the plane ≈ 1 s, the labelmap cylinder ≈ 4 s,
-  the sphere ≈ 3 s on the development machine (it took over 90 s, over 90 s and ≈ 3 s before SLC-61). Record the times
-  in the Result column: `[TODO verify]` Slicer's own VTK build is as fast as the `vtk` 9.6.2 wheel.
+- Each line prints the share reached (100000 or just under) and a time: the plane ≈ 0.8 s, the labelmap cylinder
+  ≈ 3 s, the sphere ≈ 2.5 s in the development sandbox (they took over 90 s, over 90 s and ≈ 3 s with SLC-14's
+  filters). Record the times in the Result column: `[TODO verify]` Slicer's own VTK build is as fast as the `vtk`
+  9.6.2 wheel.
 - Throughout: no traceback in the Python console.
+
+| Date | Slicer version | OS | Result | Tester |
+|---|---|---|---|---|
+| | | | | |
+
+## §15 Preparing the scene in steps (SLC-28, SLC-50, SLC-51; FR-10, R-05, `docs/research/slicer-prepare.md`)
+
+Preconditions: §2's setup with relay (b) or (c); a phone ready to join. Every step watches the main thread with a
+stall meter, a 10 ms timer that records the longest gap between two of its timeouts (the longest time Slicer could
+not draw or take input). Paste it into the Python console once:
+
+```python
+import time, qt
+stall = {"last": time.perf_counter(), "max": 0.0}
+def _beat():
+    now = time.perf_counter()
+    stall["max"] = max(stall["max"], now - stall["last"])
+    stall["last"] = now
+meter = qt.QTimer()
+meter.setInterval(10)
+meter.connect("timeout()", _beat)
+meter.start()
+def longest():  # prints and restarts the measurement
+    print(f"longest stall {stall['max']:.2f} s")
+    stall["max"] = 0.0
+```
+
+Steps (five large models):
+
+1. In a new scene create five spheres of 399,616 triangles each with §14's `sphere` function:
+   `for i in range(5): sphere((100 * i, 0, 0), 448, f"Big{i}")`. Run `longest()` once to restart the meter.
+2. Click *Start session*. While the panel says "Preparing the scene", rotate the 3D view with the mouse and type in
+   the Python console. When the panel says "Live", run `longest()` and join with the phone.
+3. Click *Stop session*, then *Start session*, and click *Stop session* again within a second, while the panel still
+   says "Preparing the scene". Watch the phone (still on the old session's page) and the relay's log.
+4. Start a session again and join. Replace one sphere's mesh with a smaller one and run `longest()` after the phone
+   shows the change:
+
+   ```python
+   source = vtk.vtkSphereSource()
+   source.SetCenter(200, 0, 0)
+   source.SetRadius(40)
+   source.SetThetaResolution(64)
+   source.SetPhiResolution(64)
+   source.Update()
+   getNode("Big2").SetAndObservePolyData(source.GetOutput())
+   ```
+
+5. With the session live, start a long preparation and load data in the middle of it: give `Big2` a 448-resolution
+   sphere again (step 4's snippet with `SetThetaResolution(448)`/`SetPhiResolution(448)`) and right after it run
+   `qt.QTimer.singleShot(1200, lambda: slicer.util.loadSampleData("MRHead"))`. When the phone shows the scene, do
+   the same with `qt.QTimer.singleShot(1200, lambda: slicer.mrmlScene.Clear(0))` (the scene closed while a
+   preparation runs).
+
+Expected results:
+
+- Step 2: the code appears at once with "Preparing the scene · no viewers yet." (no progress window: SLC-55 removed
+  it at the owner's request; the status line is the only sign); the 3D view
+  follows the mouse, a little jerkily, and the console takes input; then "Sending the scene", then "Live", and the phone shows the five spheres as in §14. `longest()` prints less than 1.5 s (the
+  longest step is one sphere's quadric run, measured natively 0.8 s); the whole preparation takes about as long as
+  before SLC-28 (§14: a few seconds).
+- Step 3: the relay receives no `scene.snapshot.begin` for the stopped session (its log shows the session closed
+  with nothing sent), the panel says "Not connected.", and no traceback appears.
+- Step 4: only `Big2` is prepared again (the panel says "Preparing the scene" or "Updating the scene" for well under
+  a second); the phone shows the coarser `Big2` and the other four unchanged.
+  `longest()` prints less than 1 s.
+- Step 5: loading MRHead (a batch) stops the preparation; one snapshot follows when the load is done, with
+  MRHead's models if any are shown in 3D. Closing the scene stops the next preparation: the closed scene never
+  reaches the phone, which shows the empty scene within a second (an empty snapshot goes first when the new scene
+  takes longer than one slice).
+- Throughout: no `RemoteView`, `live:` or `scene:` error line and no traceback in the Python console.
+
+Steps (large segmentation; the reporter's scene or §14's large-segmentation preconditions):
+
+6. Restart Slicer, load the scene, paste the stall meter, run `longest()`. Click *Start session*; while the panel
+   says "Preparing the scene", rotate the 3D view. Note the time from the click to "Live" and run `longest()`.
+7. With the session live and the phone joined, add a small model next to the segmentation
+   (`sphere((0, 0, 0), 32, "Small")`), then give it another mesh as in step 4 (`getNode("Small")`); time each change
+   to the phone and run `longest()` after each.
+8. Change the segment's colour in the Segment Editor.
+
+Expected results:
+
+- Step 6: the code appears within a second; the status says "Preparing the scene"; the 3D view moves between steps
+  — `longest()` prints less than 3 s (one step: the quadric's run, 1.75 + 0.10 s in §14; every other step about
+  0.75 s at most, from the native profile in the research note); "Live" follows about 11-13 s after the click (§14:
+  collect + fit 10.5-11 s in one call before SLC-28).
+- Step 7: each change re-exports the scene without preparing the segmentation again (SLC-50): the phone shows it in
+  about 1 s; `longest()` prints less than 1 s.
+- Step 8: a `scene.update` only (no "Preparing the scene"), as in §13 step 7.
+- The progress dialog of SLC-51 (`qt.QProgressDialog`) is gone since SLC-55: no window may appear at any step.
+
+Steps (the scene changed during a preparation, and the last step near the relay's limit; SLC-68, `[TODO verify]`):
+
+9. Choose *At once* in the toolbar's *Send changes* box (§16), then redo steps 1-2 (a new scene, the stall meter, five
+   spheres live, the phone joined). Give `Big0` a 448-resolution mesh again (step 4's snippet with
+   `SetCenter(0, 0, 0)`, resolution 448 and `getNode("Big0")`) to start a preparation, and while the panel says
+   "Preparing the scene" delete `Big3` (*Data* module, right-click, *Delete*) and hide `Big4` (its eye icon).
+10. Stop the session and, in a new scene, make ten triangle soups of 99,456 triangles (every corner its own point):
+
+    ```python
+    import numpy as np
+    import vtk
+    from vtkmodules.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray, vtk_to_numpy
+    def soup(center, name):
+        source = vtk.vtkSphereSource()
+        source.SetCenter(*center)
+        source.SetRadius(40)
+        source.SetThetaResolution(224)
+        source.SetPhiResolution(224)
+        source.Update()
+        mesh = source.GetOutput()
+        corners = vtk_to_numpy(mesh.GetPoints().GetData())[
+            vtk_to_numpy(mesh.GetPolys().GetConnectivityArray())
+        ]
+        out = vtk.vtkPolyData()
+        out.SetPoints(vtk.vtkPoints())
+        out.GetPoints().SetData(numpy_to_vtk(corners, deep=True))
+        polys = vtk.vtkCellArray()
+        polys.SetData(numpy_to_vtkIdTypeArray(np.arange(0, len(corners) + 1, 3, dtype=np.int64), deep=True),
+                      numpy_to_vtkIdTypeArray(np.arange(len(corners), dtype=np.int64), deep=True))
+        out.SetPolys(polys)
+        slicer.modules.models.logic().AddModel(out).SetName(name)
+    for i in range(10):
+        soup((100 * i, 0, 0), f"Soup{i}")
+    ```
+
+    Select the `quest3` profile (until SLC-18's selector: after one *Start session*/*Stop session*, run
+    `slicer.modules.remoteview.widgetRepresentation().self().controller.profile = "quest3"`, `[TODO verify]`), run
+    `longest()`, click *Start session*, and run `longest()` when the panel says "Live".
+
+Expected results:
+
+- Step 9: the snapshot that goes out may still show `Big3` and `Big4` (each is collected as it is at its step; the
+  last step does not list the shown nodes again); within about a second after it the phone loses `Big3` and `Big4`
+  (their marks go out after the snapshot's ack). No `RemoteView`, `live:` or `scene:` error line and no traceback —
+  `[TODO verify]` how the Slicer adapter reads a model deleted between two steps (SLC-68).
+- Step 10: the GLB is about 45.5 MiB (each soup is under the 100k cap and is sent as it is); the phone shows ten
+  spheres; `longest()` prints less than 1.5 s — the last step writes and hashes the GLB on the main thread (≈ 0.9 s for
+  45.8 MiB in the sandbox, `docs/research/slicer-prepare.md`). Record the time in the Result column.
+
+| Date | Slicer version | OS | Result | Tester |
+|---|---|---|---|---|
+| | | | | |
+
+## §16 The toolbar: Send scene now and the send mode (SLC-55, SLC-56, SLC-57; FR-11, NFR-02, §7.3)
+
+Preconditions: the test Slicer of §2 with the relay stub or a relay, a phone joined, and the two spheres of §12.
+
+Steps:
+
+1. Start Slicer and look at the main window's toolbars before opening any module.
+2. Open *RemoteView*. Read the text above *Start session* and click its link.
+3. Click *Start session*; wait for "Live". In the toolbar choose *30 s after the last change*. In *Models*, change
+   *Sphere A*'s colour, then its opacity 10 s later, then its colour again 10 s after that. Watch the button.
+4. Choose *Only with Send scene now*. Change *Sphere A*'s colour; wait a minute; click *Send scene now*; click it once
+   more.
+5. Choose *At once*. Change *Sphere A*'s colour.
+6. Choose *15 s after the last change*. Hide *Sphere A*, then *File → Close Scene* within 15 s.
+7. Click *Stop session*, then *Send scene now*. Quit Slicer, start it again and look at the toolbar.
+8. Developer mode: click the module's *Reload* button, then change the mode on the toolbar and start a session.
+
+Expected results:
+
+- Step 1: the toolbar "RemoteView" is there with *Send scene now* (disabled) and *Send changes:* set to *30 s after
+  the last change* (a fresh installation), before the module was ever opened `[TODO verify]` `addToolBar` and
+  `QToolBar.addAction(str)` from PythonQt.
+- Step 2: two sentences and the project link (no long statement, no progress window later); the link opens
+  `https://github.com/dolegadolegowski/SlicerRemoteView` in the browser `[TODO verify]` `openExternalLinks`.
+- Step 3: after the first change the button reads "Send now (30 s)" and counts down; each change restarts it at 30;
+  the phone shows all three changes at once, 30 s after the last one; the panel's detail says "Changes in Slicer wait:
+  RemoteView sends them N s after the last change." meanwhile, nothing after.
+- Step 4: nothing goes to the phone for the minute; the button reads "Send now (changes wait)" and the panel says "Changes in Slicer wait for Send now."; the first click sends the colour (a `scene.update`), the
+  second sends the whole scene again (a snapshot: "Updating the scene", then "Live"), without a progress window.
+- Step 5: the phone shows the colour within about half a second, the button never counts down.
+- Step 6: the closed scene leaves the phone at once (the reset ignores the delay, §7.3); the hidden sphere never had
+  to be sent on its own.
+- Step 7: after Stop the button is disabled, and a click on it does nothing; after the restart the toolbar shows
+  *15 s after the last change* (the setting) `[TODO verify]` `QComboBox.currentIndex`/`addItem(label, data)`.
+- Step 8: one toolbar, not two (the old one is removed); the new mode is saved and the session starts with it.
+- Throughout: no traceback; nothing in the log but exception type names, if anything.
 
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|

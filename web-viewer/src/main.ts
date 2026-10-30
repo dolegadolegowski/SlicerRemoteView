@@ -84,6 +84,15 @@ if (app) {
     maxSnapshotBytes,
   });
   const models = createSceneModelStore();
+  // Registered first, so it runs before the screens show a new snapshot: when it continues the scene on screen (the
+  // viewer keeps the view for it, WEB-25), the user's local choices on the scene it replaces move to it, unless the
+  // snapshot changed them (FR-40); those it replaced are named once it is shown (below). Another scene starts from the
+  // presenter's values, as every snapshot did before.
+  let replaced: readonly string[] = [];
+  models.onChange((model) => {
+    replaced =
+      model && live && screens.viewer?.continues(model) ? live.carryTo(model).overridden : [];
+  });
   bindSnapshotStream(connection, stream);
   bindStreamToLoader(connection, stream, loader);
   /** A snapshot that will not be shown: updates go back to the scene shown, and the "updating" hint goes. */
@@ -143,6 +152,9 @@ if (app) {
   // After the screens: a new model is on screen (with its node panel) before queued updates are applied to it.
   models.onChange((model) => {
     live = model ? createLiveScene(model) : null;
+    // The local choices the snapshot replaced (WEB-25), named after the screens: showing a scene clears the notice line.
+    screens.presenterChanged(replaced);
+    replaced = [];
     // First the snapshot's version: `shown` applies a waiting `scene.state` and queued updates, which raise it.
     screens.sceneVersion(model?.snapshotVersion ?? null);
     versions.shown(model?.snapshotVersion ?? null);

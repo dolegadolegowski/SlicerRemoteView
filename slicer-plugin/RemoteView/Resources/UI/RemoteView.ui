@@ -42,9 +42,25 @@
          <string/>
         </property>
         <property name="textFormat">
-         <enum>Qt::PlainText</enum>
+         <enum>Qt::RichText</enum>
         </property>
         <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+        <property name="openExternalLinks">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QCheckBox" name="removeIslandsCheckBox">
+        <property name="toolTip">
+         <string>Leaves out the pieces of a model or segment that are not connected to the rest and have fewer than 1,196 triangles (the smallest surface Slicer makes of 1,000 voxels, the default minimum size of the Segment Editor's Islands effect), unless a piece has at least 1% of the triangles of the largest piece. The largest piece is always sent. Changing this during a session sends the scene again.</string>
+        </property>
+        <property name="text">
+         <string>Remove small islands (islands below the minimum size are not sent)</string>
+        </property>
+        <property name="checked">
          <bool>true</bool>
         </property>
        </widget>

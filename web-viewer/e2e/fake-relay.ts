@@ -44,16 +44,18 @@ export function streamSnapshot(ws: WebSocketRoute, glb: Buffer, sceneVersion = 1
 /** Plays the relay's side of the newest socket after the join (live updates in WEB-13 tests). */
 export interface FakeRelay {
   send(message: Record<string, unknown>): void;
+  /** Streams `glb` as snapshot `sceneVersion`: the presenter shares a scene again (WEB-25). */
+  snapshot(glb: Buffer, sceneVersion: number): void;
 }
 
 export async function fakeRelay(
   page: Page,
   glb: Buffer = fixture("asymmetric-2nodes.glb"),
 ): Promise<FakeRelay> {
-  let latest: ((message: Record<string, unknown>) => void) | null = null;
+  let latest: WebSocketRoute | null = null;
   await page.routeWebSocket(/\/ws$/, (ws) => {
     const send = (message: Record<string, unknown>) => sendJson(ws, message);
-    latest = send;
+    latest = ws;
     ws.onMessage((frame) => {
       const message = JSON.parse(String(frame)) as { type: string; id?: string };
       if (message.type === "ping") send({ type: "pong", replyTo: message.id });
@@ -76,11 +78,13 @@ export async function fakeRelay(
       streamSnapshot(ws, glb);
     });
   });
+  const socket = () => {
+    if (!latest) throw new Error("no socket yet");
+    return latest;
+  };
   return {
-    send(message) {
-      if (!latest) throw new Error("no socket yet");
-      latest(message);
-    },
+    send: (message) => sendJson(socket(), message),
+    snapshot: (next, sceneVersion) => streamSnapshot(socket(), next, sceneVersion),
   };
 }
 

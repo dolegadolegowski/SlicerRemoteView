@@ -23,10 +23,14 @@ from typing import Any, ClassVar
 
 import numpy as np
 import pytest
+from vtkmodules.util.numpy_support import numpy_to_vtk
 from vtkmodules.vtkCommonCore import vtkObject
+from vtkmodules.vtkCommonDataModel import vtkImageData
+from vtkmodules.vtkFiltersCore import vtkAppendPolyData
+from vtkmodules.vtkFiltersGeneral import vtkDiscreteFlyingEdges3D
 from vtkmodules.vtkFiltersSources import vtkSphereSource
 
-from remoteview_core.collect import polydata_from_triangles
+from remoteview_core.glb_writer import Entity
 from remoteview_core.protocol_client import ProtocolClient, SessionState, make_client_info
 from remoteview_core.transport import RelayTransport, check_relay_url
 from remoteview_core.vendored import chunk_header
@@ -454,30 +458,21 @@ def sphere(resolution: int = 16):
     return source.GetOutput()
 
 
-def book(pages: int = 3_000, rows: int = 1, *, alternate: bool = False):
-    """``pages`` flat pages of ``rows`` quads (two triangles each) fanned over 180° around a spine of ``rows`` edges on
-    the S axis, 100 mm wide and 150 mm high: every spine edge is shared by one triangle of each page (non-manifold;
-    SLC-61, SLC-63). Every page is wound the same way, or every second one the other way with ``alternate``."""
-    spine = np.c_[np.zeros(rows + 1), np.zeros(rows + 1), np.linspace(0.0, 150.0, rows + 1)]
-    angles = np.linspace(0.0, np.pi, pages)
-    outer = np.stack(
-        [
-            np.repeat(100.0 * np.cos(angles), rows + 1),
-            np.repeat(100.0 * np.sin(angles), rows + 1),
-            np.tile(spine[:, 2], pages),
-        ],
-        axis=1,
-    )
-    row = np.arange(rows)
-    # each page's outer point of each row
-    first = (rows + 1) * (1 + np.arange(pages))[:, None] + row
-    spine_low, spine_high = np.broadcast_to(row, first.shape), np.broadcast_to(row + 1, first.shape)
-    on_spine = np.stack([spine_low, first, spine_high], axis=-1)  # (pages, rows, 3)
-    outside = np.stack([spine_high, first, first + 1], axis=-1)
-    triangles = np.concatenate([on_spine, outside], axis=1)  # (pages, 2·rows, 3)
-    if alternate:
-        triangles[1::2] = triangles[1::2, :, ::-1]
-    return polydata_from_triangles(np.vstack([spine, outer]), triangles.reshape(-1, 3))
+def specked(resolution: int, specks: int = 6):
+    """``sphere(resolution)`` and ``specks`` spheres of 16 triangles beside it, as one mesh: small islands of a body
+    from ``sphere(32)`` (1,920 triangles, of which 1 % is 19.2) up (SLC-53)."""
+    append = vtkAppendPolyData()
+    append.AddInputData(sphere(resolution))
+    for i in range(specks):
+        speck = vtkSphereSource()
+        speck.SetRadius(0.5)
+        speck.SetCenter(150.0 + 5.0 * i, 0.0, 0.0)
+        speck.SetThetaResolution(4)
+        speck.SetPhiResolution(4)
+        speck.Update()
+        append.AddInputData(speck.GetOutput())
+    append.Update()
+    return append.GetOutput()
 
 
 class FakeScene:
@@ -515,6 +510,56 @@ class FakeScene:
 
     def world_transform(self, node):
         return None
+
+
+def flying_edges(mask, spacing: float):
+    """The ``vtkDiscreteFlyingEdges3D`` surface of a boolean ``(z, y, x)`` labelmap with isotropic ``spacing`` (mm),
+    unsmoothed, like a segmentation's closed surface before Slicer's smoothing."""
+    image = vtkImageData()
+    image.SetDimensions(*mask.shape[::-1])
+    image.SetSpacing(spacing, spacing, spacing)
+    image.GetPointData().SetScalars(
+        numpy_to_vtk(np.ascontiguousarray(mask, dtype=np.uint8).ravel(), deep=True)
+    )
+    surface = vtkDiscreteFlyingEdges3D()
+    surface.SetInputData(image)
+    surface.SetValue(0, 1)
+    surface.Update()
+    return surface.GetOutput()
+
+
+def mesh_entity(positions, triangles, normals=None) -> Entity:
+    """A model entity over ``positions``/``triangles`` (glTF metres; +Y normals unless given), for decimation tests
+    that build their mesh directly."""
+    positions = np.asarray(positions, dtype=np.float64)
+    if normals is None:
+        normals = np.tile([0.0, 1.0, 0.0], (len(positions), 1))
+    return Entity(
+        node_id="vtkMRMLModelNode4",
+        kind="model",
+        name="Mesh",
+        positions=positions,
+        normals=np.asarray(normals, dtype=np.float64),
+        indices=np.asarray(triangles, dtype=np.int64).reshape(-1, 3),
+        color=(0.5, 0.5, 0.5),
+        opacity=1.0,
+        visible=True,
+        mrml_id="vtkMRMLModelNode4",
+    )
+
+
+def face_normals(positions, triangles):
+    """The unnormalised face normal (winding) of every triangle."""
+    p, t = np.asarray(positions), np.asarray(triangles)
+    return np.cross(p[t[:, 1]] - p[t[:, 0]], p[t[:, 2]] - p[t[:, 0]])
+
+
+def normal_opposes_face(entity) -> float:
+    """The share of triangles whose mean vertex normal opposes their face normal: they shade dark, or vanish under
+    the viewer's back-face culling (the GLB material is ``doubleSided`` false)."""
+    mean = np.asarray(entity.normals)[entity.indices].mean(axis=1)
+    face = face_normals(entity.positions, entity.indices)
+    return float(np.mean(np.einsum("ij,ij->i", mean, face) < 0))
 
 
 @functools.cache

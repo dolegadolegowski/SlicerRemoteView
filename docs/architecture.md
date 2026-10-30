@@ -362,8 +362,9 @@ different presenter's scene; after quarantine the residual risk is listed in sec
 
 ```
 MRML observers (main thread)  ->  dirty set + debounce  ->  change set
-   -> geometry changed?  yes -> full export: visible nodes -> closed surfaces -> decimation (profile budget)
-                                 -> RAS mm -> glTF m Y-up -> GLB writer (numpy + struct) -> chunk -> IO thread
+   -> geometry changed?  yes -> full export: visible nodes -> closed surfaces -> small islands out (option)
+                                 -> decimation (profile budget) -> RAS mm -> glTF m Y-up -> GLB writer
+                                 -> chunk -> IO thread
                         no  -> scene.update / scene.nodeRemoved (JSON)                          -> IO thread
 ```
 
@@ -383,10 +384,15 @@ MRML observers (main thread)  ->  dirty set + debounce  ->  change set
    (the linear parent transform goes into the **absolute world** `T.matrix`, which later `scene.update.matrix`
    messages replace; **only non-linear** transforms are baked into the vertices with
    `vtkTransformPolyDataFilter`, `baked:true`, `T.matrix` identity),
-   `vtkTriangleFilter` → `vtkQuadricDecimation` to the per-node share of the profile budget (proportional to
-   input triangle count, min 2 k per node; fallback `vtkDecimatePro(PreserveTopologyOn)` if degenerate) →
-   `vtkPolyDataNormals(SplittingOff)` → numpy copies (`np.array(copy=True)`), one node per timer tick with a
-   progress dialog so the GUI stays responsive (slicer.md §5, §8).
+   `vtkTriangleFilter` → `vtkPolyDataNormals` → numpy copies (`np.array(copy=True)`). Then every node loses its
+   small islands while the panel option **Remove small islands** is on (the default: parts not connected to the
+   rest with fewer than 1,196 triangles, unless they have 1 % of the node's largest part, which always stays;
+   SLC-53, SLC-54), and is decimated to its share of the profile budget (proportional to the triangles left,
+   min 2 k per node; `remoteview_core/decimate.py`: connected vertex clustering first for very large meshes,
+   `vtkQuadricDecimation`, a clustering fallback, normals again with `vtkPolyDataNormals(SplittingOff)`; no
+   `vtkDecimatePro`, whose splitting cracked the surface, SLC-41). The work runs in short steps, one slice per
+   timer tick, with a progress dialog, and a per-node cache keeps the decimated meshes of unchanged nodes, so
+   the GUI stays responsive (slicer.md §5, §8; SLC-28, SLC-50, SLC-51).
 5. **GLB writer (pure Python + numpy, no Slicer imports — testable in CI):** apply `[R,S,-A]×0.001`, quantize
    `POSITION` to `SHORT` with per-mesh scale/offset in `M.matrix`, `NORMAL` as normalised `BYTE` (stride 4),
    indices `uint16`/`uint32`, one material per node, extras per protocol §7. Validated in CI with

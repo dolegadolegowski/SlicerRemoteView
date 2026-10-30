@@ -4,6 +4,13 @@ Zdalny podgląd sceny 3D z **3D Slicer** na goglach **Meta Quest** i w przegląd
 (iPhone/iPad/Android). Urządzenia łączą się z konkretną sesją 3D Slicera przez **5-znakowy kod**
 wyświetlany przez plugin.
 
+**Dokumentacja użytkownika / User guide**
+
+- **PL:** [Ręczna instalacja pluginu w 3D Slicerze](docs/user-guide/pl/install-plugin.md) ·
+  [Własny serwer do połączeń zdalnych](docs/user-guide/pl/own-server.md)
+- **EN:** [Install the plugin in 3D Slicer manually](docs/user-guide/en/install-plugin.md) ·
+  [Run your own server for remote connections](docs/user-guide/en/own-server.md)
+
 ```
 3D Slicer + plugin ──WSS──▶  relay-server (Docker @ Railway)  ◀──WSS/HTTPS──  web-viewer (telefon/tablet; Quest Browser/WebXR)
                               • sesje + kody • relay sceny      ◀──WSS────────  quest-app (natywna aplikacja Meta Quest)

@@ -54,4 +54,3 @@ addopts = "-q"
 # a warning is a failure: collect must skip bad input without warnings (they would abort a snapshot where warnings
 # are errors), and the numpy/VTK deprecations show up early
 filterwarnings = ["error"]
-markers = ["slow: takes seconds (in the default run; -m 'not slow' leaves it out)"]

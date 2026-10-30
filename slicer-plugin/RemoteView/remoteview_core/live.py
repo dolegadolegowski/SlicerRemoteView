@@ -42,8 +42,24 @@ of the session, the first snapshot included:
   or local failures without an ack an attempt also waits for a flush, so a refusal that repeats costs at most one
   upload per change (a lost connection neither counts nor closes it). Updates stay held while a snapshot is owed
   (``ProtocolClient.require_snapshot``);
-- *Hide node names* and the device profile have no MRML event: :meth:`~LiveUpdates.set_anonymize_names` and
+- *Hide node names*, *Remove small islands* and the device profile have no MRML event:
+  :meth:`~LiveUpdates.set_anonymize_names`, :meth:`~LiveUpdates.set_remove_islands` (SLC-54) and
   :meth:`~LiveUpdates.request_snapshot` (SLC-18) ask for a snapshot;
+- **when changes go out** (SLC-56): :meth:`~LiveUpdates.set_send_policy` hands the toolbar's choice to the debouncer
+  (at once by its lanes, a delay after the last change, or only on *Send now*); :meth:`~LiveUpdates.send_now` flushes
+  what waits — or, with nothing waiting and nothing on its way, sends the scene again; :attr:`~LiveUpdates.due_in` and
+  :attr:`~LiveUpdates.changes_wait` feed the countdown. A reset ignores the policy (§7.3, the debouncer's rule), and
+  so does what a lost connection cut — a snapshot or an update on its way, or a snapshot being prepared, goes again at
+  once after the resume, with what waits;
+- **preparation in steps** (SLC-51, ``docs/research/slicer-prepare.md``): an export is prepared by SLC-28's
+  ``prepare_snapshot`` with the session's :class:`~remoteview_core.meshcache.MeshCache` (SLC-50), a slice of
+  ``slice_s`` seconds at a time — the first in the call that starts it, the others from :meth:`~LiveUpdates.tick` —
+  or in that one call (``slice_s=None``). The debouncer is held from its first step until its ``begin`` (the SLC-30
+  design review: marks made meanwhile are classified against its scene, after its ack). It runs only while its
+  snapshot may go out: Stop, a reset, a batch, a lost connection, a new setting or a gate that closes abandon it —
+  nothing of it was sent and it used no version — and a later tick starts again, from the cache. A re-sync
+  (:meth:`~LiveUpdates.request_resync`) lets it finish and asks for another snapshot after it, so events that keep
+  coming off the main thread cannot hold a large scene off for ever;
 - **IDs** (protocol v1.1 §7.3, SLC-35): every export of the session runs through one
   :class:`~remoteview_core.ids.SceneIds` (:attr:`~LiveUpdates.ids`), made by the panel — one per ``session.create`` —
   and handed in at construction. A resume (SLC-44) keeps this ``LiveUpdates`` and so the aliases the viewers hold; a
@@ -78,10 +94,12 @@ from typing import Any
 
 from remoteview_core.changes import Plan, SceneReadError, SentScene, classify
 from remoteview_core.collect import SceneApi
-from remoteview_core.debounce import Change, Debouncer, Drained, Timer
+from remoteview_core.debounce import AT_ONCE, Change, Debouncer, Drained, SendPolicy, Timer
 from remoteview_core.ids import SceneIds
+from remoteview_core.meshcache import MeshCache
 from remoteview_core.protocol_client import ProtocolClient, ProtocolStateError, SessionState
-from remoteview_core.snapshot import Snapshot, SnapshotTooLargeError, build_snapshot
+from remoteview_core.snapshot import Snapshot, SnapshotTooLargeError, prepare_snapshot
+from remoteview_core.steps import Progress, Stepper, Steps, run
 
 _log = logging.getLogger(__name__)
 
@@ -143,6 +161,17 @@ class _Cause(enum.Enum):
     LOST = enum.auto()  # the connection: a re-sync, but not a refusal (it never waits for a change)
 
 
+@dataclass
+class _Preparation:
+    """A snapshot being prepared (SLC-51): its steps, whether it replaces a closed scene, its progress."""
+
+    stepper: Stepper[Snapshot]
+    reset: bool
+    progress: Progress
+    #: events were missed off the main thread while it ran (SLC-33): a re-sync follows its snapshot
+    stale: bool = False
+
+
 class _EmptyScene:
     """A scene without nodes (all :func:`~remoteview_core.collect.collect_scene` asks of it): the empty snapshot after
     a reset."""
@@ -179,9 +208,12 @@ class LiveUpdates:
         slicer_version: str,
         end_session: Callable[[str], object],
         anonymize_names: bool = False,
+        remove_islands: bool = False,
         on_event: Callable[[LiveEvent], object] = lambda event: None,
-        export: Callable[..., Snapshot] = build_snapshot,
+        prepare: Callable[..., Steps[Snapshot]] = prepare_snapshot,
         ids: SceneIds | None = None,
+        slice_s: float | None = None,
+        send_policy: SendPolicy = AT_ONCE,
     ) -> None:
         self._client = client
         self._scene = scene
@@ -192,13 +224,19 @@ class LiveUpdates:
         self._slicer_version = slicer_version
         self._end_session = end_session
         self._anonymize = bool(anonymize_names)
+        self._remove_islands = bool(remove_islands)  # every export's island rule (SLC-53, SLC-54)
         self._on_event = on_event
-        self._export_fn = export
+        self._prepare_fn = prepare
+        self._slice_s = slice_s
         self._debouncer = Debouncer(timer, self._on_flush, clock)
+        self._debouncer.set_policy(send_policy)
         self._running = False
+        self._prep: _Preparation | None = None
         self._forget_session()
 
     def _forget_session(self) -> None:
+        self._prep = None  # abandoned first (stop)
+        self._cache = MeshCache()  # the session's meshes (SLC-50)
         self._sent = SentScene(anonymized=self._anonymize)
         self._inflight: int | None = None  # sceneVersion of our snapshot in flight
         self._inflight_hold = False
@@ -207,6 +245,10 @@ class LiveUpdates:
         self._reset_owed = False  # a closed scene may still be on the viewers
         # the snapshot in flight at the drop, until the session is back
         self._lost_inflight: int | None = None
+        # a preparation was abandoned at the drop, and a snapshot was owed with its gate before it (set at the first
+        # drop of each outage)
+        self._dropped_preparation = False
+        self._owed_at_drop = False
         self._seen_error: Any = None  # the client's last_error already attributed
         self._needed_seen = False  # the current snapshot_needed has its gate
         # the gate of an owed snapshot
@@ -223,7 +265,8 @@ class LiveUpdates:
     def __repr__(self) -> str:  # counts only (T7)
         return (
             f"LiveUpdates(running={self._running}, nodes={len(self._sent)}, "
-            f"in_flight={self._inflight is not None}, batch={self._depth}, paused={self._paused})"
+            f"preparing={self._prep is not None}, in_flight={self._inflight is not None}, "
+            f"batch={self._depth}, paused={self._paused})"
         )
 
     @property
@@ -239,6 +282,11 @@ class LiveUpdates:
     def ids(self) -> SceneIds:
         """The session's raw ID → alias registry (§7.3), the one every export of this controller uses."""
         return self._ids
+
+    @property
+    def preparing(self) -> Progress | None:
+        """The progress of the snapshot being prepared; ``None`` when none is."""
+        return self._prep.progress if self._prep is not None else None
 
     @property
     def in_flight(self) -> bool:
@@ -268,6 +316,17 @@ class LiveUpdates:
     def batch_held(self) -> bool:
         """A batch process (loading, closing, a script) holds the marks and any owed snapshot until it ends."""
         return self._depth > 0  # stop() forgets it
+
+    @property
+    def changes_wait(self) -> bool:
+        """Marked changes wait for the policy's delay, for *Send now* or for a hold to end."""
+        return self._running and self._debouncer.pending
+
+    @property
+    def due_in(self) -> float | None:
+        """Seconds until the waiting changes go out by themselves; ``None`` when none wait, they wait for a hold to
+        end, or they wait for *Send now*."""
+        return self._debouncer.due_in(self._clock()) if self._running else None
 
     # ------------------------------------------------------------------ the observers (SLC-31); never raise
 
@@ -367,6 +426,8 @@ class LiveUpdates:
             return
         self._depth += 1
         try:
+            # a batch changes the scene under a preparation: the next one, after the batch, reuses what it finished
+            self._abandon()
             self._debouncer.hold()
         except Exception as exc:  # noqa: BLE001 — called from a VTK observer (T7)
             _log.error("live: hold failed (%s)", type(exc).__name__)
@@ -387,6 +448,8 @@ class LiveUpdates:
         if not self._running:
             return
         try:
+            self._abandon()  # it was preparing the closed scene
+            self._cache.clear()
             self._reset_owed = True
             # the aliases were the closed scene's: forgotten, never reissued (§7.3 — the counters keep counting)
             self._ids.reset()
@@ -433,8 +496,10 @@ class LiveUpdates:
             self._not_sent()
 
     def stop(self) -> None:
-        """The session ended (or Stop): drop the marks; later calls do nothing until :meth:`start`."""
+        """The session ended (or Stop): drop the marks and a preparation (nothing of it is sent); later calls do
+        nothing until :meth:`start`."""
         self._running = False
+        self._abandon()
         self._debouncer.stop()
         self._forget_session()
 
@@ -448,12 +513,19 @@ class LiveUpdates:
             _log.error("live: relay event not followed (%s)", type(exc).__name__)
 
     def tick(self) -> None:
-        """From the pump: send an owed snapshot once its gate opens."""
+        """From the pump: run a slice of the snapshot being prepared, or start an owed one once its gate opens."""
         if not self._running:
             return
         try:
             self._observe()
-            if self._running and self._may_export():
+            if not self._running:
+                return
+            if self._prep is not None:
+                if self._may_continue():
+                    self._advance()
+                else:
+                    self._abandon()
+            elif self._may_export():
                 self._export(None)
         except Exception as exc:  # noqa: BLE001 — called from the pump (T7)
             _log.error("live: scene not sent (%s)", type(exc).__name__)
@@ -474,11 +546,44 @@ class LiveUpdates:
         self._anonymize = bool(on)
         self.request_snapshot()
 
-    def request_snapshot(self) -> None:
-        """Send the scene again (a new device profile, *Hide node names*): lifts the too-large and flush gates, not a
-        wait the relay asked for."""
+    def set_remove_islands(self, on: bool) -> None:
+        """*Remove small islands* changed (SLC-54): the viewers need the scene with (or without) the small islands."""
+        if bool(on) == self._remove_islands:
+            return
+        self._remove_islands = bool(on)
+        self.request_snapshot()
+
+    def set_send_policy(self, policy: SendPolicy) -> None:
+        """When changes go out (SLC-56); pending ones follow the new policy from now. Also before :meth:`start`."""
+        self._debouncer.set_policy(policy)
+
+    def send_now(self) -> None:
+        """*Send now* (SLC-56): the waiting changes go out at once (or at the end of the hold that keeps them); with
+        none waiting, the scene goes again unless a snapshot is already being prepared or in flight, or was lost with
+        the connection and waits for the resume — a click then would only restart it. Lifts the too-large and flush
+        gates like :meth:`request_snapshot`."""
         if not self._running:
             return
+        try:
+            if self._debouncer.send_now():
+                return
+            # a snapshot lost with the connection is still the resume's to adopt or owe: a click must not add one
+            if (
+                self._prep is not None
+                or self._inflight is not None
+                or self._lost_inflight is not None
+            ):
+                return
+            self.request_snapshot()
+        except Exception as exc:  # noqa: BLE001 — a Qt slot (T7)
+            _log.error("live: send now failed (%s)", type(exc).__name__)
+
+    def request_snapshot(self) -> None:
+        """Send the scene again (a new device profile, *Hide node names*, *Remove small islands*): lifts the too-large
+        and flush gates, not a wait the relay asked for."""
+        if not self._running:
+            return
+        self._abandon()  # prepared with the old setting
         self._client.require_snapshot()
         self._needed_seen = True
         self._shrink = None
@@ -508,7 +613,11 @@ class LiveUpdates:
             )
             self._shrink = None
             self._needs_flush = False
-            if not waiting:
+            if self._prep is not None:
+                # it may have read what the missed events changed: it finishes (abandoning it each time could hold a
+                # large scene off for ever) and the re-sync follows its snapshot
+                self._prep.stale = True
+            elif not waiting:
                 self._failed(_Cause.LOST)
         except Exception as exc:  # noqa: BLE001 — called from the pump (T7)
             _log.error("live: re-sync not asked for (%s)", type(exc).__name__)
@@ -529,7 +638,10 @@ class LiveUpdates:
             _log.error("live: changes not sent (%s)", type(exc).__name__)
             if self._running:
                 self._not_sent()
-        self.tick()
+        if (
+            self._prep is None
+        ):  # a preparation the flush started has had its slice: the pump runs the others
+            self.tick()
 
     def _apply_flush(self, drained: Drained) -> None:
         if self._reset_owed and not drained.reset:
@@ -592,50 +704,139 @@ class LiveUpdates:
     # ------------------------------------------------------------------ exports
 
     def _may_export(self) -> bool:
-        client = self._client
-        if client.state not in _LIVE or not (client.snapshot_needed or self._reset_owed):
+        owed = self._client.snapshot_needed or self._reset_owed
+        # a pending flush classifies first (a reset's plan announces its nodes)
+        return owed and self._may_continue() and not self._debouncer.pending
+
+    def _may_continue(self) -> bool:
+        """A snapshot may go out now: the condition of every slice of a preparation — one a flush started owes no
+        snapshot to the client, and marks made while it runs only wait for its ack."""
+        if self._client.state not in _LIVE:
             return False
-        if self._inflight is not None or self._depth or self._paused or self._debouncer.pending:
-            return False  # a pending flush classifies first (a reset's plan announces its nodes)
+        if self._inflight is not None or self._depth or self._paused:
+            return False
         return self._reset_owed or self._gate_open()
 
     def _gate_open(self) -> bool:
         return self._shrink is None and not self._needs_flush and self._clock() >= self._until
 
     def _export(self, plan: Plan | None) -> None:
-        """Build the snapshot and send it, or record why not."""
-        reset = self._reset_owed
+        """Start preparing the snapshot and run its first slice (:meth:`tick` runs the others). The debouncer is held
+        from here until its ``begin``: marks made meanwhile flush after its ack, against its scene (SLC-30 review)."""
+        reset, progress = self._reset_owed, Progress()
         try:
-            snapshot = self._build(self._scene(), plan.added if plan is not None else ())
-        except SnapshotTooLargeError as exc:
+            steps = self._prepare_fn(
+                self._scene(),
+                self._client,
+                slicer_version=self._slicer_version,
+                anonymize_names=self._anonymize,
+                announce=plan.added if plan is not None else (),
+                ids=self._ids,
+                cache=self._cache,
+                progress=progress,
+                remove_islands=self._remove_islands,
+            )
+        except Exception as exc:  # noqa: BLE001 — the scene cannot be read (T7: type only)
+            self._not_prepared(exc, reset)
+            return
+        self._prep = _Preparation(Stepper(steps, self._clock), reset, progress)
+        self._debouncer.hold()
+        self._advance()
+
+    def _advance(self) -> None:
+        """One slice of the preparation; at its end the snapshot begins, or why it cannot is recorded."""
+        prep = self._prep
+        if prep is None:
+            return
+        try:
+            done = prep.stepper.advance(math.inf if self._slice_s is None else self._slice_s)
+        except Exception as exc:  # noqa: BLE001 — a scene that cannot be exported (T7: type only)
+            if (
+                self._prep is not prep
+            ):  # abandoned by a step that called back: its hold went with it
+                _log.error("live: abandoned preparation failed (%s)", type(exc).__name__)
+                return
+            self._prep = None
+            try:
+                self._not_prepared(exc, prep.reset)
+            finally:
+                self._debouncer.release()  # the preparation's hold (an empty reset snapshot holds its own)
+            return
+        if self._prep is not prep:
+            # abandoned by a step that called back (a scene event): nothing of it is sent; a snapshot it began is
+            # superseded by the one still owed
+            return
+        if not done:
+            if prep.reset:
+                # a closed scene's replacement that takes more than one slice: the closed scene leaves the viewers
+                # first (§7.3), and the new one follows as an owed snapshot
+                self._abandon()
+                self._empty()
+            return
+        self._prep = None
+        try:
+            self._install(
+                prep.stepper.result
+            )  # the in-flight hold is taken before the preparation's ends
+        finally:
+            self._debouncer.release()
+        if prep.stale and self._running:
+            self._failed(_Cause.LOST)  # the re-sync asked for while it ran
+
+    def _not_prepared(self, exc: Exception, reset: bool) -> None:
+        """The snapshot could not be prepared: record why. When it was a closed scene's replacement, an empty
+        snapshot clears the closed scene off the viewers."""
+        if isinstance(exc, SnapshotTooLargeError):
             if reset:
                 self._empty(_Cause.TOO_LARGE, exc)
             else:
                 self._failed(_Cause.TOO_LARGE)
                 self._emit(LiveEventKind.TOO_LARGE, too_large=exc)
             return
-        except Exception as exc:  # noqa: BLE001 — a scene that cannot be exported (T7: type only)
-            _log.error("live: scene not exported (%s)", type(exc).__name__)
-            if reset:
-                self._empty(_Cause.LOCAL)
-            else:
-                self._failed(_Cause.LOCAL)
-                self._emit(LiveEventKind.FAILED)
+        _log.error("live: scene not exported (%s)", type(exc).__name__)
+        if reset:
+            self._empty(_Cause.LOCAL)
+        else:
+            self._failed(_Cause.LOCAL)
+            self._emit(LiveEventKind.FAILED)
+
+    def _abandon(self) -> None:
+        """Drop the snapshot being prepared: nothing of it is sent, and it used no version (unless a scene event
+        abandoned it from inside its last step: the snapshot still owed then supersedes the one it began). While the
+        session runs it stays owed — a flush's re-export or the first snapshot owe the client nothing yet —, so a
+        later tick starts it again, without a flush's ``scene.nodeAdded`` hint (optional, §8.2: updates, and the hint,
+        are held while a snapshot is owed)."""
+        prep, self._prep = self._prep, None
+        if prep is None:
             return
-        self._install(snapshot)
+        try:
+            prep.stepper.close()
+        except Exception as exc:  # noqa: BLE001 — T7: type only
+            _log.error("live: preparation not closed (%s)", type(exc).__name__)
+        self._debouncer.release()
+        if self._running:
+            self._client.require_snapshot()
+            self._needed_seen = True
 
     def _build(self, scene_api: SceneApi, announce: Iterable[tuple[str, str]]) -> Snapshot:
-        return self._export_fn(
-            scene_api,
-            self._client,
-            slicer_version=self._slicer_version,
-            anonymize_names=self._anonymize,
-            announce=announce,
-            ids=self._ids,
+        """A snapshot prepared in one call, without the session's cache (the empty one after a reset)."""
+        return run(
+            self._prepare_fn(
+                scene_api,
+                self._client,
+                slicer_version=self._slicer_version,
+                anonymize_names=self._anonymize,
+                announce=announce,
+                ids=self._ids,
+                remove_islands=self._remove_islands,
+            )
         )
 
-    def _empty(self, cause: _Cause, too_large: SnapshotTooLargeError | None = None) -> None:
-        """A reset's scene cannot be sent: clear the closed one off the viewers, and keep the scene owed."""
+    def _empty(
+        self, cause: _Cause | None = None, too_large: SnapshotTooLargeError | None = None
+    ) -> None:
+        """A reset's scene cannot be sent now: clear the closed one off the viewers, and keep the scene owed —
+        after a failure (``cause``), or while it is still being prepared (``None``, SLC-51)."""
         try:
             snapshot = self._build(_EmptyScene(), ())
         except Exception as exc:  # noqa: BLE001 — T7: type only
@@ -643,6 +844,10 @@ class LiveUpdates:
             self._end(RESET_NOT_SENT)
             return
         self._install(snapshot)
+        if cause is None:
+            self._client.require_snapshot()  # begin cleared it: the new scene follows the empty one's ack
+            self._needed_seen = True
+            return
         self._failed(cause)  # after its begin: updates stay held until the real scene goes out
         if too_large is not None:
             self._emit(LiveEventKind.TOO_LARGE, too_large=too_large)
@@ -683,6 +888,12 @@ class LiveUpdates:
             return
         if state in _PAUSED:
             if not self._paused:
+                # a snapshot being prepared is abandoned, as for any gate that closes: nothing of it was sent, and the
+                # resume starts it again from the cache (the panel does not tick while it reconnects)
+                self._dropped_preparation = self._prep is not None
+                # whether a snapshot was owed with its gate, before the abandon and the reset below set it
+                self._owed_at_drop = self._needed_seen
+                self._abandon()
                 self._paused = True
                 self._debouncer.hold()
                 if self._reset_owed and self._inflight is None:
@@ -703,8 +914,19 @@ class LiveUpdates:
             return  # a drop alone owes nothing: the resume decides
         if self._paused:
             self._paused = False
-            self._debouncer.release()
             lost, self._lost_inflight = self._lost_inflight, None
+            cut = lost is not None and self._client.accepted_version < lost
+            # changes the relay did not get (an update lost with the connection, or marks flushed while offline): the
+            # resume owes a re-sync that no snapshot owed before the drop explains — one asked for while reconnecting
+            # (a setting, *Send now*) does not hide it
+            lost_update = self._client.snapshot_needed and not self._owed_at_drop
+            if cut or self._dropped_preparation or lost_update:
+                # what the drop cut — a snapshot or an update on its way, or a snapshot being prepared — goes again at
+                # once, whatever the send policy (SLC-56): what waits is flushed at the hold's end, or a pending mark
+                # would keep the owed snapshot back for the delay or until *Send now*. A snapshot owed before the drop
+                # keeps the policy it had
+                self._debouncer.send_now()
+            self._debouncer.release()
             if lost is not None and self._client.accepted_version >= lost:
                 self._acked()  # the relay had it; only its ack was lost
             # an error answering the resume is not a scene refusal

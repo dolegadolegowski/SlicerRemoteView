@@ -38,6 +38,13 @@
   scene — with the reason and what happens next; a scene that cannot go out now (too large, refused, not prepared)
   leaves the session running (the code still works). A closed scene that cannot be cleared off the viewers ends the
   session (§7.3).
+- The scene is prepared a slice of :data:`PREPARE_SLICE_S` at a time, one slice per pump tick (SLC-51): the code is
+  shown at once and the status says "Preparing the scene"; :attr:`PanelView.progress` carries the progress (no dialog
+  since SLC-55, the owner's request).
+- When changes go out is the toolbar's choice (SLC-56): :meth:`PanelController.set_send_policy` keeps a
+  :class:`~remoteview_core.debounce.SendPolicy` for every session and hands it to the live one;
+  :meth:`PanelController.send_now` sends what waits; :attr:`PanelView.changes_wait` and :attr:`PanelView.due_in`
+  show the countdown.
 - Renewal follows the user (SLC-47, §4.4): when the relay is about to end a session no viewer is connected to
   (``session.expiring``), the panel renews it by itself for one warning per Start (a repeat with the same
   ``closesAt`` after a resume is the same warning), and only if a panel button was used within
@@ -59,7 +66,7 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 from remoteview_core.collect import SceneApi
-from remoteview_core.debounce import Timer
+from remoteview_core.debounce import AT_ONCE, SendPolicy, Timer
 from remoteview_core.deps import DepsResult, Outcome
 from remoteview_core.ids import SceneIds
 from remoteview_core.links import join_url
@@ -71,6 +78,10 @@ from remoteview_core.transport import Connected, Disconnected, Event, Received, 
 _log = logging.getLogger(__name__)
 
 DEFAULT_PROFILE = "mobile"
+#: How long one pump tick may prepare the scene (SLC-51): with the pump's 50 ms period the main thread spends almost all
+#: its time on a large scene's preparation and handles Qt's events between slices; a step longer than a slice (the
+#: quadric's run) still ends it (``docs/research/slicer-prepare.md``).
+PREPARE_SLICE_S = 0.05
 #: Events handled per pump tick (50 ms): the relay sends a publisher few messages; this bounds one tick's work.
 MAX_EVENTS_PER_PUMP = 100
 #: How long the module's cleanup waits for ``session.close`` to go out (the transport aborts after 2 s).
@@ -233,6 +244,13 @@ class PanelView:
     settings_enabled: bool = True  # relay address and CA file
     keep_shown: bool = False  # *Keep session*: the relay is about to end the idle session (SLC-47)
 
+    #: while the scene is prepared (SLC-51): ``(done, total)`` units of work (the adapter shows no dialog, SLC-55)
+    progress: tuple[int, int] | None = None
+    #: changes in Slicer wait to be sent (SLC-56), and in how many seconds they go by themselves (``None``: only on
+    #: *Send now*, or when a hold ends)
+    changes_wait: bool = False
+    due_in: float | None = None
+
     def __post_init__(self) -> None:
         # the link holds the code: no link without its code (a code may show alone: NO_LINK)
         if self.link and not self.code:
@@ -242,6 +260,7 @@ class PanelView:
 #: The first part of the live status, by the state of the scene (no scene factory: "").
 SCENE_STATES = {
     "": "Session running",
+    "preparing": "Preparing the scene",  # simplified for the viewers' devices, a slice per pump tick (SLC-51)
     "sending": "Sending the scene",  # no snapshot of this session accepted yet: one in flight or owed
     "updating": "Updating the scene",  # one accepted; a newer one in flight or owed
     "live": "Live",
@@ -264,6 +283,11 @@ RESTART = "Stop and start the session to try again."
 OBSERVE_FAILED = (
     "Changes in Slicer cannot be followed, so the scene was not sent. Please report this."
 )
+#: Changes wait under the send policy (SLC-56): the toolbar counts down; the panel says so in words.
+CHANGES_WAIT_AUTO = (
+    "Changes in Slicer wait: RemoteView sends them {seconds} s after the last change."
+)
+CHANGES_WAIT_SEND_NOW = "Changes in Slicer wait for Send now."
 #: A batch process (loading, closing, a script) holds the owed snapshot.
 WAITING_FOR_SLICER = (
     "Slicer is still loading or changing the scene: RemoteView sends it when Slicer is done."
@@ -291,7 +315,7 @@ def scene_refused_text(code: str | None) -> str:
 
 
 def budget_text(snapshot: Snapshot) -> str:
-    """What the device profile's budgets left over (SLC-14, §7.5, NFR-03): nodes no filter could simplify, and a scene
+    """What the device profile's budgets left over (SLC-14, §7.5, NFR-03): nodes nothing could simplify, and a scene
     above the profile's recommended size (sent anyway — the warning, not a refusal). Empty when the scene fits."""
     parts = []
     if snapshot.unreduced:
@@ -366,13 +390,15 @@ class PanelController:
     ``transport_factory`` is called as ``factory(url, events, extra_ca_file=...)`` and defaults to
     :class:`~remoteview_core.transport.RelayTransport` (looked up at Start, so tests can replace it). ``clock``
     (seconds, monotonic) times the wait for ``session.created``/``session.resumed`` and, with ``wall`` (seconds, the
-    wall clock, which also runs while the computer sleeps; the clock of ``Disconnected.lost_at``), the reconnect
-    window. ``ensure_deps`` (SLC-10) is called once the address is accepted and before the transport starts; it
-    returns a :class:`~remoteview_core.deps.DepsResult` (it may show dialogs and block while pip runs). Without it
-    nothing is installed or checked. ``scene`` returns the scene the snapshots are made of. ``watch(live)`` returns the
-    :class:`Watcher` that marks the scene's changes on ``live``; ``flush_timer`` is the single-shot timer whose
-    timeout calls :meth:`flush_live`. ``watch`` needs both (marks that are never flushed would freeze the viewers
-    silently).
+    wall clock, which also runs while the computer sleeps; the clock of ``Disconnected.lost_at``), the reconnect window.
+    ``ensure_deps`` (SLC-10) is called once the address is accepted and before the transport starts; it returns a
+    :class:`~remoteview_core.deps.DepsResult` (it may show dialogs and block while pip runs). Without it nothing is
+    installed or checked. ``scene`` returns the scene the snapshots are made of. ``watch(live)`` returns the
+    :class:`Watcher` that marks the scene's changes on ``live``; ``flush_timer`` is the single-shot timer whose timeout
+    calls :meth:`flush_live`. ``watch`` needs both (marks that are never flushed would freeze the viewers silently).
+    ``prepare_slice_s`` is how long one pump tick may prepare the scene (tests pass 0: one step per tick).
+    ``remove_islands`` is *Remove small islands* (SLC-54) for the sessions it starts; :meth:`set_remove_islands` changes
+    it, for the live session too.
     """
 
     def __init__(  # noqa: PLR0913 — keyword-only collaborators, defaults for the application
@@ -388,6 +414,9 @@ class PanelController:
         flush_timer: Timer | None = None,
         watch: Callable[[LiveUpdates], Watcher] | None = None,
         wall: Callable[[], float] = time.time,
+        prepare_slice_s: float = PREPARE_SLICE_S,
+        remove_islands: bool = False,
+        send_policy: SendPolicy = AT_ONCE,
     ) -> None:
         if watch is not None and (scene is None or flush_timer is None):
             raise ValueError("watch needs a scene factory and a flush_timer")
@@ -401,6 +430,9 @@ class PanelController:
         self._ensure_deps = ensure_deps
         self._flush_timer: Timer = flush_timer if flush_timer is not None else _NoTimer()
         self._watch = watch
+        self._prepare_slice_s = prepare_slice_s
+        self._remove_islands = bool(remove_islands)
+        self._send_policy = send_policy
         self._live: LiveUpdates | None = None
         self._watcher: Watcher | None = None
         # ensure_deps blocks inside Qt's event loop (dialogs, pip's progress window): a second click must not start over
@@ -441,6 +473,30 @@ class PanelController:
     def observer_count(self) -> int:
         """The observers the current watcher has added (its own bookkeeping; 0 without one)."""
         return self._watcher.observer_count if self._watcher is not None else 0
+
+    def set_remove_islands(self, on: bool) -> None:
+        """*Remove small islands* changed (SLC-54): the live session sends the scene again; without one, the next
+        session starts with it."""
+        self._remove_islands = bool(on)
+        if self._live is not None:
+            self._live.set_remove_islands(self._remove_islands)
+
+    def set_send_policy(self, policy: SendPolicy) -> None:
+        """The toolbar's choice of when changes go out (SLC-56): the live session follows it from now; the next
+        sessions start with it."""
+        self._send_policy = policy
+        if self._live is not None:
+            self._live.set_send_policy(policy)
+            if self.phase is Phase.LIVE:
+                self._show_live()
+
+    def send_now(self) -> PanelView:
+        """*Send now* (SLC-56): the waiting changes go out, or the scene goes again; nothing without a live session."""
+        if self._live is not None:
+            self._live.send_now()  # never raises
+            if self.phase is Phase.LIVE:
+                self._show_live()
+        return self.view
 
     @property
     def active(self) -> bool:
@@ -524,7 +580,8 @@ class PanelController:
         return self.view
 
     def note_activity(self) -> None:
-        """A panel button was used (the adapter's slots; Start and *Keep session* count by themselves)."""
+        """A panel button, *Remove small islands* or the toolbar was used (the adapter's slots; Start and *Keep
+        session* count by themselves)."""
         self._activity_at = self._clock()
 
     def keep(self) -> PanelView:
@@ -887,6 +944,9 @@ class PanelController:
                 # one alias registry per session.create (§7.3): every export of this session reuses its aliases; a
                 # resume keeps this LiveUpdates and so the registry (SLC-44), a re-create comes back here (SLC-45)
                 ids=SceneIds(),
+                slice_s=self._prepare_slice_s,
+                remove_islands=self._remove_islands,
+                send_policy=self._send_policy,
             )
             if self._watch is not None:
                 watching = True
@@ -973,6 +1033,10 @@ class PanelController:
         live = self._live
         if live is None:
             return self._scene, self._problem
+        if (
+            live.preparing is not None
+        ):  # also a retry: the reason of the last failure stays as the detail
+            return "preparing", self._problem
         if self._problem:
             state = "stale" if self._accepted else "failed"
             return state, f"{self._problem} {self._next_step(live)}"
@@ -981,7 +1045,20 @@ class PanelController:
         else:
             state = "live" if self._accepted else "sending"
         waiting = live.batch_held and live.owed and not live.in_flight
-        return state, WAITING_FOR_SLICER if waiting else self._notes
+        if waiting:
+            return state, WAITING_FOR_SLICER
+        return state, " ".join(text for text in (self._notes, self._wait_text(live)) if text)
+
+    def _wait_text(self, live: LiveUpdates) -> str:
+        """What the waiting changes wait for (SLC-56); "" when none wait or they go out by the lanes."""
+        if not live.changes_wait or self._send_policy.lanes:
+            return ""
+        due = live.due_in
+        if due is None:
+            return (
+                CHANGES_WAIT_SEND_NOW if self._send_policy.manual else ""
+            )  # a hold: Slicer is busy
+        return CHANGES_WAIT_AUTO.format(seconds=math.ceil(due))
 
     def _next_step(self, live: LiveUpdates) -> str:
         """What happens next: only a followed change can open the too-large and the flush gates."""
@@ -996,6 +1073,7 @@ class PanelController:
         client: Any = self._client  # never None while LIVE (the only callers)
         scene, detail = self._scene_state()
         keep = self._keep_offered(client)
+        preparing = self._live.preparing if self._live is not None else None
         # the extra-CA note stays next to a scene message (T5); a new code after a restart stays said (T4)
         parts = (KEEP_SESSION if keep else "", self._ca_note, self._code_note, detail)
         self._show(
@@ -1003,6 +1081,9 @@ class PanelController:
             detail="\n".join(part for part in parts if part),
             code=client.code or "",
             keep=keep,
+            progress=None if preparing is None else (preparing.done, preparing.total),
+            changes_wait=self._live.changes_wait if self._live is not None else False,
+            due_in=self._live.due_in if self._live is not None else None,
         )
 
     # ------------------------------------------------------------------ renewal (SLC-47)
@@ -1072,8 +1153,16 @@ class PanelController:
         except ValueError:
             return "", NO_LINK
 
-    def _show(
-        self, status: str, *, detail: str = "", code: str = "", keep: bool = False
+    def _show(  # noqa: PLR0913 — the view's fields, keyword-only
+        self,
+        status: str,
+        *,
+        detail: str = "",
+        code: str = "",
+        keep: bool = False,
+        progress: tuple[int, int] | None = None,
+        changes_wait: bool = False,
+        due_in: float | None = None,
     ) -> PanelView:
         phase = self.phase
         note = self._ca_note if phase in _RUNNING else ""
@@ -1088,6 +1177,9 @@ class PanelController:
             stop_enabled=phase in _RUNNING,
             settings_enabled=phase is Phase.IDLE,
             keep_shown=keep,
+            progress=progress if phase is Phase.LIVE else None,
+            changes_wait=changes_wait and phase is Phase.LIVE,
+            due_in=due_in if phase is Phase.LIVE else None,
         )
         return self.view
 

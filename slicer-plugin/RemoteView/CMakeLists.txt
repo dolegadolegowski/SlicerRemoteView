@@ -10,6 +10,7 @@ set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}.py
   remoteview_core/__init__.py
   remoteview_core/changes.py
+  remoteview_core/clustering.py
   remoteview_core/collect.py
   remoteview_core/consent.py
   remoteview_core/coords.py
@@ -20,12 +21,15 @@ set(MODULE_PYTHON_SCRIPTS
   remoteview_core/ids.py
   remoteview_core/links.py
   remoteview_core/live.py
+  remoteview_core/meshcache.py
   remoteview_core/mrml_scene.py
   remoteview_core/names.py
   remoteview_core/observers.py
   remoteview_core/panel.py
   remoteview_core/protocol_client.py
+  remoteview_core/sendmode.py
   remoteview_core/snapshot.py
+  remoteview_core/steps.py
   remoteview_core/transport.py
   remoteview_core/vendored.py
   _vendor/remoteview_protocol/__init__.py

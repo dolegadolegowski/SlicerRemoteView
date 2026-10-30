@@ -44,11 +44,13 @@ from support import (
     reassemble,
     relay_error,
     resumed,
+    specked,
     sphere,
     start_relay_stub,
 )
 
 from remoteview_core import live, panel
+from remoteview_core.debounce import SendPolicy
 from remoteview_core.mrml_scene import MrmlSceneApi
 from remoteview_core.observers import MrmlEvents, SceneWatcher
 from remoteview_core.panel import PanelController, Phase
@@ -99,7 +101,13 @@ class Rig:
     """A panel whose ``watch`` factory builds (and records) the real ``SceneWatcher`` over ``scene``."""
 
     def __init__(
-        self, *models, transport_factory=FakeTransport, batch=False, scene_class=Scene, watch=None
+        self,
+        *models,
+        transport_factory=FakeTransport,
+        batch=False,
+        scene_class=Scene,
+        watch=None,
+        remove_islands=False,
     ):
         self.models = list(models)
         self.scene = scene_class(MrmlView("vtkMRMLViewNode1"), *models)
@@ -115,6 +123,7 @@ class Rig:
             scene=lambda: MrmlSceneApi(self.scene.by_class, FakeFolders()),
             flush_timer=self.timer,
             watch=watch or self.watch,
+            remove_islands=remove_islands,
         )
         self.timer.callback = self.ctl.flush_live  # what the adapter's timeout() connection does
 
@@ -1030,6 +1039,31 @@ def test_panel_live_repeated_failures_wait_for_a_change(fake):
     assert len(rig.begins()) == 4
 
 
+def test_panel_live_remove_small_islands_follows_the_switch(fake):
+    """SLC-54: switched on and off during a live session, the scene goes again without and with the specks;
+    switched while no session runs, the next Start uses it."""
+    rig = live_rig(MrmlModel(A, polydata=specked(32)))
+    assert [b["triangleCount"] for b in rig.begins()] == [2_016]
+    acked(rig, 1)
+    rig.ctl.set_remove_islands(True)
+    rig.pump()
+    assert acked(rig, 2).status == "Live · no viewers yet."
+    rig.ctl.set_remove_islands(False)
+    rig.pump()
+    assert [b["triangleCount"] for b in rig.begins()] == [2_016, 1_920, 2_016]
+    assert acked(rig, 3).status == "Live · no viewers yet."
+    rig.ctl.stop()
+    deliver(rig.ctl, Disconnected(1, None, None, final_sent=True))
+    rig.ctl.set_remove_islands(True)
+    rig.ctl.start(URL)
+    deliver(rig.ctl, Connected(1), Received(1, created()))
+    assert [b["triangleCount"] for b in rig.begins()] == [1_920]
+    restarted = Rig(MrmlModel(A, polydata=specked(32)), remove_islands=True)
+    restarted.ctl.start(URL)
+    deliver(restarted.ctl, Connected(1), Received(1, created()))
+    assert [b["triangleCount"] for b in restarted.begins()] == [1_920]
+
+
 def test_panel_live_an_acknowledged_empty_scene_is_not_live(fake):
     a = MrmlModel(A)
     rig = live_rig(a, limits={"maxSnapshotBytes": limit_for_one(8)})
@@ -1405,6 +1439,8 @@ def _adapter(import_remote_view, slicer_stubs, monkeypatch, *nodes):
     monkeypatch.setattr(slicer.util, "getNodesByClass", slicer.mrmlScene.by_class)
     monkeypatch.setattr(slicer, "vtkMRMLFolderDisplayNode", FakeFolders())
     monkeypatch.setattr(panel, "RelayTransport", FakeTransport)
+    # the lanes, as before SLC-57: these tests time the flushes; the default mode (30 s) is test_sendmode's
+    slicer_stubs["qt"].QSettings().setValue("RemoteView/SendMode", "now")
     module = import_remote_view()
 
     def start():
@@ -1783,3 +1819,41 @@ def test_panel_live_segments_end_to_end_with_the_relay_stub(caplog, capfd):
     assert (
         leaks(caplog, capfd, *NAMES, "Sphere", "Liver_DoeJohn", "Segment_1", SEG, code, token) == []
     )
+
+
+def test_panel_live_the_send_policy_shows_the_countdown_and_send_now(fake):
+    """SLC-56: under a delay the view counts down and the detail says so; manual says to use Send now; the policy
+    outlives the session."""
+    a = MrmlModel(A)
+    rig = live_rig(a)
+    ctl = rig.ctl
+    acked(rig, 1)
+    recolor(a, (0.2, 0.2, 0.3))  # At once: a pending change shows no wait text
+    view = rig.pump(100)
+    assert view.changes_wait and view.detail == "" and _updates(rig) == []
+    rig.pump(50)
+    assert len(_updates(rig)) == 1
+    ctl.set_send_policy(SendPolicy(delay_s=15))
+    recolor(a, (0.1, 0.2, 0.3))
+    view = rig.pump(1_000)
+    assert (view.changes_wait, view.due_in) == (True, 14.0)
+    assert view.detail == panel.CHANGES_WAIT_AUTO.format(seconds=14) and len(_updates(rig)) == 1
+    view = rig.pump(14_000)
+    assert len(_updates(rig)) == 2 and (view.changes_wait, view.due_in) == (False, None)
+    assert view.detail == ""
+    view = ctl.set_send_policy(SendPolicy(manual=True)) or ctl.view
+    recolor(a, (0.3, 0.2, 0.1))
+    view = rig.pump(600_000)
+    assert (view.changes_wait, view.due_in) == (True, None)
+    assert view.detail == panel.CHANGES_WAIT_SEND_NOW and len(_updates(rig)) == 2
+    view = ctl.send_now()
+    assert len(_updates(rig)) == 3 and not view.changes_wait and view.detail == ""
+    ctl.stop()
+    deliver(ctl, Disconnected(1, None, None, final_sent=True))
+    assert ctl.send_now().status == "Not connected." and not ctl.view.changes_wait
+    ctl.start(URL)
+    deliver(ctl, Connected(1), Received(1, created()))
+    acked(rig, 1)
+    recolor(a, (0.5, 0.2, 0.1))
+    rig.pump(600_000)
+    assert ctl.view.detail == panel.CHANGES_WAIT_SEND_NOW  # the next session keeps the policy

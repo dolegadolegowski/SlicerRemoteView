@@ -1,4 +1,4 @@
-// Canvas screenshots for the viewer specs: wait until rendering stops, and find the model in the image.
+// Canvas screenshots for the viewer specs: wait until rendering stops, find the model in the image, compare two.
 
 import type { Page } from "@playwright/test";
 
@@ -54,4 +54,41 @@ export async function footprint(page: Page, png: Buffer): Promise<Footprint> {
       y: count ? sy / count / height : 0,
     };
   }, png.toString("base64"));
+}
+
+export interface Difference {
+  /** Share of the pixels that differ at all (1 for screenshots of different sizes). */
+  readonly share: number;
+  /** The largest difference of one pixel, |ΔR| + |ΔG| + |ΔB| (0..765). */
+  readonly max: number;
+}
+
+/** How two screenshots differ: decoded in the page, like `footprint`. */
+export async function difference(page: Page, a: Buffer, b: Buffer): Promise<Difference> {
+  return page.evaluate(
+    async ([first, second]) => {
+      const decode = async (base64: string) => {
+        const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+        const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/png" }));
+        const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+        const context = canvas.getContext("2d")!;
+        context.drawImage(bitmap, 0, 0);
+        return context.getImageData(0, 0, bitmap.width, bitmap.height).data;
+      };
+      const [p, q] = [await decode(first), await decode(second)];
+      if (p.length !== q.length) return { share: 1, max: 765 };
+      let differing = 0;
+      let max = 0;
+      for (let i = 0; i < p.length; i += 4) {
+        const d =
+          Math.abs(p[i]! - q[i]!) +
+          Math.abs(p[i + 1]! - q[i + 1]!) +
+          Math.abs(p[i + 2]! - q[i + 2]!);
+        if (d > 0) differing++;
+        max = Math.max(max, d);
+      }
+      return { share: differing / (p.length / 4), max };
+    },
+    [a.toString("base64"), b.toString("base64")] as const,
+  );
 }

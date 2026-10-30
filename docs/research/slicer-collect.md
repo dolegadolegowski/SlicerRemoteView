@@ -49,33 +49,59 @@ attribute arrays, vertices or lines); check that cells are stored as integers an
 range before filtering (the filters do not bounds-check: an ID out of range crashes the process); keep only 3-point
 cells and drop triangles that repeat a vertex **between** the triangle filter and the normals filter; compact unused
 points; copy every array out of VTK memory with a normalised dtype; skip (never abort) a node without triangles.
-**SLC-63:** `collect` predicts the walk's work, Σ n(p)·n(q) over the edges of every triangle (`np.bincount` of the
-corners and three dot products: ≈ 0.03 s for 2M triangles). Within a budget of the larger of 1,000 checks a triangle
-and 10⁹ (≈ 0.5 s), VTK's filter runs as before and gives the same arrays to the bit, manifold or not: spheres need ≈ 120
-checks a triangle (2M: 118), a 100-sided cone 628, a 3,000-gon extruded with `vtkRegularPolygonSource` →
-`vtkLinearExtrusionFilter` → `vtkTriangleFilter` 1,900–3,300 (the caps' triangulation varies with the radius); a
-cylinder of 4,000 sides whose caps are
-fanned from a rim point needs 3.5·10⁸, a sphere split by an equatorial disc (edges of three triangles) 5.8·10⁵ — VTK
-turns its reversed half round across the disc, and so does collect. Over the budget — a fan of 20,000 triangles needs
-1.6·10⁹, the 3,000-page book 5·10¹⁰ — the points of more than T triangles are cut for the largest T that brings the
-walk on the copy within the budget (bisection over the valences at the corners; each copy of a cut point has one
-triangle: ≤ 0.6 s for a crafted 2M mesh of 1,999 valences), the copy is walked by `vtkOrientPolyData` with
-`vtkPolyDataNormals`' settings (its points are zeros: the walk reads only the cells and their links) and the normals
-are computed with `ConsistencyOff` on the original points. The triangles joined to the rest of their part only through
-cut points then form parts of their own — of any size, on closed meshes too — each wound like its own lowest-ID
-triangle: a reversed one there is not repaired and turns its part round with it (round-3 review: an extruded
-10,000-gon, 3.0–5.6·10⁸ checks, lost the repair of 31,620 of 39,996 triangles under a budget of 10⁸; ordinary meshes
-short of very large primitives — an extruded 20,000-gon needs 0.9–1.4·10⁹ — are now under the 10⁹). Every point keeps the normalised sum of its triangles' normals. Measured with
-`mesh_from_triangles`, before → after: the 3,000-page book 11 s → 0.03 s (four rows: minutes → 0.03 s), a fan of 100k
-triangles → 0.07 s, 100k triangles on one point → 0.1 s; ordinary meshes the same within noise (best of 9 interleaved
-collects of a sphere of 400k 0.235 → 0.242 s, of the labelmap cylinder 0.309 → 0.284 s; a sphere of 2M 2.6 → 2.9 s,
-+548 → +551 MiB peak). What is left is linear but not small on crafted input, mostly cache misses of the normals filter
-on randomly ordered points (≈ 3.5 s per 1M triangles with no cut, before and after): a random mesh of 2M triangles whose
-every point is used by 32 9.3 → 4.3 s (+410 → +641 MiB, the cut copy), one whose points have 18 plus a fan that tips it
-over the budget ≈ 5–5.5 s per 1M at 2–4M (≈ 25 % above the old walk on it), shuffled fans of 3 to 2,000 triangles at 2M
-9.4 s. The budget is per node: VTK's walk costs ≈ 0.5 s for a node up to 1M triangles at the budget's edge, ≈ 0.5 s per
-1M triangles above (8,032 fans of 249 triangles, 2M triangles: 1.1 s), more on randomly ordered points — a scene of many
-such nodes costs that for each (SLC-28's ticks).
+**SLC-63 (superseded in the merge of `main` on 2026-10-30):** SLC-41 bounds the walk its own way — `ConsistencyOn` only
+when the winding is not already consistent, and not at all on a non-manifold fan (`clustering.edge_work` over
+`ORIENT_WORK`), where the given winding is kept for the whole node; SLC-67 brings back the cut below for such a node, so
+that the rest of it is still made consistent. What SLC-63 did: `collect` predicts the walk's work, Σ n(p)·n(q) over the
+edges of every triangle (`np.bincount` of the corners and three dot products: ≈ 0.03 s for 2M triangles). Within a
+budget of the larger of 1,000 checks a triangle and 10⁹ (≈ 0.5 s), VTK's filter runs as before and gives the same arrays
+to the bit, manifold or not: spheres need ≈ 120 checks a triangle (2M: 118), a 100-sided cone 628, a 3,000-gon extruded
+with `vtkRegularPolygonSource` → `vtkLinearExtrusionFilter` → `vtkTriangleFilter` 1,900–3,300 (the caps' triangulation
+varies with the radius); a cylinder of 4,000 sides whose caps are fanned from a rim point needs 3.5·10⁸, a sphere split
+by an equatorial disc (edges of three triangles) 5.8·10⁵ — VTK turns its reversed half round across the disc, and so
+does collect. Over the budget — a fan of 20,000 triangles needs 1.6·10⁹, the 3,000-page book 5·10¹⁰ — the points of more
+than T triangles are cut for the largest T that brings the walk on the copy within the budget (bisection over the
+valences at the corners; each copy of a cut point has one triangle: ≤ 0.6 s for a crafted 2M mesh of 1,999 valences),
+the copy is walked by `vtkOrientPolyData` with `vtkPolyDataNormals`' settings (its points are zeros: the walk reads only
+the cells and their links) and the normals are computed with `ConsistencyOff` on the original points. The triangles
+joined to the rest of their part only through cut points then form parts of their own — of any size, on closed meshes
+too — each wound like its own lowest-ID triangle: a reversed one there is not repaired and turns its part round with it
+(round-3 review: an extruded 10,000-gon, 3.0–5.6·10⁸ checks, lost the repair of 31,620 of 39,996 triangles under a
+budget of 10⁸; ordinary meshes short of very large primitives — an extruded 20,000-gon needs 0.9–1.4·10⁹ — are now under
+the 10⁹). Every point keeps the normalised sum of its triangles' normals. Measured with `mesh_from_triangles`, before
+→ after: the 3,000-page book 11 s → 0.03 s (four rows: minutes → 0.03 s), a fan of 100k triangles → 0.07 s, 100k
+triangles on one point → 0.1 s; ordinary meshes the same within noise (best of 9 interleaved collects of a sphere of
+400k 0.235 → 0.242 s, of the labelmap cylinder 0.309 → 0.284 s; a sphere of 2M 2.6 → 2.9 s, +548 → +551 MiB peak). What
+is left is linear but not small on crafted input, mostly cache misses of the normals filter on randomly ordered points
+(≈ 3.5 s per 1M triangles with no cut, before and after): a random mesh of 2M triangles whose every point is used by 32
+9.3 → 4.3 s (+410 → +641 MiB, the cut copy), one whose points have 18 plus a fan that tips it over the budget ≈ 5–5.5 s
+per 1M at 2–4M (≈ 25 % above the old walk on it), shuffled fans of 3 to 2,000 triangles at 2M 9.4 s. The budget is per
+node: VTK's walk costs ≈ 0.5 s for a node up to 1M triangles at the budget's edge, ≈ 0.5 s per 1M triangles above (8,032
+fans of 249 triangles, 2M triangles: 1.1 s), more on randomly ordered points — a scene of many such nodes costs that for
+each (SLC-51's ticks).
+
+### Merge comparison (2026-10-30)
+
+`collect_entities` of one node on `main` (`d70c5be`, SLC-41's walk rule) and on `ws/slicer` (`e4573c3`, SLC-63's cut),
+three runs each in one process (load 0.01–0.4); "edge work" is Σ n(p)·n(q). The indices and normals were compared by
+hash.
+
+| Mesh | Triangles | Edge work | `main` (s; consistency) | `ws/slicer` (s; consistency, points cut) | Same output |
+|---|---|---|---|---|---|
+| Book 3,000 × 1 | 6,000 | 5.4e10 | 0.005–0.007 (off) | 0.021–0.031 (off, 1 cut) | yes |
+| Book 3,000 × 4 | 24,000 | 7.3e11 | 0.012–0.019 (off) | 0.126–0.141 (off, 3 cut) | yes |
+| Fan of 100k around one point | 100,000 | 4.0e10 | 0.056–0.082 (off) | 0.074–0.130 (off, 1 cut) | yes |
+| 100k triangles sharing one point | 100,000 | 2.0e10 | 0.094–0.151 (off) | 0.103–0.174 (off, 1 cut) | yes |
+| Sphere 2M | 1,998,000 | 2.4e8 | best of five 1.32–1.51 (off: already consistent) | 2.05–2.06 (on) | yes |
+| Labelmap cylinder | 434,800 | 4.7e7 | 0.23–0.53 (off) | 0.28–0.38 (on) | yes |
+| Fan of 22k, every second triangle reversed | 22,000 | 1.9e9 | 1.10–1.15 (on: under `ORIENT_WORK` = 2e9) | 0.017–0.030 (off, 1 cut) | no |
+| A reversed sphere next to an alternately wound book 3,000 × 2 | 13,056 | 2.4e11 | 0.007–0.011 (off) | 0.110–0.121 (off, 1 cut) | no: 151 of the sphere's 1,056 triangles face in on `main`, 0 on `ws/slicer` |
+
+`main` bounds the walk by switching it off for the whole node over `ORIENT_WORK` (2e9, or 1,000 a triangle) and skips it
+on a mesh already wound consistently; `ws/slicer` cut the busiest points and walked the rest. Every named case is fast
+on both; what only the cut gives is the repair of the rest of such a node → SLC-67. A trial rule — `main`'s skip for a
+consistent mesh first, then the cut instead of the switch-off — passed `main`'s SLC-41 tests and gave `ws/slicer`'s
+output on every case above (the 2M sphere 1.33–1.68 s best of five).
 
 ## 3. MRML API for the Slicer adapter (SLC-22)
 

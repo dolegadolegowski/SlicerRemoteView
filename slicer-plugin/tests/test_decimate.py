@@ -1,9 +1,10 @@
-"""SLC-14: decimation to the profile budgets (protocol §7.5, FR-10) and the GLB size estimate (NFR-03, NFR-23)."""
+"""SLC-14: decimation to the profile budgets (protocol §7.5, FR-10) and the GLB size estimate (NFR-03, NFR-23);
+SLC-41: bounded time and a crack-free result on very large, flat and non-manifold meshes."""
 
 from __future__ import annotations
 
 import dataclasses
-import gc
+import logging
 import struct
 import time
 
@@ -12,23 +13,25 @@ import pytest
 from pygltflib import GLTF2
 from support import (
     FakeScene,
-    book,
+    face_normals,
+    flying_edges,
     live_client,
+    mesh_entity,
     needs_validator,
+    normal_opposes_face,
     reassemble,
     sphere,
     validate_glb,
 )
-from vtkmodules.util.numpy_support import numpy_to_vtk
-from vtkmodules.vtkCommonDataModel import vtkImageData, vtkPolyData
-from vtkmodules.vtkFiltersGeneral import vtkDiscreteFlyingEdges3D
-from vtkmodules.vtkFiltersSources import vtkCubeSource, vtkPlaneSource
+from vtkmodules.vtkCommonCore import reference
+from vtkmodules.vtkCommonDataModel import vtkPolyData, vtkStaticCellLocator
+from vtkmodules.vtkFiltersCore import vtkQuadricDecimation
+from vtkmodules.vtkFiltersSources import vtkCubeSource, vtkPlaneSource, vtkSphereSource
 
-from remoteview_core import decimate, glb_writer, protocol_client
+from remoteview_core import clustering, decimate, glb_writer, protocol_client
 from remoteview_core import snapshot as snapshot_module
 from remoteview_core.collect import (
     collect_entities,
-    mesh_from_triangles,
     mesh_points_and_triangles,
     polydata_from_triangles,
 )
@@ -43,6 +46,7 @@ from remoteview_core.decimate import (
 )
 from remoteview_core.glb_writer import Entity, RootExtras, size_report, write_glb
 from remoteview_core.snapshot import SnapshotTooLargeError, build_snapshot
+from remoteview_core.steps import run
 
 ROOT = RootExtras(scene_version=1, profile="quest2", slicer_version="5.12.4")
 QUEST2 = PROFILES["quest2"]
@@ -90,17 +94,12 @@ def grid_entity(nx: int, ny: int, *, matrix=None):
     )
 
 
-def outward_cosines(entity, centre=(0.1, 0.0, 0.0)) -> np.ndarray:
-    """The cosine between each vertex normal and the direction from the sphere's centre (support.sphere: R+100 mm,
-    glTF +X 0.1 m) — near 1 when the normals point out, in glTF space."""
+def outward(entity, centre=(0.1, 0.0, 0.0)) -> float:
+    """The smallest cosine between a vertex normal and the direction from the sphere's centre (support.sphere: R+100
+    mm, glTF +X 0.1 m) — near 1 when the normals point out, in glTF space."""
     radial = entity.positions - np.asarray(centre)
     radial /= np.linalg.norm(radial, axis=1)[:, None]
-    return np.einsum("ij,ij->i", entity.normals, radial)
-
-
-def outward(entity, centre=(0.1, 0.0, 0.0)) -> float:
-    """The smallest of :func:`outward_cosines`."""
-    return float(outward_cosines(entity, centre).min())
+    return float(np.einsum("ij,ij->i", entity.normals, radial).min())
 
 
 def has_unit_normals(entity) -> bool:
@@ -188,12 +187,15 @@ def test_decimate_entity_reduces_to_the_target_with_unit_normals():
 
 
 class Degenerate:
-    """A filter that "succeeds" with no triangle, a non-finite point, a point beyond float32, too many triangles — or
+    """A quadric that "succeeds" with no triangle, a non-finite point, a point beyond float32, too many triangles — or
     with two triangles folded onto each other (finite, but their normals cancel: usable, the zero normals become
     +Y as in collect)."""
 
     def __init__(self, kind: str, calls: list, target: int = 0) -> None:
         self.kind, self.calls, self.input, self.target = kind, calls, None, target
+
+    def AddObserver(self, *args):  # noqa: N802 — the deadline observer; never fires here
+        pass
 
     def SetInputData(self, data):  # noqa: N802
         self.input = data
@@ -215,13 +217,13 @@ class Degenerate:
         return polydata_from_triangles(np.array(points, dtype=np.float64), np.array(triangles))
 
 
-#: Fixed filter outputs of :class:`Degenerate`: (points, triangles).
+#: Fixed quadric outputs of :class:`Degenerate`: (points, triangles), in the quadric's scaled frame.
 DEGENERATE_OUTPUTS = {
     "nan": ([[0, 0, 0], [1, 0, 0], [np.nan, 1, 0]], [[0, 1, 2]]),
     "huge": (
-        [[0, 0, 0], [1e39, 0, 0], [0, 1e39, 0]],
+        [[0, 0, 0], [1e45, 0, 0], [0, 1e45, 0]],
         [[0, 1, 2]],
-    ),  # finite in float64, beyond float32 (metres)
+    ),  # finite in float64, beyond float32 (metres, after the quadric's scale is undone)
     "folded": ([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0.5, 1, 0]], [[0, 1, 2], [1, 0, 3]]),
     "flat": ([[0, 0, 0], [1, 0, 0], [2, 0, 0]], [[0, 1, 2]]),  # every triangle without area
     # an unused point and a triangle without area next to a real one
@@ -232,39 +234,314 @@ DEGENERATE_OUTPUTS = {
 }
 
 
+def unscaled(entity, points) -> np.ndarray:
+    """``points`` of the quadric's frame (centred, median edge 100) back in the entity's metres."""
+    _, _, centre, scale = decimate._prepared(
+        np.asarray(entity.positions, dtype=np.float64), np.asarray(entity.indices)
+    )
+    return np.asarray(points, dtype=np.float64) / scale + centre
+
+
+def every_face_outward(entity, centre=(0.1, 0.0, 0.0)) -> bool:
+    face = face_normals(entity.positions, entity.indices)
+    out = entity.positions[entity.indices].mean(axis=1) - np.asarray(centre)
+    return bool(np.all(np.einsum("ij,ij->i", face, out) > 0))
+
+
+def fallback_warnings(caplog) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == "remoteview_core.decimate" and r.levelno == logging.WARNING
+    ]
+
+
 @pytest.mark.parametrize("kind", ["empty", "nan", "huge", "flat", "unchanged"])
-def test_decimate_falls_back_to_decimate_pro_when_the_quadric_result_is_unusable(kind):
+def test_decimate_falls_back_to_clustering_when_the_quadric_result_is_unusable(
+    kind, monkeypatch, caplog
+):
+    """No usable quadric result: connected clustering with a growing cell still reaches the share, crack-free and
+    outward (SLC-41; ``vtkDecimatePro`` is gone), with a warning in the log (counts only)."""
     [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(64)})
     calls: list = []
-    filters = (lambda r: Degenerate(kind, calls), decimate._pro)
-    smaller = decimate_entity(entity, 2_000, filters=filters)
-    assert calls == [kind]  # the quadric ran once; DecimatePro made the result
+    fallbacks: list = []
+    original = decimate._fallback_steps
+    monkeypatch.setattr(
+        decimate, "_fallback_steps", lambda *a: fallbacks.append(len(a[1])) or original(*a)
+    )
+    with caplog.at_level(logging.WARNING, logger="remoteview_core.decimate"):
+        smaller = decimate_entity(entity, 2_000, quadric=lambda r: Degenerate(kind, calls))
+    assert (
+        calls == [kind] and len(fallbacks) == 1
+    )  # the quadric ran once; the clustering made the result
+    assert fallback_warnings(caplog) == [
+        f"Decimation: the quadric gave no usable result on a node of {entity.triangle_count} triangles; "
+        f"vertex clustering reduced it to {smaller.triangle_count} instead (coarser)"
+    ]
     assert 0 < smaller.triangle_count <= 2_000 and has_unit_normals(smaller)
     radius = np.linalg.norm(
         smaller.positions - [0.1, 0.0, 0.0], axis=1
     )  # still the sphere, not the bad result
     np.testing.assert_allclose(radius, 0.020, atol=0.002)
-    assert outward(smaller) > 0.9
+    assert outward(smaller) > 0.9 and every_face_outward(smaller)
 
 
 def test_decimate_a_result_one_triangle_over_the_share_is_not_used():
     [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(64)})
     calls: list = []
-    filters = (lambda r: Degenerate("over", calls, target=2_000), decimate._pro)
-    smaller = decimate_entity(entity, 2_000, filters=filters)
+    smaller = decimate_entity(
+        entity, 2_000, quadric=lambda r: Degenerate("over", calls, target=2_000)
+    )
     assert calls == ["over"] and 0 < smaller.triangle_count <= 2_000 and outward(smaller) > 0.9
+
+
+def test_decimate_quadric_deadline_falls_back(monkeypatch, caplog):
+    """An aborted quadric (the deadline already passed) gives no triangle: the clustering fallback makes the
+    result, quickly, and the log says why (the §14 console check then shows which path ran)."""
+    monkeypatch.setattr(decimate, "QUADRIC_SECONDS", 0.0)
+    fallbacks: list = []
+    original = decimate._fallback_steps
+    monkeypatch.setattr(
+        decimate, "_fallback_steps", lambda *a: fallbacks.append(len(a[1])) or original(*a)
+    )
+    [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(200)})
+    start = time.perf_counter()
+    with caplog.at_level(logging.WARNING, logger="remoteview_core.decimate"):
+        smaller = decimate_entity(entity, 2_000)
+    assert time.perf_counter() - start < 2.0
+    assert fallbacks == [entity.triangle_count] and 0 < smaller.triangle_count <= 2_000
+    assert outward(smaller) > 0.9
+    assert fallback_warnings(caplog) == [
+        f"Decimation: the quadric did not finish within 0 s on a node of {entity.triangle_count} triangles; "
+        f"vertex clustering reduced it to {smaller.triangle_count} instead (coarser)"
+    ]
+
+
+def test_decimate_deadline_starts_at_the_quadric_step(monkeypatch, caplog):
+    """The clustering before the quadric (numpy, linear) does not use the quadric's time: a slow size bound (the
+    clock jumps 1,000 s) still leaves the quadric its ``QUADRIC_SECONDS``, so the result does not depend on how fast
+    the bound ran. Counted from the entry, the reporter's node had 1.5 s of margin in Slicer under Rosetta."""
+    clock = Clock()
+    monkeypatch.setattr(decimate, "time", clock)
+    monkeypatch.setattr(decimate, "CLUSTER_GOAL", 10_000)
+    bounded = decimate._bounded_steps
+
+    def slow_bound(*args):
+        clock.now += 1_000.0
+        return bounded(*args)
+
+    monkeypatch.setattr(decimate, "_bounded_steps", slow_bound)
+    monkeypatch.setattr(decimate, "_fallback_steps", no_fallback)
+    [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(200)})
+    assert entity.triangle_count > 2 * decimate.CLUSTER_GOAL  # the size bound runs
+    with caplog.at_level(logging.WARNING, logger="remoteview_core.decimate"):
+        smaller = decimate_entity(entity, 2_000)
+    assert clock.now == 1_000.0 and fallback_warnings(caplog) == []
+    assert 0 < smaller.triangle_count <= 2_000 and outward(smaller) > 0.9
+
+
+def no_fallback(*args):
+    raise AssertionError("the fallback ran")
+
+
+def test_decimate_steps_the_event_loop_between_them_never_counts(monkeypatch, caplog):
+    """SLC-28: driven a step at a time with the clock jumping 1,000 s between steps (the event loop's time), the
+    quadric still has its run — its runs are one step, and its deadline counts only their own time."""
+    clock = Clock()
+    monkeypatch.setattr(decimate, "time", clock)
+    monkeypatch.setattr(decimate, "CLUSTER_GOAL", 10_000)
+    monkeypatch.setattr(decimate, "_fallback_steps", no_fallback)
+    [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(200)})
+    steps = decimate.decimate_steps(entity, 2_000)
+    taken = 0
+    with caplog.at_level(logging.WARNING, logger="remoteview_core.decimate"):
+        while True:
+            try:
+                next(steps)
+            except StopIteration as stop:
+                smaller = stop.value
+                break
+            taken += 1
+            clock.now += 1_000.0
+    assert taken > 5 and clock.now == 1_000.0 * taken and fallback_warnings(caplog) == []
+    assert 0 < smaller.triangle_count <= 2_000 and outward(smaller) > 0.9
+
+
+def test_decimate_deadline_does_not_count_the_fan_clustering(monkeypatch, caplog):
+    """Like the size bound, the fan clustering before the quadric is not counted: a slow one (the clock jumps
+    1,000 s) on a book of pages sharing one spine still leaves the quadric its run, and no fallback follows."""
+    clock = Clock()
+    monkeypatch.setattr(decimate, "time", clock)
+    unfanned = decimate._unfanned_steps
+
+    def slow_fans(*args):
+        clock.now += 1_000.0
+        return unfanned(*args)
+
+    monkeypatch.setattr(decimate, "_unfanned_steps", slow_fans)
+    runs = spy_runs(monkeypatch)
+    positions, triangles = book()
+    assert clustering.fan_weight(triangles) > decimate.FAN_LIMIT  # the fan path
+    with caplog.at_level(logging.WARNING, logger="remoteview_core.decimate"):
+        smaller = decimate_entity(mesh_entity(positions, triangles), 2_000)
+    assert clock.now == 1_000.0 and runs and fallback_warnings(caplog) == []
+    assert 0 < smaller.triangle_count <= 2_000
+
+
+def test_decimate_a_size_bound_that_leaves_nothing_warns_and_falls_back(monkeypatch, caplog):
+    """When the size bound's clustering leaves no triangle (a node of dust), the fallback runs on the input, with the
+    same kind of warning as after the quadric: every fallback shows in the log."""
+    monkeypatch.setattr(decimate, "CLUSTER_GOAL", 10_000)
+    empty = (np.empty((0, 3)), np.empty((0, 3), dtype=np.int64))
+
+    def leaves_nothing(*args):
+        return empty
+        yield  # a steps generator (remoteview_core.steps)
+
+    monkeypatch.setattr(decimate, "_bounded_steps", leaves_nothing)
+    [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(200)})
+    assert entity.triangle_count > 2 * decimate.CLUSTER_GOAL  # the size bound runs
+    with caplog.at_level(logging.WARNING, logger="remoteview_core.decimate"):
+        smaller = decimate_entity(entity, 2_000)
+    assert 0 < smaller.triangle_count <= 2_000 and outward(smaller) > 0.9
+    assert fallback_warnings(caplog) == [
+        f"Decimation: the size bound left no triangle on a node of {entity.triangle_count} triangles; "
+        f"vertex clustering reduced it to {smaller.triangle_count} instead (coarser)"
+    ]
+
+
+class Clock:
+    """A ``time`` stand-in for :mod:`remoteview_core.decimate` (it reads only ``time.monotonic``)."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+def body_and_debris() -> tuple[np.ndarray, np.ndarray]:
+    """A 50 mm sphere (100 × 100: 19,600 triangles) at the origin and 50 islands of 96 triangles beside it."""
+    source = vtkSphereSource()
+    source.SetRadius(0.05)
+    source.SetThetaResolution(100)
+    source.SetPhiResolution(100)
+    source.Update()
+    centres = np.c_[0.1 + 0.02 * (np.arange(50) % 10), 0.02 * (np.arange(50) // 10), np.zeros(50)]
+    return with_islands(mesh_points_and_triangles(source.GetOutput()), centres, radius=0.003)
+
+
+def on_body(entity) -> int:
+    """The triangles of ``entity`` on :func:`body_and_debris`'s large sphere."""
+    middle = entity.positions[entity.indices].mean(axis=1)
+    return int(np.sum(np.abs(np.linalg.norm(middle, axis=1) - 0.05) < 0.005))
+
+
+@pytest.mark.parametrize("when", ["during-the-body", "between-the-runs"])
+def test_decimate_an_aborted_part_sends_the_whole_node_to_the_fallback(when, monkeypatch):
+    """A part whose run is aborted (or not started) at the deadline is not dropped: the whole node goes to the
+    fallback. Before, the body's empty result was kept next to the islands (the node came back as its debris), or
+    the islands' run was aborted and they vanished, and the node was reported as reduced."""
+    positions, triangles = body_and_debris()
+    assert len(triangles) == 19_600 + 50 * 96
+    clock = Clock()
+    monkeypatch.setattr(decimate, "time", clock)
+    made: list = []
+
+    def make(reduction):
+        quadric = decimate._quadric(reduction)
+        made.append(reduction)
+        event = "StartEvent" if when == "during-the-body" else "EndEvent"
+        quadric.AddObserver(event, lambda *_: setattr(clock, "now", 1e9))
+        return quadric
+
+    fallbacks: list = []
+    original = decimate._fallback_steps
+    monkeypatch.setattr(
+        decimate, "_fallback_steps", lambda *a: fallbacks.append(len(a[1])) or original(*a)
+    )
+    # 15,000: the islands fit their share and need no run; 4,000: they need one, after the body's
+    target = 15_000 if when == "during-the-body" else 4_000
+    smaller = decimate_entity(mesh_entity(positions, triangles), target, quadric=make)
+    assert len(made) == 1 and fallbacks == [len(triangles)]
+    assert 0 < smaller.triangle_count <= target and on_body(smaller) > 0.5 * target
+
+
+def seamed_sphere(resolution: int, radius: float = 0.02) -> tuple[np.ndarray, np.ndarray]:
+    """A sphere cut into 6 charts (3 longitude sectors × 2 hemispheres) whose shared vertices are duplicated per
+    chart, exact copies — the seams a reader (texture coordinates) or a normal filter (feature edges) leaves."""
+    source = vtkSphereSource()
+    source.SetRadius(radius)
+    source.SetThetaResolution(resolution)
+    source.SetPhiResolution(resolution)
+    source.Update()
+    positions, triangles = mesh_points_and_triangles(source.GetOutput())
+    middle = positions[triangles].mean(axis=1)
+    sector = np.floor((np.arctan2(middle[:, 1], middle[:, 0]) + np.pi + 0.3) / (2 * np.pi / 3))
+    chart = (sector.astype(np.int64) % 3) * 2 + (middle[:, 2] > 0)
+    used, seamed = np.unique(chart[:, None] * len(positions) + triangles, return_inverse=True)
+    return positions[used % len(positions)], seamed.reshape(-1, 3)
+
+
+def boundary_edges(triangles) -> int:
+    _, uses = np.unique(
+        np.sort(clustering.edges(np.asarray(triangles)), axis=1), axis=0, return_counts=True
+    )
+    return int(np.sum(uses == 1))
+
+
+def test_decimate_seams_stay_closed(monkeypatch):
+    """Clustering joins the two sides of a seam (coincident vertices with agreeing normals): through the size bound
+    and through the fallback the reduced sphere has no boundary edge, where the seams opened as cracks before."""
+    monkeypatch.setattr(decimate, "CLUSTER_GOAL", 10_000)
+    positions, triangles = seamed_sphere(200)
+    assert len(triangles) > 2 * 10_000 and boundary_edges(triangles) > 1_000
+    smaller = decimate_entity(mesh_entity(positions, triangles), 2_000)
+    assert 0 < smaller.triangle_count <= 2_000 and boundary_edges(smaller.indices) == 0
+    monkeypatch.setattr(decimate, "QUADRIC_SECONDS", 0.0)  # the fallback
+    positions, triangles = seamed_sphere(64)
+    smaller = decimate_entity(mesh_entity(positions, triangles), 2_000)
+    assert 0 < smaller.triangle_count <= 2_000 and boundary_edges(smaller.indices) == 0
+
+
+def test_decimate_double_sided_sheet_still_reduces(monkeypatch):
+    """Two coincident layers with opposite winding: their vertices are not joined (their normals oppose), so the
+    layers do not cancel and the sheet is still reduced, both sides kept."""
+    monkeypatch.setattr(decimate, "CLUSTER_GOAL", 10_000)
+    positions, triangles = grid_patch(120)
+    sheet = np.vstack([positions, positions])
+    both = np.vstack([triangles, triangles[:, ::-1] + len(positions)])
+    assert len(both) > 2 * 10_000
+    smaller = decimate_entity(mesh_entity(sheet, both), 2_000)
+    assert 0 < smaller.triangle_count <= 2_000
+    up = face_normals(smaller.positions, smaller.indices)[:, 2]
+    assert np.sum(up > 0) > 500 and np.sum(up < 0) > 500
+
+
+def test_decimate_dust_is_bounded(monkeypatch):
+    """A labelmap of random voxels (2 %): almost every triangle is in an island smaller than the size bound's cell.
+    The rescue is skipped above ``RESCUE_GOALS · goal`` lost triangles and the bound is applied again, so the quadric
+    gets at most ``2 · goal`` (before: 59,947 for a goal of 10,000; a 16.5M-triangle version took 14.9 s)."""
+    monkeypatch.setattr(decimate, "CLUSTER_GOAL", 10_000)
+    mask = np.random.default_rng(3).random((120, 120, 120)) < 0.02
+    [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": flying_edges(mask, 0.075)})
+    assert entity.triangle_count > 200_000
+    runs = spy_runs(monkeypatch)
+    start = time.perf_counter()
+    smaller = decimate_entity(entity, 2_000)
+    assert time.perf_counter() - start < 5.0
+    assert runs and sum(n for n, _ in runs) <= 2 * 10_000
+    assert 0 < smaller.triangle_count <= 2_000
 
 
 def test_decimate_result_keeps_only_the_points_its_triangles_use():
     [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(16)})
-    smaller = decimate_entity(entity, 10, filters=(lambda r: Degenerate("loose", []),))
+    smaller = decimate_entity(entity, 10, quadric=lambda r: Degenerate("loose", []))
     np.testing.assert_array_equal(
         smaller.indices, [[0, 1, 2]]
     )  # the flat triangle and the loose point are gone
-    # the filters see the mesh centred on its bounding box (SLC-61); the centre is added back to their result
-    centre = (entity.positions.min(axis=0) + entity.positions.max(axis=0)) / 2
     np.testing.assert_allclose(
-        smaller.positions - centre, [[0, 0, 0], [0.01, 0, 0], [0, 0.01, 0]], atol=1e-15
+        smaller.positions, unscaled(entity, [[0, 0, 0], [0.01, 0, 0], [0, 0.01, 0]])
     )
     np.testing.assert_allclose(smaller.normals, [[0.0, 0.0, 1.0]] * 3, atol=1e-6)
 
@@ -294,7 +571,7 @@ def test_decimate_repairs_normals_that_cancel_out_like_collect():
     """Decimated normals go to the writer as they are; a zero one becomes +Y (``coords.unit_normals``), so a result
     with a fold is used, not refused — refusing it would send the whole model above its share."""
     [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(64)})
-    smaller = decimate_entity(entity, 2_000, filters=(lambda r: Degenerate("folded", []),))
+    smaller = decimate_entity(entity, 2_000, quadric=lambda r: Degenerate("folded", []))
     assert smaller is not None and smaller.triangle_count == 2
     np.testing.assert_allclose(
         smaller.normals[:2], [[0.0, 1.0, 0.0]] * 2
@@ -308,79 +585,398 @@ def test_decimate_repairs_normals_that_cancel_out_like_collect():
     ids=["too-high", "negative", "repeated-ab", "repeated-bc", "repeated-ac"],
 )
 def test_decimate_refuses_broken_indices_before_vtk(bad):
-    """IDs out of range, or a triangle that repeats a vertex (collect never makes them; a vtkDecimatePro crash on
-    them was reported, not reproduced): no filter sees them."""
+    """IDs out of range, or a triangle that repeats a vertex (collect never makes them; VTK does not check them):
+    no filter sees them."""
     [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(16)})
     row = [len(entity.positions) if v == "n" else v for v in bad]
     broken = dataclasses.replace(entity, indices=np.vstack([entity.indices, [row]]))
     calls: list = []
-    assert decimate_entity(broken, 10, filters=(lambda r: Degenerate("unchanged", calls),)) is None
+    assert decimate_entity(broken, 10, quadric=lambda r: Degenerate("unchanged", calls)) is None
     assert calls == []
-    assert decimate_entity(entity, 10, filters=()) is None  # no filter at all: nothing usable
 
 
-def test_decimate_filters_and_their_settings():
-    pro = decimate._pro(0.5)
-    assert pro.GetPreserveTopology() == 1 and pro.GetTargetReduction() == 0.5
-    quadric = decimate._quadric(0.25)
-    assert quadric.GetTargetReduction() == 0.25
-    # the settings under which VTK guarantees the reduction (vtkDecimatePro.h)
-    forced = decimate._pro_guaranteed(0.75)
+def test_decimate_quadric_settings():
+    quadric = decimate._quadric(0.5)
     assert (
-        forced.GetPreserveTopology(),
-        forced.GetSplitting(),
-        forced.GetBoundaryVertexDeletion(),
-    ) == (0, 1, 1)
-    assert forced.GetMaximumError() >= 1e299 and forced.GetTargetReduction() == 0.75
-    assert (decimate._quadric, decimate._pro, decimate._pro_guaranteed) == decimate.FILTERS
+        quadric.GetRegularize(),
+        quadric.GetRegularization(),
+        quadric.GetTargetReduction(),
+    ) == (1, 0.01, 0.5)
+    assert decimate.QUADRIC is decimate._quadric
+    assert not hasattr(decimate, "vtkDecimatePro")  # its splitting cracked the surface (SLC-41)
 
 
-def test_decimate_reaches_the_target_when_topology_cannot_be_kept():
-    """Both first filters unusable: the last one, allowed to change the topology, still reaches the target."""
-    [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(64)})
+def soup(rows: int = 80, columns: int = 100) -> tuple[np.ndarray, np.ndarray]:
+    """``rows · columns`` separate right triangles with legs of 2⁻¹⁰ m, 2⁻⁴ m apart on a grid: each lies inside one
+    cell of the fallback's first grid (cell = median edge · √(8,000 / 2,000) = 2⁻⁹ m, exact in binary)."""
+    leg = 2.0**-10
+    i, j = np.meshgrid(np.arange(rows), np.arange(columns), indexing="ij")
+    corner = np.c_[i.ravel(), j.ravel(), np.zeros(i.size)] * 64 * leg
+    n = len(corner)
+    positions = np.concatenate(
+        [corner, corner + np.array([leg, 0, 0]), corner + np.array([0, leg, 0])]
+    )
+    return positions, np.c_[np.arange(n), np.arange(n) + n, np.arange(n) + 2 * n]
+
+
+def test_decimate_a_node_nothing_can_reduce_is_kept_whole_and_reported(caplog):
+    """A soup of separate tiny triangles the quadric leaves unchanged: the fallback clustering collapses every
+    triangle, so its first result at or under the share is empty — the node is sent whole and reported, and the
+    warning says so (one per call)."""
+    positions, triangles = soup()
+    node = dataclasses.replace(
+        mesh_entity(positions, triangles), node_id="vtkMRMLModelNode5", mrml_id="vtkMRMLModelNode5"
+    )
+    [other] = entities({"id": "vtkMRMLModelNode4", "mesh": cube()})
     calls: list = []
-    filters = (
-        lambda r: Degenerate("empty", calls),
-        lambda r: Degenerate("unchanged", calls),
-        decimate._pro_guaranteed,
-    )
-    smaller = decimate_entity(entity, 300, filters=filters)
-    assert (
-        calls == ["empty", "unchanged"]
-        and 0 < smaller.triangle_count <= 300
-        and has_unit_normals(smaller)
-    )
-    assert outward(smaller) > 0.9
-
-
-def test_decimate_a_node_no_filter_can_reduce_is_kept_whole_and_reported():
-    nodes = entities(
-        {"id": "vtkMRMLModelNode4", "mesh": sphere(64)},
-        {"id": "vtkMRMLModelNode5", "mesh": cube()},
-    )
-    calls: list = []
-    filters = (lambda r: Degenerate("empty", calls), lambda r: Degenerate("nan", calls))
-    tight = Budget(
-        total_triangles=3_000, node_triangles=2_000, target_bytes=1 << 20, floor_triangles=100
-    )
-    assert decimate_entity(nodes[0], 2_000, filters=filters) is None
-    result = fit_to_budget(nodes, tight, filters=filters)
-    assert result.entities == tuple(nodes) and result.reduced == ()
-    assert result.unreduced == ("vtkMRMLModelNode4",)  # never dropped (§7.5)
+    quadric = lambda r: Degenerate("unchanged", calls)  # noqa: E731
+    with caplog.at_level(logging.WARNING, logger="remoteview_core.decimate"):
+        assert decimate_entity(node, 2_000, quadric=quadric) is None
+        tight = Budget(
+            total_triangles=3_000, node_triangles=2_000, target_bytes=1 << 20, floor_triangles=100
+        )
+        result = fit_to_budget([node, other], tight, quadric=quadric)
+    assert result.entities == (node, other) and result.reduced == ()
+    assert result.unreduced == ("vtkMRMLModelNode5",)  # never dropped (§7.5)
     write_glb(list(result.entities), ROOT)
+    kept = (
+        f"Decimation: the quadric gave no usable result on a node of {node.triangle_count} triangles; "
+        "nothing could reduce it, it is sent whole"
+    )
+    assert fallback_warnings(caplog) == [kept, kept]
+
+
+# --------------------------------------------------------------------------- bounded time and quality (SLC-41)
+
+
+def stalling_sphere() -> tuple[np.ndarray, np.ndarray]:
+    """A sphere (radius 0.03 m about (0.1, 0.1, 0.1) m, 3,040 triangles) with one triangle removed and a hole edge
+    split by a vertex 1e-12 m from its end: distinct in float64, the same point in float32 — like the short boundary
+    edges collect leaves where it drops a segmentation's triangles without area."""
+    source = vtkSphereSource()
+    source.SetRadius(0.03)
+    source.SetCenter(0.1, 0.1, 0.1)
+    source.SetThetaResolution(40)
+    source.SetPhiResolution(40)
+    source.Update()
+    positions, triangles = mesh_points_and_triangles(source.GetOutput())
+    hole = len(triangles) // 2
+    a, b, _ = triangles[hole]
+    triangles = np.delete(triangles, hole, axis=0)
+    across = next(i for i, t in enumerate(triangles) if a in t and b in t)
+    t = list(triangles[across])
+    m = len(positions)
+    step = positions[b] - positions[a]
+    positions = np.vstack([positions, positions[a] + 1e-12 * step / np.linalg.norm(step)])
+    first, second = list(t), list(t)  # (a, m, d) and (m, b, d) in the winding of t
+    first[t.index(b)] = m
+    second[t.index(a)] = m
+    return positions, np.vstack([np.delete(triangles, across, axis=0), [first, second]])
+
+
+def test_decimate_quadric_stall_float32_generated(monkeypatch):
+    positions, triangles = stalling_sphere()
+    assert len(triangles) == 3_040
+    # Characterisation of VTK 9.6.x: vtkQuadricDecimation copies the points into float32, the split edge becomes
+    # zero-length there, its NaN boundary quadric ends the main loop (measured 3,038 kept for a target of 304). A
+    # release that copies double points would make this fail; the weld must then stay anyway (older VTK in Slicer).
+    plain = vtkQuadricDecimation()
+    plain.SetTargetReduction(0.9)
+    plain.SetInputData(polydata_from_triangles(positions, triangles))
+    plain.Update()
+    assert plain.GetOutput().GetNumberOfPolys() > 2_700
+
+    def no_fallback(*args):
+        raise AssertionError("the fallback ran")
+
+    monkeypatch.setattr(decimate, "_fallback_steps", no_fallback)
+    smaller = decimate_entity(mesh_entity(positions, triangles), 304)
+    assert 0 < smaller.triangle_count <= 304 and has_unit_normals(smaller)
+
+
+def test_decimate_weld_float32_merges_only_float32_coincident_ends():
+    one = np.float64(1.0)
+    ulp = float(np.spacing(np.float32(1.0)))  # 2⁻²³
+    positions = np.array(
+        [
+            [one, 0, 0],
+            [one + 0.2 * ulp, 0, 0],  # equal to vertex 0 in float32
+            [one + 2 * ulp, 0, 0],  # 2 ulp away: distinct
+            [0, 1, 0],
+            [0, 0, 1],
+        ]
+    )
+    triangles = np.array([[0, 1, 3], [0, 2, 3], [1, 3, 4], [2, 4, 3]])
+    welded = decimate._weld_float32(positions, triangles)
+    # [0, 1, 3] repeats vertex 0 now and goes; vertex 1 becomes 0 elsewhere; vertex 2 stays
+    np.testing.assert_array_equal(welded, [[0, 2, 3], [0, 3, 4], [2, 4, 3]])
+
+
+def test_decimate_flat_plane_is_fast_and_exact():
+    """A flat 0.1 m plane: exact cost ties made the plain quadric take 94 s (to 100k) and 234 s (to 2k); with
+    Regularize it takes well under a second (measured 0.2-0.4 s)."""
+    plane = vtkPlaneSource()
+    plane.SetOrigin(0, 0, 0)
+    plane.SetPoint1(100, 0, 0)
+    plane.SetPoint2(0, 100, 0)
+    for resolution, targets, limit in ((300, (100_000, 2_000), 5.0), (120, (2_000,), 2.0)):
+        plane.SetResolution(resolution, resolution)
+        plane.Update()
+        [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": plane.GetOutput()})
+        assert entity.triangle_count == 2 * resolution**2
+        for target in targets:
+            start = time.perf_counter()
+            smaller = decimate_entity(entity, target)
+            assert time.perf_counter() - start < limit
+            assert 0 < smaller.triangle_count <= target
+            # RAS z = 0 → glTF y = 0: every position stays on the plane
+            assert np.ptp(smaller.positions[:, 1]) < 1e-9
+            assert normal_opposes_face(smaller) == 0
+
+
+def test_decimate_flatcap_cylinder_stays_exact():
+    """An unsmoothed flying-edges cylinder with flat caps (the plain quadric took 28 s on a 427k version) to 25 %:
+    fast, and the output's vertices stay on the input surface."""
+    z, y, x = np.mgrid[0:100, 0:160, 0:160]
+    mask = (((x - 80) ** 2 + (y - 80) ** 2) < 70**2) & (z > 2) & (z < 97)
+    [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": flying_edges(mask, 0.5)})
+    start = time.perf_counter()
+    smaller = decimate_entity(entity, entity.triangle_count // 4)
+    assert time.perf_counter() - start < 5.0
+    assert 0 < smaller.triangle_count <= entity.triangle_count // 4
+    locator = vtkStaticCellLocator()
+    locator.SetDataSet(polydata_from_triangles(entity.positions, entity.indices))
+    locator.BuildLocator()
+    closest, cell, sub, distance2 = [0.0, 0.0, 0.0], reference(0), reference(0), reference(0.0)
+    distances = []
+    for point in smaller.positions:
+        locator.FindClosestPoint(list(point), closest, cell, sub, distance2)
+        distances.append(float(distance2) ** 0.5)
+    diagonal = np.linalg.norm(np.ptp(entity.positions, axis=0))
+    assert np.percentile(distances, 99) < 1e-4 * diagonal
+
+
+def book(pages: int = 300, grid: int = 4) -> tuple[np.ndarray, np.ndarray]:
+    """``pages`` pages of ``grid × grid`` quads, 10 mm square, sharing one spine (non-manifold: every spine edge has
+    one triangle per page), in metres."""
+    g = grid + 1
+    i, j = np.meshgrid(np.arange(g), np.arange(g), indexing="ij")
+    radius, height = 0.01 * i.ravel() / grid, 0.01 * j.ravel() / grid
+    angle = np.pi * np.arange(pages) / pages
+    positions = np.stack(
+        [
+            radius[None] * np.cos(angle)[:, None],
+            radius[None] * np.sin(angle)[:, None],
+            np.broadcast_to(height, (pages, g * g)),
+        ],
+        axis=-1,
+    ).reshape(-1, 3)
+    corner = (np.arange(grid)[:, None] * g + np.arange(grid)[None]).ravel()
+    page = np.concatenate(
+        [np.c_[corner, corner + g, corner + 1], np.c_[corner + 1, corner + g, corner + g + 1]]
+    )
+    triangles = (page[None] + g * g * np.arange(pages)[:, None, None]).reshape(-1, 3)
+    local = np.arange(len(positions)) % (g * g)
+    spine = np.where(
+        local < g, local, np.arange(len(positions))
+    )  # the first column of every page is page 0's
+    return positions, spine[triangles]
+
+
+def test_decimate_book_routes_around_the_quadric(monkeypatch):
+    positions, triangles = book()
+    assert clustering.fan_weight(triangles) > 50
+    calls: list = []
+    original = clustering.cluster_by_normal_steps
+    monkeypatch.setattr(
+        clustering, "cluster_by_normal_steps", lambda *a: calls.append(len(a[1])) or original(*a)
+    )
+    start = time.perf_counter()
+    smaller = decimate_entity(mesh_entity(positions, triangles), 2_000)
+    assert (
+        time.perf_counter() - start < 2.0
+    )  # the 3,000-page version: did not finish before, 0.3 s now
+    assert calls and 0 < smaller.triangle_count <= 2_000
+
+
+@pytest.mark.parametrize(("target", "limit"), [(2_000, 2.0), (100_000, 5.0)])
+def test_decimate_a_fan_below_the_fan_limit_is_routed_by_its_quadric_work(
+    target, limit, monkeypatch
+):
+    """400 pages of 16 × 16 quads: ``fan_weight`` 42 is below ``FAN_LIMIT``, but the quadric's set-up (which cannot be
+    aborted) would cost ``edge_work`` 8.8e9 — 2.8-4.0 s here, 16.8 s on 672 pages. It goes the fan path instead
+    (measured 0.12 s and 1.9 s)."""
+    positions, triangles = book(400, 16)
+    assert clustering.fan_weight(triangles) < decimate.FAN_LIMIT
+    assert clustering.edge_work(triangles) > decimate.QUADRIC_WORK
+    calls: list = []
+    original = clustering.cluster_by_normal_steps
+    monkeypatch.setattr(
+        clustering, "cluster_by_normal_steps", lambda *a: calls.append(len(a[1])) or original(*a)
+    )
+    runs = spy_runs(monkeypatch)
+    start = time.perf_counter()
+    smaller = decimate_entity(mesh_entity(positions, triangles), target)
+    assert time.perf_counter() - start < limit
+    assert calls and runs and 0 < smaller.triangle_count <= target
+
+
+def test_decimate_fallback_tries_normal_classes_when_connected_clusters_empty_the_mesh():
+    """100 closed spheres, each inside one cell of the fallback's first grid: connected clusters collapse every
+    sphere; normal classes keep a coarse shape of each."""
+    centres = np.c_[0.02 * (np.arange(100) % 10), 0.02 * (np.arange(100) // 10), np.zeros(100)]
+    nothing = (np.empty((0, 3)), np.empty((0, 3), dtype=np.int64))
+    positions, triangles = with_islands(nothing, centres, radius=0.003)
+    target = 300
+    first = clustering.median_edge(positions, triangles) * np.sqrt(len(triangles) / target)
+    assert len(clustering.cluster_connected(positions, triangles, first, rescue=0)[1]) == 0
+    coarse = run(decimate._fallback_steps(positions, triangles, target))
+    assert coarse is not None and 0 < len(coarse[1]) <= target
+
+
+def noisy_sphere(resolution: int = 200, seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
+    source = vtkSphereSource()
+    source.SetRadius(0.02)
+    source.SetCenter(0.1, 0.0, 0.0)
+    source.SetThetaResolution(resolution)
+    source.SetPhiResolution(resolution)
+    source.Update()
+    positions, triangles = mesh_points_and_triangles(source.GetOutput())
+    noise = 1 + 0.002 * np.random.default_rng(seed).standard_normal(len(positions))
+    return (positions - [0.1, 0, 0]) * noise[:, None] + [0.1, 0, 0], triangles
+
+
+def test_decimate_size_bound_feeds_the_quadric_a_bounded_mesh(monkeypatch):
+    monkeypatch.setattr(decimate, "CLUSTER_GOAL", 10_000)
+    runs = spy_runs(monkeypatch)
+    positions, triangles = noisy_sphere()
+    assert len(triangles) > 2 * 10_000
+    smaller = decimate_entity(mesh_entity(positions, triangles), 2_000)
+    assert runs and sum(n for n, _ in runs) <= 1.6 * 10_000
+    assert 0 < smaller.triangle_count <= 2_000
+    assert every_face_outward(smaller) and normal_opposes_face(smaller) == 0
+
+
+def with_islands(
+    body: tuple[np.ndarray, np.ndarray], centres: np.ndarray, radius: float = 0.005
+) -> tuple[np.ndarray, np.ndarray]:
+    """``body`` plus a small sphere (8 × 8: 96 triangles) at each of ``centres``, as one mesh."""
+    meshes = [body]
+    for centre in centres:
+        source = vtkSphereSource()
+        source.SetRadius(radius)
+        source.SetCenter(*centre)
+        source.SetThetaResolution(8)
+        source.SetPhiResolution(8)
+        source.Update()
+        meshes.append(mesh_points_and_triangles(source.GetOutput()))
+    offsets = np.cumsum([0] + [len(p) for p, _ in meshes])
+    positions = np.concatenate([p for p, _ in meshes])
+    triangles = np.concatenate([t + o for (_, t), o in zip(meshes, offsets, strict=False)])
+    return positions, triangles
+
+
+def spy_runs(monkeypatch) -> list:
+    """Records ``(input triangles, share)`` of every :func:`decimate._run_quadric` call."""
+    runs: list = []
+    original = decimate._run_quadric
+    monkeypatch.setattr(
+        decimate,
+        "_run_quadric",
+        lambda p, t, share, *a: runs.append((len(t), share)) or original(p, t, share, *a),
+    )
+    return runs
+
+
+def test_decimate_islands_keep_their_share(monkeypatch):
+    """A large sphere with 200 small ones: the parts below ``ISLAND_TRIANGLES`` get a run of their own with their
+    share (twice the proportional 1,920 is 3,840, capped at half the target), the large sphere the rest."""
+    centres = np.c_[
+        0.2 + 0.02 * (np.arange(200) % 20), 0.02 * (np.arange(200) // 20), np.zeros(200)
+    ]
+    positions, triangles = with_islands(noisy_sphere(160, seed=1), centres)
+    assert len(triangles) == 50_560 + 200 * 96
+    target = len(triangles) // 10
+    t_small = target // 2
+    runs = spy_runs(monkeypatch)
+    smaller = decimate_entity(mesh_entity(positions, triangles), target)
+    assert runs == [(50_560, target - t_small), (19_200, t_small)]
+    assert 0 < smaller.triangle_count <= target
+    middle = smaller.positions[smaller.indices].mean(axis=1)
+    distance = np.linalg.norm(middle[:, None, :] - centres[None], axis=2)
+    near = distance.min(axis=1) < 0.006
+    assert 0.9 * t_small <= near.sum() <= t_small  # one run over everything: 6,670 and 306
+    assert 0.9 * (target - t_small) <= (~near).sum() <= target - t_small
+    assert len(np.unique(distance.argmin(axis=1)[near])) == 200
+    # only small parts: they get all of the share, not half of it
+    tetrahedron = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float64) * 0.001
+    faces = np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]])
+    positions = np.concatenate([tetrahedron + np.array([0.01 * i, 0, 0]) for i in range(300)])
+    triangles = np.concatenate([faces + 4 * i for i in range(300)])
+    smaller = decimate_entity(mesh_entity(positions, triangles), 200)
+    assert 100 < smaller.triangle_count <= 200
+
+
+def test_decimate_islands_use_what_the_body_leaves(monkeypatch):
+    """A body within its share needs no run; the islands then get the rest of the target instead of half of it."""
+    centres = np.c_[
+        0.2 + 0.02 * (np.arange(100) % 10), 0.02 * (np.arange(100) // 10), np.zeros(100)
+    ]
+    positions, triangles = with_islands(noisy_sphere(40, seed=2), centres)
+    body = 40 * 38 * 2
+    target = 2 * body + 2_000  # the body (3,040) fits in its half; the islands (9,600) need a run
+    runs = spy_runs(monkeypatch)
+    smaller = decimate_entity(mesh_entity(positions, triangles), target)
+    assert runs == [(9_600, target - body)]
+    assert target - 50 <= smaller.triangle_count <= target
+
+
+def grid_patch(n: int = 4) -> tuple[np.ndarray, np.ndarray]:
+    """An ``n × n`` grid of quads in the z = 0 plane, every triangle facing +z."""
+    i, j = np.meshgrid(np.arange(n + 1), np.arange(n + 1), indexing="ij")
+    positions = np.c_[i.ravel(), j.ravel(), np.zeros(i.size)] * 0.001
+    corner = (np.arange(n)[:, None] * (n + 1) + np.arange(n)[None]).ravel()
+    triangles = np.concatenate(
+        [
+            np.c_[corner, corner + n + 1, corner + 1],
+            np.c_[corner + 1, corner + n + 1, corner + n + 2],
+        ]
+    )
+    return positions, triangles
+
+
+def test_decimate_fold_repair():
+    positions, triangles = grid_patch()
+    assert np.all(face_normals(positions, triangles)[:, 2] > 0)
+    np.testing.assert_array_equal(decimate._repair_folds(positions, triangles), triangles)
+    flipped = triangles.copy()
+    flipped[5] = flipped[5][::-1]
+    np.testing.assert_array_equal(decimate._repair_folds(positions, flipped), triangles)
+    # the final normals come from vtkPolyDataNormals without reordering: the repaired triangles, minus the one
+    # without area (a collinear triangle on unused points), are what the entity gets
+    extra = np.vstack([positions, [[0.0, 0.01, 0.0], [0.0, 0.02, 0.0], [0.0, 0.03, 0.0]]])
+    with_flat = np.vstack([flipped, [[25, 26, 27]]])
+    finished = decimate._finished(mesh_entity(extra, with_flat), extra, with_flat, 100)
+    np.testing.assert_array_equal(finished.indices, triangles)
+    np.testing.assert_allclose(finished.normals, [[0.0, 0.0, 1.0]] * len(positions), atol=1e-12)
 
 
 # --------------------------------------------------------------------------- the whole scene (criterion 1)
 
 
-def test_decimate_quest2_scene_fits_500k_with_no_node_above_100k():
-    """A 400k-triangle sphere and three other nodes under ``quest2`` (FR-10, §7.5)."""
-    nodes = entities(
+def quest2_scene() -> list:
+    """A 400k-triangle sphere and three other nodes, the last a ``vtkCubeSource`` (4 points of its own per face)."""
+    return entities(
         {"id": "vtkMRMLModelNode4", "mesh": sphere(448)},  # 399,616 triangles
         {"id": "vtkMRMLModelNode5", "mesh": sphere(240)},  # 114,240
         {"id": "vtkMRMLModelNode6", "mesh": sphere(160)},  # 50,560
         {"id": "vtkMRMLModelNode7", "mesh": cube()},  # 12
     )
+
+
+def test_decimate_quest2_scene_fits_500k_with_no_node_above_100k():
+    """A 400k-triangle sphere and three other nodes under ``quest2`` (FR-10, §7.5)."""
+    nodes = quest2_scene()
     counts = [e.triangle_count for e in nodes]
     assert counts == [399_616, 114_240, 50_560, 12]
     result = fit_to_budget(nodes, QUEST2)
@@ -392,6 +988,18 @@ def test_decimate_quest2_scene_fits_500k_with_no_node_above_100k():
     )  # within their shares: untouched
     assert all(has_unit_normals(e) and outward(e) > 0.9 for e in result.entities[:3])  # the spheres
     write_glb(list(result.entities), ROOT, quantize=True)
+
+
+def test_decimate_quest2_scene_has_no_small_islands():
+    """SLC-53: with *Remove small islands* the same scene fits with the same counts — every sphere is one part, and
+    the cube's six faces (two triangles each by vertex IDs) are one part by position, the only one of its node."""
+    nodes = quest2_scene()
+    plain = fit_to_budget(nodes, QUEST2)
+    result = fit_to_budget(nodes, QUEST2, remove_islands=True)
+    assert result.cleaned == () and plain.cleaned == ()
+    assert [e.triangle_count for e in result.entities] == [e.triangle_count for e in plain.entities]
+    assert result.reduced == plain.reduced == ("vtkMRMLModelNode4", "vtkMRMLModelNode5")
+    assert result.entities[2] is nodes[2] and result.entities[3] is nodes[3]
 
 
 def test_decimate_fit_to_budget_holds_the_total():
@@ -411,600 +1019,6 @@ def test_decimate_fit_to_budget_holds_the_total():
 
 def test_decimate_profile_names_match_the_protocol():
     assert set(PROFILES) == set(protocol_client.PROFILES) == set(glb_writer.PROFILES)
-
-
-# --------------------------------------------------------------------------- one node in bounded time (SLC-61)
-
-
-def plane(resolution: int):
-    """A flat 100 mm square of ``resolution``² quads (``vtkPlaneSource``): 2·resolution² triangles once collected."""
-    source = vtkPlaneSource()
-    source.SetOrigin(0.0, 0.0, 0.0)
-    source.SetPoint1(100.0, 0.0, 0.0)
-    source.SetPoint2(0.0, 100.0, 0.0)
-    source.SetResolution(resolution, resolution)
-    source.Update()
-    return source.GetOutput()
-
-
-def grid(nx: int, ny: int, spacing: float):
-    """:func:`grid_entity`'s triangles in its order (all first triangles of the cells, then all second ones) as a
-    polydata in millimetres, to be collected."""
-    entity = grid_entity(nx, ny)
-    return polydata_from_triangles(entity.positions * 1000.0 * spacing, entity.indices)
-
-
-def labelmap_cylinder(radius: int = 110, height: int = 160):
-    """The unsmoothed closed surface of a labelmap cylinder of 1 mm voxels whose flat caps lie on the volume's border
-    (``vtkDiscreteFlyingEdges3D``, no smoothing or decimation): 434,800 triangles, most of them in exactly flat
-    regions — the SLC-14 review's 427k segmentation surface."""
-    side = np.arange(-radius - 1, radius + 2)
-    y, x = np.meshgrid(side, side, indexing="ij")
-    volume = np.zeros((height + 2, len(side), len(side)), dtype=np.uint8)
-    volume[1:-1] = x * x + y * y <= radius * radius
-    image = vtkImageData()
-    image.SetDimensions(len(side), len(side), height + 2)
-    image.GetPointData().SetScalars(numpy_to_vtk(volume.ravel(), deep=True))
-    surface = vtkDiscreteFlyingEdges3D()
-    surface.SetInputData(image)
-    surface.SetValue(0, 1)
-    surface.ComputeNormalsOff()
-    surface.ComputeGradientsOff()
-    surface.ComputeScalarsOff()
-    surface.Update()
-    return surface.GetOutput()
-
-
-def boundary_edges(entity) -> int:
-    """Edges used by one triangle only, with coincident points merged (a hole, or a seam a soup leaves)."""
-    _, merged = np.unique(entity.positions, axis=0, return_inverse=True)
-    triangles = merged.reshape(-1)[entity.indices]
-    edges = np.sort(triangles[:, [0, 1, 1, 2, 2, 0]].reshape(-1, 2), axis=1)
-    _, counts = np.unique(edges, axis=0, return_counts=True)
-    return int(np.count_nonzero(counts == 1))
-
-
-def area(entity) -> float:
-    p, t = entity.positions, entity.indices
-    return float(
-        np.linalg.norm(np.cross(p[t[:, 1]] - p[t[:, 0]], p[t[:, 2]] - p[t[:, 0]]), axis=1).sum() / 2
-    )
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize(
-    ("make", "target", "kept_area"),
-    [
-        # before: review 57 s; > 90 s with VTK 9.6.2 here
-        (lambda: plane(300), 100_000, 1.0),
-        # the same plane in grid_entity's order: > 90 s
-        (lambda: grid(301, 301, 1 / 3), 100_000, 1.0),
-        # 28,800 triangles: 4.5 s
-        (lambda: grid(121, 121, 1.0), 2_000, 1.0),
-        # review: 437 s and 3 GB; > 90 s here
-        (labelmap_cylinder, 100_000, 1.0),
-        # 18 s (the review's book: 73 s); collect 11 s before SLC-63
-        (lambda: book(3_000, 1), 2_000, 0.3),
-        # > 90 s; collect minutes before SLC-63
-        (lambda: book(3_000, 4), 2_000, 0.05),
-    ],
-    ids=["plane-180k", "grid-180k", "grid-28.8k", "labelmap-cylinder-435k", "book", "book-4-rows"],
-)
-def test_decimate_bounded_one_node_within_its_share(make, target, kept_area):
-    """The meshes that took minutes (flat regions tie the quadric's costs; an edge of 3,000 triangles costs its
-    set-up m³) are collected and decimated within their share in well under 10 s (plan criterion 1)."""
-    data = make()
-    started = time.perf_counter()
-    [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": data})
-    smaller = decimate_entity(entity, target)
-    elapsed = time.perf_counter() - started
-    assert smaller is not None and 0 < smaller.triangle_count <= target
-    assert elapsed < 10.0, elapsed
-    # the plane keeps its area; a book cannot
-    assert area(smaller) >= kept_area * area(entity) * 0.999
-    assert has_unit_normals(smaller)
-
-
-@pytest.mark.slow
-def test_decimate_bounded_smooth_sphere_keeps_the_quadric_and_its_time():
-    """A smooth 400k-triangle sphere still goes through the quadric, in at most 1.2× the time of SLC-14's first
-    filter alone (plan criterion 2): the best of seven interleaved runs each, the estimate least moved by other load
-    (measured 1.02–1.18 under load, ≈ 1.06 idle; single pairs 1.0–1.25)."""
-    [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(448)})
-    used: list[str] = []
-
-    def recorded(make):
-        def filter_(reduction):
-            used.append(make.__name__)
-            return make(reduction)
-
-        return filter_
-
-    filters = tuple(recorded(make) for make in decimate.FILTERS)
-
-    # SLC-14: the quadric on the collected mesh as it is, then the same normals step
-    def before() -> int:
-        quadric = decimate._quadric(1.0 - 100_000 / entity.triangle_count)
-        quadric.SetInputData(polydata_from_triangles(entity.positions, entity.indices))
-        quadric.Update()
-        return len(mesh_from_triangles(*mesh_points_and_triangles(quadric.GetOutput())).triangles)
-
-    def after() -> int:
-        return decimate_entity(entity, 100_000, filters=filters).triangle_count
-
-    times: dict[str, list[float]] = {"before": [], "after": []}
-    collecting = gc.isenabled()
-    gc.disable()  # as timeit does: a collection of the suite's heap inside one run is not the rule's cost
-    try:
-        for _ in range(7):
-            for name, run in (("before", before), ("after", after)):
-                gc.collect()
-                started = time.perf_counter()
-                assert 0 < run() <= 100_000
-                times[name].append(time.perf_counter() - started)
-    finally:
-        if collecting:
-            gc.enable()
-    assert used == ["_quadric"] * 7
-    assert min(times["after"]) <= 1.2 * min(times["before"]), times
-
-
-def _repeated(entity, *, own_points: bool):
-    """``entity`` with its first triangle written twice: on the same points, or on copies of them (an STL facet)."""
-    triangles = np.asarray(entity.indices)
-    corners = triangles[0]
-    if not own_points:
-        return dataclasses.replace(entity, indices=np.vstack([triangles, corners]))
-    added = len(entity.positions) + np.arange(3)
-    return dataclasses.replace(
-        entity,
-        positions=np.vstack([entity.positions, entity.positions[corners]]),
-        normals=np.vstack([entity.normals, entity.normals[corners]]),
-        indices=np.vstack([triangles, added]),
-    )
-
-
-@pytest.mark.parametrize(
-    "repeat",
-    [None, True, False],
-    ids=["soup", "facet-twice-on-its-own-points", "facet-twice-on-the-same-points"],
-)
-def test_decimate_bounded_triangle_soup_comes_out_without_holes(repeat):
-    """Every triangle with points of its own (an STL read without merging): the quadric decimated each triangle
-    alone and left 300,000 boundary edges on the 400k sphere; merged, the soup is one surface again (criterion 3) —
-    also with a facet written twice, whose merged edges are shared by three triangles (SLC-61 review: 0.38 of the
-    area with 6,000 open edges)."""
-    source = sphere(64)
-    points, triangles = mesh_points_and_triangles(source)
-    soup = polydata_from_triangles(
-        points[triangles.ravel()], np.arange(triangles.size).reshape(-1, 3)
-    )
-    [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": soup})
-    assert boundary_edges(entity) == 0 and len(entity.positions) == 3 * entity.triangle_count
-    if repeat is not None:
-        entity = _repeated(entity, own_points=repeat)
-    smaller = decimate_entity(entity, 2_000)
-    assert 0 < smaller.triangle_count <= 2_000 and boundary_edges(smaller) == 0
-    # coincident triangles close each other's edges: the area tells a holed result apart
-    assert area(smaller) >= 0.99 * area(entity)
-    radius = np.linalg.norm(smaller.positions - [0.1, 0.0, 0.0], axis=1)
-    np.testing.assert_allclose(radius, 0.020, atol=0.002)
-    cosines = outward_cosines(smaller)
-    # the facet written twice can tilt a normal or two next to it, by how much depends on the jitter's draws (down to
-    # ≈ 0.71 over 600 seeds, below 0.9 for ≈ 8 % of them, never inward); all the others point out
-    assert cosines.min() > (0.9 if repeat is None else 0.0)
-    assert np.quantile(cosines, 0.01) > 0.9
-
-
-def test_decimate_bounded_soup_of_a_two_sided_surface_keeps_one_sides_area():
-    """The soup of a two-sided sphere is merged into the two-sided sphere and decimated like it (0.19 of the area
-    unmerged: SLC-61 review)."""
-    [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(64)})
-    soup = _soup(_two_sheets(entity, reversed_=True, own_points=False))
-    smaller = decimate_entity(soup, 2_000)
-    assert 0 < smaller.triangle_count <= 2_000
-    assert area(smaller) >= 0.45 * area(soup)
-
-
-def test_decimate_bounded_soup_check():
-    assert decimate._soup(np.arange(9).reshape(-1, 3))
-    # a facet written twice, either way round, is still a soup
-    assert decimate._soup(np.array([[0, 1, 2], [3, 4, 5], [2, 0, 1], [2, 1, 0]]))
-    assert not decimate._soup(np.array([[0, 1, 2], [2, 1, 3]]))  # points 1 and 2 in two triangles
-    assert not decimate._soup(np.array([[0, 1, 2], [0, 1, 2], [2, 3, 4]]))
-    # the last two triangles share point 5
-    assert not decimate._soup(np.array([[0, 1, 2], [3, 4, 5], [5, 6, 7]]))
-
-
-class Recording:
-    """A filter factory that records the input each filter is given, and then runs the real one."""
-
-    def __init__(self, make, log: list) -> None:
-        self.make, self.log = make, log
-
-    def __call__(self, reduction):
-        recording, real = self, self.make(reduction)
-
-        class Filter:
-            def SetInputData(self, data):  # noqa: N802
-                points, triangles = mesh_points_and_triangles(data)
-                recording.log.append((recording.make.__name__, points, triangles))
-                real.SetInputData(data)
-
-            def Update(self):  # noqa: N802
-                real.Update()
-
-            def GetOutput(self):  # noqa: N802
-                return real.GetOutput()
-
-        return Filter()
-
-
-def _soup(entity):
-    """``entity`` with every triangle on points of its own."""
-    corners = np.asarray(entity.indices).ravel()
-    return dataclasses.replace(
-        entity,
-        positions=entity.positions[corners],
-        normals=entity.normals[corners],
-        indices=np.arange(corners.size).reshape(-1, 3),
-    )
-
-
-def test_decimate_bounded_filters_get_the_merged_centred_jittered_mesh():
-    """Every filter gets the same input: coincident points merged, centred on the bounding box and moved by up to 1e-7
-    of its diagonal; the centre is added back to the result."""
-    [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(64)})
-    soup = _soup(entity)
-    log: list = []
-    unusable = lambda r: Degenerate("empty", [])  # noqa: E731
-    decimate_entity(soup, 2_000, filters=(Recording(unusable, log), Recording(decimate._pro, log)))
-    assert [name for name, _, _ in log] == ["<lambda>", "_pro"]
-    (_, first, triangles), (_, second, _) = log
-    np.testing.assert_array_equal(first, second)  # one input for every filter
-    assert len(first) == len(entity.positions)  # merged: the sphere's points again
-    low, high = entity.positions.min(axis=0), entity.positions.max(axis=0)
-    diagonal = np.linalg.norm(high - low)
-    np.testing.assert_allclose(
-        (first.min(axis=0) + first.max(axis=0)) / 2, 0.0, atol=2e-7 * diagonal
-    )
-    # merged points come in the order they are first used
-    _, first_seen = np.unique(soup.positions, axis=0, return_index=True)
-    moved = np.abs(first - (soup.positions[np.sort(first_seen)] - (low + high) / 2))
-    # 24k uniform draws in [−1, 1]: the largest is within 1e-3 of the amplitude
-    assert 0.99e-7 * diagonal <= moved.max() <= 1e-7 * diagonal * (1 + 1e-9)
-    assert triangles.shape == (entity.triangle_count, 3)
-
-
-def _keys(points) -> np.ndarray:
-    return decimate._point_keys(np.asarray(points, dtype=np.float64))
-
-
-def test_decimate_bounded_merges_only_when_points_coincide():
-    """No two points coincide (the collected sphere): the filters get its points in their order, merely centred and
-    jittered; one point repeated: the merge runs and the copy goes; a point 1e-12 of the diagonal away stays."""
-    [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(64)})
-    assert not decimate._coincident(_keys(entity.positions))
-    log: list = []
-    decimate_entity(entity, 2_000, filters=(Recording(decimate._quadric, log),))
-    [(_, points, triangles)] = log
-    low, high = entity.positions.min(axis=0), entity.positions.max(axis=0)
-    diagonal = np.linalg.norm(high - low)
-    shift = np.abs(points - (entity.positions - (low + high) / 2))
-    assert shift.max() <= 1e-7 * diagonal * (1 + 1e-9)
-    np.testing.assert_array_equal(triangles, entity.indices)
-    first = int(np.flatnonzero(np.any(entity.indices == 0, axis=1))[0])
-    indices = np.array(entity.indices)
-    # point 0 replaced in one triangle by its copy, or by a point next to it
-    indices[first][indices[first] == 0] = len(entity.positions)
-    for offset, merged in ((0.0, True), (1e-12 * diagonal, False)):
-        log.clear()
-        twin = entity.positions[:1] + np.array([offset, 0.0, 0.0])
-        decimate_entity(
-            dataclasses.replace(
-                entity,
-                positions=np.vstack([entity.positions, twin]),
-                normals=np.vstack([entity.normals, entity.normals[:1]]),
-                indices=indices,
-            ),
-            2_000,
-            filters=(Recording(decimate._quadric, log),),
-        )
-        assert len(log[0][1]) == len(entity.positions) + (0 if merged else 1), offset
-
-
-def test_decimate_bounded_coincidence_check():
-    points = np.array([[0.0, 1.0, 2.0], [0.0, -1.0, -2.0], [-0.0, 1.0, -2.0], [1.0, 1.0, 2.0]])
-    assert not decimate._coincident(_keys(points))  # mirror images do not collide
-    assert decimate._coincident(_keys(np.vstack([points, [[0.0, -1.0, -2.0]]])))
-    # -0.0 is 0.0, as in vtkMergePoints
-    assert decimate._coincident(_keys([[0.0, 1.0, 2.0], [-0.0, 1.0, 2.0]]))
-    rng = np.random.default_rng(52)
-    assert not decimate._coincident(_keys(rng.normal(size=(200_000, 3))))
-
-
-def _two_sheets(entity, *, reversed_: bool, own_points: bool):
-    """``entity`` and a second copy of its surface lying on it: wound the other way (a two-sided surface) or the same
-    way (a duplicated shell), on the same points or on points of its own."""
-    triangles = np.asarray(entity.indices)
-    second = triangles[:, ::-1] if reversed_ else triangles
-    if own_points:
-        second = second + len(entity.positions)
-        positions = np.vstack([entity.positions, entity.positions])
-        normals = np.vstack([entity.normals, entity.normals])
-    else:
-        positions, normals = entity.positions, entity.normals
-    return dataclasses.replace(
-        entity, positions=positions, normals=normals, indices=np.vstack([triangles, second])
-    )
-
-
-@pytest.mark.parametrize(
-    ("make", "kept"),
-    [
-        (
-            lambda e: _two_sheets(e, reversed_=True, own_points=False),
-            0.45,
-        ),  # one sheet's area: as before SLC-61
-        (lambda e: _two_sheets(e, reversed_=True, own_points=True), 0.99),
-        (lambda e: _two_sheets(e, reversed_=False, own_points=True), 0.99),
-        # one edge of three triangles already: the merge would add thousands (0.50 before the per-edge guard)
-        (
-            lambda e: _repeated(_two_sheets(e, reversed_=True, own_points=True), own_points=False),
-            0.99,
-        ),
-        (
-            lambda e: _repeated(_two_sheets(e, reversed_=False, own_points=True), own_points=False),
-            0.99,
-        ),
-    ],
-    ids=[
-        "two-sided",
-        "two-sided-own-points",
-        "duplicated-shell",
-        "two-sided-own-points-and-a-facet-twice",
-        "duplicated-shell-and-a-facet-twice",
-    ],
-)
-def test_decimate_bounded_sheets_on_each_other_keep_their_area(make, kept):
-    """A surface with a second sheet on it (SLC-61 review): every edge shared by four triangles, so the topology-kept
-    filter stops short, and the split copy would be a soup the quadric empties (area 0.19 and 0.38 before the fix) —
-    the chain runs on the mesh as it is when its set-up fits the budget, and sheets with points of their own are not
-    merged into one."""
-    [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(64)})
-    doubled = make(entity)
-    smaller = decimate_entity(doubled, 2_000)
-    assert 0 < smaller.triangle_count <= 2_000
-    assert area(smaller) >= kept * area(doubled)
-
-
-def test_decimate_bounded_soup_next_to_a_non_manifold_part_is_still_merged():
-    """The guard keeps sheets apart only when merging would make shared edges the input did not have: a soup next to a
-    three-page book (shared edges already) is merged and comes out without holes."""
-    [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(64)})
-    mixed = _with_book(_soup(entity), 3)
-    assert decimate._non_manifold(np.asarray(mixed.indices), len(mixed.positions))
-    smaller = decimate_entity(mixed, 2_000)
-    on_sphere = np.linalg.norm(smaller.positions - [0.1, 0.0, 0.0], axis=1) < 0.05
-    sphere_part = dataclasses.replace(
-        smaller, indices=smaller.indices[np.all(on_sphere[smaller.indices], axis=1)]
-    )
-    assert boundary_edges(sphere_part) == 0
-
-
-def _with_book(entity, pages: int):
-    """``entity`` and a book of ``pages`` pages on one edge (:func:`support.book`, in metres, 0.3 m along +X) in one
-    node."""
-    points, triangles = mesh_points_and_triangles(book(pages, 1))
-    return dataclasses.replace(
-        entity,
-        positions=np.vstack([entity.positions, points * 0.001 + [0.3, 0.0, 0.0]]),
-        normals=np.vstack([entity.normals, np.tile([0.0, 1.0, 0.0], (len(points), 1))]),
-        indices=np.vstack([entity.indices, triangles + len(entity.positions)]),
-    )
-
-
-@pytest.mark.parametrize("reversed_", [False, True], ids=["duplicated-shell", "two-sided"])
-def test_decimate_bounded_sheets_next_to_a_book_keep_their_area(reversed_):
-    """A book's spine is an edge of 3,000 triangles already; merging sheets on their own points next to it would add
-    thousands more (the guard counts them: the sphere kept 0.19 of its area with holes before)."""
-    [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(64)})
-    mixed = _with_book(_two_sheets(entity, reversed_=reversed_, own_points=True), 3_000)
-    smaller = decimate_entity(mixed, 8_000)
-    assert 0 < smaller.triangle_count <= 8_000
-    on_sphere = np.linalg.norm(smaller.positions - [0.1, 0.0, 0.0], axis=1) < 0.05
-    sphere_part = dataclasses.replace(
-        smaller, indices=smaller.indices[np.all(on_sphere[smaller.indices], axis=1)]
-    )
-    assert area(sphere_part) >= 0.99 * area(entity)
-
-
-@pytest.mark.parametrize("repeat", [False, True], ids=["labels", "labels-and-a-facet-twice"])
-def test_decimate_bounded_touching_segments_keep_their_area(repeat):
-    """The two halves of a ball as two labels in one flying-edges run (40³ voxels, radius 16): each label's surface
-    has the disc between them on points of its own; merged, the two discs would be sheets on each other and lose area
-    (0.85 with the guard off, and with a facet written twice under the whole-mesh guard of round 2; boxes lose none, so
-    they cannot tell: SLC-61 review). The node keeps its area."""
-    z, y, x = np.mgrid[0:40, 0:40, 0:40]
-    ball = (x - 20) ** 2 + (y - 20) ** 2 + (z - 20) ** 2 <= 16**2
-    volume = np.where(ball, np.where(x < 20, 1, 2), 0).astype(np.uint8)
-    image = vtkImageData()
-    image.SetDimensions(40, 40, 40)
-    image.GetPointData().SetScalars(numpy_to_vtk(volume.ravel(), deep=True))
-    surface = vtkDiscreteFlyingEdges3D()
-    surface.SetInputData(image)
-    surface.SetValue(0, 1)
-    surface.SetValue(1, 2)
-    surface.ComputeNormalsOff()
-    surface.ComputeGradientsOff()
-    surface.ComputeScalarsOff()
-    surface.Update()
-    [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": surface.GetOutput()})
-    if repeat:
-        entity = _repeated(entity, own_points=False)
-    smaller = decimate_entity(entity, entity.triangle_count // 5)
-    assert 0 < smaller.triangle_count <= entity.triangle_count // 5
-    assert area(smaller) >= 0.99 * area(entity)
-
-
-@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
-def test_decimate_bounded_refuses_positions_that_are_not_finite(bad):
-    """Collect keeps them out (``_finite_geometry``); here they give ``None`` rather than an exception."""
-    [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(16)})
-    for positions in (
-        np.vstack([entity.positions, [[bad, 0.0, 0.0]]]),  # unused
-        np.where(np.arange(len(entity.positions))[:, None] == 3, bad, entity.positions),  # used
-    ):
-        broken = dataclasses.replace(
-            entity,
-            positions=positions,
-            normals=np.vstack([entity.normals, entity.normals])[: len(positions)],
-        )
-        assert decimate_entity(broken, 10) is None
-
-
-def test_decimate_bounded_refuses_positions_whose_extent_overflows():
-    """Finite positions whose bounding box does not fit float64 (±1e308): ``None``, not an exception."""
-    [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(16)})
-    positions = np.array(entity.positions)
-    positions[0], positions[1] = [1e308, 0.0, 0.0], [-1e308, 0.0, 0.0]
-    assert decimate_entity(dataclasses.replace(entity, positions=positions), 10) is None
-
-
-def _first_use_order(entity):
-    """``entity`` with its points renumbered in the order its triangles first use them, the order the merge leaves."""
-    corners = np.asarray(entity.indices).ravel()
-    _, first = np.unique(corners, return_index=True)
-    order = corners[np.sort(first)]
-    renumbered = np.empty(len(entity.positions), dtype=np.int64)
-    renumbered[order] = np.arange(len(order))
-    return dataclasses.replace(
-        entity,
-        positions=entity.positions[order],
-        normals=entity.normals[order],
-        indices=renumbered[entity.indices],
-    )
-
-
-def test_decimate_bounded_jitter_is_seeded_from_the_mesh():
-    """The same mesh moves the same way (deterministic). The same mesh moved elsewhere, or with two coincident unused
-    points added, moves differently: the seed is a digest of every point, so a crafted mesh cannot steer it to cancel
-    its jitter in advance (an XOR of the keys could be: SLC-61 review)."""
-    [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(64)})
-    entity = _first_use_order(entity)  # so that the merge of the added pair keeps the points' order
-    count = len(entity.positions)
-    moved = dataclasses.replace(entity, positions=entity.positions + np.array([0.5, 0.0, 0.0]))
-    pair = dataclasses.replace(
-        entity,
-        positions=np.vstack([entity.positions, [[0.3, 0.2, 0.1], [0.3, 0.2, 0.1]]]),
-        normals=np.vstack([entity.normals, entity.normals[:2]]),
-    )
-    offsets = []
-    for mesh in (entity, entity, moved, pair):
-        log: list = []
-        decimate_entity(mesh, 2_000, filters=(Recording(decimate._quadric, log),))
-        used = mesh.positions[:count]
-        low, high = used.min(axis=0), used.max(axis=0)
-        assert len(log[0][1]) == count  # the pair merged and dropped
-        offsets.append(log[0][1] - (used - (low + high) / 2))
-    diagonal = np.linalg.norm(entity.positions.max(axis=0) - entity.positions.min(axis=0))
-    np.testing.assert_array_equal(offsets[0], offsets[1])
-    for other in offsets[2:]:
-        assert np.abs(other).max() <= 1e-7 * diagonal * (1 + 1e-9)
-        assert not np.allclose(offsets[0], other, rtol=0, atol=1e-12)
-
-
-def test_decimate_bounded_unused_points_neither_centre_nor_scale_the_jitter():
-    [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(64)})
-    far = dataclasses.replace(
-        entity,
-        positions=np.vstack([entity.positions, [[1_000.0, 0.0, 0.0]]]),  # a kilometre away, unused
-        normals=np.vstack([entity.normals, entity.normals[:1]]),
-    )
-    log: list = []
-    decimate_entity(far, 2_000, filters=(Recording(decimate._quadric, log),))
-    [(_, points, _)] = log
-    low, high = entity.positions.min(axis=0), entity.positions.max(axis=0)
-    moved = np.abs(points[:-1] - (entity.positions - (low + high) / 2))
-    assert moved.max() <= 1e-7 * np.linalg.norm(high - low) * (1 + 1e-9)
-
-
-def test_decimate_bounded_is_deterministic():
-    [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": plane(60)})
-    first, second = decimate_entity(entity, 500), decimate_entity(entity, 500)
-    for field in ("positions", "normals", "indices"):
-        np.testing.assert_array_equal(getattr(first, field), getattr(second, field))
-    # flat stays flat: the jitter moved no point off the plane by more than 1e-7 of the diagonal
-    span = np.linalg.norm(entity.positions.max(axis=0) - entity.positions.min(axis=0))
-    assert np.ptp(first.positions[:, 1]) <= 2e-7 * span
-
-
-@pytest.mark.parametrize(
-    ("pages", "rows", "used"),
-    [(3_000, 1, ["first"]), (3_000, 4, ["first", "_quadric"])],
-    ids=["book", "book-4-rows"],
-)
-def test_decimate_bounded_non_manifold_mesh_tries_topology_kept_first(
-    monkeypatch, pages, rows, used
-):
-    """An edge of more than two triangles: ``vtkDecimatePro(PreserveTopologyOn)`` first — enough for one row of pages;
-    with four rows it stops at 12,000 triangles, over the share of 2,000, and the chain runs on a copy with the shared
-    edges' ends cut, where no such edge is left."""
-    log: list = []
-    monkeypatch.setattr(decimate, "NON_MANIFOLD_FIRST", Recording(decimate._pro, log))
-    chain = tuple(Recording(make, log) for make in decimate.FILTERS)
-    [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": book(pages, rows)})
-    smaller = decimate_entity(entity, 2_000, filters=chain)
-    assert 0 < smaller.triangle_count <= 2_000
-    assert ["first" if i == 0 else name for i, (name, _, _) in enumerate(log)] == used
-    if len(log) > 1:
-        _, points, triangles = log[1]
-        assert len(triangles) == entity.triangle_count and len(points) > len(log[0][1])
-        assert not decimate._non_manifold(triangles, len(points))
-
-
-def test_decimate_bounded_whole_mesh_chain_skips_the_filter_that_just_ran(monkeypatch):
-    """A two-sided sphere: topology-kept pro stops short, the quadric (here unusable) runs on the mesh as it is, the
-    same pro is not run again on the same input (deterministic: a wasted run, SLC-61 review), the guaranteed one
-    is."""
-    log: list = []
-    first = Recording(decimate._pro, log)
-    monkeypatch.setattr(decimate, "NON_MANIFOLD_FIRST", first)
-    unusable = lambda r: Degenerate("empty", [])  # noqa: E731
-    chain = (Recording(unusable, log), first, Recording(decimate._pro_guaranteed, log))
-    [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(64)})
-    two_sided = _two_sheets(entity, reversed_=True, own_points=False)
-    smaller = decimate_entity(two_sided, 2_000, filters=chain)
-    assert 0 < smaller.triangle_count <= 2_000
-    names = [name for name, _, _ in log]
-    assert names[:3] == ["_pro", "<lambda>", "_pro_guaranteed"]
-    assert all(len(points) == len(entity.positions) for _, points, _ in log[:3])
-
-
-def test_decimate_bounded_shared_edge_ends_and_the_check():
-    # edge 0–1 in three triangles, run both ways; triangle 3 touches its end 0 elsewhere
-    triangles = np.array([[0, 1, 2], [1, 0, 3], [0, 1, 4], [0, 5, 6], [2, 5, 7]])
-    assert decimate._non_manifold(triangles, 8)
-    np.testing.assert_array_equal(np.flatnonzero(decimate._shared_edge_ends(triangles, 8)), [0, 1])
-    # the edge run the same way by all three, as each triangle's second edge, then as its third
-    for same_way in ([[2, 0, 1], [3, 0, 1], [4, 0, 1]], [[1, 2, 0], [1, 3, 0], [1, 4, 0]]):
-        np.testing.assert_array_equal(
-            np.flatnonzero(decimate._shared_edge_ends(np.array(same_way), 5)), [0, 1]
-        )
-    closed = mesh_points_and_triangles(sphere(16))[1]
-    assert not decimate._non_manifold(closed, closed.max() + 1)
-    assert not decimate._shared_edge_ends(closed, closed.max() + 1).any()
-    assert not decimate._non_manifold(np.array([[0, 1, 2], [2, 1, 0]]), 3)  # two, either way round
-    repeated = np.array([[0, 1, 2], [2, 1, 0], [0, 1, 2]])
-    assert decimate._non_manifold(repeated, 3)
-    assert decimate._non_manifold(np.array([[3, 0, 1], [3, 1, 2], [2, 1, 4], [5, 1, 2]]), 6)
-    keys = decimate._edge_keys(np.array([[2, 0, 1]]), 3)
-    # edges (2, 0), (0, 1), (1, 2), each keyed by its smaller end first
-    np.testing.assert_array_equal(keys, [0 * 3 + 2, 0 * 3 + 1, 1 * 3 + 2])
-
-
-def test_decimate_bounded_rule_constants():
-    assert decimate.JITTER == 1e-7 and decimate.NON_MANIFOLD_FIRST is decimate._pro
 
 
 # --------------------------------------------------------------------------- size estimate (criterion 3)

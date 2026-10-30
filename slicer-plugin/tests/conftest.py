@@ -85,6 +85,10 @@ class _StubApp:
         if signal == "startupCompleted()":
             slot()
 
+    @staticmethod
+    def commandOptions():
+        return types.SimpleNamespace(noMainWindow=False)
+
 
 class _StubQTimer:
     """``qt.QTimer`` whose ``singleShot`` fires at once (deferred work must not escape the guard). Instances only
@@ -135,6 +139,89 @@ class _StubQTimer:
 
     def isActive(self) -> bool:
         return self.active
+
+
+class _StubQAction:
+    """What ``QToolBar.addAction(text)`` returns: text, enabled, toolTip and its slots."""
+
+    def __init__(self, text: str) -> None:
+        self.text, self.enabled, self.toolTip = text, True, ""
+        self.slots: dict[str, object] = {}
+
+    def connect(self, signal: str, slot) -> None:
+        self.slots[signal] = slot
+
+
+class _StubQLabel:
+    def __init__(self, text: str = "") -> None:
+        self.text, self.toolTip = text, ""
+
+
+class _StubQComboBox:
+    """``qt.QComboBox``: items with data; a change of ``currentIndex`` fires ``currentIndexChanged(int)``."""
+
+    def __init__(self) -> None:
+        self.items: list[tuple[str, object]] = []
+        self._index = -1
+        self.toolTip = ""
+        self.slots: dict[str, object] = {}
+
+    def addItem(self, label: str, data=None) -> None:
+        self.items.append((label, data))
+        self._index = max(self._index, 0)
+
+    @property
+    def currentIndex(self) -> int:
+        return self._index
+
+    @currentIndex.setter
+    def currentIndex(self, index: int) -> None:
+        if not 0 <= index < len(self.items):
+            return  # Qt ignores an index out of range
+        changed = index != self._index
+        self._index = index
+        slot = self.slots.get("currentIndexChanged(int)")
+        if changed and slot is not None:
+            slot(index)
+
+    def connect(self, signal: str, slot) -> None:
+        self.slots[signal] = slot
+
+
+class _StubQToolBar:
+    def __init__(self, title: str, parent=None) -> None:
+        self.title, self.parent, self.objectName = title, parent, ""
+        self.actions: list[_StubQAction] = []
+        self.widgets: list[object] = []
+        self.deleted = False
+
+    def addAction(self, text: str) -> _StubQAction:
+        action = _StubQAction(text)
+        self.actions.append(action)
+        return action
+
+    def addWidget(self, widget) -> None:
+        self.widgets.append(widget)
+
+    def deleteLater(self) -> None:
+        self.deleted = True
+
+
+class StubMainWindow:
+    """``slicer.util.mainWindow()`` with toolbars, for the toolbar tests (SLC-57); the default stub has none."""
+
+    def __init__(self) -> None:
+        self.toolbars: list[_StubQToolBar] = []
+
+    def findChildren(self, class_name: str) -> list:
+        assert class_name == "QToolBar"
+        return list(self.toolbars)
+
+    def addToolBar(self, toolbar: _StubQToolBar) -> None:
+        self.toolbars.append(toolbar)
+
+    def removeToolBar(self, toolbar: _StubQToolBar) -> None:
+        self.toolbars.remove(toolbar)
 
 
 class _StubQFont:
@@ -296,8 +383,21 @@ def _make_stub_modules() -> dict[str, types.ModuleType]:
         return converter(settings.value(key)) if settings.contains(key) else default
 
     util.settingsValue = settings_value
+
+    def to_bool(value):
+        """``slicer.util.toBool`` as Slicer 5.12.4 has it (Base/Python/slicer/util.py L3634-L3659)."""
+        try:
+            return bool(int(value))
+        except (ValueError, TypeError):
+            return value.lower() in ["true"] if isinstance(value, str) else bool(value)
+
+    util.toBool = to_bool
     # an empty scene (MRML stays manual, docs/testing/slicer.md); tests replace these to add nodes
     util.getNodesByClass = lambda _class_name: []
+    util.mainWindow = lambda: (
+        None
+    )  # no main window in the tests (StubMainWindow for the toolbar tests)
+    util.selectModule = mock.MagicMock(name="slicer.util.selectModule")
     slicer.util = util
     # the scene the observers attach to (SLC-34): VTK's own dispatch, empty until a test adds nodes
     slicer.mrmlScene = MrmlScene()
@@ -352,6 +452,9 @@ def _make_stub_modules() -> dict[str, types.ModuleType]:
         QPainter=_StubQPainter,
         QColor=_StubQColor,
         QApplication=_make_application_class(),
+        QToolBar=_StubQToolBar,
+        QComboBox=_StubQComboBox,
+        QLabel=_StubQLabel,
     )
     ctk = _strict_module("ctk")
     return {
