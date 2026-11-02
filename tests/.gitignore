@@ -1,0 +1,5 @@
+node_modules/
+# Staged relay build (harness/stage.ts), logs and Playwright output: never committed (they may hold scene bytes).
+.stack/
+test-results/
+playwright-report/

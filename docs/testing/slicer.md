@@ -5,6 +5,28 @@ run in the sandbox (CLAUDE.md rule 10). Record every run in the section's result
 OS, result (`pass` / `fail` + note), tester. Automated checks run with `slicer-plugin/.venv/bin/pytest slicer-plugin`
 (see `slicer-plugin/README.md`).
 
+## Scenario index
+
+Added by `qa` (QA-10, `CLAUDE.md` rule 4 exception): a table of contents only. Section numbers, step numbers and
+step text are the `slicer` workstream's and are unchanged (§7–§11 are not used in this file). Each section is one
+end-to-end scenario on a real 3D Slicer 5.12.x and ends with its own results table (`Date | Slicer version | OS |
+Result | Tester`); write the module's git commit in **Result** with the outcome (e.g. `pass @ <sha>`, or `fail @
+<sha>, step 4 — report <file>`), as release checks need the version (`docs/plan/00-overview.md` §5).
+
+| § | Scenario | Tasks | Requirements / references | Steps | Results table |
+|---|---|---|---|---|---|
+| [§1](#1-module-loads-slc-01-fr-01-fr-02-nfr-24) | Module loads | SLC-01 | FR-01, FR-02, NFR-24 | 1–6 | yes |
+| [§2](#2-session-panel-start-code-scene-stop-slc-09-slc-25-us-01-us-03-fr-03-fr-05-fr-08-fr-13) | Session panel: Start, code, scene, Stop | SLC-09, SLC-25 | US-01, US-03, FR-03, FR-05, FR-08, FR-13 | 1–16 | yes |
+| [§3](#3-dependencies-on-first-use-slc-10-fr-16-fr-02-us-01-nfr-31) | Dependencies on first use | SLC-10 | FR-16, FR-02, US-01, NFR-31 | 1–8 | yes |
+| [§4](#4-qr-code-copy-link-and-the-presentation-window-slc-11-fr-04-nfr-29-nfr-30-us-07-t6) | QR code, Copy link and the Presentation window | SLC-11 | FR-04, NFR-29, NFR-30, US-07, T6 | 1–10 | yes |
+| [§5](#5-transforms-baked-into-the-vertices-slc-13-fr-06-fr-12-part-us-02-protocol-73) | Transforms baked into the vertices | SLC-13 | FR-06, FR-12 part, US-02, protocol §7.3 | 1–7 | yes |
+| [§6](#6-live-scene-changes-slc-32-slc-33-slc-34-nfr-02-fr-11-fr-12-architecture-6-protocol-62-73-8) | Live scene changes | SLC-32, SLC-33, SLC-34 | NFR-02, FR-11, FR-12, architecture §6, protocol §6.2, §7.3, §8 | 1–15 | yes |
+| [§12](#12-consent-text-and-the-scene-adapter-slc-22-r-06-nfr-16-fr-05) | Consent text and the scene adapter | SLC-22 | R-06, NFR-16, FR-05 | 1–4 | yes |
+| [§13](#13-segments-slc-27-slc-35-slc-36-slc-37-us-02-fr-06-fr-64-adr-0005-6-protocol-v11-73-t7) | Segments | SLC-27, SLC-35, SLC-36, SLC-37 | US-02, FR-06, FR-64, ADR 0005 §6, protocol v1.1 §7.3, T7 | 1–14 | yes |
+| [§14](#14-decimation-to-the-device-profile-slc-14-slc-41-slc-53-slc-54-fr-10-nfr-03-nfr-04-protocol-75) | Decimation to the device profile | SLC-14, SLC-41, SLC-53, SLC-54 | FR-10, NFR-03, NFR-04, protocol §7.5 | 1–12 (blocks: “large segmentation, SLC-41”, “small islands, SLC-53”, “the *Remove small islands* checkbox, SLC-54”) | yes |
+| [§15](#15-preparing-the-scene-in-steps-slc-28-slc-50-slc-51-fr-10-r-05-docsresearchslicer-preparemd) | Preparing the scene in steps | SLC-28, SLC-50, SLC-51 | FR-10, R-05, `docs/research/slicer-prepare.md` | 1–8 (blocks: “five large models”, “large segmentation; the reporter's scene or §14's large-segmentation preconditions”) | yes |
+| [§16](#16-the-toolbar-send-scene-now-and-the-send-mode-slc-55-slc-56-slc-57-fr-11-nfr-02-73) | The toolbar: Send scene now and the send mode | SLC-55, SLC-56, SLC-57 | FR-11, NFR-02, §7.3 | 1–8 | yes |
+
 ## §1 Module loads (SLC-01; FR-01, FR-02, NFR-24)
 
 Preconditions: 3D Slicer 5.12.x installed (macOS and Windows both need a run); repository cloned; an empty scene

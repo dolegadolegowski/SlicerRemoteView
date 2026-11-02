@@ -6,6 +6,67 @@ pinch-zoom inertia and no GPU, so the steps below are run by a person on real ha
 whenever a task below changes the touch, layout or rendering code. Each task that adds a step names it in its
 plan row.
 
+## Scenario index
+
+Added by `qa` (QA-10, `CLAUDE.md` rule 4 exception): this index, the `Scenario` line under each scenario heading,
+the **Expected (summary)** paragraph and the results table at the end of each scenario. The steps and their
+**Expect:** lines are the `web` workstream's and are unchanged; where a summary and a step disagree, the step wins.
+
+The iPhone Safari scenarios (`W01`–`W15`) also run on Android Chrome, with the differences listed in
+[§Android Chrome](#android-chrome); the Quest Browser scenarios (`Q01`, `Q02`) cover the headset (QA-11 executes
+them for M3a).
+
+### Scenarios
+
+| ID | Scenario | Tasks / requirements | iPhone Safari | Android Chrome | Quest Browser |
+|---|---|---|---|---|---|
+| `W01` | [Join and view](#join-and-view-web-10-nfr-01) | WEB-10, NFR-01, US-06 | yes | yes | — |
+| `W02` | [Deep link](#deep-link-web-11-us-07) | WEB-11, US-07 | yes | yes (step 1 differs) | — |
+| `W03` | [Code entry](#code-entry-web-03-web-04) | WEB-03, WEB-04, US-06, US-13 | yes | yes (step 1 differs) | — |
+| `W04` | [Activity line](#activity-line-web-24) | WEB-24 | yes | yes | — |
+| `W05` | [Language](#language-web-21) | WEB-21 | yes | yes | — |
+| `W06` | [Viewer and controls](#viewer-and-controls-web-08) | WEB-08, US-08 | yes | yes (steps 3, 8, 11 differ) | — |
+| `W07` | [Node panel](#node-panel-web-09) | WEB-09, US-09 | yes | yes | — |
+| `W08` | [Live updates](#live-updates-web-12) | WEB-12, US-09, US-11 | yes | yes | — |
+| `W09` | [Opacity](#opacity-web-13) | WEB-13, US-10 | yes | yes (steps 2–3 state it) | — |
+| `W10` | [New snapshot of the same scene](#new-snapshot-of-the-same-scene-web-25) | WEB-25 | yes | yes | — |
+| `W11` | [Reconnect](#reconnect-web-14) | WEB-14, US-12, US-13 | yes | yes | — |
+| `W12` | [Status bar](#status-bar-web-15) | WEB-15, WEB-22, US-11 | yes | yes | — |
+| `W13` | [Memory and wake lock](#memory-and-wake-lock-web-16) | WEB-16, FR-46, R-02 | yes | yes | — |
+| `W14` | [Add to Home Screen](#add-to-home-screen-web-17) | WEB-17, WEB-22 | yes | yes (steps 4–5 state it) | — |
+| `W15` | [Download in the background](#download-in-the-background-web-06-review-web-10) | WEB-06, WEB-10 | yes | yes | — |
+| `Q01` | [Device profile](#device-profile-web-15) | WEB-15, NFR-03 | — | — | yes |
+| `Q02` | [WebXR](#webxr-web-19) | WEB-19, WEB-20, WEB-23, US-14, NFR-02, NFR-07, NFR-27 | — | — | yes |
+
+### User stories US-06…US-13 by device class
+
+User stories from `docs/requirements.md`. `Wnn s.k` = scenario `Wnn`, step `k`. **Gap** = an acceptance criterion of
+the story that no step checks on that device class yet (filed for `web` as
+`docs/testing/reports/2026-11-02-qa-1.md`; the steps are `web`'s to write).
+
+| Story | iPhone Safari | Android Chrome | Quest Browser (WebXR) |
+|---|---|---|---|
+| US-06 Join by typing the code | `W03` s.1–5 (upper case, auto-advance, Join only for five valid characters); `W01` s.1–3 (model within 10 s on 4G, "Joining…", no code in the address bar); `W15` | as iPhone, `W03` s.1 per §Android Chrome | `Q01` s.2, `Q02` s.1 (a join). **Gap:** code entry (case, Join enabling) and the join time are not checked in Quest Browser |
+| US-07 Join by QR code | `W02` s.1–4 (scan, `/j` only, wrong code); `W14` s.3 (QR with the app installed); History residual: report `2026-10-20-web-1.md` | as iPhone, `W02` s.1 per §Android Chrome (stock camera / Lens) | QR scan: n/a (no camera scan into the headset browser). **Gap:** opening a `/j#<CODE>` link in Quest Browser (fragment removed, invalid fragment) has no step |
+| US-08 Rotate, zoom, pan | `W06` s.1–10 (orbit, pinch, pan, the page neither zooms nor scrolls), s.11 (no frames while idle); `W03` s.6 | as iPhone, `W06` s.3, s.8, s.11 per §Android Chrome | `Q02` s.6 (pinch, rotate and Fit in 2D after leaving XR); in XR `Q02` s.10–11 (grab, scale, reset). **Gap:** no idle-rendering check in 2D |
+| US-09 Toggle visibility locally | `W07` s.1–6; `W08` s.2 (the presenter's change overrides the local hide); `W10` s.2 | as iPhone | `Q02` s.14 (local hide in the node panel, then the presenter's override notice in XR); `Q02` s.4 (presenter hides in XR) |
+| US-10 Change opacity locally | `W09` s.1–6 (s.1 depth sorting, s.5 the presenter's override); `W10` s.3 | as iPhone (`W09` s.2–3 state the Android behaviour) | `Q02` s.14 (local opacity, the presenter's override in XR). **Gap:** depth sorting of a faded node is not checked in the headset |
+| US-11 Late join | `W08` s.1 (join while the presenter changes the scene); `W12` s.1 (scene version includes changes made after the snapshot); `W11` s.4 ("Waiting for the presenter" after a relay restart). **Gap:** the first join to a publisher that has not shared a scene yet | as iPhone, same gap | **Gap:** no step joins a session whose state changed before the join |
+| US-12 Reconnect after a network drop | `W11` s.1–7; `W01` s.4; `W06` s.12; `W08` s.4; `W12` s.4; `W13` s.6 | as iPhone | `Q02` s.8 (headset off and on), s.14 (network cut while in XR, status line) |
+| US-13 Wrong or expired code | `W03` s.5 (characters outside the alphabet); `W02` s.3–4 (wrong code in a link); `W11` s.5–6 (ended: "Presentation ended", not "Code not recognised"). **Gap:** a well-formed unknown code ("Code not recognised", code kept, input focused) and "Too many attempts" after repeated failures | as iPhone, same gap | `Q02` s.7 (session ended while in XR). **Gap:** as on iPhone |
+
+### Recording a result
+
+- One row per run of a scenario on one device and build, in that scenario's **Results** table (iPhone and Android
+  rows alike); one line per test session in [Results](#results) at the end.
+- **Result**: `pass`, `fail` (+ the report file in `docs/testing/reports/`), `partial` (+ the failed step numbers),
+  `blocked` (+ why) or `n/a`. **Date**: `YYYY-MM-DD`. **Version/commit**: the viewer build's git SHA (and the
+  relay's, if different). **Device/OS/browser**: model, OS version and browser version, e.g. `iPhone 13 / iOS <x.y> /
+  Safari`, `Pixel 7 / Android <n> / Chrome <n>`, `Quest 3 / Horizon OS <v> / Quest Browser <n>`. **Notes**: the
+  measurements the steps ask for (times, sizes, frame rates, which variant happened) and anything unexpected.
+- Every failure is filed as a report (`docs/testing/reports/README.md`) and named in **Result**. The release
+  checklist (QA-12) names the scenarios that need a result within 14 days of a tag.
+
 ## Setup
 
 - A relay reachable from the device over **HTTPS** (the page needs a secure context: `crypto.subtle` verifies the
@@ -26,6 +87,8 @@ Devices: one iPhone with iOS ≥ 16.4 and one with iOS 15.x if available (R-02, 
 
 ### Join and view (WEB-10, NFR-01)
 
+Scenario `W01` · iPhone Safari; Android Chrome with the differences in [§Android Chrome](#android-chrome).
+
 Publisher on the computer, phone on **4G** (Wi-Fi off). Use the largest fixture available (`large-synthetic.glb`,
 4.9 MB; a 10 MB fixture for the NFR-01 figure is `[TODO]` with PRO), start a stopwatch on **Join**.
 
@@ -39,7 +102,19 @@ Publisher on the computer, phone on **4G** (Wi-Fi off). Use the largest fixture 
    model; or "Reconnecting…" under a busy Join and then the model by itself (the socket dropped after the join,
    WEB-14).
 
+**Expected (summary):** the model is drawn within 10 s of **Join** on 4G (time and file size recorded), every
+structure is listed in the publisher's order, the code never appears in the address bar, and a drop while joining
+recovers (retry with the code still typed, or a rejoin by itself). The **Expect:** of each step above is binding.
+
+Results:
+
+| Result | Date | Version/commit | Device/OS/browser | Notes |
+|---|---|---|---|---|
+|        |      |                |                   |       |
+
 ### Deep link (WEB-11, US-07)
+
+Scenario `W02` · iPhone Safari; Android Chrome with the differences in [§Android Chrome](#android-chrome).
 
 The publisher shows a QR of `https://<host>/j#<CODE>` (Slicer FR-04, or make one from the link fake-slicer writes to
 `code.txt`).
@@ -56,7 +131,20 @@ The publisher shows a QR of `https://<host>/j#<CODE>` (Slicer FR-04, or make one
    session; the address bar shows `…/j`. A link with a wrong code pasted the same way shows a notice over the scene
    and the session goes on.
 
+**Expected (summary):** a scanned QR opens the viewer and joins without a tap; the address bar, tabs overview and Back
+list show only `…/j` (the History entry is the recorded residual of report `2026-10-20-web-1.md`); a wrong code in a
+link never joins, and a link pasted while joined switches sessions or shows a notice. The **Expect:** of each step
+above is binding.
+
+Results:
+
+| Result | Date | Version/commit | Device/OS/browser | Notes |
+|---|---|---|---|---|
+|        |      |                |                   |       |
+
 ### Code entry (WEB-03, WEB-04)
+
+Scenario `W03` · iPhone Safari; Android Chrome with the differences in [§Android Chrome](#android-chrome).
 
 1. Open the viewer URL. **Expect:** five empty cells, the keyboard shows capitals (`autocapitalize`), no
    autocorrect suggestions.
@@ -68,7 +156,19 @@ The publisher shows a QR of `https://<host>/j#<CODE>` (Slicer FR-04, or make one
 5. Type `O` or `1`. **Expect:** the cell is marked invalid with the ADR 0008 hint.
 6. Pinch-zoom the code entry page. **Expect:** the page zooms (it stays zoomable for low vision).
 
+**Expected (summary):** five cells that upper-case, advance by themselves, take a pasted code, mark `O`/`1` invalid
+with the ADR 0008 hint and enable **Join** only for five valid characters; the page stays zoomable. The **Expect:** of
+each step above is binding.
+
+Results:
+
+| Result | Date | Version/commit | Device/OS/browser | Notes |
+|---|---|---|---|---|
+|        |      |                |                   |       |
+
 ### Activity line (WEB-24)
+
+Scenario `W04` · iPhone Safari; Android Chrome with the differences in [§Android Chrome](#android-chrome).
 
 1. With a presenter sharing and two other phones joined, open the viewer URL on a third phone. **Expect:** under
    the form "Active sessions: 1 · Viewers: 2" ("Aktywne sesje: 1 · Widzowie: 2" in Polish); the page still does not
@@ -89,7 +189,19 @@ The publisher shows a QR of `https://<host>/j#<CODE>` (Slicer FR-04, or make one
 8. On the fourth phone (home page), turn on airplane mode and wait 30 s. **Expect:** the line disappears; it comes
    back within 30 s after airplane mode is off.
 
+**Expected (summary):** the home page shows live session and viewer counts that hide while joined, come back at once
+with fresh counts on leave, language switch and Back, and otherwise follow within 30 s. The **Expect:** of each step
+above is binding.
+
+Results:
+
+| Result | Date | Version/commit | Device/OS/browser | Notes |
+|---|---|---|---|---|
+|        |      |                |                   |       |
+
 ### Language (WEB-21)
+
+Scenario `W05` · iPhone Safari; Android Chrome with the differences in [§Android Chrome](#android-chrome).
 
 1. With the iPhone set to English, open the viewer. **Expect:** English texts and a **Polski** button at the top
    right of the code entry. Turn VoiceOver on and swipe to it. **Expect:** "Polski, button" read with Polish
@@ -104,7 +216,19 @@ The publisher shows a QR of `https://<host>/j#<CODE>` (Slicer FR-04, or make one
    (Mac) → Storage → Local Storage shows only the key `rv.lang`.
 5. Private Browsing tab: tap **Polski**. **Expect:** it switches (the choice may be forgotten when the tab closes).
 
+**Expected (summary):** English and Polish switch at once without a reload or rejoin, the choice is remembered (only
+the key `rv.lang` is stored) and screen readers pronounce the switch correctly. The **Expect:** of each step above is
+binding.
+
+Results:
+
+| Result | Date | Version/commit | Device/OS/browser | Notes |
+|---|---|---|---|---|
+|        |      |                |                   |       |
+
 ### Viewer and controls (WEB-08)
+
+Scenario `W06` · iPhone Safari; Android Chrome with the differences in [§Android Chrome](#android-chrome).
 
 Join with a valid code (`asymmetric-2nodes.glb`).
 
@@ -137,7 +261,20 @@ Join with a valid code (`asymmetric-2nodes.glb`).
     then "Connected" in the status bar, with the same camera and nothing typed (WEB-14, WEB-15). Note which one
     happened.
 
+**Expected (summary):** one-finger orbit with damping, pinch zoom, two-finger pan, double tap and **Fit view**
+re-frame; the page itself never zooms, scrolls or shows callouts; the canvas fills the visible area in both
+orientations and with any toolbar state; nothing is rendered while idle; an app switch keeps the camera. The
+**Expect:** of each step above is binding.
+
+Results:
+
+| Result | Date | Version/commit | Device/OS/browser | Notes |
+|---|---|---|---|---|
+|        |      |                |                   |       |
+
 ### Node panel (WEB-09)
+
+Scenario `W07` · iPhone Safari; Android Chrome with the differences in [§Android Chrome](#android-chrome).
 
 Joined with `asymmetric-2nodes.glb` (the opaque "Liver" encloses the translucent "Tumor").
 
@@ -154,7 +291,19 @@ Joined with `asymmetric-2nodes.glb` (the opaque "Liver" encloses the translucent
 6. Join with `large-synthetic.glb` (four spheres, one hidden in the snapshot). **Expect:** that row starts
    crossed out and its sphere is not drawn.
 
+**Expected (summary):** the **Structures** list hides and shows nodes locally at once, **Show all** restores them
+without moving the model, touches outside the list still reach the canvas, the list works in landscape, and a node
+hidden in the snapshot starts hidden. The **Expect:** of each step above is binding.
+
+Results:
+
+| Result | Date | Version/commit | Device/OS/browser | Notes |
+|---|---|---|---|---|
+|        |      |                |                   |       |
+
 ### Live updates (WEB-12)
+
+Scenario `W08` · iPhone Safari; Android Chrome with the differences in [§Android Chrome](#android-chrome).
 
 Start the publisher with an update script: `node_modules/.bin/fake-slicer --relay wss://<host>/ws --script
 toggle-visibility --loop --code-fd 3 3>code.txt` (other scripts: `colour-cycle`, `move-node`, `reload-scene`).
@@ -170,7 +319,19 @@ toggle-visibility --loop --code-fd 3 3>code.txt` (other scripts: `colour-cycle`,
 4. Switch on airplane mode for 5 s during `toggle-visibility --loop`, then off (the viewer rejoins by itself since
    WEB-14). **Expect:** the scene shows the presenter's current state (no node stuck in an old state).
 
+**Expected (summary):** the presenter's visibility, colour, opacity, transform and scene-reload changes appear on the
+phone; a local hide stays until the presenter next changes that node; after a short drop the scene shows the
+presenter's current state. The **Expect:** of each step above is binding.
+
+Results:
+
+| Result | Date | Version/commit | Device/OS/browser | Notes |
+|---|---|---|---|---|
+|        |      |                |                   |       |
+
 ### Opacity (WEB-13)
+
+Scenario `W09` · iPhone Safari; Android Chrome with the differences in [§Android Chrome](#android-chrome).
 
 Joined with `asymmetric-2nodes.glb`, **Structures** open.
 
@@ -188,7 +349,19 @@ Joined with `asymmetric-2nodes.glb`, **Structures** open.
 6. Hide the liver yourself while `colour-cycle` plays. **Expect:** its colour changes are applied (seen when you
    show it again) but it stays hidden.
 
+**Expected (summary):** the sliders fade a structure while dragging with correct depth sorting, scrolling over them
+does not change them, screen readers announce and change them in 1 % steps, a presenter change overrides the local
+value with a notice, and a locally hidden node stays hidden. The **Expect:** of each step above is binding.
+
+Results:
+
+| Result | Date | Version/commit | Device/OS/browser | Notes |
+|---|---|---|---|---|
+|        |      |                |                   |       |
+
 ### New snapshot of the same scene (WEB-25)
+
+Scenario `W10` · iPhone Safari; Android Chrome with the differences in [§Android Chrome](#android-chrome).
 
 3D Slicer with the plugin and a segmentation with at least two segments; or, for steps 1, 2 and 4, the fake-slicer CLI
 sharing its scene again every 5 s: save `[{"afterMs": 5000, "type": "scene.snapshot"}]` as a file outside the
@@ -216,7 +389,19 @@ repository and start `node_modules/.bin/fake-slicer --relay wss://<host>/ws --sc
    `[{"afterMs": 30000, "type": "scene.snapshot", "fixture": "quantized-1node.glb"}]` and no `--loop`, join with its
    code and turn the view before the other scene (no node in common) arrives, 30 s after the start.
 
+**Expected (summary):** a new snapshot of the same scene keeps the camera and the local visibility and opacity choices
+(unless the presenter changed that node, with a notice); a different scene is framed from the front with the
+presenter's state. The **Expect:** of each step above is binding.
+
+Results:
+
+| Result | Date | Version/commit | Device/OS/browser | Notes |
+|---|---|---|---|---|
+|        |      |                |                   |       |
+
 ### Reconnect (WEB-14)
+
+Scenario `W11` · iPhone Safari; Android Chrome with the differences in [§Android Chrome](#android-chrome).
 
 Joined with `toggle-visibility --loop` playing.
 
@@ -237,7 +422,19 @@ Joined with `toggle-visibility --loop` playing.
    a minute, then "Presentation ended" on the code entry (not "Code not recognised").
 7. With VoiceOver on, repeat step 1. **Expect:** "Reconnecting…" is spoken once, then "Connected" (status bar).
 
+**Expected (summary):** network drops, a locked phone and a relay restart recover by themselves ("Reconnecting…", then
+"Connected") with no new download and nothing typed; a presenter offline is shown over the frozen scene; an ended
+session shows "Presentation ended" and nothing retries. The **Expect:** of each step above is binding.
+
+Results:
+
+| Result | Date | Version/commit | Device/OS/browser | Notes |
+|---|---|---|---|---|
+|        |      |                |                   |       |
+
 ### Status bar (WEB-15)
+
+Scenario `W12` · iPhone Safari; Android Chrome with the differences in [§Android Chrome](#android-chrome).
 
 1. Join. **Expect:** at the top, below the notch / Dynamic Island and inside the rounded corners (portrait and
    landscape; attach both screenshots to **Results**): a green dot, "Connected", "Viewers: n" and "Scene v<n>" with
@@ -255,7 +452,19 @@ Joined with `toggle-visibility --loop` playing.
    scene is shown during "Reconnecting…" (airplane mode on, tap, airplane mode off): no join happens by itself
    afterwards.
 
+**Expected (summary):** the dot, "Connected", the viewer count and the scene version are correct, inside the safe
+area, updated live and spoken; **Leave** / **Leave session** return to an empty code entry and stop any download or
+pending join. The **Expect:** of each step above is binding.
+
+Results:
+
+| Result | Date | Version/commit | Device/OS/browser | Notes |
+|---|---|---|---|---|
+|        |      |                |                   |       |
+
 ### Memory and wake lock (WEB-16)
+
+Scenario `W13` · iPhone Safari; Android Chrome with the differences in [§Android Chrome](#android-chrome).
 
 1. Save `[{"afterMs":5000,"type":"scene.snapshot"}]` as `resend.json` (a `scene.snapshot` entry without `fixture`
    resends the `--fixture` GLB) and start `node_modules/.bin/fake-slicer --relay wss://<host>/ws --fixture
@@ -278,7 +487,20 @@ Joined with `toggle-visibility --loop` playing.
 6. Turn on airplane mode for more than 2 minutes with the scene open. **Expect:** "Reconnecting…", and the screen
    may dim after its usual timeout (the lock is let go offline); back online, the scene and the lock return.
 
+**Expected (summary):** repeated snapshots do not grow the renderer's geometries or memory; the screen stays on during
+a session (after one tap for a QR join) and is let go offline and after the end; a lost WebGL context or memory
+pressure shows "3D view paused" or recovers — never a black canvas without a message. The **Expect:** of each step
+above is binding.
+
+Results:
+
+| Result | Date | Version/commit | Device/OS/browser | Notes |
+|---|---|---|---|---|
+|        |      |                |                   |       |
+
 ### Add to Home Screen (WEB-17)
+
+Scenario `W14` · iPhone Safari; Android Chrome with the differences in [§Android Chrome](#android-chrome).
 
 1. Safari → Share → **Add to Home Screen**. **Expect:** the cube icon (not a screenshot of the page) and the name
    "Remote View".
@@ -296,11 +518,32 @@ Joined with `toggle-visibility --loop` playing.
    Android: also press the system Back during a session and record what happens (expected: the app closes;
    `[TODO verify]`).
 
+**Expected (summary):** the installed app has the cube icon and the name "Remote View", no browser UI and a safe-area
+layout; joining, **Leave** and QR links work without browser controls; the next launch starts on the code entry and a
+closed app drops out of the viewer count. The **Expect:** of each step above is binding.
+
+Results:
+
+| Result | Date | Version/commit | Device/OS/browser | Notes |
+|---|---|---|---|---|
+|        |      |                |                   |       |
+
 ### Download in the background (WEB-06 review, WEB-10)
+
+Scenario `W15` · iPhone Safari; Android Chrome with the differences in [§Android Chrome](#android-chrome).
 
 1. Join with `large-synthetic.glb` on a slow network (Settings → Developer → Network Link Conditioner "3G"), and
    switch to another app while it downloads; return after 5 s. **Expect:** the download completes or restarts
    once; no "stalled" error right after returning.
+
+**Expected (summary):** backgrounding during a slow download ends with the download complete or restarted once,
+without a "stalled" error right after returning. The **Expect:** of each step above is binding.
+
+Results:
+
+| Result | Date | Version/commit | Device/OS/browser | Notes |
+|---|---|---|---|---|
+|        |      |                |                   |       |
 
 ## Android Chrome
 
@@ -315,12 +558,28 @@ differences:
   split-screen (drag the divider) and with rotation (step 9). **Expect:** the canvas follows, no strip.
 - Viewer step 11: `chrome://inspect` → Performance shows no frames while idle (optional).
 
+**Expected (summary):** each iPhone Safari scenario's expectations hold in Chrome, with the differences above.
+Record each Android run in that scenario's own **Results** table (Device/OS/browser names the Android device and the
+Chrome version); the differences above get their own rows here.
+
+Results (Android differences):
+
+| Step | Result | Date | Version/commit | Device/OS/browser | Notes |
+|---|---|---|---|---|---|
+| `W02` Deep link step 1 |        |      |                |                   |       |
+| `W03` Code entry step 1 |        |      |                |                   |       |
+| `W06` Viewer step 3 |        |      |                |                   |       |
+| `W06` Viewer step 8 |        |      |                |                   |       |
+| `W06` Viewer step 11 |        |      |                |                   |       |
+
 ## Quest Browser
 
 WebXR entry (WEB-19) below; grabbing, scaling and the Quest 2 budget warning follow with WEB-20, the in-XR status
 line with WEB-23 (NFR-27).
 
 ### Device profile (WEB-15)
+
+Scenario `Q01` · Quest Browser on Quest 2, Quest 3, Quest 3S (Quest Pro if available).
 
 On Quest 2, Quest 3, Quest 3S (and Quest Pro if available), current Meta Quest Browser:
 
@@ -340,7 +599,20 @@ Quest Browser has no developer tools on the headset: connect it over USB (develo
 3. On a Quest 3, load a scene close to 64 MiB (`[TODO verify]`: Quest Browser tab memory, NFR-03). **Expect:** it
    loads and stays responsive; if the tab is killed, record it — the limit for `quest3` goes back to 32 MiB.
 
+**Expected (summary):** the user agent carries `OculusBrowser/` and a `Quest …` token in desktop and mobile mode
+(values added to `web-viewer/test/platform.test.ts`); `viewer.join` sends `quest-browser`, the right profile and size
+limit and no user agent; a scene close to 64 MiB loads on Quest 3 (or the kill is recorded). The **Expect:** of each
+step above is binding.
+
+Results:
+
+| Result | Date | Version/commit | Device/OS/browser | Notes |
+|---|---|---|---|---|
+|        |      |                |                   |       |
+
 ### WebXR (WEB-19)
+
+Scenario `Q02` · Quest Browser (WebXR) on Quest 2 and Quest 3 (3S if available).
 
 On Quest 2 and Quest 3 (3S if available), current Meta Quest Browser, the viewer deployed behind the relay (its CSP
 matters: the controller models' textures must load under it). Bring a tape measure. Reference size in
@@ -400,7 +672,22 @@ its corner at the origin, and the edge between them ≈ 141 mm (`shared/fixtures
     leaning in; it does not cover the scene, and grabbing the scene leaves it where it is; a reset (grip button) puts
     it back below the scene. On Quest 2 with the budget warning up, the status line stands under the warning.
 
+**Expected (summary):** the XR button enters AR (or VR) without extra prompts, the scene stands 1.3 m ahead at real
+size; controller and hand models load from the relay's origin; presenter changes arrive within 0.5 s; leaving XR
+restores the 2D view; grab, two-hand scale (0.1×–5×) and reset behave as written; the Quest 2 budget panel shows only
+on Quest 2; 72 Hz sustained; the in-XR status line reports drops and notices without covering the scene. The
+**Expect:** of each step above is binding.
+
+Results:
+
+| Result | Date | Version/commit | Device/OS/browser | Notes |
+|---|---|---|---|---|
+|        |      |                |                   |       |
+
 ## Results
+
+The per-scenario tables above hold the result of each scenario on each device; this table logs each test
+session (who ran which scenarios on which device and build).
 
 | Date | Tester | Device / OS | Browser + version | Build (git SHA) | Sections | Result / notes |
 |------|--------|-------------|-------------------|-----------------|----------|----------------|
