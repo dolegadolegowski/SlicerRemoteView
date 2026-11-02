@@ -219,14 +219,14 @@ with `--code-fd`, never to the terminal.
 | # | Check | How | Expected | Result (date) |
 |---|---|---|---|---|
 | 1 | The image builds on Railway with the repository root as context | Deployments → newest → **Build Logs** | the Dockerfile `/relay-server/Dockerfile` is used, both stages succeed (`COPY shared/…` works, ADR 0007) | |
-| 2 | `/healthz` over HTTPS, TLS 1.2+ only | `curl -sS -w '\n%{http_code} %{ssl_version}\n' https://<your-domain>/healthz`; `curl -sS --tls-max 1.1 https://<your-domain>/healthz` | `{"status":"ok","uptimeS":…,"sessions":…,"viewers":…,"version":…}` and `200 TLSv1.3` (or 1.2); the second command fails | |
+| 2 | `/healthz` over HTTPS, TLS 1.2+ only | `curl -sS -w '\n%{http_code}\n' https://<your-domain>/healthz`; `openssl s_client -connect <your-domain>:443 -servername <your-domain> < /dev/null 2>/dev/null \| grep -E '^ *Protocol'`; `curl -sS --tls-max 1.1 https://<your-domain>/healthz` | `{"status":"ok","uptimeS":…,"sessions":…,"viewers":…,"version":…}` and `200`; `Protocol : TLSv1.3` (or 1.2); the last command fails | |
 | 3 | `/healthz` has no memory figures and no session data | the body of item 2 | only `status`, `uptimeS`, `sessions`, `viewers`, `version` (NFR-38) | |
 | 4 | `X-Forwarded-For`: how many entries the edge adds | right after a deploy, as the **first** WebSocket of that deployment: `node tools/fake-slicer/bin/fake-slicer.js --relay wss://<your-domain>/ws --exit-after-ack --code-fd 3 3>/dev/null`; then the deploy log line `first websocket upgrade` | `xff: "present"`, `xffEntries: 1` (the edge is the only hop: `TRUST_PROXY=true` is right). More than 1: report to `server` (report 2026-10-18-server-1) | |
 | 5 | The relay starts as configured | deploy log line `relay starting` | `trustProxy: true`, `testFastTimers: false`; note `heapSizeLimit` (item 9) | |
 | 6 | Publish over `wss://` and join from a phone | `node tools/fake-slicer/bin/fake-slicer.js --relay wss://<your-domain>/ws --code-fd 3 3>code.txt` (keeps running); open `https://<your-domain>/` on a phone on mobile data, type the code from `code.txt`; then delete `code.txt` | the phone shows the fixture scene (NFR-14) | |
 | 7 | A foreign browser origin is refused | `curl -sS -o /dev/null -w '%{http_code}\n' -H 'Origin: https://example.com' -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' https://<your-domain>/ws` | `403` (FR-33); the phone of item 6 (its own origin) works | |
 | 8 | Redeploy drains instead of cutting | with item 6 still connected, **Deployments** → **Redeploy**; watch the old deployment's log and fake-slicer's output | the old relay logs `shutting down` and ends within `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` (30 s) without `shutdown timed out`; clients are closed with `4008` and the publisher resumes on the new deployment (T9; SRV-17) `[TODO verify]` exact client output | |
-| 9 | Heap size inside the container | `heapSizeLimit` of item 5 | about 75 % of the container memory (`NODE_OPTIONS=--max-old-space-size-percentage=75`). Railway sizes the container to the plan's per-replica cap (Hobby: 8 GB), so expect ~6 GB: lower it with **Settings** → **Deploy** → **Replica Limits** (memory, e.g. 1–2 GB, §6) `[TODO verify]` that `heapSizeLimit` follows | |
+| 9 | Heap size inside the container | `heapSizeLimit` of item 5 | about 75 % of the container memory (`NODE_OPTIONS=--max-old-space-size-percentage=75`). Railway sizes the container to the plan's per-replica cap (Hobby: 8 GB), so expect ~6 GB: cap the memory (§6) `[TODO verify]` that `heapSizeLimit` follows the cap | |
 | 10 | Query strings in the edge's HTTP logs | `curl -sS -o /dev/null 'https://<your-domain>/healthz?probe=1'`; **Observability** → HTTP logs, filter the path | record whether `path` shows `?probe=1` (T6; the relay never puts codes or tokens in a URL, so either answer is safe — it decides whether query strings may ever be used) | |
 | 11 | `ALLOWED_ORIGINS` names the domain phones open | service **Variables** | exactly `https://<your-domain>` (or empty for the generated domain); otherwise phones show "Connection lost" | |
 
@@ -272,15 +272,16 @@ $5/month including $5 of usage; Pro $20 including $20 (`docs/research/deploy-rai
 | Spending alert | workspace **Usage** → **Set Usage Limits** → **Custom email alert** | e.g. $10 on Hobby: an email, nothing stops |
 | Hard limit | same page → **Hard limit** | optional; when reached **every service goes offline** (sessions end); minimum $10 |
 | Egress alert (NFR-34: warn at 150 GB, alert at 200 GB per month) | only with **Pro**: project **Observability** → network egress widget → **Add monitor** | Hobby has no per-metric alert: 150 GB ≈ $7.50 of egress, so a dollar alert near the expected monthly total is the proxy; check **Usage** monthly |
-| Memory per replica | service **Settings** → **Deploy** → **Replica Limits** | cap memory (e.g. 1–2 GB) so that a leak fails fast instead of growing to the plan cap (8 GB on Hobby) and costing money |
+| Memory per replica | service **Settings** → **Deploy** → **Replica Limits**; under IaC (§1.3) in `.railway/railway.ts` (`deploy.limitOverride`, shape `[TODO verify]` with `railway config pull --json`), or an apply reverts it | cap memory so that a leak fails fast instead of growing to the plan cap (8 GB on Hobby) and costing money; size it as below |
 | Metrics | service **Metrics** tab (CPU, memory, network; up to 30 days) | look at memory after a busy day (NFR-06): it should return near the idle level |
 | Logs | service **Logs**, **Observability** → HTTP logs | retention Hobby 7 days, Pro 30 days; 500 lines/s per replica; no export without extra services |
 
 Estimate (one replica, mostly idle, relay.md §1.7): ~0.1 vCPU and ~0.2 GB RAM average ≈ $2 + $2 a month, plus
 egress — a 20 MB scene sent to 20 viewers is 0.4 GB, so 150 GB is ~375 such sends a month. The memory budgets of the
 relay (`MAX_TOTAL_SNAPSHOT_BYTES` 512 MiB + `MAX_TOTAL_BUFFERED_BYTES` 160 MiB, outside the heap) plus the heap must
-fit the replica's memory limit: with a 1 GB limit and the default 75 % heap share they do not (report
-2026-10-20-server-9) — pick the limit with `server` (`docs/architecture.md` §4), e.g. 1.5 GB, or lower the budgets.
+fit the replica's memory limit. With the defaults (heap 75 % of the limit, 672 MiB of budgets outside it) the limit
+must be at least about 2.7 GiB; a smaller cap needs a lower heap share or lower budgets — choose with `server`
+(`docs/architecture.md` §4, report 2026-10-20-server-9) before setting the cap.
 
 Privacy (T5, for an institutional review, `docs/security.md`): Railway publishes a GDPR data processing agreement
 (railway.com/legal/dpa) and a sub-processor list (trust.railway.com). Its primary processing is in the United States;
