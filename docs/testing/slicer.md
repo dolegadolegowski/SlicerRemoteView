@@ -1614,6 +1614,37 @@ Steps (the scene changed during a preparation, and the last step near the relay'
     with `t` about `c` plus a twentieth of `p`, and
     `lambda: getNode("Segs").GetSegmentation().RemoveSegment("Doe tumour")`.
 
+13. (SLC-52) Stop the session. In a new scene with step 1's five spheres add two models kept out of the slice views:
+    `Star`, one star-shaped polygon of 100,000 points, and `Discs`, 16 polygons of 3,000 points (the preparation
+    refuses the star and cuts the discs in six parts: five of three discs and the last of one):
+
+    ```python
+    import numpy as np
+    from vtkmodules.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray
+    def polygons(xyz, size, name):  # consecutive points, `size` per polygon
+        data = vtk.vtkPolyData()
+        data.SetPoints(vtk.vtkPoints())
+        data.GetPoints().SetData(numpy_to_vtk(np.ascontiguousarray(xyz), deep=True))
+        cells = vtk.vtkCellArray()
+        cells.SetData(numpy_to_vtkIdTypeArray(np.arange(0, len(xyz) + 1, size, dtype=np.int64), deep=True),
+                      numpy_to_vtkIdTypeArray(np.arange(len(xyz), dtype=np.int64), deep=True))
+        data.SetPolys(cells)
+        node = slicer.modules.models.logic().AddModel(data)
+        node.SetName(name)
+        node.GetDisplayNode().SetVisibility2D(False)
+    n = 100_000
+    angle = np.linspace(0, 2 * np.pi, n, endpoint=False)
+    radius = np.where(np.arange(n) % 2 == 0, 60.0, 40.0)
+    polygons(np.c_[radius * np.cos(angle), radius * np.sin(angle) + 200, np.zeros(n)], n, "Star")
+    k = np.arange(3000) * 2 * np.pi / 3000
+    disc = np.c_[4 * np.cos(k), 4 * np.sin(k), np.zeros(3000)]
+    grid = np.stack(np.meshgrid(np.arange(4.0), np.arange(4.0)), -1).reshape(-1, 2) * 10
+    centres = np.c_[grid[:, 0] + 150, grid[:, 1] - 250, np.zeros(len(grid))]
+    polygons((disc[None] + centres[:, None]).reshape(-1, 3), 3000, "Discs")
+    ```
+
+    Run `longest()`, click *Start session*, join with the phone, and run `longest()` when the panel says "Live".
+
 Expected results:
 
 - Step 9: the snapshot that goes out may still show `Big3` and `Big4` (each is collected as it is at its step; the
@@ -1648,6 +1679,11 @@ Expected results:
   properties found for segment with ID Doe tumour" line must appear in the Error Log window and the log file (record
   it; this closes the `[TODO verify]` that such VTK lines reach them). Without it, the log checks of steps 11 and 12 do
   not count.
+- Step 13: the 3D view shows the star and the discs at once (the star filled roughly: the view fans its polygon);
+  the panel says "1 model or segments shown in 3D could not be shared." while Live; the phone shows the five spheres
+  and a square of 16 discs (4 × 4, 10 mm apart), and no star; `longest()` prints less than 1.5 s, as in step 2 — no
+  stall of minutes: the star is refused before the triangle filter runs, and the discs are cut in six short steps
+  (SLC-52).
 
 SLC-70 (a scene closed off the main thread) has no manual step: no path of Slicer itself closes the scene off the main
 thread, and a script that does is unsupported and may crash Slicer (`docs/research/slicer-prepare.md`, *A scene closed

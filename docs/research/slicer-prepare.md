@@ -29,7 +29,7 @@ thread wants the GIL back. Such stretches are `ufunc.at` on 48M elements (0.4 s)
 and the Python between calls. The project's threading rule keeps VTK on the main thread (`slicer.md` §3), and none of
 this can be tested without Slicer (CLAUDE.md rule 10). The preparation is therefore cut into steps on the main
 thread instead (below). A single numpy or VTK call cannot be cut. The longest is the quadric's run; the others are
-`vtkPolyDataNormals` (0.88 s on 31.4M triangles natively), `vtkTriangleFilter` (long on a polygon of many points:
+`vtkPolyDataNormals` (0.88 s on 31.4M triangles natively), `vtkTriangleFilter` (in parts of bounded work since
 SLC-52), the geometry copy's `DeepCopy` and a bake's `TransformPoints` (a bake under a non-linear transform has not
 been measured). Moving only the quadric's `Update()` into a worker is the follow-up of the plan (SLC-51 follow-ups):
 by (a) and (b) it runs without the GIL in Slicer. It must first be

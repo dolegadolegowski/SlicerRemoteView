@@ -1,4 +1,4 @@
-# Research — MRML collection and the VTK mesh pipeline (SLC-07, SLC-22, SLC-63)
+# Research — MRML collection and the VTK mesh pipeline (SLC-07, SLC-22, SLC-52, SLC-63)
 
 Verified for `remoteview_core/collect.py` (SLC-07) and the Slicer `scene_api` adapter that SLC-22 writes in
 `RemoteView.py`. Sources are pinned to **3D Slicer v5.12.4** (commit `4e21c19d`) and **VTK v9.6.2**; "run" means
@@ -102,6 +102,94 @@ on a mesh already wound consistently; `ws/slicer` cut the busiest points and wal
 on both; what only the cut gives is the repair of the rest of such a node → SLC-67. A trial rule — `main`'s skip for a
 consistent mesh first, then the cut instead of the switch-off — passed `main`'s SLC-41 tests and gave `ws/slicer`'s
 output on every case above (the 2M sphere 1.33–1.68 s best of five).
+
+### Polygons too large to cut (SLC-52)
+
+`vtkTriangleFilter` (`vtkTriangleFilter.cxx`, VTK v9.6.2) copies a triangle, cuts every other polygon with an ear
+cut (`vtkPolygon::TriangulateLocalIds` → `EarCutTriangulation`, about O(n²) for n points; most quads take its
+`SimpleTriangulation` shortcut) and does all of a node's polygons in one call, which SLC-28's steps cannot split. A
+node of triangles only takes a fast path that copies the cell array. Measured in the sandbox (the filter alone, best
+of three):
+
+| Points in one polygon | 2,000 | 4,000 | 6,000 | 8,000 |
+|---|---|---|---|---|
+| convex (a regular polygon) | 0.005 s | 0.021 s | 0.063 s | 0.12 s |
+| star, inner radius 0.6 | 0.027 s | 0.090 s | 0.17 s | 0.31 s |
+| star, inner radius 0.03 | 0.034 s | 0.14 s | 0.33 s | 0.69 s |
+| random 3D points | 0.022 s | 0.093 s | 0.27 s | 0.36 s |
+| thin zigzag ribbon (a zigzag out, the same back 0.01 above) | 0.040 s | 0.16 s | 0.42 s | 0.65 s |
+
+The zigzag row was measured again in the SLC-52 review: a run under load had given 0.071 / 0.19 / 0.44 / 0.83 s. At
+16,000 points an earlier run took 0.31 s (convex) and 1.15 s (star, 0.6). One polygon of a million points (a crafted or
+broken file) would hold the main thread for over an hour. Many small polygons add up in the same call. Per polygon, the
+slowest of the convex, zigzag and deep-star outlines is about 12 ns × (n² + 64): the 64 is the fixed cost of an ear cut,
+which dominates for 5 to 8 points. The cost is 0.23 / 0.91 / 1.35 / 1.67 / 3.8 µs for 4 / 5 / 6 / 8 / 16 points and 45
+µs / 0.68 ms / 10.5 ms for 64 / 256 / 1,000 (each polygon with its own consecutive points). When each small polygon has
+its own points, scattered over a large point array, every point read misses the cache: up to 18 ns per unit (7-point
+stars, SLC-52 review). A quad the ear cut rejects is the exception: a bow tie (its last two points swapped), four
+collinear points or one point repeated. `TriangulateLocalIds` then hands the quad to `vtkQuad`, which costs 3.8–4.3 µs,
+against 0.2 µs for a plain quad (SLC-52 review). Polygons of 5 or more points have no such fallback, and degenerate ones
+fail fast (0.1–1.4 µs). A triangle costs 34 ns when the call also cuts polygons (10M triangles and one quad: 0.34 s),
+against 1.4 ns on the fast path. So, before SLC-52, 300,000 zigzag polygons of 64 points sharing 64 points (19.2M IDs, a
+small file) held the filter for 17.3 s in one step (SLC-52 review).
+
+`collect.py` therefore checks the polygons first, in the same pass as the ID check:
+
+- **One polygon too large.** A node with a polygon of more than `MAX_POLYGON_POINTS` (6,000) points is left out as
+  `invalid-geometry` before the filter runs. A polygon of 100k points is refused in a few milliseconds.
+- **Parts.** The other polygons are cut in parts, in order. Each part holds at most the work of one polygon of 6,000
+  points (`_cut_parts`, greedy, at least one cell per part). The work counts n² + 64 per polygon of five or more
+  points, 400 per quad (its `vtkQuad` fallback) and 3 per other cell. A part holds 8,653 polygons of 64 points,
+  360,000 hexagons or 90,000 quads.
+- **One step per part.** Each part is one `vtkTriangleFilter` call and one step. It runs on cell arrays sliced from
+  the copy's, over the copy's points: the filter's output keeps its input's points, `SetPoints(input->GetPoints())`.
+- **Strips and order.** The strips (linear) follow in one call. The triangles are concatenated in the order of one
+  call, polygons then strips, so the winding and the normals are the same (`test_collect.py` compares them).
+- **One call.** A node of cells of at most 3 points, or whose polygons fit in one part, is cut in one call, as before.
+
+Measured on crafted nodes (`mesh_steps`, every step timed), a part took about 0.4 s (best of three), up to about
+0.65 s for small polygons over scattered points; single runs under load reached about 0.8 s:
+
+- one zigzag polygon of 6,000 points: 0.40 s;
+- three of them: about 0.4 s each, best of three (0.36–0.70 s for the longest in single runs);
+- a deep star of 6,000 points: 0.32–0.43 s (0.57 s in a single run under load);
+- the 300,000 shared 64-gons: 35 parts of 0.41–0.79 s (0.40–0.64 s in a reviewer's run; the highest figures come from
+  runs under load);
+- 2M hexagons: 6 parts of 0.20–0.46 s;
+- 450,000 and 2M bow-tie quads: 5 and 23 parts of at most 0.43 and 0.54 s; 450,000 one-point quads: 5 parts of at
+  most 0.53 s; one part of 90,000 bow-tie quads alone: 0.36–0.42 s (SLC-52 review);
+- 1.2M 7-point stars over scattered points: 4 parts, the three full ones 0.53–0.65 s (up to 0.83 s under load), the
+  last 0.44–0.50 s (SLC-52 review);
+- 2M plain quads: 23 parts of at most 0.06 s;
+- 10M triangles and a quad: one call, 0.43 s.
+
+The step after the last part joins the parts' triangles: it is linear in the mesh, 2.8 s for the 18.6M triangles of
+the 300,000 64-gons. The steps after the cut are SLC-28's, linear in the mesh's triangles and points like those of
+any mesh that size. For 2M hexagons (8M triangles over 12M points) the longest is 7.3 s, the normals, against 4.6 s
+for a sphere of 8M triangles. For the 300,000 64-gons (18.6M triangles, each edge shared by 300,000 of them) it is
+8.5 s, also in the normals' steps. No step is quadratic any more.
+
+The total is not capped: a node's cutting time grows with the work of all its polygons. In a reviewer's run, 20 zigzag
+polygons of 6,000 points that share their points (120,000 IDs) took 30 steps and 8.8 s in all, no step above 0.72 s. By
+the same rate, 1,000 of them (6M IDs, a small file when the IDs repeat) would keep "Preparing the scene" for about 7
+minutes. Slicer handles its events between the steps, about twice a second, and *Stop* ends it. A cap on the total would
+have to be in seconds of cutting, so that real meshes of millions of quads are not refused; it is a follow-up in the
+plan.
+
+Strips need checks of their own. `vtkTriangleStrip::DecomposeStrip` reads a strip's first two IDs whatever its size
+(`vtkTriangleStrip.cxx`, VTK v9.6.2). A strip of 0 points crashes Slicer (SIGSEGV in the sandbox, with or without
+polygons, in pure VTK too), a strip of 1 point reads one ID past its own (past the array when it is the last), and a
+strip of 2 points makes no triangle. No VTK filter makes such strips (`vtkStripper`, `vtkTubeFilter`,
+`vtkCleanPolyData`), so a node with one is left out as `invalid-geometry` before the filter runs. Offsets whose
+differences wrap around int64 (`0, 2⁶² + 10, −2⁶², 6`) passed a check that subtracted them: the strips' loop then ran
+for ever with int64 storage and aborted with uint64. The offsets are now compared instead. Both were older than SLC-52
+(SLC-52 review).
+
+Slicer itself is not slowed by such a polygon in 3D: the OpenGL mapper fans every polygon linearly when it builds its
+index buffer (`AppendTrianglesFunctor` in `vtkOpenGLIndexBufferObject.cxx`, the VTK fork Slicer v5.12.4 pins,
+`c9cd17a`), so the triangle filter would have been RemoteView's own freeze. The slice views are another matter: a
+model's slice intersection cuts its cells, and a polygon cut contours through `vtkPolygon` (`[TODO verify]` its cost
+in Slicer); manual §15 step 13 turns the 2D display off.
 
 ## 3. MRML API for the Slicer adapter (SLC-22)
 

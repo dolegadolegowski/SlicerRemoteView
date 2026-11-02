@@ -29,8 +29,10 @@ A node that cannot be exported never aborts the snapshot: it is left out and rep
 :attr:`CollectedScene.skipped` with a :class:`SkipReason` — no triangles (empty, points or lines only; a segment
 without a 3D representation or with a planar-contour one), a non-linear world transform the scene cannot hand over for
 baking, duplicate IDs, an ID that is not a string at all (``GetID()`` returning ``None``: an adapter bug, never a
-Slicer state), non-finite data (also after a bake), cells that reference missing points or are not stored as integers
-(checked before any VTK filter runs: the filters do not bounds-check point IDs).
+Slicer state), non-finite data (also after a bake), cells that reference missing points, are not stored as integers or
+are strips of fewer than 3 points (checked before any VTK filter runs: the filters do not bounds-check point IDs), and
+a polygon too large for the triangle filter to cut in one step (:data:`MAX_POLYGON_POINTS`, SLC-52; the other polygons
+are triangulated in parts).
 
 :func:`collect_steps` is the same collection in steps (SLC-28, :mod:`remoteview_core.steps`): one per filter or numpy
 pass over a mesh and one per node, keeping the seen IDs and the names across them; :func:`collect_scene` runs it in
@@ -189,18 +191,25 @@ class Mesh:
     triangles: NDArray[np.int64] = field(repr=False)
 
 
-def _owned(array: vtkDataArray, dtype: type[np.generic]) -> NDArray[Any]:
-    """An owned copy of a VTK data array, shaped ``(tuples, components)`` (``(tuples,)`` for one component).
+def _view(array: vtkDataArray) -> NDArray[Any]:
+    """A read-only view of a VTK data array's memory in its own type, shaped ``(tuples, components)`` (``(tuples,)``
+    for one component); valid while the array is neither changed nor freed.
 
     Same buffer access as ``numpy_support.vtk_to_numpy`` — whose result is a view into VTK memory that the filter
     outputs share with the input — minus its in-place ``shape`` assignment, deprecated in numpy 2.5.
     """
     tuples, components = array.GetNumberOfTuples(), array.GetNumberOfComponents()
     shape = (tuples, components) if components > 1 else (tuples,)
-    if tuples == 0:
-        return np.empty(shape, dtype=dtype)
-    flat = np.frombuffer(array, dtype=get_numpy_array_type(array.GetDataType()))
-    return flat.reshape(shape).astype(dtype)  # astype copies
+    dtype = get_numpy_array_type(array.GetDataType())
+    flat = np.empty(0, dtype=dtype) if tuples == 0 else np.frombuffer(array, dtype=dtype)
+    view = flat.reshape(shape)
+    view.flags.writeable = False
+    return view
+
+
+def _owned(array: vtkDataArray, dtype: type[np.generic]) -> NDArray[Any]:
+    """An owned copy of a VTK data array (:func:`_view`) in ``dtype``."""
+    return _view(array).astype(dtype)  # astype copies
 
 
 def _triangles(cells: vtkCellArray) -> NDArray[np.int64]:
@@ -229,7 +238,9 @@ def _cell_array(triangles: NDArray[np.int64]) -> vtkCellArray:
 
 
 class InvalidMeshError(ValueError):
-    """The polydata's cells reference points it does not have or are not integer IDs (a corrupt or crafted file)."""
+    """The polydata's cells reference points it does not have, are not integer IDs or are strips of fewer than 3
+    points, or it holds a polygon too large to triangulate in one step (:data:`MAX_POLYGON_POINTS`): a corrupt or
+    crafted file."""
 
 
 def _integer_storage(array: vtkDataArray | None) -> bool:
@@ -243,11 +254,36 @@ def _integer_storage(array: vtkDataArray | None) -> bool:
         return False
 
 
-def _check_cells(cells: vtkCellArray, point_count: int) -> None:
-    """Refuse cells that the VTK filters would read or write out of bounds (they do not check point IDs: an ID
-    ≥ the point count or negative crashes Slicer with a heap corruption)."""
+#: ``vtkTriangleFilter`` cuts a polygon of n ≥ 4 points with an ear cut (``vtkPolygon::EarCutTriangulation``) in about
+#: O(n²) time, and a node's polygons in one call: one step that SLC-28's steps cannot split (SLC-52). Measured in the
+#: sandbox (VTK 9.6.2, best of three; the research note has the figures): about 12 ns × (n² + 64) per polygon — the 64
+#: is the fixed cost of an ear cut, most of the time for 5 to 8 points — except a quad the ear cut rejects (a bow tie,
+#: repeated or collinear points), which ``vtkQuad`` cuts in about 4 µs, so a quad counts 400 units. Small polygons whose
+#: points are scattered over a large array take up to 18 ns a unit (cache misses). A triangle in the same pass costs
+#: 34 ns, as much as 3 units. One polygon of a million points freezes Slicer. So a node with a polygon of more than
+#: ``MAX_POLYGON_POINTS`` points is left out as ``invalid-geometry`` before the filter runs, and the other polygons are
+#: cut in parts of at most the work of one polygon of ``MAX_POLYGON_POINTS`` points, one step each: about 0.4 s a part
+#: (a thin zigzag ribbon of 6,000 points, 360,000 hexagons or 90,000 bow-tie quads), up to about 0.65 s for small
+#: polygons over scattered points. A node of cells of at most 3 points, or whose polygons fit in one part, is cut in one
+#: call, as before; strips are cut in linear time, after the parts.
+MAX_POLYGON_POINTS = 6_000
+
+
+def _cut_work(sizes: NDArray[np.int64]) -> NDArray[np.int64]:
+    """The triangle filter's work for cells of ``sizes`` points (≤ :data:`MAX_POLYGON_POINTS`), in the units above (one
+    new array: a node can have tens of millions of cells)."""
+    work = sizes * sizes
+    work += 64
+    work[sizes == 4] = 400
+    work[sizes < 4] = 3
+    return work
+
+
+def _check_cells(cells: vtkCellArray, point_count: int) -> NDArray[np.int64]:
+    """The number of points of each cell, once cells that the VTK filters would read or write out of bounds are refused
+    (they do not check point IDs: an ID ≥ the point count or negative crashes Slicer with a heap corruption)."""
     if cells.GetNumberOfCells() == 0:
-        return
+        return np.empty(0, dtype=np.int64)
     if not (
         _integer_storage(cells.GetOffsetsArray()) and _integer_storage(cells.GetConnectivityArray())
     ):
@@ -258,12 +294,87 @@ def _check_cells(cells: vtkCellArray, point_count: int) -> None:
         offsets.size >= 1
         and offsets[0] == 0
         and offsets[-1] == connectivity.size
-        and np.all(np.diff(offsets) >= 0)
+        # compared, not subtracted: a difference of crafted offsets can wrap around int64 and look positive
+        and np.all(offsets[1:] >= offsets[:-1])
         and (
             connectivity.size == 0 or (connectivity.min() >= 0 and connectivity.max() < point_count)
         )
     ):
         raise InvalidMeshError("cell point IDs out of range")
+    return np.diff(offsets)
+
+
+def _cut_parts(sizes: NDArray[np.int64]) -> list[int]:
+    """Cell indices that split polygons of ``sizes`` points into parts of at most the triangle filter's work for one
+    polygon of :data:`MAX_POLYGON_POINTS` points (and at least one cell), in order: ``[0, len(sizes)]`` when one part
+    holds them all, or for cells of at most 3 points, however many. Raises :class:`InvalidMeshError` for a polygon of
+    more points."""
+    count = len(sizes)
+    # cells of at most 3 points: one linear call (the filter or _triangles drops the smaller cells)
+    if count == 0 or sizes.max() <= 3:
+        return [0, count]
+    if sizes.max() > MAX_POLYGON_POINTS:  # checked first: n² of a crafted size can overflow
+        raise InvalidMeshError("a polygon too large to triangulate")
+    budget = int(_cut_work(np.array([MAX_POLYGON_POINTS]))[0])
+    work = _cut_work(sizes)
+    np.cumsum(work, out=work)
+    bounds = [0]
+    while (start := bounds[-1]) < count:
+        done = int(work[start - 1]) if start else 0
+        bounds.append(max(start + 1, int(np.searchsorted(work, done + budget, side="right"))))
+    return bounds
+
+
+def _cut(data: vtkPolyData) -> NDArray[np.int64]:
+    """The triangles ``vtkTriangleFilter`` cuts the polygons and strips of ``data`` into, as an owned ``(m, 3)`` array
+    of IDs of the points of ``data`` (its output keeps the input's points: ``SetPoints(input->GetPoints())``,
+    vtkTriangleFilter.cxx, VTK 9.6.2). The polygons come first, then the strips, each in their order."""
+    triangulate = vtkTriangleFilter()
+    triangulate.PassVertsOff()
+    triangulate.PassLinesOff()
+    triangulate.SetInputData(data)
+    triangulate.Update()
+    return _triangles(triangulate.GetOutput().GetPolys())
+
+
+def _part(
+    copy: vtkPolyData, offsets: NDArray[Any], connectivity: NDArray[Any], start: int, stop: int
+) -> vtkPolyData:
+    """A polydata over the points of ``copy`` with a copy of its polygons ``start`` to ``stop`` (``offsets`` and
+    ``connectivity`` are views of its polygon arrays)."""
+    part_offsets = offsets[start : stop + 1].astype(np.int64)
+    cells = vtkCellArray()
+    cells.SetData(
+        numpy_to_vtk(part_offsets - part_offsets[0], deep=True, array_type=VTK_ID_TYPE),
+        numpy_to_vtk(
+            connectivity[part_offsets[0] : part_offsets[-1]].astype(np.int64),
+            deep=True,
+            array_type=VTK_ID_TYPE,
+        ),
+    )
+    part = vtkPolyData()
+    part.SetPoints(copy.GetPoints())
+    part.SetPolys(cells)
+    return part
+
+
+def _cut_steps(copy: vtkPolyData, bounds: list[int]) -> Steps[NDArray[np.int64]]:
+    """:func:`_cut` of ``copy`` in steps: the polygons in the parts ``bounds`` gives (:func:`_cut_parts`), one step
+    each, then the strips — the same triangles in the same order as one call."""
+    if len(bounds) <= 2:
+        return _cut(copy)
+    polys = copy.GetPolys()
+    offsets, connectivity = _view(polys.GetOffsetsArray()), _view(polys.GetConnectivityArray())
+    pieces = []
+    for start, stop in itertools.pairwise(bounds):
+        pieces.append(_cut(_part(copy, offsets, connectivity, start, stop)))
+        yield
+    if copy.GetNumberOfStrips():
+        strips = vtkPolyData()
+        strips.SetPoints(copy.GetPoints())
+        strips.SetStrips(copy.GetStrips())
+        pieces.append(_cut(strips))
+    return np.concatenate(pieces)
 
 
 def _geometry_copy(polydata: vtkPolyData) -> vtkPolyData:
@@ -325,7 +436,7 @@ def mesh_from_polydata(
     ``vtkPolyData`` counts as no mesh. With a ``transform`` the points are moved by it before the normals are computed
     (baking, see the module docstring); the mesh is then in the transform's output frame. Raises
     :class:`InvalidMeshError` — before any filter runs — when polygons or strips reference missing points or are not
-    stored as integers.
+    stored as integers, a strip has fewer than 3 points or a polygon more than :data:`MAX_POLYGON_POINTS`.
     """
     return run(mesh_steps(polydata, transform))
 
@@ -342,23 +453,21 @@ def mesh_steps(
         return None
     copy = _geometry_copy(polydata)
     yield
-    for cells in (copy.GetPolys(), copy.GetStrips()):
-        _check_cells(cells, copy.GetNumberOfPoints())
+    bounds = _cut_parts(_check_cells(copy.GetPolys(), copy.GetNumberOfPoints()))
+    # vtkTriangleStrip::DecomposeStrip reads a strip's first two IDs whatever its size (vtkTriangleStrip.cxx, VTK
+    # 9.6.2): past its own for a strip of 0 or 1 point (0 crashes Slicer); one of 2 points makes no triangle, and no
+    # VTK filter makes such strips.
+    if np.any(_check_cells(copy.GetStrips(), copy.GetNumberOfPoints()) < 3):
+        raise InvalidMeshError("a strip of fewer than 3 points")
     yield
-    triangulate = vtkTriangleFilter()
-    triangulate.PassVertsOff()
-    triangulate.PassLinesOff()
-    triangulate.SetInputData(copy)
-    triangulate.Update()
+    triangles = yield from _cut_steps(copy, bounds)
     yield
-    triangulated = triangulate.GetOutput()
-    triangles = _triangles(triangulated.GetPolys())
     a, b, c = triangles.T
     # A triangle that repeats a vertex has no area and no normal, and it must go before ConsistencyOn: its edges
     # run both ways, so it would turn every triangle reached through it inside out (stitched strips make them).
     triangles = triangles[(a != b) & (b != c) & (a != c)]
-    points = triangulated.GetPoints()
-    if len(triangles) == 0 or points is None:
+    points = copy.GetPoints()
+    if len(triangles) == 0:
         return None
     if transform is not None:
         yield

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import itertools
+import math
+import signal
 import subprocess
 import sys
 import time
@@ -690,6 +693,22 @@ def mesh(kind, offsets, connectivity):
     (data.SetStrips if kind == "strip" else data.SetPolys)(cells(offsets, connectivity))
     return data
 
+def with_strips(data, offsets, connectivity):
+    data.SetStrips(cells(offsets, connectivity))
+    return data
+
+def mesh_uint64(offsets, connectivity):
+    from vtkmodules.util.numpy_support import numpy_to_vtk
+    from vtkmodules.vtkCommonCore import VTK_UNSIGNED_LONG_LONG
+    data = mesh("strip", [0], [])
+    array = vtkCellArray()
+    assert array.SetData(
+        numpy_to_vtk(np.array(offsets, dtype=np.uint64), deep=True, array_type=VTK_UNSIGNED_LONG_LONG),
+        numpy_to_vtk(np.array(connectivity, dtype=np.uint64), deep=True, array_type=VTK_UNSIGNED_LONG_LONG),
+    )
+    data.SetStrips(array)
+    return data
+
 def legacy_file(cells="POLYGONS 3 3\\nOFFSETS vtktypeint64\\n0 3 9000000\\nCONNECTIVITY vtktypeint64\\n0 1 2\\n"):
     # the path a crafted file takes: a legacy VTK 5.1 file (by default its OFFSETS run past its CONNECTIVITY)
     import os, tempfile
@@ -721,6 +740,22 @@ data = {
     "offset-decreasing": lambda: mesh("poly", [0, -3000000, 3], [0, 1, 2]),
     "offset-not-monotonic": lambda: mesh("poly", [0, 4, 2, 6], [0, 1, 2, 3, 0, 1]),
     "strip-offset-beyond": lambda: mesh("strip", [0, 3000000], [0, 1, 2]),
+    # a strip's first two IDs are read whatever its size (vtkTriangleStrip::DecomposeStrip): 0 points crash
+    "strip-empty": lambda: mesh("strip", [0, 0], []),
+    "strip-empty-after-one": lambda: mesh("strip", [0, 3, 3], [0, 1, 2]),
+    "strip-one-point": lambda: mesh("strip", [0, 1], [0]),
+    "strip-two-points": lambda: mesh("strip", [0, 2], [0, 1]),
+    "strip-empty-with-quad": lambda: with_strips(mesh("poly", [0, 4], [0, 1, 2, 3]), [0, 0], []),
+    # offsets whose differences wrap around int64 look increasing to a subtraction
+    "strip-offset-wrap": lambda: mesh("strip", [0, 2**62 + 10, -(2**62), 6], [0, 1, 2, 0, 1, 2]),
+    "strip-offset-wrap-with-quad": lambda: with_strips(
+        mesh("poly", [0, 4], [0, 1, 2, 3]), [0, 2**62 + 10, -(2**62), 6], [0, 1, 2, 0, 1, 2]
+    ),
+    "strip-offset-wrap-uint64": lambda: mesh_uint64([0, 2**62 + 10, 2**64 - 2**62, 6], [0, 1, 2, 0, 1, 2]),
+    "legacy-strip-wrap": lambda: legacy_file(
+        "TRIANGLE_STRIPS 4 6\\nOFFSETS vtktypeint64\\n0 4611686018427387914 -4611686018427387904 6\\n"
+        "CONNECTIVITY vtktypeint64\\n0 1 2 0 1 2\\n"
+    ),
     "legacy-file": lambda: legacy_file(),
     # VTK 9.6 keeps the declared type: a vtkBitArray (or float) cell array the filters would read as IDs
     "legacy-bit-cells": lambda: legacy_file("POLYGONS 2 3\\nOFFSETS bit\\n0 1\\nCONNECTIVITY bit\\n0 1 1\\n"),
@@ -766,14 +801,25 @@ print([e.node_id for e in result.entities], [(s.node_id, s.reason.value) for s i
         "offset-decreasing",
         "offset-not-monotonic",
         "strip-offset-beyond",
+        "strip-empty",
+        "strip-empty-after-one",
+        "strip-one-point",
+        "strip-two-points",
+        "strip-empty-with-quad",
+        "strip-offset-wrap",
+        "strip-offset-wrap-with-quad",
+        "strip-offset-wrap-uint64",
+        "legacy-strip-wrap",
         "legacy-file",
         "legacy-bit-cells",
         "legacy-float-cells",
     ],
 )
 def test_collect_cells_with_missing_points_are_skipped_not_crashing(case):
-    """VTK's filters do not bounds-check point IDs: a corrupt or crafted file would crash Slicer (heap write).
-    Run in a subprocess, so a regression fails this test instead of killing pytest."""
+    """VTK's filters do not bounds-check point IDs: a corrupt or crafted file would crash Slicer (heap write). Strips
+    of fewer than 3 points are refused too (``DecomposeStrip`` reads two IDs whatever the size: an empty one crashes),
+    and offsets whose differences wrap around int64 (the strips' filter loop would run for ever, or abort with uint64
+    storage). Run in a subprocess, so a regression fails this test instead of killing pytest."""
     result = subprocess.run(
         [
             sys.executable,
@@ -926,6 +972,258 @@ def test_collect_display_values_are_clamped():
     )
     assert entity.color == (1.0, 0.0, 0.5) and entity.opacity == 1.0 and entity.visible is False
     assert all(type(c) is float for c in entity.color) and type(entity.opacity) is float
+
+
+# --------------------------------------------------------------------------- polygons too large to cut (SLC-52)
+
+
+def _polygons(sizes, *, star: bool = False, strips: bool = False) -> vtkPolyData:
+    """Flat polygons (or ``strips``) of ``sizes`` points each, side by side; a star-shaped outline when ``star``
+    (concave: the ear cut's slower case)."""
+    sizes = np.asarray(sizes, dtype=np.int64)
+    offsets = np.r_[0, np.cumsum(sizes)]
+    cell = np.repeat(np.arange(len(sizes)), sizes)
+    k = np.arange(offsets[-1]) - offsets[:-1][cell]  # the point's place in its cell
+    if strips:  # a zigzag ribbon: point k at (k, k % 2)
+        xyz = np.c_[k, k % 2, 3.0 * cell].astype(np.float64)
+    else:
+        angle = 2.0 * np.pi * k / sizes[cell]
+        radius = np.where(star & (k % 2 == 1), 0.6, 1.0)
+        xyz = np.c_[radius * np.cos(angle) + 3.0 * cell, radius * np.sin(angle), np.zeros(len(k))]
+    data = vtkPolyData()
+    vtk_points = vtkPoints()
+    vtk_points.SetData(numpy_to_vtk(xyz, deep=True))
+    data.SetPoints(vtk_points)
+    cells = vtkCellArray()
+    cells.SetData(
+        numpy_to_vtkIdTypeArray(offsets, deep=True),
+        numpy_to_vtkIdTypeArray(np.arange(offsets[-1], dtype=np.int64), deep=True),
+    )
+    (data.SetStrips if strips else data.SetPolys)(cells)
+    return data
+
+
+def _drain(steps):
+    """The number of steps of ``steps`` and its result."""
+    count = 0
+    while True:
+        try:
+            next(steps)
+        except StopIteration as stop:
+            return count, stop.value
+        count += 1
+
+
+def test_collect_a_polygon_too_large_to_triangulate_is_skipped_at_once():
+    """One polygon of 100k points (a crafted file): ``vtkTriangleFilter`` would cut it in about O(n²) — about a minute
+    on the main thread, in one step — so the node is left out as ``invalid-geometry`` before the filter runs, fast; the
+    other nodes are untouched. The skip is asserted before the timing: a regression fails after one cut, not three."""
+    scene = FakeScene(
+        FakeNode("vtkMRMLModelNode1", _polygons([100_000], star=True)),
+        FakeNode("vtkMRMLModelNode2", _cube()),
+    )
+    collected = collect_scene(scene)
+    assert collected.skipped == (SkippedNode("vtkMRMLModelNode1", SkipReason.INVALID_GEOMETRY),)
+    assert [e.node_id for e in collected.entities] == ["vtkMRMLModelNode2"]
+    best = math.inf
+    for _ in range(3):  # other work on the machine only adds time
+        start = time.perf_counter()
+        collect_scene(scene)
+        best = min(best, time.perf_counter() - start)
+    assert best < 0.1
+
+
+@pytest.mark.parametrize(
+    ("sizes", "kept"),
+    [
+        ([collect.MAX_POLYGON_POINTS], True),  # exactly at the cap: kept (the comparison is strict)
+        ([collect.MAX_POLYGON_POINTS + 1], False),
+        ([4] * 10 + [collect.MAX_POLYGON_POINTS + 1] + [4] * 10, False),
+        ([collect.MAX_POLYGON_POINTS] * 2, True),  # each at the cap: cut in two parts
+    ],
+)
+def test_collect_a_polygon_is_capped_by_its_size(sizes, kept):
+    collected = collect_scene(FakeScene(FakeNode("vtkMRMLModelNode1", _polygons(sizes))))
+    if kept:
+        [entity] = collected.entities
+        assert entity.triangle_count == sum(n - 2 for n in sizes)
+    else:
+        assert collected.skipped == (SkippedNode("vtkMRMLModelNode1", SkipReason.INVALID_GEOMETRY),)
+
+
+def _work(sizes):
+    return sum(n * n + 64 if n > 4 else 400 if n == 4 else 3 for n in sizes)
+
+
+def test_collect_cut_parts_hold_at_most_one_large_polygon_of_work(monkeypatch):
+    """The parts are in order, cover every cell, none is empty, each holds at most the work of one polygon of
+    ``MAX_POLYGON_POINTS`` points and could not take the next cell (greedy): a node of many polygons is cut in parts,
+    never refused. A quad counts 400 units (its ``vtkQuad`` fallback)."""
+    monkeypatch.setattr(collect, "MAX_POLYGON_POINTS", 20)
+    budget = _work([20])
+    assert budget == 464
+    assert collect._cut_parts(np.array([20, 20, 4, 4], dtype=np.int64)) == [0, 1, 2, 3, 4]
+    assert collect._cut_parts(np.array([3] * 50 + [20], dtype=np.int64)) == [0, 50, 51]
+    assert collect._cut_parts(np.array([3] * 154 + [4], dtype=np.int64)) == [0, 154, 155]
+    assert collect._cut_parts(np.array([5] * 5, dtype=np.int64)) == [0, 5]  # 445: one part
+    assert collect._cut_parts(np.array([5] * 6, dtype=np.int64)) == [0, 5, 6]
+    rng = np.random.default_rng(52)
+    for _ in range(200):
+        sizes = rng.choice([0, 2, 3, 4, 5, 9, 19, 20], size=rng.integers(1, 60)).astype(np.int64)
+        bounds = collect._cut_parts(sizes)
+        assert bounds[0] == 0 and bounds[-1] == len(sizes)
+        for start, stop in itertools.pairwise(bounds):
+            assert start < stop and _work(sizes[start:stop]) <= budget
+            if stop < len(sizes):
+                assert _work(sizes[start : stop + 1]) > budget
+
+
+@contextlib.contextmanager
+def _deadline(seconds: int):
+    """Fails the block with ``TimeoutError`` after ``seconds`` instead of letting it hang (``SIGALRM``: POSIX only;
+    elsewhere no limit)."""
+    if not hasattr(signal, "SIGALRM"):
+        yield
+        return
+
+    def expire(signum, frame):
+        raise TimeoutError(f"still running after {seconds} s")
+
+    previous = signal.signal(signal.SIGALRM, expire)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def test_collect_cut_parts_take_a_cell_heavier_than_a_part_alone(monkeypatch):
+    """A quad (400 units) is more work than a part when the cap is under 19 points: it gets a part of its own instead
+    of stopping the split (without that rule the split loops for ever: the deadline fails it)."""
+    monkeypatch.setattr(collect, "MAX_POLYGON_POINTS", 10)
+    with _deadline(10):
+        # each quad alone; the triangle and the 9-gon together: 3 + 145 fit in 164
+        assert collect._cut_parts(np.array([4, 4, 3, 9], dtype=np.int64)) == [0, 1, 2, 4]
+
+
+@pytest.mark.parametrize("sizes", [[], [2, 1, 3, 0], [3] * 155])
+def test_collect_cut_parts_leave_triangles_in_one_call(monkeypatch, sizes):
+    """Cells of at most 3 points take the filter's fast path (a copy of the cell array), however many: 155 triangles
+    count 465 units, more than a part under a cap of 20 points, and still stay one call."""
+    monkeypatch.setattr(collect, "MAX_POLYGON_POINTS", 20)
+    assert collect._cut_parts(np.array(sizes, dtype=np.int64)) == [0, len(sizes)]
+
+
+def test_collect_two_parts_take_two_steps():
+    """With the real cap: two polygons of ``MAX_POLYGON_POINTS`` points are two parts, a step each; one is cut in a
+    single call, as before SLC-52."""
+    one, _ = _drain(collect.mesh_steps(_polygons([collect.MAX_POLYGON_POINTS])))
+    two, mesh = _drain(collect.mesh_steps(_polygons([collect.MAX_POLYGON_POINTS] * 2)))
+    assert two == one + 2 and len(mesh.triangles) == 2 * (collect.MAX_POLYGON_POINTS - 2)
+
+
+def test_collect_an_empty_cell_does_not_refuse_its_node():
+    """Equal offsets (a cell of 0 points) are valid VTK: the check needs offsets that never decrease, not ones that
+    always grow, so the node's other cells are still collected."""
+    data = _polygons([3, 3])
+    cells = vtkCellArray()
+    cells.SetData(
+        numpy_to_vtkIdTypeArray(np.array([0, 3, 3, 6], dtype=np.int64), deep=True),
+        numpy_to_vtkIdTypeArray(np.arange(6, dtype=np.int64), deep=True),
+    )
+    data.SetPolys(cells)
+    [entity] = collect_entities(FakeScene(FakeNode("vtkMRMLModelNode1", data)))
+    assert entity.triangle_count == 2
+
+
+def test_collect_views_of_vtk_memory_are_read_only():
+    """The parts are sliced from views of the copy's cell arrays, checked before: a write through one would put
+    unchecked IDs in front of the filter, so they cannot be written."""
+    ids = numpy_to_vtkIdTypeArray(np.arange(6, dtype=np.int64), deep=True)
+    view = collect._view(ids)
+    np.testing.assert_array_equal(view, np.arange(6))
+    with pytest.raises(ValueError, match="read-only"):
+        view[0] = 5
+
+
+def test_collect_cut_parts_refuse_a_polygon_above_the_cap_before_squaring_it():
+    """A crafted cell size whose square overflows int64 is refused, not wrapped into a small negative work."""
+    for size in (collect.MAX_POLYGON_POINTS + 1, 2**32 + 1):
+        with pytest.raises(collect.InvalidMeshError):
+            collect._cut_parts(np.array([4, size, 4], dtype=np.int64))
+
+
+def test_collect_cut_parts_of_real_size():
+    """With the real cap: a part holds 8,653 polygons of 64 points, 360,000 hexagons or 90,000 quads (about 0.4 s each
+    in the sandbox, best of three; up to about 0.65 s for small polygons over scattered points; see the research
+    note)."""
+    assert np.diff(collect._cut_parts(np.full(20_000, 64, dtype=np.int64)))[0] == 8_653
+    assert np.diff(collect._cut_parts(np.full(1_000_000, 6, dtype=np.int64)))[0] == 360_000
+    assert np.diff(collect._cut_parts(np.full(200_000, 4, dtype=np.int64)))[0] == 90_000
+
+
+def _mixed_polygons() -> vtkPolyData:
+    """Triangles, quads, polygons of 5 to 40 points (some concave), a polygon of 2 points and strips, in one node."""
+    sphere = vtkSphereSource()
+    sphere.SetThetaResolution(12)
+    sphere.SetPhiResolution(12)
+    sphere.Update()
+    stripped = vtkStripper()
+    stripped.SetInputConnection(sphere.GetOutputPort())
+    stripped.Update()
+    append = vtkAppendPolyData()
+    for part in (
+        _sphere(),
+        _cube(),
+        _polygons([5, 40, 3, 8, 2, 33, 4] * 6, star=True),
+        _polygons([12, 7, 40] * 5),
+        stripped.GetOutput(),
+    ):
+        append.AddInputData(part)
+    append.Update()
+    return append.GetOutput()
+
+
+def test_collect_parts_cut_the_same_mesh_as_one_call(monkeypatch):
+    """Cutting in parts (a cap lowered to 40 points: dozens of parts) gives the same triangles in the same order —
+    so the same winding and normals — as one call, with one step more per part and one cut per step: each part, then
+    the strips."""
+    data = _mixed_polygons()
+    assert data.GetNumberOfStrips() > 0 and data.GetNumberOfPolys() > 0
+    whole_steps, whole = _drain(collect.mesh_steps(data))
+    monkeypatch.setattr(collect, "MAX_POLYGON_POINTS", 40)
+    sizes = np.diff(collect._owned(data.GetPolys().GetOffsetsArray(), np.int64))
+    parts = len(collect._cut_parts(sizes)) - 1
+    assert parts >= 20
+    step, cut_at, cut = 0, [], collect._cut
+    monkeypatch.setattr(collect, "_cut", lambda piece: cut_at.append(step) or cut(piece))
+    steps = collect.mesh_steps(data)
+    while True:
+        try:
+            next(steps)
+        except StopIteration as stop:
+            parted = stop.value
+            break
+        step += 1
+    assert step == whole_steps + parts
+    assert len(cut_at) == parts + 1 and len(set(cut_at)) == parts + 1
+    np.testing.assert_array_equal(parted.triangles, whole.triangles)
+    np.testing.assert_array_equal(parted.positions, whole.positions)
+    np.testing.assert_array_equal(parted.normals, whole.normals)
+
+
+def test_collect_long_strips_and_ordinary_meshes_are_not_capped():
+    """A triangle strip is cut in linear time: a strip of 100k points is a mesh of 99,998 triangles. A sphere of
+    triangles and a cube of quads are unchanged."""
+    [strip] = collect_entities(
+        FakeScene(FakeNode("vtkMRMLModelNode1", _polygons([100_000], strips=True)))
+    )
+    assert strip.triangle_count == 99_998
+    [sphere, cube] = collect_entities(
+        FakeScene(FakeNode("vtkMRMLModelNode2", _sphere()), FakeNode("vtkMRMLModelNode3", _cube()))
+    )
+    assert sphere.triangle_count == _sphere().GetNumberOfCells() and cube.triangle_count == 12
 
 
 # --------------------------------------------------------------------------- input untouched (criterion 3)
