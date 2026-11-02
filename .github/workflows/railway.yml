@@ -2,8 +2,9 @@
 # the reviewed plan after the merge; docs/research/deploy-railway-iac.md §5).
 #
 # Safety, because an apply that changes the service redeploys the live relay and ends every running session:
-# - nothing happens without the repository secret RAILWAY_TOKEN (a project token of the production environment);
-#   forks and Dependabot never get it, so their plan job skips its steps and stays green;
+# - nothing happens without the secret RAILWAY_TOKEN (a project token of the production environment, which can
+#   also deploy). Recommended: do not store it at all and plan/apply locally; a *repository* secret is usable from
+#   any pushed branch (docs/deploy.md §1.4). Forks never get it, so their plan job skips its steps and stays green;
 # - apply runs only for a push to main AND when the repository variable RAILWAY_IAC_APPLY is `true` (opt-in,
 #   set after the first clean `railway config plan`, docs/deploy.md §1.4) AND after the `railway-production`
 #   environment's protection rules (required reviewers where the GitHub plan offers them);
@@ -53,7 +54,7 @@ jobs:
           node-version: 22.x
       # railway/iac resolves from .railway/node_modules (the action installs only the root workspaces).
       - if: env.HAS_TOKEN == 'true'
-        run: npm ci --prefix .railway
+        run: npm ci --prefix .railway --ignore-scripts
       - if: env.HAS_TOKEN == 'true'
         run: npm run typecheck --prefix .railway
       - if: env.HAS_TOKEN == 'true'

@@ -38,6 +38,7 @@ test("exceptions may be missing anywhere; the test-only switch is forbidden on R
   assert.deepEqual(compare({ r: ["RELAY_TEST_FAST_TIMERS"], e: [] }, { railwayLabel: "r" }), [
     "RELAY_TEST_FAST_TIMERS: test-only (docs/architecture.md §9), must not be in r",
   ]);
+  assert.equal(compare({ r: ["PORT", "NODE_OPTIONS"], e: [] }, { railwayLabel: "r" }).length, 2);
 });
 
 test("the repository's own files agree", () => {

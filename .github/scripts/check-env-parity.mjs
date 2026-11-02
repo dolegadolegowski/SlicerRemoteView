@@ -25,7 +25,8 @@ export const EXCEPTIONS = {
   NODE_OPTIONS: "set by relay-server/Dockerfile and read by Node, not by config.ts (report 2026-10-18-server-2)",
   RELAY_TEST_FAST_TIMERS: "test-only (docs/architecture.md §9)",
 };
-export const FORBIDDEN_ON_RAILWAY = ["RELAY_TEST_FAST_TIMERS"];
+/** Never declared in railway.ts: Railway injects the first two, the image sets the third, tests use the last. */
+export const FORBIDDEN_ON_RAILWAY = ["PORT", "RAILWAY_PUBLIC_DOMAIN", "NODE_OPTIONS", "RELAY_TEST_FAST_TIMERS"];
 
 const NAME = "[A-Z][A-Z0-9_]*";
 /** `--with-docs`: the variable tables of the documentation. */

@@ -11,7 +11,8 @@
  * owner's domain, `METRICS_TOKEN` is a secret) are `preserve()`: declared, value kept from the dashboard.
  *
  * Not declared on purpose:
- * - the region: the CLI keeps the service's current region (pick an EU region in the dashboard, ADR 0007 §6);
+ * - the region: pick an EU region in the dashboard (ADR 0007 §6); the CLI should keep the current one for a plain
+ *   `replicas: 1` (`[TODO verify]` with the first plan, docs/research/deploy-railway-iac.md §3);
  * - the generated `*.up.railway.app` domain (IaC cannot express it) and custom domains (docs/deploy.md §5);
  * - `PORT` and `RAILWAY_PUBLIC_DOMAIN` (injected by Railway), `NODE_OPTIONS` (set by relay-server/Dockerfile, a
  *   Railway variable would override it), `RELAY_TEST_FAST_TIMERS` (test-only) — the env parity check
@@ -44,20 +45,25 @@ const WATCH_PATTERNS = [
 
 const relay = service(SERVICE_NAME, {
   // Root directory "/" (the default): the Dockerfile copies shared/ and web-viewer/ (ADR 0007 §5).
-  source: github(REPOSITORY, { branch: "main" }),
+  // checkSuites = "Wait for CI": a commit deploys only after its GitHub Actions runs passed (docs/deploy.md §7.3).
+  source: github(REPOSITORY, { branch: "main", checkSuites: true }),
   build: {
     builder: "DOCKERFILE",
     dockerfilePath: "/relay-server/Dockerfile",
     watchPatterns: WATCH_PATTERNS,
   },
+  // In-memory sessions: exactly one replica (ADR 0006, ADR 0007 §6).
+  replicas: 1,
+  healthcheck: "/healthz",
+  healthcheckTimeout: 300,
   deploy: {
-    // In-memory sessions: exactly one replica (ADR 0006, ADR 0007 §6); never asleep (it would drop sessions).
-    numReplicas: 1,
+    // Never asleep: a sleeping relay drops its sessions.
     sleepApplication: false,
-    healthcheckPath: "/healthz",
-    healthcheckTimeout: 300,
     restartPolicyType: "ON_FAILURE",
     restartPolicyMaxRetries: 10,
+    // A memory cap per replica belongs here, not in the dashboard (an apply reverts dashboard values), once its
+    // shape is confirmed with `railway config pull --json` and its size agreed with `server` (docs/deploy.md §6):
+    // limitOverride: { containers: { memoryBytes: <bytes> } },
   },
   // docs/architecture.md §9, values = relay-server/.env.example defaults (the relay's own defaults).
   env: {

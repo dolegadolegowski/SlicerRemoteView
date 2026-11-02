@@ -55,11 +55,11 @@ builder, **Dockerfile Path** `/relay-server/Dockerfile`, **Root Directory** `/`,
 
 | Setting | Value | Note |
 |---|---|---|
-| Service | `relay`, GitHub source `<owner>/<repo>`, branch `main`, root directory `/` | a fork puts its own repository into `REPOSITORY` |
+| Service | `relay`, GitHub source `<owner>/<repo>`, branch `main`, root directory `/`, **Wait for CI** on (`checkSuites`, §7.3) | a fork puts its own repository into `REPOSITORY` |
 | Build | Dockerfile builder, `/relay-server/Dockerfile`, the eleven watch patterns of `own-server.md` | pushes that touch nothing else do not deploy |
 | Deploy | 1 replica, serverless (sleeping) off, healthcheck `/healthz` with 300 s timeout, restart on failure (10 retries) | in-memory sessions: never more than one replica (ADR 0006) |
 | Variables | §2: every variable of `docs/architecture.md` §9 except `PORT`, `NODE_OPTIONS`, `RAILWAY_PUBLIC_DOMAIN` | `ALLOWED_ORIGINS` and `METRICS_TOKEN` are `preserve()`: declared, their dashboard values kept |
-| Not declared | the region, the generated `*.up.railway.app` domain, custom domains | the region stays what the dashboard says; IaC cannot express the generated domain |
+| Not declared | the region, a memory cap (Replica Limits), the generated `*.up.railway.app` domain, custom domains | the CLI should keep the current region for a plain `replicas: 1` (`[TODO verify]` in the first plan); IaC cannot express the generated domain; a memory cap goes into the file once its shape is confirmed (§6) |
 
 `apply` makes the project equal to the file: a service missing from the file is **deleted**, and so is a variable
 of `relay` missing from its `env` block (both are marked destructive in the plan). A dashboard edit of a declared
@@ -79,35 +79,60 @@ procedure changes Railway until step 6.
    source, `build` and `deploy` blocks with §1.2.
 4. Plan: `railway config plan`. Read every line. Expected: only **non-destructive** changes on `relay` — "Set
    variable" for the variables the dashboard does not have yet (`LOG_LEVEL`, `SESSION_TTL_S`, … with their default
-   values, so the relay behaves exactly as before), and possibly settings the dashboard left at Railway's
-   defaults (healthcheck timeout, restart policy, sleeping off). **Stop** if the plan wants to create or delete a
-   service, delete a variable, change the source or the root directory, or shows anything marked destructive:
-   correct `.railway/railway.ts` (service name, repository, a setting) and plan again.
+   values, so the relay behaves exactly as before), settings going from empty or Railway's default to the file's
+   value (healthcheck timeout, restart policy, sleeping off), and Wait for CI (`checkSuites`) turning on.
+   **Stop** — correct `.railway/railway.ts` and plan again — if the plan:
+   - creates or deletes a service, deletes a variable, or shows anything marked destructive;
+   - changes the source repository, branch or root directory, the region, `multiRegionConfig` or the replicas;
+   - sets any `build` or `deploy` key to empty/`null`: a live setting (for example a memory cap set under
+     Replica Limits) is missing from the file — add it to the file;
+   - **updates** a variable that already exists: compare locally with `railway config plan --show-values` (never
+     in CI, never pasted anywhere) and put the live value into the file, or keep it with `preserve()`.
 5. Record the result (no values, no domain) in §1.5.
 6. Apply when no session is running: `railway config apply`. Every apply that changes `build`, `deploy` or
    variables redeploys the relay and ends all sessions. A second `railway config plan` must then print "Your
    Railway configuration is already up to date."
 
 Field names that only the SDK types confirm (builder, Dockerfile path, watch patterns, restart policy,
-`sleepApplication`) are `[TODO verify]` until step 4 shows no unexpected change for them
-(`docs/research/deploy-railway-iac.md` §2).
+`sleepApplication`, `checkSuites`) are `[TODO verify]` until step 4 shows no unexpected change for them
+(`docs/research/deploy-railway-iac.md` §2); `replicas`, `healthcheck`, `healthcheckTimeout`, `env` and `preserve()`
+are in the IaC reference.
 
 ### 1.4 Plan and apply from GitHub Actions (optional, after §1.3)
 
 `.github/workflows/railway.yml` plans every pull request that touches `.railway/**` and comments the plan on it;
-after the merge it applies exactly that reviewed plan. Opt in:
+after the merge it applies exactly that reviewed plan.
+
+**Read this before storing `RAILWAY_TOKEN` in GitHub.** A Railway project token is not read-only: it can change and
+deploy the production environment. A *repository* secret is available to every workflow run that a push of any
+branch triggers, with that branch's own workflow files — so anyone (or any agent session) that can push a branch can
+use it, and the plan job runs third-party code next to it (the `railwayapp/config` action installs Node, the Railway
+CLI and the repository's npm dependencies). Neither `RAILWAY_IAC_APPLY` nor the `railway-production` environment
+protects a repository secret. Recommended for this private repository: **keep planning and applying locally**
+(§1.3) and do not add the token. If you still want CI to do it:
+
+- with GitHub Pro, Team or Enterprise, store `RAILWAY_TOKEN` as an **environment secret** of `railway-production`
+  whose deployment branches are limited to `main` (only the apply job can read it; pull requests then get no plan
+  comment, plan them locally);
+- with GitHub Free, environments do not exist for private repositories and the token can only be a repository
+  secret, with the exposure above.
+
+Opt in:
 
 1. Railway: project **Settings** → **Tokens** → create a **project token** for the `production` environment
-   `[TODO verify]` (menu path). GitHub: **Settings** → **Secrets and variables** → **Actions** → **New repository
-   secret** `RAILWAY_TOKEN` (§3).
-2. GitHub: **Settings** → **Environments** → **New environment** `railway-production`; add **Required reviewers**
-   (yourself) where your GitHub plan offers them — on a private repository they need GitHub Enterprise, so
-   without it the opt-in variable below is the only gate.
+   `[TODO verify]` (menu path). GitHub: store it as `RAILWAY_TOKEN` (§3), as an environment or a repository secret
+   as above.
+2. GitHub Pro, Team or Enterprise only: **Settings** → **Environments** → **New environment**
+   `railway-production`, deployment branches: `main`; **Required reviewers** exist there only on GitHub Enterprise
+   for a private repository. On GitHub Free skip this step; whether the apply job's `environment:` line then runs
+   unprotected or fails is `[TODO verify]` at the first apply.
 3. Only after §1.3 ended with "already up to date": **Settings** → **Secrets and variables** → **Actions** →
    **Variables** → `RAILWAY_IAC_APPLY` = `true`.
 
-Without `RAILWAY_TOKEN` the plan job skips its steps and stays green (forks, Dependabot); without
-`RAILWAY_IAC_APPLY=true` no apply ever runs. A plan with destructive changes cannot be applied by CI
+Without `RAILWAY_TOKEN` the plan job skips its steps and stays green (forks); without `RAILWAY_IAC_APPLY=true` no
+apply ever runs. The SDK in `.railway/package.json` is not updated by Dependabot: a Dependabot pull request gets no
+secret, hence no plan, and its merge would fail the apply. Bump it by hand in a pull request (planned like any
+other `.railway/` change) or locally. A plan with destructive changes cannot be applied by CI
 (`confirm-destructive: "false"`); a direct push to `main` has no reviewed plan, so its apply fails by design.
 Merge `.railway/**` changes like deploys: when no session is running.
 
@@ -163,7 +188,7 @@ image's build stage and the build cache (report 2026-10-20-server-9; not in the 
 
 | Secret | Where it lives | Used by | Create | Rotate |
 |---|---|---|---|---|
-| `RAILWAY_TOKEN` | GitHub → **Settings** → **Secrets and variables** → **Actions** → repository secret | `.github/workflows/railway.yml` only (§1.4) | Railway project → **Settings** → **Tokens** → project token for `production` `[TODO verify]` (menu path) | create a new token, replace the secret, delete the old token in Railway |
+| `RAILWAY_TOKEN` | nowhere by default (plan/apply run locally, §1.3); optionally GitHub → **Settings** → **Secrets and variables** → **Actions**, preferably as an environment secret of `railway-production` (§1.4: a repository secret is usable from any pushed branch) | `.github/workflows/railway.yml` only | Railway project → **Settings** → **Tokens** → project token for `production` `[TODO verify]` (menu path) | create a new token, replace the secret, delete the old token in Railway |
 | `METRICS_TOKEN` | Railway → service **Variables**, sealed `[TODO verify]` (seal option) | the relay (`GET /metrics`) and whoever scrapes it | `openssl rand -base64 32` (≥ 32 printable characters) | set a new value; it takes effect with the deploy that follows (ends sessions); update the scraper |
 | `GITHUB_TOKEN` | provided by GitHub per job | CI (GHCR push on `main`, plan comments) | automatic | automatic |
 
@@ -312,7 +337,8 @@ owner's plan; without them, keep merging through pull requests and look at `ci-o
 
 ### 7.3 Railway waits for CI (recommended)
 
-In the Railway service settings, turn on **Wait for CI** (its section: `[TODO verify]` in the dashboard). Railway then deploys a commit on `main` only
+In the Railway service settings, turn on **Wait for CI** (its section: `[TODO verify]` in the dashboard); once the
+service is under IaC (§1.3) the file declares it (`checkSuites: true`), and an apply would revert a dashboard change. Railway then deploys a commit on `main` only
 after the GitHub Actions runs on that commit finished, and skips the deploy when one failed
 (`docs/research/deploy-railway-ops.md` §10). The toggle appears once a workflow runs on `push` to `main` — `ci.yml`
 does — and after accepting the updated Railway GitHub App permissions. A non-blocking job (`continue-on-error`) does
@@ -321,9 +347,10 @@ concurrency group in `ci.yml`, so none is.
 
 ### 7.4 Supply chain (Dependabot, audit, pinned actions)
 
-- **Dependabot** (`.github/dependabot.yml`, weekly): npm at the root (all workspaces share one lockfile) and in
-  `.railway/`, pip in `shared/py` and `slicer-plugin`, the pinned GitHub Actions, and the relay's base image
-  (`node:22-alpine`, no major bumps). Minor and patch updates come grouped, one pull request per ecosystem. Its pull
+- **Dependabot** (`.github/dependabot.yml`, weekly): npm at the root (all workspaces share one lockfile), pip in
+  `shared/py` and `slicer-plugin`, the pinned GitHub Actions, and the relay's base image (`node:22-alpine`, no major
+  bumps). Minor and patch updates come grouped per directory (root npm, each pip directory, all actions in one); the
+  base image gets one pull request per update. `.railway/` is left out on purpose (§1.4). Its pull
   requests get no secrets and run the same CI. Merging an npm update changes `package-lock.json` and therefore
   **redeploys the relay**: merge them when no session is running. A pip bump of `slicer-plugin` must be followed by
   regenerating `slicer-plugin/requirements-dev.txt` (`slicer-plugin/README.md`). Check after the first run that the

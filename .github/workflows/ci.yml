@@ -75,7 +75,7 @@ jobs:
       - name: Railway IaC type-check
         run: |
           if [ -f .railway/package.json ]; then
-            npm ci --prefix .railway --no-audit --no-fund
+            npm ci --prefix .railway --ignore-scripts --no-audit --no-fund
             npm run typecheck --prefix .railway
           else
             echo "no .railway/ on this branch"
