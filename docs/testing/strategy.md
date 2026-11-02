@@ -33,7 +33,7 @@ is needed). The root `npm test`, `npm run lint`, `npm run typecheck`, `npm run b
 | `slicer` — `slicer-plugin/` | `slicer-plugin/.venv/bin/pytest slicer-plugin` (pure core + adapter against stub `slicer`/`qt`/`ctk`; set `REMOTEVIEW_REQUIRE_GLTF_VALIDATOR=1`, `REMOTEVIEW_REQUIRE_OPENSSL=1`, `REMOTEVIEW_REQUIRE_RELAY_STUB=1` in CI so skips become failures) · `slicer-plugin/.venv/bin/ruff check slicer-plugin` · `slicer-plugin/.venv/bin/ruff format --check slicer-plugin` · `python3 slicer-plugin/scripts/vendor_shared.py --check` | `docs/testing/slicer.md` (§1–§6, §12–§16; `ScriptedLoadableModuleTest` inside Slicer is manual, NFR-39) |
 | `quest` — `quest-app/` | Unity Test Framework EditMode — not set up yet (`quest-app/README.md` is a TODO; `dotnet test quest-app/Tests.NET` planned in `docs/plan/quest.md`; Unity CI waits for the licence question R-07) | `docs/testing/quest.md` — **does not exist yet** (QST-16, M3b); M3a Quest Browser runs are in `docs/testing/web.md` §Quest Browser |
 | `deploy` — `.github/`, `.railway/` | not in this checkout yet. Planned: `actionlint` and the CI jobs of DEP-01…DEP-03, DEP-09, DEP-10 (§5) | `docs/deploy.md` §4 first-deploy checklist (DEP-06), §5 TLS (DEP-07), §6 region/cost/log retention (DEP-08) — not in this checkout yet |
-| `qa` — `tests/` | `npm --prefix tests run e2e` (projects `iphone15`, `pixel7`, `desktop-chromium`) · `npm --prefix tests run security` · `npm --prefix tests run load:smoke` · `npm --prefix tests run load:full` (local only) · `npm --prefix tests run lint` (`tsc --noEmit`) — see `tests/README.md`; `npm --prefix tests run all` is added by QA-12 | records results in the documents above; this file and `docs/security.md` |
+| `qa` — `tests/` | `npm --prefix tests run e2e` (projects `iphone15`, `pixel7`, `desktop-chromium`) · `npm --prefix tests run security` · `npm --prefix tests run load:smoke` · `npm --prefix tests run load:full` (local only) · `npm --prefix tests run lint` (`tsc --noEmit`) · `npm --prefix tests run triage` · `npm --prefix tests run all` (every suite, QA-12) — see `tests/README.md` | records results in the documents above; this file and `docs/security.md` |
 
 ## 3. Automated vs manual
 
@@ -143,7 +143,7 @@ Consistent with `docs/plan/00-overview.md` §2 and §5:
   and view*) and first deploy (DEP-06) recorded.
 - **M2** — QA-04, QA-06, QA-14, QA-13, QA-08 (NFR-02, NFR-05, NFR-06), QA-09 (`docs/security.md`), QA-10.
 - **M3a** — QA-11 Quest Browser results on Quest 2 and Quest 3/3S. **M3b** — `docs/testing/quest.md` results.
-- **M4** — QA-12: `npm --prefix tests run all` (added by QA-12) gates the release; every manual scenario listed in the
+- **M4** — QA-12: `npm --prefix tests run all` gates the release; every manual scenario listed in the
   `tests/README.md` release checklist has a result dated within 14 days of the tag; zero open `high` reports.
 
 Every closed milestone needs, per §5 of the overview: root `npm run build`, `npm test`, `npm run lint` green,
@@ -157,4 +157,4 @@ manual checklist).
 
 | Date | Commit | Result | Notes |
 |---|---|---|---|
-| — | — | — | no release run yet |
+| 2026-11-03 | `ws/qa` `2f03c3f` + QA-12 files (pre-merge, not a release candidate) | pass — lint, triage, e2e 23/23 (19 s), security 76 + 1 skipped (19 s), load:smoke 6/6 (32 s); `CI=1`, Apple M3 Ultra | first run of `npm --prefix tests run all`; manual checklist not run (no release); 0 open `high` reports |

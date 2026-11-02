@@ -30,7 +30,7 @@ export async function expectModelLoaded(page: Page, timeout = 20_000): Promise<v
 export const nodeRow = (page: Page, nodeId: string) =>
   page.locator(`.node-panel__row[data-node-id="${nodeId}"]`);
 
-/** Opens the node panel (rows are in the DOM only while it is open). */
+/** Opens the node panel (its rows are always built; the panel body is hidden until opened). */
 export async function openNodePanel(page: Page): Promise<void> {
   await page.locator(".node-panel__toggle").click();
 }

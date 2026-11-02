@@ -13,7 +13,9 @@
     "security": "playwright test --project=security",
     "load:smoke": "playwright test --project=load-smoke",
     "load:full": "playwright test --project=load-full",
-    "lint": "tsc -p tsconfig.json --noEmit"
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "triage": "node scripts/report-index.mjs --check",
+    "all": "node scripts/run-all.mjs"
   },
   "devDependencies": {
     "@playwright/test": "1.60.0",
