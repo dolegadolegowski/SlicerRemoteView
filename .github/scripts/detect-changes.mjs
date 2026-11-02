@@ -2,13 +2,14 @@
 /**
  * The `detect` job of `.github/workflows/ci.yml` (DEP-01): which CI jobs a push or pull request needs.
  *
- *   BASE_SHA=<sha> EVENT_NAME=push REF=refs/heads/ws/x node .github/scripts/detect-changes.mjs
+ *   EVENT_NAME=push REF=refs/heads/ws/x node .github/scripts/detect-changes.mjs
+ *   EVENT_NAME=pull_request BASE_SHA=<base sha> node .github/scripts/detect-changes.mjs
  *
  * A job runs when (a) the files it needs exist in the checkout — a component directory may not exist yet on a
  * branch (prompts/06-deploy-ci.md: `hashFiles` does not work in `jobs.<id>.if`, so existence is checked here) — and
- * (b) one of its paths changed against the base, or the run is a full run. A full run is: a push to `main`, a manual
- * or scheduled run, a base that is missing, all zeros (a new branch) or not in the fetched history (a force push),
- * or a change to the CI wiring itself (`.github/workflows/`, `.github/scripts/`).
+ * (b) one of its paths changed against the base — for a pull request its base commit, for a push `origin/main`, both
+ * through the merge base — or the run is a full run. A full run is: a push to `main`, a manual run, a base missing
+ * from the fetched history, or a change to the CI wiring itself (`.github/workflows/`, `.github/scripts/`).
  *
  * Writes `<job>=true|false` lines to `$GITHUB_OUTPUT` (and a table to `$GITHUB_STEP_SUMMARY`) when they are set,
  * and always prints the decision. Needs the full history (`actions/checkout` with `fetch-depth: 0`).
@@ -73,8 +74,6 @@ export const JOBS = {
 /** A change here re-runs everything: the wiring that decides what runs must itself be exercised. */
 export const WIRING = [".github/workflows/", ".github/scripts/", ".github/actions/"];
 
-const ZERO_SHA = /^0+$/;
-
 function matches(file, paths) {
   return paths.some((p) => (p.endsWith("/") ? file.startsWith(p) : file === p));
 }
@@ -96,22 +95,29 @@ function git(...args) {
   return execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 }
 
-/** Changed files against the base, or `null` (with the reason) when the run must be a full run. */
+/** The branch every other branch is compared with on a push. */
+export const MAIN_REF = "origin/main";
+
+/**
+ * Changed files against the base, or `null` (with the reason) when the run must be a full run. A pull request
+ * compares with its base commit, a push to another branch with `main` — both through the merge base (three dots),
+ * so every run checks everything the branch changed, whatever happened to the runs before it.
+ */
 export function changedFiles(env, run = git) {
   const event = env.EVENT_NAME ?? "";
-  const base = (env.BASE_SHA ?? "").trim();
   if (!["push", "pull_request"].includes(event)) return { files: null, reason: `event ${event || "unknown"}` };
   if (event === "push" && env.REF === "refs/heads/main") return { files: null, reason: "push to main" };
-  if (!base || ZERO_SHA.test(base)) return { files: null, reason: "no base commit (new branch)" };
+  const base = event === "pull_request" ? (env.BASE_SHA ?? "").trim() : MAIN_REF;
+  if (!base) return { files: null, reason: "no base commit" };
   try {
-    run("cat-file", "-e", `${base}^{commit}`);
+    run("rev-parse", "--verify", "--quiet", `${base}^{commit}`);
   } catch {
-    return { files: null, reason: `base ${base.slice(0, 12)} not in the history (force push?)` };
+    return { files: null, reason: `base ${base.slice(0, 12)} not in the fetched history` };
   }
-  // A pull request compares with the merge base (three dots); a push with the commit it replaced.
-  const range = event === "pull_request" ? `${base}...HEAD` : `${base}..HEAD`;
-  const out = run("diff", "--name-only", "--no-renames", range);
-  return { files: out.split("\n").filter(Boolean), reason: `git diff ${range}` };
+  const range = `${base}...HEAD`;
+  // -z: paths unquoted and NUL-separated (non-ASCII names would otherwise come back C-quoted).
+  const out = run("-c", "core.quotepath=off", "diff", "--name-only", "-z", "--no-renames", range);
+  return { files: out.split("\0").filter(Boolean), reason: `git diff ${range}` };
 }
 
 function main() {

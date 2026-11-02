@@ -285,9 +285,12 @@ files with the base and checks which components exist on the branch; the other j
 | `audit (non-blocking)` | always | `npm audit --omit=dev`, `pip-audit` (§7.4) | no |
 | `ci-ok` | always | fails when a blocking job failed or was cancelled; passes when they passed or were skipped | **the required check** |
 
-A full run (every job whose component exists) happens on a push to `main`, a manual run, the first push of a new
-branch, after a force push, and whenever `.github/workflows/` or `.github/scripts/` change. A change to `docs/` only
-runs `detect`, `repo-checks` and `ci-ok`.
+A push to a branch is compared with `main` and a pull request with its base, both through the merge base: every run
+checks everything the branch changed, so a failed or cancelled earlier run cannot be hidden by a later docs-only
+push. A full run (every job whose component exists) happens on a push to `main`, a manual run, and whenever
+`.github/workflows/` or `.github/scripts/` change. A branch that changes only `docs/` runs `detect`, `repo-checks`,
+`audit (non-blocking)` and `ci-ok`. A newer push cancels the older run of the same branch or pull request; on `main`
+every commit has its own run, never cancelled.
 
 No job needs a secret, so pull requests from forks and from Dependabot pass with the read-only `GITHUB_TOKEN`.
 
@@ -313,7 +316,8 @@ In the Railway service settings, turn on **Wait for CI** (its section: `[TODO ve
 after the GitHub Actions runs on that commit finished, and skips the deploy when one failed
 (`docs/research/deploy-railway-ops.md` §10). The toggle appears once a workflow runs on `push` to `main` — `ci.yml`
 does — and after accepting the updated Railway GitHub App permissions. A non-blocking job (`continue-on-error`) does
-not fail its run. `ci.yml` never cancels runs on `main`, as Railway asks.
+not fail its run. Railway asks that runs are not cancelled while queued: on `main` each commit has its own
+concurrency group in `ci.yml`, so none is.
 
 ### 7.4 Supply chain (Dependabot, audit, pinned actions)
 

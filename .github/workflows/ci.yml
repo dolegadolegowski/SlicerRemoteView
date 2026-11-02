@@ -17,8 +17,10 @@ on:
 permissions:
   contents: read
 
+# A newer run cancels an older one on the same branch or pull request. On main every commit has its own group:
+# a queued run there is never cancelled, so Railway's "Wait for CI" always gets a result for each commit.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.ref == 'refs/heads/main' && github.sha || github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
@@ -44,7 +46,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           REF: ${{ github.ref }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: node .github/scripts/detect-changes.mjs
 
   repo-checks:

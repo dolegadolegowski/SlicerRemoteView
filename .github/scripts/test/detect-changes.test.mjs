@@ -57,28 +57,33 @@ test("a change to the CI wiring is a full run", () => {
   assert.equal(decide([".github/dependabot.yml"], all).full, false);
 });
 
-const okGit = (out) => (...args) => (args[0] === "diff" ? out : "");
+const okGit = (out) => (...args) => (args.includes("diff") ? out : "");
 const failGit = () => {
-  throw new Error("fatal: Not a valid object name");
+  throw new Error("fatal: Needed a single revision");
 };
 
-test("full runs: main, manual run, new branch, unknown base", () => {
-  assert.equal(changedFiles({ EVENT_NAME: "push", REF: "refs/heads/main", BASE_SHA: "abc" }, okGit("")).files, null);
+test("full runs: main, manual run, a base that is not in the history", () => {
+  assert.equal(changedFiles({ EVENT_NAME: "push", REF: "refs/heads/main" }, okGit("")).files, null);
   assert.equal(changedFiles({ EVENT_NAME: "workflow_dispatch" }, okGit("")).files, null);
-  assert.equal(changedFiles({ EVENT_NAME: "push", REF: "refs/heads/x", BASE_SHA: "0".repeat(40) }, okGit("")).files, null);
-  assert.equal(changedFiles({ EVENT_NAME: "push", REF: "refs/heads/x", BASE_SHA: "" }, okGit("")).files, null);
-  assert.equal(changedFiles({ EVENT_NAME: "push", REF: "refs/heads/x", BASE_SHA: "abc" }, failGit).files, null);
+  assert.equal(changedFiles({ EVENT_NAME: "pull_request", BASE_SHA: "" }, okGit("")).files, null);
+  assert.equal(changedFiles({ EVENT_NAME: "push", REF: "refs/heads/x" }, failGit).files, null);
 });
 
-test("push diffs two dots, pull request three dots", () => {
+test("a push compares the whole branch with main, a pull request with its base, via the merge base", () => {
   const calls = [];
   const spy = (...args) => {
     calls.push(args.join(" "));
-    return args[0] === "diff" ? "a.md\nrelay-server/x.ts\n" : "";
+    return args.includes("diff") ? "a.md\0relay-server/x.ts\0web-viewer/ü ber.ts\0" : "";
   };
-  const push = changedFiles({ EVENT_NAME: "push", REF: "refs/heads/ws/deploy", BASE_SHA: "b1" }, spy);
-  assert.deepEqual(push.files, ["a.md", "relay-server/x.ts"]);
+  const push = changedFiles({ EVENT_NAME: "push", REF: "refs/heads/ws/deploy", BASE_SHA: "ignored" }, spy);
+  assert.deepEqual(push.files, ["a.md", "relay-server/x.ts", "web-viewer/ü ber.ts"]);
   changedFiles({ EVENT_NAME: "pull_request", REF: "refs/pull/1/merge", BASE_SHA: "b2" }, spy);
-  assert.ok(calls.includes("diff --name-only --no-renames b1..HEAD"));
-  assert.ok(calls.includes("diff --name-only --no-renames b2...HEAD"));
+  assert.ok(calls.includes("rev-parse --verify --quiet origin/main^{commit}"));
+  assert.ok(calls.includes("-c core.quotepath=off diff --name-only -z --no-renames origin/main...HEAD"));
+  assert.ok(calls.includes("-c core.quotepath=off diff --name-only -z --no-renames b2...HEAD"));
+});
+
+test("a docs-only push after a relay commit on the same branch still runs the relay's jobs", () => {
+  const { files } = changedFiles({ EVENT_NAME: "push", REF: "refs/heads/ws/x" }, okGit("relay-server/a.ts\0docs/b.md\0"));
+  assert.equal(decide(files, all).jobs.docker, true);
 });
