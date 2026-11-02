@@ -1,0 +1,25 @@
+{
+  "name": "slicerremoteview-tests",
+  "version": "0.0.0",
+  "private": true,
+  "description": "System E2E, security and load tests of SlicerRemoteView against a locally started relay, fake-slicer and the built web-viewer (docs/plan/qa.md).",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18 <23"
+  },
+  "scripts": {
+    "e2e": "playwright test --project=iphone15 --project=pixel7 --project=desktop-chromium",
+    "security": "playwright test --project=security",
+    "load:smoke": "playwright test --project=load-smoke",
+    "load:full": "playwright test --project=load-full",
+    "lint": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.60.0",
+    "@types/node": "22.20.5",
+    "@types/ws": "8.18.2",
+    "typescript": "5.9.3",
+    "ws": "8.22.0"
+  }
+}
