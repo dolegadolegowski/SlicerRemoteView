@@ -111,9 +111,15 @@ function loadBase(name: string): Base {
   return base;
 }
 
+/** Raw JSON text spliced over a sentinel string when encoding (`deep-json`): [quoted sentinel, replacement]. */
+const RAW_JSON = new WeakMap<object, [string, string]>();
+
 /** A GLB container (glTF 2.0 §4.4): JSON padded with spaces, BIN with zeros, both to 4 bytes. */
 export function encodeGlb(json: unknown, bin: Uint8Array | null): Uint8Array {
-  const text = new TextEncoder().encode(JSON.stringify(json));
+  let source = JSON.stringify(json);
+  const raw = typeof json === "object" && json !== null ? RAW_JSON.get(json) : undefined;
+  if (raw) source = source.replace(raw[0], () => raw[1]);
+  const text = new TextEncoder().encode(source);
   const jsonLength = Math.ceil(text.byteLength / 4) * 4;
   const binLength = bin ? Math.ceil(bin.byteLength / 4) * 4 : 0;
   const total = 12 + 8 + jsonLength + (bin ? 8 + binLength : 0);
@@ -389,10 +395,15 @@ const JSON_MUTATIONS: Record<string, { expect: Expectation; apply: JsonMutation 
     expect: "either",
     apply(g, rng) {
       const depth = rng.int(100, 5_000);
-      let deep: unknown = 0;
-      for (let i = 0; i < depth; i++) deep = rng.chance(0.5) ? [deep] : { a: deep };
-      if (rng.chance(0.5)) (rootOf(g)["extras"] as Json)["deep"] = deep; // `extras` is free-form
-      else (g["asset"] as Json)["deep"] = deep;
+      // Built as text, innermost level first (the same draws as nesting objects): `JSON.stringify` of a value
+      // nested ~5,000 deep recurses past the V8 stack of Node on x64 Linux (CI), though not on arm64 macOS.
+      const open: string[] = [];
+      for (let i = 0; i < depth; i++) open.push(rng.chance(0.5) ? "[" : '{"a":');
+      const close = open.map((o) => (o === "[" ? "]" : "}")).join("");
+      const sentinel = "\u0000qa13-deep\u0000";
+      if (rng.chance(0.5)) (rootOf(g)["extras"] as Json)["deep"] = sentinel; // `extras` is free-form
+      else (g["asset"] as Json)["deep"] = sentinel;
+      RAW_JSON.set(g, [JSON.stringify(sentinel), open.reverse().join("") + "0" + close]);
     },
   },
   "random-value": {
