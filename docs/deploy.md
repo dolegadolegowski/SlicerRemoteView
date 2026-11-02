@@ -237,6 +237,32 @@ port 8080 when none is given; until that is verified with a plan, keep domains i
 
 Record (no domain): date the custom domain went live, certificate check result, `ALLOWED_ORIGINS` switched on.
 
+## 6. Cost, egress and log retention
+
+Railway bills usage per second: RAM $10/GB/month, CPU $20/vCPU/month, egress $0.05/GB (2026-11). Hobby costs
+$5/month including $5 of usage; Pro $20 including $20 (`docs/research/deploy-railway-ops.md` §4).
+
+| Item | Where | Setting (DEP-08) |
+|---|---|---|
+| Spending alert | workspace **Usage** → **Set Usage Limits** → **Custom email alert** | e.g. $10 on Hobby: an email, nothing stops |
+| Hard limit | same page → **Hard limit** | optional; when reached **every service goes offline** (sessions end); minimum $10 |
+| Egress alert (NFR-34: warn at 150 GB, alert at 200 GB per month) | only with **Pro**: project **Observability** → network egress widget → **Add monitor** | Hobby has no per-metric alert: 150 GB ≈ $7.50 of egress, so a dollar alert near the expected monthly total is the proxy; check **Usage** monthly |
+| Memory per replica | service **Settings** → **Deploy** → **Replica Limits** | cap memory (e.g. 1–2 GB) so that a leak fails fast instead of growing to the plan cap (8 GB on Hobby) and costing money |
+| Metrics | service **Metrics** tab (CPU, memory, network; up to 30 days) | look at memory after a busy day (NFR-06): it should return near the idle level |
+| Logs | service **Logs**, **Observability** → HTTP logs | retention Hobby 7 days, Pro 30 days; 500 lines/s per replica; no export without extra services |
+
+Estimate (one replica, mostly idle, relay.md §1.7): ~0.1 vCPU and ~0.2 GB RAM average ≈ $2 + $2 a month, plus
+egress — a 20 MB scene sent to 20 viewers is 0.4 GB, so 150 GB is ~375 such sends a month. The memory budgets of the
+relay (`MAX_TOTAL_SNAPSHOT_BYTES` 512 MiB + `MAX_TOTAL_BUFFERED_BYTES` 160 MiB, outside the heap) plus the heap must
+fit the replica's memory limit: with a 1 GB limit and the default 75 % heap share they do not (report
+2026-10-20-server-9) — pick the limit with `server` (`docs/architecture.md` §4), e.g. 1.5 GB, or lower the budgets.
+
+Privacy (T5, for an institutional review, `docs/security.md`): Railway publishes a GDPR data processing agreement
+(railway.com/legal/dpa) and a sub-processor list (trust.railway.com). Its primary processing is in the United States;
+an EU region places the relay's compute in the EU, but whether logs and metadata stay in the EU is `[TODO verify]`.
+The relay stores nothing on disk and logs no scene data, codes or tokens (CLAUDE.md rule 6), so what passes through
+Railway is transient traffic plus the HTTP edge log (paths, source IPs, user agents).
+
 ## 7. CI and branch protection
 
 ### 7.1 What runs
