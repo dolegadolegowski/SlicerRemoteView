@@ -269,6 +269,122 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
 
+  # DEP-10: system tests of the qa workstream (tests/, its own npm project; tests/README.md) and the relay's load
+  # smoke. Non-blocking (continue-on-error, not in ci-ok's needs) until they have been stable for two weeks; then
+  # add them to ci-ok's needs and drop continue-on-error (docs/deploy.md §7.5). Every suite starts its own relay
+  # on 127.0.0.1 — never a deployed relay. Artefacts (Playwright traces, relay.log for QA-07's log grep) are
+  # internal: a trace can show a session code typed on screen.
+  e2e:
+    needs: detect
+    if: needs.detect.outputs.qa == 'true'
+    name: e2e (non-blocking)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.x
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            tests/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm ci --prefix tests
+      - run: npm run lint --prefix tests --if-present
+      # Not cached: Playwright advises against caching browsers (restoring takes as long as downloading,
+      # docs/research/deploy-github-actions.md §12); --with-deps installs WebKit's system libraries.
+      - name: Playwright browsers
+        working-directory: tests
+        run: npx playwright install --with-deps chromium webkit
+      - run: npm run e2e --prefix tests
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-results
+          path: |
+            tests/test-results/
+            tests/playwright-report/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  security:
+    needs: detect
+    if: needs.detect.outputs.qa == 'true'
+    name: security (non-blocking)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.x
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            tests/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm ci --prefix tests
+      - name: Playwright browser (GLB fuzz)
+        working-directory: tests
+        run: npx playwright install --with-deps chromium
+      # --pass-with-no-tests: green while tests/security has no spec yet (QA-05).
+      - run: npm run security --prefix tests -- --pass-with-no-tests
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: security-results
+          path: |
+            tests/test-results/
+            tests/playwright-report/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  load-smoke:
+    needs: detect
+    if: needs.detect.outputs.load_smoke == 'true' || needs.detect.outputs.qa == 'true'
+    name: load smoke (non-blocking)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    continue-on-error: true
+    env:
+      RELAY_SMOKE: ${{ needs.detect.outputs.load_smoke }}
+      QA: ${{ needs.detect.outputs.qa }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.x
+          cache: npm
+      - run: npm ci
+      # SRV-21: one relay process, one publisher, 20 viewers (relay-server/scripts/load-smoke.ts).
+      - name: relay load smoke (SRV-21)
+        if: env.RELAY_SMOKE == 'true'
+        run: npm run load:smoke -w relay-server
+      - name: qa load smoke (tests/load)
+        if: env.QA == 'true'
+        run: |
+          npm run build
+          npm ci --prefix tests
+          npm run load:smoke --prefix tests -- --pass-with-no-tests
+      - if: always() && env.QA == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: load-smoke-results
+          path: tests/test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
   # DEP-09 (T12): known vulnerabilities in the relay's production npm dependencies and the Python dev/test
   # dependencies, on every run; reported, never blocking (not in ci-ok's needs). Findings go to the owning
   # component through docs/testing/reports/ (docs/deploy.md §7.4).

@@ -195,6 +195,9 @@ files with the base and checks which components exist on the branch; the other j
 | `node 24 (non-blocking)` | as `node 22` | the same on the next Node LTS (NFR-41) | no |
 | `python 3.12` | `shared/`, `slicer-plugin/`, `tools/fake-slicer/`, `package*.json` changed | vendored copy of `shared/py` up to date; `shared/py`: ruff, mypy, pytest, the Python half of `npm run check -w shared`; `slicer-plugin`: ruff, pytest with every opt-in gate required | yes |
 | `docker` | the relay image's inputs changed (the Railway watch paths) | build of `relay-server/Dockerfile` from the repository root; smoke test (`/healthz` 200 within 10 s, `/api/version`, uid 1000); `docker-smoke` tests; on `main` only: push to `ghcr.io/<owner>/slicerremoteview-relay:sha-<commit>` | yes |
+| `e2e (non-blocking)` | `tests/package.json` exists and `tests/`, the relay, the viewer, `shared/`, fake-slicer or `package*.json` changed | `npm --prefix tests run lint`, then `run e2e` (Playwright: iPhone 15/WebKit, Pixel 7/Chromium, desktop Chromium) against a locally started relay | no (§7.5) |
+| `security (non-blocking)` | as `e2e` | `npm --prefix tests run security` (passes while there is no spec yet) | no (§7.5) |
+| `load smoke (non-blocking)` | the relay, `shared/`, fake-slicer or `package*.json` changed, or as `e2e` | `npm run load:smoke -w relay-server` (SRV-21); with `tests/`: `npm --prefix tests run load:smoke` | no (§7.5) |
 | `audit (non-blocking)` | always | `npm audit --omit=dev`, `pip-audit` (§7.4) | no |
 | `ci-ok` | always | fails when a blocking job failed or was cancelled; passes when they passed or were skipped | **the required check** |
 
@@ -246,3 +249,16 @@ not fail its run. `ci.yml` never cancels runs on `main`, as Railway asks.
   from here.
 - **CODEOWNERS** is not added: on a private repository it needs GitHub Pro, Team or Enterprise, and every component
   has the same maintainer today.
+
+### 7.5 Making the qa jobs required
+
+`e2e`, `security` and `load smoke` start as non-blocking (DEP-10): they report, and their artefacts
+(`e2e-results`, `security-results`, `load-smoke-results`: Playwright traces and the relay's `relay.log` for the
+QA-07 log grep, kept 7 days) can be downloaded from the run page. A trace can show a session code typed on screen,
+so treat artefacts as internal and never attach them to an issue. Each suite starts its own relay on `127.0.0.1`;
+none of them ever contacts a deployed relay.
+
+Once a job has been green for two weeks, make it blocking in `.github/workflows/ci.yml`: delete its
+`continue-on-error: true` line and add the job's id to the `needs:` list of `ci-ok` (one line each, for example
+`needs: [detect, repo-checks, node, python, docker, e2e]`). Branch protection needs no change: `ci-ok` stays the
+only required check.
