@@ -23,7 +23,8 @@ export const RULES = [
   // An assignment with a real-looking value (not empty, not a placeholder such as <…>, ${…}, $X or …).
   {
     kind: "secret variable with a value",
-    re: /\b(?:METRICS_TOKEN|RAILWAY_TOKEN|RAILWAY_API_TOKEN)\s*[=:]\s*["']?(?![<$"'`{.…]|\*{3}|secrets\.)[A-Za-z0-9+/_\-]{16,}/,
+    // The key may be quoted (`"RAILWAY_TOKEN": "…"` in JSON such as .mcp.json or settings files).
+    re: /\b(?:METRICS_TOKEN|RAILWAY_TOKEN|RAILWAY_API_TOKEN)["']?\s*[=:]\s*["'`]?(?![<$"'`{.…]|\*{3}|secrets\.)[A-Za-z0-9+/_\-]{16,}/,
   },
 ];
 

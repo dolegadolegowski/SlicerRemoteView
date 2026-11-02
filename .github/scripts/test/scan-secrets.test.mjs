@@ -14,6 +14,8 @@ test("well-known secret formats are found, with their line", () => {
     `key = ${fake("AKIA", 16).toUpperCase()}`,
     `METRICS_TOKEN=${fake("", 44)}`,
     `RAILWAY_TOKEN: "${fake("", 36)}"`,
+    `{ "RAILWAY_API_TOKEN": "${fake("", 36)}", "x": 1 }`,
+    `  'METRICS_TOKEN': '${fake("", 32)}',`,
   ].join("\n");
   assert.deepEqual(
     scanText(text).map(({ line, kind }) => `${line} ${kind}`),
@@ -23,6 +25,8 @@ test("well-known secret formats are found, with their line", () => {
       "4 AWS access key",
       "5 secret variable with a value",
       "6 secret variable with a value",
+      "7 secret variable with a value",
+      "8 secret variable with a value",
     ],
   );
 });
@@ -36,6 +40,7 @@ test("empty values, placeholders and workflow expressions are not findings", () 
     'METRICS_TOKEN="$(openssl rand -base64 32)"',
     "export RAILWAY_TOKEN=$RAILWAY_TOKEN",
     "| `METRICS_TOKEN` | unset → `/metrics` disabled (404) | bearer for Prometheus scrape |",
+    '{ "RAILWAY_TOKEN": "${RAILWAY_TOKEN}", "METRICS_TOKEN": "" }',
   ].join("\n");
   assert.deepEqual(scanText(text), []);
 });
