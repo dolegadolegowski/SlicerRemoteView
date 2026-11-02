@@ -205,6 +205,38 @@ with `--code-fd`, never to the terminal.
 | 10 | Query strings in the edge's HTTP logs | `curl -sS -o /dev/null 'https://<your-domain>/healthz?probe=1'`; **Observability** → HTTP logs, filter the path | record whether `path` shows `?probe=1` (T6; the relay never puts codes or tokens in a URL, so either answer is safe — it decides whether query strings may ever be used) | |
 | 11 | `ALLOWED_ORIGINS` names the domain phones open | service **Variables** | exactly `https://<your-domain>` (or empty for the generated domain); otherwise phones show "Connection lost" | |
 
+## 5. Custom domain and TLS
+
+The generated `<name>.up.railway.app` domain is enough to run (HTTPS, a Let's Encrypt certificate). A domain of your
+own (DEP-07) gives a stable address for the Slicer setting, the QR code and the user guides, and lets the relay's
+HSTS header (`includeSubDomains`, SRV-16) cover a dedicated host name only (report 2026-10-27-protocol-4, item 7).
+Use a **dedicated subdomain** such as `relay.example.org`, never the apex of a domain that serves other sites.
+
+1. Railway: service **Settings** → **Networking** → **Public Networking** → **+ Custom Domain**, enter
+   `relay.example.org`. Railway shows a `CNAME` record (target `<something>.up.railway.app`) and a `TXT` record
+   (ownership). Add **both** at your DNS provider; without the TXT record the domain answers `404`.
+2. Wait until Railway shows the certificate as issued (usually within an hour, up to 72 h). Behind Cloudflare's
+   proxy, set SSL/TLS to **Full** (not Flexible: redirect loop; not Full (strict) during issuance).
+3. Check: `curl -sSI https://relay.example.org/healthz` → `HTTP/2 200` with a `strict-transport-security` header,
+   and `openssl s_client -connect relay.example.org:443 -servername relay.example.org < /dev/null | grep -E
+   'Verify return code|subject='` → `Verify return code: 0 (ok)`. Hospital networks that inspect TLS replace the
+   chain with their own; the relay cannot change that (R-10) — test from such a network before relying on it.
+4. Variables: `ALLOWED_ORIGINS=https://relay.example.org` (only the new origin once everyone uses it; both,
+   comma-separated, during the switch). Deploy when no session runs. Item 7 of §4 must still answer `403`.
+5. Slicer: the relay address becomes `wss://relay.example.org/ws`. The QR code fits a host of at most 48 characters
+   (report 2026-10-21-slicer-1); a short subdomain keeps the link scannable.
+6. Keep the generated domain as a fallback: it stays on the service next to the custom one (Railway allows one
+   generated domain and several custom ones per service; that adding a custom domain never removes the generated
+   one is `[TODO verify]` at the first setup). A phone opening the fallback needs its origin in `ALLOWED_ORIGINS`
+   too.
+
+Limits: Hobby 2 custom domains per service, Pro 20. Do not delete and re-add a domain repeatedly: Let's Encrypt
+issues at most 5 duplicate certificates per week. With IaC (§1.4), a custom domain can be declared as
+`domains: [{ domain: "relay.example.org", port: <the port of the "relay listening" log line> }]` — the SDK assumes
+port 8080 when none is given; until that is verified with a plan, keep domains in the dashboard `[TODO verify]`.
+
+Record (no domain): date the custom domain went live, certificate check result, `ALLOWED_ORIGINS` switched on.
+
 ## 7. CI and branch protection
 
 ### 7.1 What runs
