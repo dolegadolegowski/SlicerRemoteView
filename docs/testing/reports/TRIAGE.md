@@ -9,11 +9,11 @@ a report without an owner component or a status. Triage flow, status transitions
 
 | Status | high | medium | low | no severity | Total |
 |---|---|---|---|---|---|
-| open | 0 | 12 | 15 | 0 | 27 |
+| open | 0 | 12 | 16 | 0 | 28 |
 | triaged | 0 | 8 | 18 | 0 | 26 |
 | fixed | 0 | 2 | 4 | 0 | 6 |
 | rejected | 0 | 0 | 0 | 0 | 0 |
-| **all reports** | 0 | 22 | 37 | 0 | 59 |
+| **all reports** | 0 | 22 | 38 | 0 | 60 |
 
 ## Open and triaged reports by owner component
 
@@ -42,7 +42,7 @@ a report without an owner component or a status. Triage flow, status transitions
 | [2026-10-27-server-4](2026-10-27-server-4.md) | low | M2 | triaged (PRO-25, SRV-28) | web, slicer, release | Resume and rejoin: answers the protocol does not state yet (SRV-15) |
 | [2026-10-27-server-5](2026-10-27-server-5.md) | low | M2 | triaged (PRO-25) | web, slicer, quest | A draining relay: the `503` answers the protocol does not list (SRV-17) |
 
-### server — 4 (4 open, 0 triaged)
+### server — 5 (5 open, 0 triaged)
 
 | Report | Severity | Milestone | Status | Also affects | Title |
 |---|---|---|---|---|---|
@@ -50,6 +50,7 @@ a report without an owner component or a status. Triage flow, status transitions
 | [2026-10-20-web-2](2026-10-20-web-2.md) | medium | M2 | open | release, qa | After a relay restart, a lecture room behind one NAT address can trip the per-IP join ban while rejoining by code |
 | [2026-10-21-web](2026-10-21-web.md) | medium | M2, M3a | open | — | The relay serves only `/`, `/j` and `/assets/*`: the viewer's manifest and icons 404, and its CSP refuses `fetch(blob:)` |
 | [2026-10-27-protocol-1](2026-10-27-protocol-1.md) | low | M3b | open | — | Protocol 1.1: what the relay must change (little) and may now close |
+| [2026-11-03-qa-1](2026-11-03-qa-1.md) | low | M2 | open | — | Production dependencies carry 4 moderate npm advisories; `fast-uri` has an in-range fix |
 
 ### web — 3 (2 open, 1 triaged)
 
