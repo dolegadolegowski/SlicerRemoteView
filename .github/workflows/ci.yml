@@ -59,6 +59,9 @@ jobs:
           node-version: 22.x
       - name: CI script tests
         run: node --test ".github/scripts/test/*.test.mjs"
+      # DEP-13: the same variable names in .railway/railway.ts and relay-server/.env.example.
+      - name: Env parity
+        run: node .github/scripts/check-env-parity.mjs
       # DEP-04: .railway/railway.ts against the railway SDK's types (field names, values).
       - name: Railway IaC type-check
         run: |

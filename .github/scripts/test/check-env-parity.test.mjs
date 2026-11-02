@@ -1,0 +1,48 @@
+// node --test ".github/scripts/test/*.test.mjs" (run by the `repo-checks` job of ci.yml)
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { test } from "node:test";
+import { compare, namesFromEnvExample, namesFromRailwayTs } from "../check-env-parity.mjs";
+
+const RAILWAY = `
+const relay = service("relay", {
+  deploy: { numReplicas: 1 },
+  env: {
+    LOG_LEVEL: "info",
+    // a comment with NOT_A_NAME: inside
+    METRICS_TOKEN: preserve(),
+  },
+});
+const other = { env: { LATER: "x" } };
+`;
+
+test("railway.ts: the keys of the env block only", () => {
+  assert.deepEqual(namesFromRailwayTs(RAILWAY), ["LOG_LEVEL", "METRICS_TOKEN"]);
+});
+
+test(".env.example: NAME= lines, not comments", () => {
+  assert.deepEqual(namesFromEnvExample("# FOO=1\nPORT=8787\nMETRICS_TOKEN=\n\nLOG_LEVEL=info\n"), [
+    "PORT",
+    "METRICS_TOKEN",
+    "LOG_LEVEL",
+  ]);
+});
+
+test("a name on one side only is reported with both labels", () => {
+  const problems = compare({ a: ["LOG_LEVEL", "FOO"], b: ["LOG_LEVEL", "BAR"] });
+  assert.deepEqual(problems, ["BAR: in b, missing from a", "FOO: in a, missing from b"]);
+});
+
+test("exceptions may be missing anywhere; the test-only switch is forbidden on Railway", () => {
+  assert.deepEqual(compare({ r: ["LOG_LEVEL"], e: ["LOG_LEVEL", "PORT", "RELAY_TEST_FAST_TIMERS"] }, { railwayLabel: "r" }), []);
+  assert.deepEqual(compare({ r: ["RELAY_TEST_FAST_TIMERS"], e: [] }, { railwayLabel: "r" }), [
+    "RELAY_TEST_FAST_TIMERS: test-only (docs/architecture.md §9), must not be in r",
+  ]);
+});
+
+test("the repository's own files agree", () => {
+  const railway = namesFromRailwayTs(readFileSync(".railway/railway.ts", "utf8"));
+  const example = namesFromEnvExample(readFileSync("relay-server/.env.example", "utf8"));
+  assert.deepEqual(compare({ railway, example }, { railwayLabel: "railway" }), []);
+  assert.ok(railway.includes("MAX_TOTAL_BUFFERED_BYTES") && railway.includes("TRUST_PROXY"));
+});
