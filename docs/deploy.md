@@ -346,3 +346,24 @@ Once a job has been green for two weeks, make it blocking in `.github/workflows/
 `continue-on-error: true` line and add the job's id to the `needs:` list of `ci-ok` (one line each, for example
 `needs: [detect, repo-checks, node, python, docker, e2e]`). Branch protection needs no change: `ci-ok` stays the
 only required check.
+
+## 8. Releasing
+
+`.github/workflows/release.yml` runs when a tag `v*` is pushed (DEP-11). It never deploys: the relay on Railway
+follows `main`, not tags.
+
+1. On `main`, `release` adds a section `## [X.Y.Z] - YYYY-MM-DD` to `CHANGELOG.md` (the only source of the release
+   text) and aligns the versions (prompts/08).
+2. Tag the commit and push the tag: `git tag vX.Y.Z` then `git push origin vX.Y.Z` (a tag with a hyphen, such as
+   `v0.0.1-rc.1`, makes a pre-release).
+3. The workflow:
+   - takes the tag's section from `CHANGELOG.md` (`.github/scripts/changelog-section.mjs`) and fails with a clear
+     message when there is none;
+   - builds `SlicerRemoteView-X.Y.Z.zip` with `slicer-plugin/scripts/package.py` (SLC-20; fails while that script
+     does not exist) and fails if the archive lists a `.env`, `.npmrc`, key or keystore file;
+   - builds the relay image and pushes `ghcr.io/<owner>/slicerremoteview-relay:X.Y.Z` (and `:sha-<commit>`);
+   - creates a **draft** release with the notes, the zip and a checklist line for the Quest APK.
+4. Open **Releases**, attach the APK by hand (QST-15), read the draft, **Publish release**.
+
+A failed run leaves no release behind except, possibly, a pushed image; fix the cause, delete the tag
+(`git push origin :refs/tags/vX.Y.Z` and `git tag -d vX.Y.Z`) and tag again.
