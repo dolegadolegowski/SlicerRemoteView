@@ -179,6 +179,32 @@ image's build stage and the build cache (report 2026-10-20-server-9; not in the 
   endpoints"; report 2026-10-27-server-7). No label carries a code, session, token or address, but a leaked token
   still shows activity and headroom over time: rotate it when in doubt.
 
+## 4. First deploy checklist
+
+Run once after the relay is deployed on Railway (DEP-06), and again after a change of the Dockerfile, the region or
+the plan. It is the owner's check against the owner's relay; the agents never send traffic to it. Use a computer on
+a direct connection (no corporate or hospital proxy), because the `X-Forwarded-For` count of item 4 is read from
+your own request. Fill the result column with `pass`/`fail` and the date; a `fail` becomes a report in
+`docs/testing/reports/` for the component that owns it. Write no domain, code or token into this table.
+
+Commands use `<your-domain>`; `fake-slicer` is the repository's publisher simulator (`npm ci && npm run build -w
+shared -w tools/fake-slicer` at the repository root first). Its session code goes only to the file descriptor given
+with `--code-fd`, never to the terminal.
+
+| # | Check | How | Expected | Result (date) |
+|---|---|---|---|---|
+| 1 | The image builds on Railway with the repository root as context | Deployments → newest → **Build Logs** | the Dockerfile `/relay-server/Dockerfile` is used, both stages succeed (`COPY shared/…` works, ADR 0007) | |
+| 2 | `/healthz` over HTTPS, TLS 1.2+ only | `curl -sS -w '\n%{http_code} %{ssl_version}\n' https://<your-domain>/healthz`; `curl -sS --tls-max 1.1 https://<your-domain>/healthz` | `{"status":"ok","uptimeS":…,"sessions":…,"viewers":…,"version":…}` and `200 TLSv1.3` (or 1.2); the second command fails | |
+| 3 | `/healthz` has no memory figures and no session data | the body of item 2 | only `status`, `uptimeS`, `sessions`, `viewers`, `version` (NFR-38) | |
+| 4 | `X-Forwarded-For`: how many entries the edge adds | right after a deploy, as the **first** WebSocket of that deployment: `node tools/fake-slicer/bin/fake-slicer.js --relay wss://<your-domain>/ws --exit-after-ack --code-fd 3 3>/dev/null`; then the deploy log line `first websocket upgrade` | `xff: "present"`, `xffEntries: 1` (the edge is the only hop: `TRUST_PROXY=true` is right). More than 1: report to `server` (report 2026-10-18-server-1) | |
+| 5 | The relay starts as configured | deploy log line `relay starting` | `trustProxy: true`, `testFastTimers: false`; note `heapSizeLimit` (item 9) | |
+| 6 | Publish over `wss://` and join from a phone | `node tools/fake-slicer/bin/fake-slicer.js --relay wss://<your-domain>/ws --code-fd 3 3>code.txt` (keeps running); open `https://<your-domain>/` on a phone on mobile data, type the code from `code.txt`; then delete `code.txt` | the phone shows the fixture scene (NFR-14) | |
+| 7 | A foreign browser origin is refused | `curl -sS -o /dev/null -w '%{http_code}\n' -H 'Origin: https://example.com' -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' https://<your-domain>/ws` | `403` (FR-33); the phone of item 6 (its own origin) works | |
+| 8 | Redeploy drains instead of cutting | with item 6 still connected, **Deployments** → **Redeploy**; watch the old deployment's log and fake-slicer's output | the old relay logs `shutting down` and ends within `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` (30 s) without `shutdown timed out`; clients are closed with `4008` and the publisher resumes on the new deployment (T9; SRV-17) `[TODO verify]` exact client output | |
+| 9 | Heap size inside the container | `heapSizeLimit` of item 5 | about 75 % of the container memory (`NODE_OPTIONS=--max-old-space-size-percentage=75`). Railway sizes the container to the plan's per-replica cap (Hobby: 8 GB), so expect ~6 GB: lower it with **Settings** → **Deploy** → **Replica Limits** (memory, e.g. 1–2 GB, §6) `[TODO verify]` that `heapSizeLimit` follows | |
+| 10 | Query strings in the edge's HTTP logs | `curl -sS -o /dev/null 'https://<your-domain>/healthz?probe=1'`; **Observability** → HTTP logs, filter the path | record whether `path` shows `?probe=1` (T6; the relay never puts codes or tokens in a URL, so either answer is safe — it decides whether query strings may ever be used) | |
+| 11 | `ALLOWED_ORIGINS` names the domain phones open | service **Variables** | exactly `https://<your-domain>` (or empty for the generated domain); otherwise phones show "Connection lost" | |
+
 ## 7. CI and branch protection
 
 ### 7.1 What runs
