@@ -59,6 +59,15 @@ jobs:
           node-version: 22.x
       - name: CI script tests
         run: node --test ".github/scripts/test/*.test.mjs"
+      # DEP-04: .railway/railway.ts against the railway SDK's types (field names, values).
+      - name: Railway IaC type-check
+        run: |
+          if [ -f .railway/package.json ]; then
+            npm ci --prefix .railway --no-audit --no-fund
+            npm run typecheck --prefix .railway
+          else
+            echo "no .railway/ on this branch"
+          fi
 
   node:
     needs: detect
