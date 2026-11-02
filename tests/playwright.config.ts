@@ -20,10 +20,13 @@ export default defineConfig({
   fullyParallel: true,
   forbidOnly: !!process.env["CI"],
   retries: process.env["CI"] ? 1 : 0,
-  reporter: process.env["CI"] ? [["github"], ["html", { open: "never" }]] : "list",
+  // No HTML report and no traces in CI: both record step titles and request headers (`Type "<code>"`, the
+  // `/j#<code>` navigation, `Authorization: Bearer <viewerToken>`), and CI uploads its artefacts — NFR-12 keeps
+  // codes and tokens out of every file CI produces. Locally a failing test keeps its trace (git-ignored).
+  reporter: process.env["CI"] ? [["github"], ["list"]] : "list",
   timeout: 60_000,
   use: {
-    trace: "retain-on-failure",
+    trace: process.env["CI"] ? "off" : "retain-on-failure",
   },
   projects: [
     { name: "iphone15", testDir: "e2e", use: { ...devices["iPhone 15"] } },
