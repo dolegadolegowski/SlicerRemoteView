@@ -56,10 +56,13 @@ MRML ID (and segment ID) the event's node reports; the sink resolves it through 
   log file (T7): every handler catches ``Exception`` and logs its type only; :meth:`SceneWatcher.attach` raises a
   fixed text. An event on another thread marks nothing (MRML is main-thread only); :meth:`SceneWatcher.take_off_thread`
   tells the pump to ask for a fresh snapshot, and the pump brings the sink's batch hold in line with
-  :meth:`SceneWatcher.batch_processing` (SLC-33: an ``EndBatchProcessEvent`` missed released nothing).
+  :meth:`SceneWatcher.batch_processing` (SLC-33: an ``EndBatchProcessEvent`` missed released nothing). An
+  ``EndCloseEvent`` on another thread (SLC-70) also calls the sink's ``scene_closed_off_thread`` at once — its one
+  method safe off the main thread —: a preparation running stops at its next step, and the sink resets on the main
+  thread before it sends anything again.
 
 Pure: ``vtkmodules`` only; the event ids come from the adapter's ``slicer.vtkMRML*``/``slicer.vtkSegmentation``
-constants (:class:`MrmlEvents`). Main thread only.
+constants (:class:`MrmlEvents`). Main thread only, but for the handlers' off-thread branches above.
 """
 
 from __future__ import annotations
@@ -108,7 +111,8 @@ class MrmlEvents:
 
 
 class Sink(Protocol):
-    """What the watcher calls: SLC-29's ``LiveUpdates`` (none of these raise). Every ID is raw: the sink resolves."""
+    """What the watcher calls: SLC-29's ``LiveUpdates`` (none of these raise). Every ID is raw: the sink resolves.
+    Main thread only, but ``scene_closed_off_thread`` (SLC-70), called from the thread that closed the scene."""
 
     def mark(self, node_id: str, flags: Change) -> None: ...
 
@@ -125,6 +129,8 @@ class Sink(Protocol):
     def release(self) -> None: ...
 
     def reset(self) -> None: ...
+
+    def scene_closed_off_thread(self) -> None: ...
 
 
 #: ``_Watched.matrix`` when the pose is unknown (not read yet, or unreadable): the next transform event marks. Also a
@@ -421,7 +427,14 @@ class SceneWatcher:
         self._guard(self._sink.release)
 
     def _on_end_close(self, caller: Any, event: str) -> None:
-        self._guard(self._closed)
+        if threading.get_ident() != self._main:
+            # SLC-70: the sink's one call safe off the main thread — a preparation running stops at its next step,
+            # and the sink resets on the main thread before it classifies, prepares or sends anything again
+            try:
+                self._sink.scene_closed_off_thread()
+            except Exception as exc:  # noqa: BLE001 — PyErr_Print would show the text (T7)
+                _log.error("live: scene observer failed (%s)", type(exc).__name__)
+        self._guard(self._closed)  # off the main thread: the flag only (SLC-33)
 
     # the segment ID as char* on the immediate path; two arguments (None) when the call data is NULL
     @calldata_type(VTK_STRING)

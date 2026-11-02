@@ -19,6 +19,9 @@ import weakref
 import pytest
 from mrml_fakes import EVENT_IDS, Scene
 from support import (
+    CODE,
+    OTHER_SESSION_ID,
+    OTHER_TOKEN,
     SESSION_ID,
     TOKEN,
     URL,
@@ -39,6 +42,8 @@ from support import (
     parent_widget,
     pump_while,
     reassemble,
+    relay_error,
+    resumed,
     specked,
     sphere,
     start_relay_stub,
@@ -62,7 +67,7 @@ from remoteview_core.transport import (
 from remoteview_protocol import envelope
 
 EVENTS = MrmlEvents(**EVENT_IDS)
-A, B = "vtkMRMLModelNode4", "vtkMRMLModelNode5"
+A, B, C = "vtkMRMLModelNode4", "vtkMRMLModelNode5", "vtkMRMLModelNode6"
 #: T7 needles: the models are named "Doe^John …", and a traceback must never be printed
 NAMES = ("Doe", "vtkMRMLModelNode", "Traceback")
 SECRET = KeyError(f"{A} Doe^John")
@@ -114,6 +119,7 @@ class Rig:
             platform=sys.platform,
             transport_factory=transport_factory,
             clock=self.timer.clock,
+            wall=self.timer.clock,  # no host clock step can reach the reconnect window
             scene=lambda: MrmlSceneApi(self.scene.by_class, FakeFolders()),
             flush_timer=self.timer,
             watch=watch or self.watch,
@@ -299,13 +305,49 @@ def test_panel_live_end_to_end_with_the_relay_stub(caplog, capfd):
 ENDS = [
     "stop",
     "relay-end",
-    "lost",
+    "reconnect-gave-up",
+    "resume-unauthorized",
+    "stop-while-reconnecting",
     "transport-ended",
     "shutdown",
     "refused-reset",
     "binary-frame",
     "fatal-error",
 ]
+
+
+def end_session(rig: Rig, end: str) -> None:
+    """End a live session in one of the ways of :data:`ENDS`."""
+    ctl = rig.ctl
+    if end == "stop":
+        ctl.stop()
+    elif end == "relay-end":
+        expired = envelope.make("session.expired", sessionId=SESSION_ID, reason="IDLE")
+        deliver(ctl, Received(1, expired))
+    elif end == "reconnect-gave-up":
+        deliver(ctl, Disconnected(1, None, 1.0))
+        rig.pump(180_000)  # the relay's grace and the slack; the pause hold leaves no flush to fire
+    elif end == "resume-unauthorized":
+        deliver(ctl, Disconnected(1, None, 1.0), Connected(2))
+        [resume] = [m for c, m in FakeTransport.made[0].sent if c == 2]
+        deliver(ctl, Received(2, relay_error("UNAUTHORIZED", resume["id"])))
+    elif end == "stop-while-reconnecting":
+        deliver(ctl, Disconnected(1, None, 1.0))
+        ctl.stop()
+    elif end == "transport-ended":
+        error = TransportError(ErrorKind.CLOSED, retryable=False, close_code=4003)
+        deliver(ctl, Disconnected(1, error, None))
+    elif end == "shutdown":
+        ctl.shutdown(timeout=0)
+    elif end == "refused-reset":
+        close_scene(rig)
+        rig.timer.advance(0)
+        refuse(rig, "CAPACITY")
+    elif end == "binary-frame":
+        deliver(ctl, Received(1, b"\x00"))
+    else:
+        fatal = envelope.make("error", code="UNAUTHORIZED", message="x", retryable=False)
+        deliver(ctl, Received(1, fatal))
 
 
 @pytest.mark.parametrize("end", ENDS)
@@ -322,27 +364,7 @@ def test_panel_live_observers_exist_only_while_live(fake, caplog, capfd, end):
     assert rig.observers() == 5 + 4 and ctl.observer_count == 5 + 4
     recolor(a, (0.0, 1.0, 0.0))
     assert rig.timer.deadline is not None  # a flush pending when the session ends
-    if end == "stop":
-        ctl.stop()
-    elif end == "relay-end":
-        expired = envelope.make("session.expired", sessionId=SESSION_ID, reason="IDLE")
-        deliver(ctl, Received(1, expired))
-    elif end == "lost":
-        deliver(ctl, Disconnected(1, None, 1.0))
-    elif end == "transport-ended":
-        error = TransportError(ErrorKind.CLOSED, retryable=False, close_code=4003)
-        deliver(ctl, Disconnected(1, error, None))
-    elif end == "shutdown":
-        ctl.shutdown(timeout=0)
-    elif end == "refused-reset":
-        close_scene(rig)
-        rig.timer.advance(0)
-        refuse(rig, "CAPACITY")
-    elif end == "binary-frame":
-        deliver(ctl, Received(1, b"\x00"))
-    else:
-        fatal = envelope.make("error", code="UNAUTHORIZED", message="x", retryable=False)
-        deliver(ctl, Received(1, fatal))
+    end_session(rig, end)
     assert ctl.phase is not Phase.LIVE
     assert ctl.observer_count == 0 and rig.observers() == 0
     assert rig.timer.deadline is None
@@ -354,7 +376,571 @@ def test_panel_live_observers_exist_only_while_live(fake, caplog, capfd, end):
     ctl.flush_live()
     rig.pump(1000)
     assert len(FakeTransport.made[0].sent) == sent
+    assert leaks(caplog, capfd, *NAMES, CODE, TOKEN, SESSION_ID) == []
+
+
+def test_panel_live_resume_keeps_the_live_updates_and_observers(fake, caplog, capfd):
+    """SLC-44: while reconnecting the marks wait (no flush, no tick); ``session.resumed`` brings back the same live
+    updates and observers (no second watcher, no second snapshot), and the held change goes out as an update."""
+    caplog.set_level(logging.DEBUG)
+    a = MrmlModel(A, name="Doe^John liver")
+    rig = live_rig(a)
+    acked(rig, 1)
+    ctl, live_updates, observers = rig.ctl, rig.ctl._live, rig.observers()
+    deliver(ctl, Disconnected(1, TransportError(ErrorKind.NETWORK, retryable=True), 0.5))
+    recolor(a, (0.0, 1.0, 0.0))
+    assert rig.timer.deadline is None  # held while reconnecting
+    rig.pump(5000)
+    deliver(ctl, Connected(2))
+    [resume] = [m for c, m in FakeTransport.made[0].sent if c == 2]
+    assert (resume["type"], resume["lastSceneVersion"]) == ("session.resume", 1)
+    deliver(ctl, Received(2, resumed(resume["id"], scene_version=1, snapshot_version=1)))
+    assert ctl.phase is Phase.LIVE and ctl._live is live_updates
+    assert len(rig.watchers) == 1 and rig.observers() == observers
+    rig.pump(150)  # the held change flushes on the new connection
+    sent = [m for c, m in FakeTransport.made[0].sent if c == 2]
+    assert [m["type"] for m in sent] == ["session.resume", "scene.update"]
+    assert (sent[1]["baseVersion"], sent[1]["sceneVersion"]) == (1, 2)
+    assert leaks(caplog, capfd, *NAMES, CODE, TOKEN) == []
+
+
+# --------------------------------------------------------------------------- SLC-45: the scene across a reconnect
+
+NETWORK = TransportError(ErrorKind.NETWORK, retryable=True)
+
+
+def sent_on(connection: int) -> list:
+    return [m for c, m in FakeTransport.made[0].sent if c == connection]
+
+
+def begins_on(connection: int) -> list[dict]:
+    return [
+        m
+        for m in sent_on(connection)
+        if isinstance(m, dict) and m["type"] == "scene.snapshot.begin"
+    ]
+
+
+def reconnect(rig: Rig, error=NETWORK) -> str:
+    """The connection drops, the transport reconnects as connection 2: the ``session.resume`` id."""
+    deliver(rig.ctl, Disconnected(1, error, 0.5), Connected(2))
+    [resume] = sent_on(2)
+    assert resume["type"] == "session.resume"
+    return resume["id"]
+
+
+def snapshot_in_flight(rig: Rig) -> int:
+    """A model added after the first ack: its snapshot begins and is not acknowledged."""
+    rig.add(MrmlModel(B, name="Doe^John kidney"))
+    rig.pump(1000)
+    begin = rig.begins()[-1]
+    assert begin["sceneVersion"] > 1
+    return begin["sceneVersion"]
+
+
+def test_panel_live_resume_snapshot_lost_with_the_connection_is_sent_again(fake, caplog, capfd):
+    caplog.set_level(logging.DEBUG)
+    rig = live_rig(MrmlModel(A, name="Doe^John liver"))
+    acked(rig, 1)
+    version = snapshot_in_flight(rig)
+    view = deliver(rig.ctl, Disconnected(1, NETWORK, 0.5))
+    assert panel.SCENE_INTERRUPTED in view.detail
+    resume_id = reconnect(rig)
+    deliver(rig.ctl, Received(2, resumed(resume_id, scene_version=version, snapshot_version=1)))
+    [begin] = begins_on(2)
+    assert begin["sceneVersion"] == version + 1  # sent again at once, on a new version (§6.2)
+    assert rig.ctl.view.status.startswith(panel.SCENE_STATES["updating"])
+    view = deliver(rig.ctl, Received(2, ack(version + 1)))
+    assert view.status.startswith(panel.SCENE_STATES["live"])
+    view = deliver(rig.ctl, Disconnected(2, NETWORK, 0.5))  # a later drop with nothing in flight
+    assert panel.SCENE_INTERRUPTED not in view.detail
+    assert leaks(caplog, capfd, *NAMES, CODE, TOKEN) == []
+
+
+def test_panel_live_resume_a_lost_snapshot_that_cannot_be_prepared_again_is_not_said_to_follow(
+    fake, monkeypatch, caplog, capfd
+):
+    """The re-export fails after the resume: the scene's problem is said, and a later drop no longer promises it."""
+    caplog.set_level(logging.DEBUG)
+    rig = live_rig(MrmlModel(A, name="Doe^John liver"))
+    acked(rig, 1)
+    version = snapshot_in_flight(rig)
+    deliver(rig.ctl, Disconnected(1, NETWORK, 0.5))
+    resume_id = reconnect(rig)
+
+    def boom(name):
+        raise SECRET
+
+    monkeypatch.setattr(rig.scene, "by_class", boom)
+    deliver(rig.ctl, Received(2, resumed(resume_id, scene_version=version, snapshot_version=1)))
+    rig.pump(1000)
+    assert begins_on(2) == [] and panel.SCENE_FAILED in rig.ctl.view.detail
+    view = deliver(rig.ctl, Disconnected(2, NETWORK, 0.5))
+    assert panel.SCENE_INTERRUPTED not in view.detail
+    assert leaks(caplog, capfd, *NAMES, CODE, TOKEN) == []
+
+
+def test_panel_live_resume_a_lost_snapshot_too_large_to_send_again_is_not_said_to_follow(fake):
+    """A model added while offline makes the owed snapshot too large: the size is said, not the interruption."""
+    rig = live_rig(
+        MrmlModel(A, polydata=sphere(64)), limits={"maxSnapshotBytes": limit_for_one(64)}
+    )
+    acked(rig, 1)
+    version = snapshot_in_flight(rig)
+    deliver(rig.ctl, Disconnected(1, NETWORK, 0.5))
+    rig.add(MrmlModel(C, polydata=sphere(64)))
+    resume_id = reconnect(rig)
+    deliver(rig.ctl, Received(2, resumed(resume_id, scene_version=version, snapshot_version=1)))
+    rig.pump(1000)
+    assert begins_on(2) == [] and rig.ctl.view.detail.endswith(panel.HIDE_MODELS)
+    view = deliver(rig.ctl, Disconnected(2, NETWORK, 0.5))
+    assert panel.SCENE_INTERRUPTED not in view.detail
+
+
+def test_panel_live_resume_a_new_start_forgets_a_lost_snapshot(fake):
+    """The next session starts while Slicer is busy (its first snapshot waits, no live event yet) and drops: nothing
+    of the last session's lost snapshot is said."""
+    rig = live_rig(MrmlModel(A, name="Doe^John liver"))
+    acked(rig, 1)
+    snapshot_in_flight(rig)
+    deliver(rig.ctl, Disconnected(1, NETWORK, 0.5))
+    rig.ctl.stop()
+    deliver(rig.ctl, Disconnected(None, None, None))
+    rig.scene.batch = True
+    rig.ctl.start(URL)
+    deliver(rig.ctl, Connected(1), Received(1, created()))
+    view = deliver(rig.ctl, Disconnected(1, NETWORK, 0.5))  # nothing in flight
+    assert rig.ctl.phase is panel.Phase.RECONNECTING and panel.SCENE_INTERRUPTED not in view.detail
+
+
+def test_panel_live_resume_snapshot_acked_while_offline_is_not_sent_again(fake):
+    rig = live_rig(MrmlModel(A, name="Doe^John liver"))
+    acked(rig, 1)
+    version = snapshot_in_flight(rig)
+    deliver(rig.ctl, Disconnected(1, NETWORK, 0.5))
+    resume_id = reconnect(rig)
+    view = deliver(
+        rig.ctl, Received(2, resumed(resume_id, scene_version=version, snapshot_version=version))
+    )
+    assert [m["type"] for m in sent_on(2)] == ["session.resume"]  # only its ack was lost
+    assert view.status.startswith(panel.SCENE_STATES["live"])
+    # the ack cleared it: a later drop does not say it
+    view = deliver(rig.ctl, Disconnected(2, NETWORK, 0.5))
+    assert panel.SCENE_INTERRUPTED not in view.detail
+
+
+def test_panel_live_resume_reset_owed_at_a_drop_goes_first(fake):
+    """§7.3: a scene closed just before the drop is cleared off the viewers first, and the panel says it is still on
+    them while reconnecting."""
+    rig = live_rig(MrmlModel(A, name="Doe^John liver"))
+    acked(rig, 1)
+    close_scene(rig)  # its flush has not run yet
+    view = deliver(rig.ctl, Disconnected(1, NETWORK, 0.5))
+    assert panel.RESET_PENDING in view.detail
+    resume_id = reconnect(rig)
+    deliver(rig.ctl, Received(2, resumed(resume_id, scene_version=1, snapshot_version=1)))
+    rig.pump(0)
+    frames = [m["type"] for m in sent_on(2) if isinstance(m, dict)]
+    assert frames[:2] == ["session.resume", "scene.snapshot.begin"]
+
+
+def test_panel_live_resume_reset_in_flight_is_adopted_once(fake):
+    """A reset whose ack was lost with the connection: the relay holds it (§4.3), so it is adopted, not sent again,
+    and nothing about it is said once Live."""
+    rig = live_rig(MrmlModel(A, name="Doe^John liver"))
+    acked(rig, 1)
+    close_scene(rig)
+    rig.timer.advance(0)  # the reset's snapshot begins
+    reset_version = rig.begins()[-1]["sceneVersion"]
+    view = deliver(rig.ctl, Disconnected(1, NETWORK, 0.5))
+    assert panel.RESET_PENDING in view.detail and panel.SCENE_INTERRUPTED in view.detail
+    resume_id = reconnect(rig)
+    answer = resumed(resume_id, scene_version=reset_version, snapshot_version=reset_version)
+    deliver(rig.ctl, Received(2, answer))
+    rig.pump(1000)
+    assert begins_on(2) == []
+    assert rig.ctl.view.status.startswith(panel.SCENE_STATES["live"])
+    view = deliver(rig.ctl, Disconnected(2, NETWORK, 0.5))
+    assert panel.RESET_PENDING not in view.detail and panel.SCENE_INTERRUPTED not in view.detail
+
+
+def test_panel_live_resume_a_scene_closed_while_offline_is_said_at_the_next_tick(fake):
+    rig = live_rig(MrmlModel(A, name="Doe^John liver"))
+    acked(rig, 1)
+    deliver(rig.ctl, Disconnected(1, NETWORK, 30.0))
+    close_scene(rig)  # the reset is owed at once; nothing flushes while paused
+    assert panel.RESET_PENDING not in rig.ctl.view.detail
+    view = rig.ctl.pump()  # no transport event for up to 30 s: the tick says it
+    assert panel.RESET_PENDING in view.detail and rig.ctl.phase is panel.Phase.RECONNECTING
+
+
+def test_panel_live_resume_after_a_restart_the_closed_scene_is_not_said_to_be_on_the_relay(fake):
+    """§13 step 9: a restarted relay keeps no scene, so a closed scene owed at a 4008 is not said to be visible to
+    anyone with the code; the restart is."""
+    rig = live_rig(MrmlModel(A, name="Doe^John liver"))
+    acked(rig, 1)
+    close_scene(rig)
+    restart = TransportError(ErrorKind.CLOSED, retryable=True, close_code=4008)
+    view = deliver(rig.ctl, Disconnected(1, restart, 0.0))
+    assert panel.RELAY_RESTARTED in view.detail and panel.RESET_PENDING not in view.detail
+
+
+def test_panel_live_resume_reset_failing_at_the_first_tick_ends_the_session(
+    fake, monkeypatch, caplog, capfd
+):
+    """A reset whose snapshot was cut by the drop goes again at the first tick after the resume; when it cannot be
+    sent the session ends from the pump, and no scene text replaces "Stopping…"."""
+    caplog.set_level(logging.DEBUG)
+    rig = live_rig(MrmlModel(A, name="Doe^John liver"))
+    acked(rig, 1)
+    close_scene(rig)
+    rig.timer.advance(0)  # the reset's snapshot begins
+    reset_version = rig.begins()[-1]["sceneVersion"]
+    deliver(rig.ctl, Disconnected(1, NETWORK, 0.5))
+    resume_id = reconnect(rig)
+    transport = FakeTransport.made[0]
+    real = transport.send
+
+    def send(frame, *, connection):
+        if isinstance(frame, dict) and frame["type"] == "scene.snapshot.begin":
+            raise OSError(f"socket {A} Doe^John")
+        return real(frame, connection=connection)
+
+    monkeypatch.setattr(transport, "send", send)
+    answer = resumed(resume_id, scene_version=reset_version, snapshot_version=1)
+    view = deliver(rig.ctl, Received(2, answer))
+    assert view.status == panel.STOPPING and rig.observers() == 0
+    view = deliver(rig.ctl, Disconnected(2, None, None, final_sent=True))
+    assert (view.status, view.detail) == (panel.SESSION_ENDED, live.RESET_NOT_SENT)
     assert leaks(caplog, capfd, *NAMES) == []
+
+
+@pytest.mark.parametrize(
+    "session_id", [OTHER_SESSION_ID, SESSION_ID], ids=["another-id", "same-id"]
+)
+def test_panel_live_resume_recreate_replaces_the_observers_once(fake, caplog, capfd, session_id):
+    """§4.3, §9.3, §8.4: after a relay restart the re-created session gets new live updates and one new watcher (none
+    in between), and its first snapshot is version 1 — even from a relay that repeats the old session ID."""
+    caplog.set_level(logging.DEBUG)
+    rig = live_rig(MrmlModel(A, name="Doe^John liver"))
+    acked(rig, 1)
+    observers = rig.observers()
+    restart = TransportError(ErrorKind.CLOSED, retryable=True, close_code=4008)
+    resume_id = reconnect(rig, restart)
+    deliver(rig.ctl, Received(2, relay_error("SESSION_NOT_FOUND", resume_id)))
+    create = sent_on(2)[-1]
+    assert create["type"] == "session.create"
+    assert rig.observers() == 0 and rig.ctl.observer_count == 0
+    again = created(create["id"], session_id=session_id, token=OTHER_TOKEN)
+    view = deliver(rig.ctl, Received(2, again))
+    assert len(rig.watchers) == 2 and rig.observers() == observers
+    [begin] = begins_on(2)
+    assert begin["sceneVersion"] == 1
+    assert view.status.startswith(panel.SCENE_STATES["sending"]) and view.code == CODE
+    assert (
+        leaks(caplog, capfd, *NAMES, CODE, TOKEN, OTHER_TOKEN, SESSION_ID, OTHER_SESSION_ID) == []
+    )
+
+
+# --------------------------------------------------------------------------- SLC-48: close 4010 is a drop
+
+
+#: The free text of the relay's error: never shown, never logged (T7).
+SLOW_TEXT = "slow consumer: the send buffer of Doe^John passed 1 MiB"
+SLOW_CLOSE = TransportError(ErrorKind.CLOSED, retryable=True, close_code=4010)
+
+
+def slow_consumer_close(rig: Rig) -> panel.PanelView:
+    """``error SLOW_CONSUMER`` (no ``replyTo``), then close 4010: the view after the close."""
+    ctl = rig.ctl
+    before, sent_before = ctl.pump(), len(sent_on(1))
+    error = relay_error("SLOW_CONSUMER", retryable=True)
+    error["message"] = SLOW_TEXT
+    view = deliver(ctl, Received(1, error))
+    # the error alone changes nothing: the relay closes the socket next
+    assert ctl.phase is Phase.LIVE and view == before and len(sent_on(1)) == sent_before
+    return deliver(ctl, Disconnected(1, SLOW_CLOSE, 0.5))
+
+
+def test_panel_live_slow_consumer_close_resumes_the_same_session(fake, caplog, capfd):
+    """Protocol v1.1 §9.3 (report ``2026-10-20-server-5``): a publisher whose send buffer on the relay passed 1 MiB gets
+    ``error SLOW_CONSUMER`` and close 4010 — a drop, not an end and not a restart: the same session resumes, with the
+    same live updates, and a change made meanwhile goes out as an update."""
+    caplog.set_level(logging.DEBUG)
+    a = MrmlModel(A, name="Doe^John liver")
+    rig = live_rig(a)
+    acked(rig, 1)
+    ctl, live_updates = rig.ctl, rig.ctl._live
+    view = slow_consumer_close(rig)
+    assert ctl.phase is Phase.RECONNECTING and view.code == CODE
+    assert view.status == panel.RECONNECTING_IN.format(seconds=1)
+    assert panel.RECONNECT_DETAIL in view.detail and panel.RELAY_RESTARTED not in view.detail
+    recolor(a, (0.0, 1.0, 0.0))
+    deliver(ctl, Connected(2))
+    [resume] = sent_on(2)
+    assert (resume["type"], resume["sessionId"]) == ("session.resume", SESSION_ID)
+    view = deliver(ctl, Received(2, resumed(resume["id"], scene_version=1, snapshot_version=1)))
+    assert ctl.phase is Phase.LIVE and view.code == CODE and ctl._live is live_updates
+    rig.pump(150)
+    assert [m["type"] for m in sent_on(2)] == ["session.resume", "scene.update"]
+    assert SLOW_TEXT not in view.status + view.detail
+    assert leaks(caplog, capfd, *NAMES, CODE, TOKEN, SESSION_ID, SLOW_TEXT) == []
+
+
+def test_panel_live_slow_consumer_error_leaves_a_snapshot_in_flight_alone(fake):
+    """The error names no message (no ``replyTo``): a snapshot in flight is not refused by it — the close that
+    follows interrupts it, and the resume sends it again on a new version (§6.2, §6.3)."""
+    rig = live_rig(MrmlModel(A, name="Doe^John liver"))
+    acked(rig, 1)
+    version = snapshot_in_flight(rig)
+    view = slow_consumer_close(rig)
+    assert panel.SCENE_INTERRUPTED in view.detail
+    deliver(rig.ctl, Connected(2))
+    [resume] = sent_on(2)
+    deliver(rig.ctl, Received(2, resumed(resume["id"], scene_version=version, snapshot_version=1)))
+    [begin] = begins_on(2)
+    assert begin["sceneVersion"] == version + 1
+
+
+def test_panel_live_slow_consumer_error_leaves_a_reset_in_flight_alone(fake):
+    """A closed scene's snapshot on its way: the error does not count as its refusal, which would end the session
+    (``RESET_REFUSED``); the close that follows interrupts it and the session reconnects."""
+    rig = live_rig(MrmlModel(A, name="Doe^John liver"))
+    acked(rig, 1)
+    close_scene(rig)
+    rig.timer.advance(0)  # the reset's snapshot begins
+    view = slow_consumer_close(rig)
+    assert rig.ctl.phase is Phase.RECONNECTING
+    assert panel.RESET_PENDING in view.detail and panel.SCENE_INTERRUPTED in view.detail
+
+
+def test_panel_live_slow_consumer_close_is_no_restart(fake):
+    """§4.3, §9.3: only a 4008 lets the panel create the session again with its code; after a 4010 a
+    ``SESSION_NOT_FOUND`` ends the session (the code may belong to another session by now, T1/T4)."""
+    rig = live_rig(MrmlModel(A, name="Doe^John liver"))
+    acked(rig, 1)
+    slow_consumer_close(rig)
+    deliver(rig.ctl, Connected(2))
+    [resume] = sent_on(2)
+    view = deliver(rig.ctl, Received(2, relay_error("SESSION_NOT_FOUND", resume["id"])))
+    assert [m["type"] for m in sent_on(2)] == ["session.resume"] and rig.ctl.phase is Phase.STOPPING
+    view = deliver(rig.ctl, Disconnected(2, None, None, final_sent=True))
+    assert view.status == panel.SESSION_ENDED and [m["type"] for m in sent_on(2)] == [
+        "session.resume"
+    ]
+
+
+# --------------------------------------------------------------------------- SLC-44, SLC-45 with segments: aliases
+
+
+#: What none of these tests may log or print (T7).
+SEGMENT_NEEDLES = (
+    *NAMES,
+    "Sphere",
+    "Cube",
+    "left lung",
+    "Segment_1",
+    "Segment_3",
+    SEG,
+    CODE,
+    TOKEN,
+    SESSION_ID,
+)
+
+
+def of_type_on(connection: int, type_: str) -> list[dict]:
+    return [m for m in sent_on(connection) if isinstance(m, dict) and m["type"] == type_]
+
+
+def segments_rig() -> tuple[Rig, MrmlSegmentation, MrmlModel]:
+    """A live session with a segmentation of two segments (one with an ID that needs an alias) and a model; the
+    first snapshot acknowledged."""
+    seg = MrmlSegmentation(
+        SEG,
+        segments=[
+            FakeSegment("Segment_1", name="Doe^John liver", polydata=sphere(8)),
+            FakeSegment("left lung", name="Doe^John lung", polydata=sphere(8)),
+        ],
+    )
+    model = MrmlModel("Sphere", name="Doe^John sphere")
+    rig = live_rig(seg, model)
+    acked(rig, 1)
+    return rig, seg, model
+
+
+def test_panel_live_resume_keeps_the_aliases_and_sends_segment_marks_made_offline(
+    fake, caplog, capfd
+):
+    """A clean resume keeps the session's live updates and so its alias registry (``SceneIds``): a segment and a
+    model changed while offline go out in one update on the aliases the viewers hold, with no snapshot (§7.3, §8.4)."""
+    caplog.set_level(logging.DEBUG)
+    rig, seg, model = segments_rig()
+    ctl = rig.ctl
+    live_updates, ids, observers = ctl._live, ctl._live.ids, rig.observers()
+    # the scene's, the segmentation's, the model's
+    assert observers == 5 + 8 + 4
+    deliver(ctl, Disconnected(1, NETWORK, 0.5))
+    seg.displays[0].per_segment["left lung"] = {"override_color": (0.0, 0.0, 1.0)}
+    seg.fire("SegmentModified", "left lung")
+    recolor(model, (0.0, 1.0, 0.0))
+    resume_id = reconnect(rig)
+    deliver(ctl, Received(2, resumed(resume_id, scene_version=1, snapshot_version=1)))
+    assert ctl._live is live_updates and ctl._live.ids is ids and rig.observers() == observers
+    rig.pump(1000)
+    assert [m["type"] for m in sent_on(2)] == ["session.resume", "scene.update"]
+    [update] = of_type_on(2, "scene.update")
+    assert (update["baseVersion"], update["sceneVersion"]) == (1, 2)
+    assert sorted(update["changes"], key=lambda c: c["nodeId"]) == [
+        {"nodeId": "m_1", "color": [0.0, 1.0, 0.0]},
+        {"nodeId": f"{SEG}/s_1", "color": [0.0, 0.0, 1.0]},
+    ]
+    assert leaks(caplog, capfd, *SEGMENT_NEEDLES) == []
+
+
+def test_panel_live_resume_a_segmentation_removed_offline_removes_its_segments(fake, caplog, capfd):
+    caplog.set_level(logging.DEBUG)
+    rig, seg, _ = segments_rig()
+    deliver(rig.ctl, Disconnected(1, NETWORK, 0.5))
+    rig.scene.remove(seg)
+    assert rig.observers() == 5 + 4
+    resume_id = reconnect(rig)
+    deliver(rig.ctl, Received(2, resumed(resume_id, scene_version=1, snapshot_version=1)))
+    rig.pump(1000)
+    assert [m["type"] for m in sent_on(2)] == ["session.resume", "scene.nodeRemoved"]
+    [removed] = of_type_on(2, "scene.nodeRemoved")
+    assert sorted(removed["nodeIds"]) == [f"{SEG}/Segment_1", f"{SEG}/s_1"]
+    assert (removed["baseVersion"], removed["sceneVersion"]) == (1, 2)
+    assert leaks(caplog, capfd, *SEGMENT_NEEDLES) == []
+
+
+def test_panel_live_resume_a_segment_added_offline_is_announced_and_sent(fake, caplog, capfd):
+    """§8.2: the hint, then the snapshot it promises; the new segment's raw ID fits the grammar, so it is its node
+    ID."""
+    caplog.set_level(logging.DEBUG)
+    rig, seg, _ = segments_rig()
+    deliver(rig.ctl, Disconnected(1, NETWORK, 0.5))
+    seg.add_segment(FakeSegment("Segment_3", name="Doe^John spleen", polydata=sphere(8)))
+    resume_id = reconnect(rig)
+    deliver(rig.ctl, Received(2, resumed(resume_id, scene_version=1, snapshot_version=1)))
+    rig.pump(1000)
+    assert [m["type"] for m in sent_on(2) if isinstance(m, dict)] == [
+        "session.resume",
+        "scene.nodeAdded",
+        "scene.snapshot.begin",
+        "scene.snapshot.end",
+    ]
+    [added] = of_type_on(2, "scene.nodeAdded")
+    assert added["nodes"] == [{"nodeId": f"{SEG}/Segment_3", "kind": "segment"}]
+    assert (added["baseVersion"], added["sceneVersion"], added["snapshotFollows"]) == (1, 2, True)
+    [begin] = begins_on(2)
+    assert (begin["nodeCount"], begin["sceneVersion"]) == (4, 3)
+    assert leaks(caplog, capfd, *SEGMENT_NEEDLES) == []
+
+
+def test_panel_live_resume_an_owed_snapshot_reuses_the_aliases(fake, caplog, capfd):
+    """The relay lost our snapshot: the export after the resume addresses the aliases of the same registry, so a
+    model added in the meantime gets the next alias, never a reissued one (§7.3)."""
+    caplog.set_level(logging.DEBUG)
+    rig, _, model = segments_rig()
+    ids = rig.ctl._live.ids
+    rig.scene.remove(model)
+    rig.add(MrmlModel("Cube", name="Doe^John cube"))
+    resume_id = reconnect(rig)
+    deliver(rig.ctl, Received(2, resumed(resume_id, scene_version=1, snapshot_version=None)))
+    rig.pump(0)
+    assert rig.ctl._live.ids is ids
+    assert [m["type"] for m in sent_on(2) if isinstance(m, dict)] == [
+        "session.resume",
+        "scene.snapshot.begin",
+        "scene.snapshot.end",
+    ]
+    [begin] = begins_on(2)
+    assert begin["sceneVersion"] == 2
+    # a fresh registry would number the cube m_1, the alias the viewers may still hold for the removed sphere
+    assert [m["nodeId"] for m in manifest(rig.glb())] == ["m_2", f"{SEG}/Segment_1", f"{SEG}/s_1"]
+    assert leaks(caplog, capfd, *SEGMENT_NEEDLES) == []
+
+
+def test_panel_live_resume_recreate_with_segments_starts_a_new_registry(fake, caplog, capfd):
+    """§8.4 after a 4008: the segmentation's observers go and come back once, and the new session gets a new alias
+    registry — the cube, m_2 in the old session, is m_1 in the new one — whose aliases a later segment change
+    addresses."""
+    caplog.set_level(logging.DEBUG)
+    rig, seg, model = segments_rig()
+    ctl = rig.ctl
+    first_ids = ctl._live.ids
+    rig.add(MrmlModel("Cube", name="Doe^John cube"))
+    rig.pump(1000)
+    acked(rig, rig.begins()[-1]["sceneVersion"])
+    assert [m["nodeId"] for m in manifest(rig.glb())] == [
+        "m_1",
+        "m_2",
+        f"{SEG}/Segment_1",
+        f"{SEG}/s_1",
+    ]
+    rig.scene.remove(model)
+    rig.pump(1000)
+    observers = rig.observers()
+    restart = TransportError(ErrorKind.CLOSED, retryable=True, close_code=4008)
+    resume_id = reconnect(rig, restart)
+    deliver(ctl, Received(2, relay_error("SESSION_NOT_FOUND", resume_id)))
+    create = sent_on(2)[-1]
+    assert create["type"] == "session.create" and rig.observers() == 0
+    # nothing follows the scene while the create is on its way
+    seg.displays[0].per_segment["left lung"] = {"override_color": (0.0, 0.0, 1.0)}
+    seg.fire("SegmentModified", "left lung")
+    again = created(create["id"], session_id=OTHER_SESSION_ID, token=OTHER_TOKEN)
+    deliver(ctl, Received(2, again))
+    assert (
+        len(rig.watchers) == 2
+        and rig.watchers[0].observer_count == 0
+        and rig.observers() == observers
+    )
+    assert ctl._live.ids is not first_ids
+    [begin] = begins_on(2)
+    assert begin["sceneVersion"] == 1
+    assert [m["nodeId"] for m in manifest(rig.glb())] == ["m_1", f"{SEG}/Segment_1", f"{SEG}/s_1"]
+    deliver(ctl, Received(2, ack(1)))
+    after_ack = len(sent_on(2))
+    seg.displays[0].per_segment["left lung"] = {"override_color": (1.0, 0.0, 0.0)}
+    seg.fire("SegmentModified", "left lung")
+    rig.pump(1000)
+    [update] = sent_on(2)[after_ack:]
+    assert update["type"] == "scene.update"
+    assert update["changes"] == [{"nodeId": f"{SEG}/s_1", "color": [1.0, 0.0, 0.0]}]
+    assert (update["baseVersion"], update["sceneVersion"]) == (1, 2)
+    assert leaks(caplog, capfd, *SEGMENT_NEEDLES, OTHER_TOKEN, OTHER_SESSION_ID) == []
+
+
+def test_panel_live_resume_a_scene_closed_offline_never_reissues_an_alias(fake, caplog, capfd):
+    """§7.3: the closed scene's reset goes first after the resume; the new scene's aliases continue the counters."""
+    caplog.set_level(logging.DEBUG)
+    rig, seg, model = segments_rig()
+    ctl = rig.ctl
+    ids = ctl._live.ids
+    deliver(ctl, Disconnected(1, NETWORK, 0.5))
+    seg2 = MrmlSegmentation(
+        "vtkMRMLSegmentationNode2",
+        segments=[FakeSegment("left lung", name="Doe^John lung", polydata=sphere(8))],
+    )
+    close_scene(rig, seg, model, added=(seg2, MrmlModel("Sphere", name="Doe^John sphere 2")))
+    assert panel.RESET_PENDING in ctl.pump().detail
+    resume_id = reconnect(rig)
+    deliver(ctl, Received(2, resumed(resume_id, scene_version=1, snapshot_version=1)))
+    rig.pump(0)
+    assert [m["type"] for m in sent_on(2) if isinstance(m, dict)] == [
+        "session.resume",
+        "scene.snapshot.begin",
+        "scene.snapshot.end",
+    ]
+    [begin] = begins_on(2)
+    assert begin["sceneVersion"] == 2
+    assert sorted(m["nodeId"] for m in manifest(rig.glb())) == [
+        "m_2",
+        "vtkMRMLSegmentationNode2/s_2",
+    ]
+    assert ctl._live.ids is ids
+    assert leaks(caplog, capfd, *SEGMENT_NEEDLES, "vtkMRMLSegmentationNode2") == []
 
 
 # --------------------------------------------------------------------------- criterion 3: Start during a batch
@@ -629,6 +1215,47 @@ def test_panel_live_a_close_that_fails_still_removes_the_observers(
     rig.pump(1000)
     assert len(FakeTransport.made[0].sent) == sent
     assert leaks(caplog, capfd, *NAMES) == []
+
+
+@pytest.mark.parametrize("fails", ["close", "transport-stop"])
+def test_panel_live_shutdown_stops_the_transport_even_if_the_close_raises(
+    fake, monkeypatch, caplog, capfd, fails
+):
+    """SLC-34 review (SLC-43): module cleanup leaves no transport, observer or pending flush behind, even when the
+    close or the transport's stop raises; the error still reaches ``cleanup()``, which logs its type only."""
+    caplog.set_level(logging.DEBUG)
+    a = MrmlModel(A, name="Doe^John liver")
+    rig = live_rig(a)
+    acked(rig, 1)
+    recolor(a, (0.0, 1.0, 0.0))  # a flush pending
+    transport = FakeTransport.made[0]
+    stops = []
+
+    def boom(*args, **kwargs):
+        stops.append((args[0] if args else None, kwargs.get("timeout")))
+        raise SECRET
+
+    if fails == "close":
+        monkeypatch.setattr(rig.ctl._client, "close", boom)
+    else:
+        monkeypatch.setattr(transport, "stop", boom)
+    with pytest.raises(KeyError):
+        rig.ctl.shutdown(timeout=3.0)
+    if fails == "close":
+        # stopped all the same, with the wait and a plain session.close in place of the client's
+        stops = transport.stops
+        [(fallback, wait)] = stops
+    else:
+        # the close's stop, then the wait with a plain session.close: the transport took neither
+        [(final, first), (fallback, wait)] = stops
+        assert (final["type"], final["reason"], first) == ("session.close", "USER_STOPPED", 0)
+    assert (fallback, wait) == (envelope.make("session.close", reason="USER_STOPPED"), 3.0)
+    assert rig.ctl.phase is Phase.IDLE and not rig.ctl.active
+    assert rig.ctl.view == panel.PanelView(panel.NOT_CONNECTED)
+    assert rig.observers() == 0 and rig.ctl.observer_count == 0
+    assert rig.timer.deadline is None
+    assert rig.ctl.shutdown() is True  # nothing left to stop
+    assert leaks(caplog, capfd, *NAMES, CODE, TOKEN) == []
 
 
 @pytest.mark.parametrize("fails", ["detach", "stop"])

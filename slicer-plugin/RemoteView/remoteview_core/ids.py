@@ -1,9 +1,9 @@
 """Node identity for the GLB manifest and `scene.update` (``docs/protocol.md`` v1.1 §3.3, §7.3; report
 ``2026-10-27-protocol-2`` item 1; threat model T7).
 
-:class:`SceneIds` is the publisher's raw ID → alias registry. Owned by the panel for the life of one session's
-``LiveUpdates`` and handed to every export and to the change classifier, it answers one question for every entity the
-3D view shows: what is its ``nodeId``?
+:class:`SceneIds` is the publisher's raw ID → alias registry. Made by the panel for one session's ``LiveUpdates``,
+which keeps it across a resume, and handed to every export and to the change classifier, it answers one question for
+every entity the 3D view shows: what is its ``nodeId``?
 
 - A model, or the segmentation node whose ID prefixes its segments, keeps its MRML ID only when the ID is what Slicer
   generates — a ``fullmatch`` of :data:`MRML_ID` (``vtkMRMLModelNode4``, ``vtkMRMLSegmentationNode12``). Any other
@@ -19,18 +19,21 @@
   as UTF-8 with U+FFFD) or is omitted under *Hide node names*.
 - One per-session counter per namespace, never repeating. The raw → alias maps live as long as the Slicer scene:
   :meth:`SceneIds.reset` (scene closed) clears them and keeps the counters, so an alias is never reissued within a
-  session. An alias once issued is kept — also after *Hide node names* is switched off again (§7.3 "never reissued or
-  shadowed" wins over "alias only when needed"): the segment is then exported under its alias with ``segmentId``
-  revealed.
+  session, and moves :attr:`SceneIds.generation`: a preparation in steps begun before the close stops at its next
+  step with :class:`SceneClosedError` (SLC-68). An alias once issued is kept — also after *Hide node names* is
+  switched off again (§7.3 "never reissued or shadowed" wins over "alias only when needed"): the segment is then
+  exported under its alias with ``segmentId`` revealed.
 
 Standard library only. No method puts a raw ID into an exception text or the ``repr`` (a raw segment ID may be PHI).
 Main thread only (unsynchronised; the collection, the snapshot builder and the classifier share one instance and all
-run on Slicer's main thread).
+run on Slicer's main thread) — except :meth:`SceneIds.closed_elsewhere`, which moves the generation under a lock from
+any thread (SLC-70).
 """
 
 from __future__ import annotations
 
 import re
+import threading
 from typing import Any
 
 #: §7.3: the IDs Slicer generates (class name + counter). Used with ``fullmatch``.
@@ -42,6 +45,10 @@ MODEL_ALIAS = re.compile(r"m_[0-9]+")
 SEGMENT_ALIAS = re.compile(r"s_[0-9]+")
 #: §3.3 ``nodeId`` length limit.
 MAX_NODE_ID = 128
+
+
+class SceneClosedError(RuntimeError):
+    """The scene was closed (:meth:`SceneIds.reset`) while it was prepared: nothing of it may be read or sent (T7)."""
 
 
 def is_generated_id(raw: Any) -> bool:
@@ -58,6 +65,11 @@ class SceneIds:
         self._segments: dict[tuple[Any, Any], str] = {}
         self._next_m = 1
         self._next_s = 1
+        #: the scene closes so far (:meth:`reset`, :meth:`closed_elsewhere`): a preparation started before one stops
+        #: at its next step (SLC-68)
+        self.generation = 0
+        # closed_elsewhere runs off the main thread (SLC-70)
+        self._generation_lock = threading.Lock()
 
     def model_node_id(self, raw: Any) -> str | None:
         """The ``nodeId``/``mrmlId`` of a model or segmentation node with MRML ID ``raw``: the ID itself when it is
@@ -113,9 +125,19 @@ class SceneIds:
         return None if mrml_id is None else f"{mrml_id}/"
 
     def reset(self) -> None:
-        """The Slicer scene was closed: forget the raw → alias maps, keep counting (no alias is reissued)."""
+        """The Slicer scene was closed: forget the raw → alias maps, keep counting (no alias is reissued), and move
+        :attr:`generation`, which stops a preparation begun before the close (SLC-68)."""
         self._models.clear()
         self._segments.clear()
+        with self._generation_lock:
+            self.generation += 1
+
+    def closed_elsewhere(self) -> None:
+        """The scene was closed off the main thread (SLC-70): move :attr:`generation` only, so a preparation running
+        now stops at its next step; the maps are the main thread's — the owner's :meth:`reset` clears them there
+        before it uses them again. The one method safe on any thread."""
+        with self._generation_lock:
+            self.generation += 1
 
     def __repr__(self) -> str:
         return (

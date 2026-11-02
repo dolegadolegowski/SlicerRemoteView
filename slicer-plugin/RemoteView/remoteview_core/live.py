@@ -6,20 +6,27 @@ of the session, the first snapshot included:
 - **marks** (:meth:`~LiveUpdates.mark`, :meth:`~LiveUpdates.mark_transform`, and for segments
   :meth:`~LiveUpdates.mark_segment`, :meth:`~LiveUpdates.mark_segment_transform`,
   :meth:`~LiveUpdates.mark_held_segments`) arrive with the **raw** MRML and segment IDs the observers read and are
-  resolved here, never in the watcher, through the session's registry (SLC-36, §7.3): a model ``Sphere`` is marked
-  as ``m_1`` — allocated on first sight, so a model added mid-session under a scripted ID is announced and exported
-  under its alias —, a segment as ``<mrmlId>/<segmentId>`` or ``<mrmlId>/s_<n>`` under the current *Hide node names*
-  setting, and a segmentation node's transform or removal reaches every segment of it the viewers hold
-  (``SentScene.under``). The debouncer's keys are therefore the viewers' ``nodeId`` (T7: a raw ID never reaches a
-  plan). The resolved marks go to SLC-15's :class:`~remoteview_core.debounce.Debouncer`; its flush is classified by
-  SLC-30's :func:`~remoteview_core.changes.classify` against :attr:`~LiveUpdates.sent` (what the viewers hold) and
-  sent with SLC-16's client — an update plan as ``scene.update``/``scene.nodeRemoved``, a re-export as
+  resolved here, never in the watcher, through the session's registry (SLC-36, §7.3): a model ``Sphere`` is marked as
+  ``m_1`` — allocated on first sight, so a model added mid-session under a scripted ID is announced and exported under
+  its alias —, a segment as ``<mrmlId>/<segmentId>`` or ``<mrmlId>/s_<n>`` under the current *Hide node names* setting,
+  and a segmentation node's transform or removal reaches every segment of it the viewers hold (``SentScene.under``) — a
+  removal or whole-node change (:meth:`~LiveUpdates.mark_held_segments`) made while a snapshot is prepared also those of
+  that snapshot, once it begins (SLC-71). The debouncer's keys are therefore the viewers' ``nodeId`` (T7: a raw ID never
+  reaches a plan). The resolved marks go to SLC-15's :class:`~remoteview_core.debounce.Debouncer`; its flush is
+  classified by SLC-30's :func:`~remoteview_core.changes.classify` against :attr:`~LiveUpdates.sent` (what the viewers
+  hold) and sent with SLC-16's client — an update plan as ``scene.update``/``scene.nodeRemoved``, a re-export as
   ``scene.nodeAdded`` and a new snapshot whose scene becomes :attr:`~LiveUpdates.sent` in the same call
   (``changes.py``'s contract); a mark that resolves to an ID neither shown nor held is dropped there (T7);
 - **holds**: the debouncer is held during a batch process (its own count, so a stray ``release`` cannot end another
   hold), from each snapshot's ``begin`` until its ack, refusal or loss — marks made meanwhile flush once after it,
   never as a second ``begin`` (no supersede: a slow uplink must finish its upload, T2) — and while the connection is
   lost (``GRACE``/``RESUMING``);
+- **resume** (SLC-42, protocol §4.3, §6.3): a snapshot in flight at the drop gives :attr:`LiveEventKind.LOST`; the
+  client's ``session.resumed`` says whether the relay holds it (then an ``ACKED`` follows: only its ack was lost) and
+  whether a snapshot is owed — a clean resume owes nothing and the kept marks flush as updates, an owed one is a
+  lost-connection re-sync (at once the first time). A reset owed at the drop whose snapshot has not begun, or made
+  while offline, holds the client's updates so none names the closed scene, and its snapshot goes first; a reset's
+  snapshot in flight at the drop is adopted or sent again, never both;
 - **reset** (a closed scene, §7.3): the only supersede. The queued chunks of a snapshot in flight are dropped and the
   new scene's snapshot begins at the flush, whatever the pacing. When it cannot be built, an empty snapshot clears the
   closed scene off the viewers and the scene stays owed; when that fails too, when a frame of it cannot be sent, or
@@ -42,7 +49,9 @@ of the session, the first snapshot included:
 - **when changes go out** (SLC-56): :meth:`~LiveUpdates.set_send_policy` hands the toolbar's choice to the debouncer
   (at once by its lanes, a delay after the last change, or only on *Send now*); :meth:`~LiveUpdates.send_now` flushes
   what waits — or, with nothing waiting and nothing on its way, sends the scene again; :attr:`~LiveUpdates.due_in` and
-  :attr:`~LiveUpdates.changes_wait` feed the countdown. A reset ignores the policy (§7.3, the debouncer's rule);
+  :attr:`~LiveUpdates.changes_wait` feed the countdown. A reset ignores the policy (§7.3, the debouncer's rule), and
+  so does what a lost connection cut — a snapshot or an update on its way, or a snapshot being prepared, goes again at
+  once after the resume, with what waits;
 - **preparation in steps** (SLC-51, ``docs/research/slicer-prepare.md``): an export is prepared by SLC-28's
   ``prepare_snapshot`` with the session's :class:`~remoteview_core.meshcache.MeshCache` (SLC-50), a slice of
   ``slice_s`` seconds at a time — the first in the call that starts it, the others from :meth:`~LiveUpdates.tick` —
@@ -51,12 +60,14 @@ of the session, the first snapshot included:
   snapshot may go out: Stop, a reset, a batch, a lost connection, a new setting or a gate that closes abandon it —
   nothing of it was sent and it used no version — and a later tick starts again, from the cache. A re-sync
   (:meth:`~LiveUpdates.request_resync`) lets it finish and asks for another snapshot after it, so events that keep
-  coming off the main thread cannot hold a large scene off for ever;
+  coming off the main thread cannot hold a large scene off for ever — but a scene closed off the main thread stops it
+  at its next step (:meth:`~LiveUpdates.scene_closed_off_thread`, SLC-70), and the next tick or flush resets first;
 - **IDs** (protocol v1.1 §7.3, SLC-35): every export of the session runs through one
-  :class:`~remoteview_core.ids.SceneIds` (:attr:`~LiveUpdates.ids`), owned by the panel — one per ``session.create`` —
-  and handed in at construction, so a resumed session (SLC-17) cannot lose the aliases the viewers hold, while a new
-  ``session.create`` (Stop → Start) may renumber. ``start()``/``stop()`` never touch it; :meth:`~LiveUpdates.reset`
-  (the scene closed) clears its raw → alias maps and keeps its counters, so no alias is ever reissued.
+  :class:`~remoteview_core.ids.SceneIds` (:attr:`~LiveUpdates.ids`), made by the panel — one per ``session.create`` —
+  and handed in at construction. A resume (SLC-44) keeps this ``LiveUpdates`` and so the aliases the viewers hold; a
+  new ``session.create`` (Stop → Start, or the re-create after a relay restart, SLC-45) gets a new ``LiveUpdates`` with
+  a new registry and may renumber. ``start()``/``stop()`` never touch it; :meth:`~LiveUpdates.reset` (the scene
+  closed) clears its raw → alias maps and keeps its counters, so no alias is ever reissued.
 
 The panel (SLC-32) calls ``start(deferred=True)``, attaches the observers, then :meth:`~LiveUpdates.tick` — all in
 one main-thread call, so a batch process running at Start holds the first snapshot until it ends; it calls
@@ -71,7 +82,8 @@ Privacy (T7): every method the observers, the flush timer or the pump call (the 
 and logs its type only — exception texts often quote a node ID or name; so do the panel's ``start``, and the calls into
 the panel (``send``, ``discard_queued``, ``end_session``, ``on_event``). Reprs and :class:`LiveEvent` show counts and
 error codes only. ``end_session`` must close the session even if the panel's texts fail: after a refused reset it is
-what keeps the closed scene off the viewers (§7.3). Main thread only (MRML, the client).
+what keeps the closed scene off the viewers (§7.3). Main thread only (MRML, the client) — except
+:meth:`~LiveUpdates.scene_closed_off_thread`, which only moves the registry's generation (SLC-70).
 """
 
 from __future__ import annotations
@@ -127,6 +139,7 @@ class LiveEventKind(enum.Enum):
     REFUSED = "refused"  # the relay refused it (``code``)
     TOO_LARGE = "too-large"  # an export over the relay's limit (``too_large``); nothing was sent
     FAILED = "failed"  # a scene read or an export failed; nothing was sent
+    LOST = "lost"  # a snapshot in flight was lost with the connection (§6.3); ACKED follows if the relay had it
 
 
 @dataclass(frozen=True)
@@ -160,6 +173,9 @@ class _Preparation:
     progress: Progress
     #: events were missed off the main thread while it ran (SLC-33): a re-sync follows its snapshot
     stale: bool = False
+    #: whole-segmentation marks made while it ran, ``prefix → flags`` (one entry per node, flags merged): its scene may
+    #: hold segments the viewers' does not yet, so they are resolved again against it once it is installed (SLC-71)
+    held_marks: dict[str, Change] = field(default_factory=dict)
 
 
 class _EmptyScene:
@@ -208,6 +224,9 @@ class LiveUpdates:
         self._client = client
         self._scene = scene
         self._ids = ids if ids is not None else SceneIds()
+        #: the registry's generation this controller has followed: one moved off the main thread (a scene closed
+        #: there, :meth:`scene_closed_off_thread`) is reset on the main thread before anything is sent (SLC-70)
+        self._seen_generation = self._ids.generation
         self._send = send
         self._discard_queued = discard_queued
         self._clock = clock
@@ -233,6 +252,12 @@ class LiveUpdates:
         self._paused = False  # the pause hold (GRACE/RESUMING) is on
         self._depth = 0  # batch holds
         self._reset_owed = False  # a closed scene may still be on the viewers
+        # the snapshot in flight at the drop, until the session is back
+        self._lost_inflight: int | None = None
+        # a preparation was abandoned at the drop, and a snapshot was owed with its gate before it (set at the first
+        # drop of each outage)
+        self._dropped_preparation = False
+        self._owed_at_drop = False
         self._seen_error: Any = None  # the client's last_error already attributed
         self._needed_seen = False  # the current snapshot_needed has its gate
         # the gate of an owed snapshot
@@ -289,6 +314,12 @@ class LiveUpdates:
         large, or :data:`FAILURES_BEFORE_FLUSH_GATE` attempts failed without an ack (the SLC-29 review). Read it when a
         text is shown: :attr:`LiveEventKind.REFUSED` is emitted before the refusal sets the gate."""
         return self._shrink is not None or self._needs_flush  # stop() forgets both
+
+    @property
+    def reset_owed(self) -> bool:
+        """A closed scene may still be on the viewers: the new scene's snapshot (or an empty one) is not acknowledged
+        yet (§7.3)."""
+        return self._reset_owed  # stop() forgets it
 
     @property
     def batch_held(self) -> bool:
@@ -360,7 +391,8 @@ class LiveUpdates:
 
     def mark_held_segments(self, node_id: str, flags: Change) -> None:
         """Every segment of the segmentation node ``node_id`` the viewers hold changed (``flags``): a whole-node event
-        without a segment ID, or the node removed."""
+        without a segment ID, or the node removed. Made while a snapshot is prepared, the mark reaches that snapshot's
+        segments too once it begins: they may be in it only (SLC-71)."""
         if not self._accepts(node_id, flags):
             return
         try:
@@ -372,6 +404,9 @@ class LiveUpdates:
             return
         for resolved in self._sent.under(prefix):
             self._mark_resolved(resolved, flags)
+        if self._prep is not None:
+            held = self._prep.held_marks
+            held[prefix] = held.get(prefix, Change(0)) | flags
 
     def _accepts(self, node_id: Any, flags: Any) -> bool:
         """The entry check of every mark: running, a non-empty ``str`` ID and non-empty ``Change`` flags."""
@@ -420,6 +455,33 @@ class LiveUpdates:
         except Exception as exc:  # noqa: BLE001 — called from a VTK observer (T7)
             _log.error("live: release failed (%s)", type(exc).__name__)
 
+    def scene_closed_off_thread(self) -> None:
+        """``EndCloseEvent`` on another thread (SLC-70): the one method safe off the main thread. It moves the
+        registry's generation only, so a preparation running now stops at its next step — an abandon — and the
+        next main-thread call that could classify, prepare or send anything (a flush, a tick, :meth:`follow_close`)
+        runs :meth:`reset` first."""
+        try:
+            self._ids.closed_elsewhere()
+        except Exception as exc:  # noqa: BLE001 — called from a VTK observer on another thread (T7)
+            _log.error("live: close not noted (%s)", type(exc).__name__)
+
+    def follow_close(self) -> None:
+        """From the pump: a scene closed off the main thread since the last reset is reset now — also while the
+        session reconnects, as a close offline on the main thread is (SLC-70)."""
+        try:
+            self._follow_close()
+        except Exception as exc:  # noqa: BLE001 — called from the pump (T7)
+            _log.error("live: close not followed (%s)", type(exc).__name__)
+
+    def _follow_close(self) -> bool:
+        """:meth:`reset` when the registry's generation moved off the main thread since this controller last reset
+        it; whether it had moved. Nothing may be classified or prepared against the closed scene's aliases and sent
+        scene before that (§7.3, T7)."""
+        if self._ids.generation == self._seen_generation:
+            return False
+        self.reset()
+        return True
+
     def reset(self) -> None:
         """``EndCloseEvent``: the scene was closed. A snapshot in flight shows the closed scene: its queued chunks are
         dropped, and the new scene's ``begin`` supersedes it at the flush (§6.2)."""
@@ -431,11 +493,19 @@ class LiveUpdates:
             self._reset_owed = True
             # the aliases were the closed scene's: forgotten, never reissued (§7.3 — the counters keep counting)
             self._ids.reset()
+            # a close off the main thread before this one is followed with it (SLC-70)
+            self._seen_generation = self._ids.generation
             # no update may address a closed scene's ID, which the next scene may reuse (§7.3)
             self._sent.apply(Plan(snapshot=True, reset=True))
             if self._inflight is not None:
                 self._discard()
                 self._end_inflight()
+            # an ack of the closed scene's snapshot recovered at the resume must not clear the reset
+            self._lost_inflight = None
+            if self._client.state in _PAUSED:
+                # offline: hold the client's updates, so a clean resume releases none that names the closed scene
+                self._client.require_snapshot()
+                self._needed_seen = True
             self._debouncer.reset()
         except Exception as exc:  # noqa: BLE001 — called from a VTK observer (T7)
             _log.error("live: reset failed (%s)", type(exc).__name__)
@@ -485,12 +555,13 @@ class LiveUpdates:
             _log.error("live: relay event not followed (%s)", type(exc).__name__)
 
     def tick(self) -> None:
-        """From the pump: run a slice of the snapshot being prepared, or start an owed one once its gate opens."""
+        """From the pump: run a slice of the snapshot being prepared, or start an owed one once its gate opens — after
+        a scene closed off the main thread, reset first (SLC-70)."""
         if not self._running:
             return
         try:
             self._observe()
-            if not self._running:
+            if not self._running or self._follow_close():
                 return
             if self._prep is not None:
                 if self._may_continue():
@@ -505,7 +576,7 @@ class LiveUpdates:
                 self._not_sent()
 
     def flush(self) -> None:
-        """The flush timer fired."""
+        """The flush timer fired (after a scene closed off the main thread, the flush resets first: SLC-70)."""
         try:
             self._debouncer.flush()
         except Exception as exc:  # noqa: BLE001 — a Qt slot (T7)
@@ -531,14 +602,20 @@ class LiveUpdates:
 
     def send_now(self) -> None:
         """*Send now* (SLC-56): the waiting changes go out at once (or at the end of the hold that keeps them); with
-        none waiting, the scene goes again unless a snapshot is already being prepared or in flight — a click then
-        would only restart it. Lifts the too-large and flush gates like :meth:`request_snapshot`."""
+        none waiting, the scene goes again unless a snapshot is already being prepared or in flight, or was lost with
+        the connection and waits for the resume — a click then would only restart it. Lifts the too-large and flush
+        gates like :meth:`request_snapshot`."""
         if not self._running:
             return
         try:
             if self._debouncer.send_now():
                 return
-            if self._prep is not None or self._inflight is not None:
+            # a snapshot lost with the connection is still the resume's to adopt or owe: a click must not add one
+            if (
+                self._prep is not None
+                or self._inflight is not None
+                or self._lost_inflight is not None
+            ):
                 return
             self.request_snapshot()
         except Exception as exc:  # noqa: BLE001 — a Qt slot (T7)
@@ -591,8 +668,15 @@ class LiveUpdates:
     # ------------------------------------------------------------------ flush
 
     def _on_flush(self, drained: Drained) -> None:
+        if self._running and self._follow_close():
+            return  # the marks were the closed scene's or the next one's: its reset sends the scene whole (SLC-70)
         if not self._running or self._client.state not in _LIVE:
-            return  # a snapshot is owed anyway: its export installs a new viewers' scene
+            if self._client.state in _PAUSED:  # stop() leaves no marks to flush
+                # offline (a flush before the drop was observed): a clean resume owes nothing, so the marks dropped
+                # here need a snapshot; they are a change all the same
+                self._lift_gates(drained)
+                self._client.require_snapshot()
+            return
         try:
             self._apply_flush(drained)
         except Exception as exc:  # noqa: BLE001 — T7: the type only
@@ -605,23 +689,24 @@ class LiveUpdates:
             self.tick()
 
     def _apply_flush(self, drained: Drained) -> None:
-        self._needs_flush = False  # a change after the failures
         if self._reset_owed and not drained.reset:
             # a reset whose flush was dropped while the session was not live
             drained = Drained(drained.changes, reset=True)
         self._reset_owed = drained.reset
-        if self._shrink is not None and self._shrinks(drained):
-            self._shrink = None
+        self._lift_gates(drained)
         try:
             plan = classify(
                 drained, self._scene(), self._sent, anonymize_names=self._anonymize, ids=self._ids
             )
         except SceneReadError:
+            if self._follow_close():
+                return  # a read the close off the main thread broke (SLC-70): its reset sends the scene whole
             _log.error("live: scene not read (SceneReadError)")
             self._failed(_Cause.LOCAL)
             self._emit(LiveEventKind.FAILED)
             return
-        if not self._running:
+        # closed off the main thread while it was classified (SLC-70): nothing of the plan goes out, the reset does
+        if not self._running or self._follow_close():
             return
         if plan.snapshot:
             self._sent.apply(plan)  # a reset forgets the closed scene before its export
@@ -637,6 +722,12 @@ class LiveUpdates:
         for message in self._client.send_removed(plan.removed):
             self._send(message)
         self._sent.apply(plan)  # a held result counts as sent: the next snapshot drops it
+
+    def _lift_gates(self, drained: Drained) -> None:
+        """A flush is a change: it opens the flush gate, and the too-large gate when it may make the export smaller."""
+        self._needs_flush = False  # a change after the failures
+        if self._shrink is not None and self._shrinks(drained):
+            self._shrink = None
 
     def _shrinks(self, drained: Drained) -> bool:
         """The flush may make an export refused as too large smaller."""
@@ -713,15 +804,17 @@ class LiveUpdates:
             ):  # abandoned by a step that called back: its hold went with it
                 _log.error("live: abandoned preparation failed (%s)", type(exc).__name__)
                 return
+            if self._closed_meanwhile():
+                return  # SceneClosedError, or a read the close broke: not a failure
             self._prep = None
             try:
                 self._not_prepared(exc, prep.reset)
             finally:
                 self._debouncer.release()  # the preparation's hold (an empty reset snapshot holds its own)
             return
-        if self._prep is not prep:
-            # abandoned by a step that called back (a scene event): nothing of it is sent; a snapshot it began is
-            # superseded by the one still owed
+        # abandoned by a step that called back (a scene event): nothing of it is sent; a snapshot it began is
+        # superseded by the one still owed
+        if self._prep is not prep or self._closed_meanwhile():
             return
         if not done:
             if prep.reset:
@@ -735,10 +828,27 @@ class LiveUpdates:
             self._install(
                 prep.stepper.result
             )  # the in-flight hold is taken before the preparation's ends
+            # a segmentation removed (or changed whole) while it was prepared: its segments may be in this snapshot
+            # only — the marks, held until the ack like every other, now find them (SLC-71)
+            for prefix, flags in prep.held_marks.items():
+                for resolved in self._sent.under(prefix):
+                    self._mark_resolved(resolved, flags)
         finally:
             self._debouncer.release()
         if prep.stale and self._running:
             self._failed(_Cause.LOST)  # the re-sync asked for while it ran
+
+    def _closed_meanwhile(self) -> bool:
+        """The scene was closed off the main thread during the slice (SLC-70) — the preparation stopped at a step
+        boundary (``SceneClosedError``), a read of a handle the finished close orphaned raised, or the last step ran
+        past its check: nothing of it goes out (a snapshot it began is superseded by the reset's, as when a scene event
+        abandons it from inside that step). An abandon, not a failure, and the reset follows at once. Whether it was
+        (a read that breaks while ``Clear`` still removes nodes comes before ``EndCloseEvent``: a failure, then)."""
+        if self._ids.generation == self._seen_generation:
+            return False
+        self._abandon()
+        self._follow_close()
+        return True
 
     def _not_prepared(self, exc: Exception, reset: bool) -> None:
         """The snapshot could not be prepared: record why. When it was a closed scene's replacement, an empty
@@ -776,7 +886,8 @@ class LiveUpdates:
             self._needed_seen = True
 
     def _build(self, scene_api: SceneApi, announce: Iterable[tuple[str, str]]) -> Snapshot:
-        """A snapshot prepared in one call, without the session's cache (the empty one after a reset)."""
+        """A snapshot prepared in one call, without the session's cache or registry (the empty one after a reset: it
+        names nothing, and a close off the main thread must not stop it — SLC-70)."""
         return run(
             self._prepare_fn(
                 scene_api,
@@ -784,7 +895,7 @@ class LiveUpdates:
                 slicer_version=self._slicer_version,
                 anonymize_names=self._anonymize,
                 announce=announce,
-                ids=self._ids,
+                ids=SceneIds(),
                 remove_islands=self._remove_islands,
             )
         )
@@ -845,18 +956,51 @@ class LiveUpdates:
             return
         if state in _PAUSED:
             if not self._paused:
+                # a snapshot being prepared is abandoned, as for any gate that closes: nothing of it was sent, and the
+                # resume starts it again from the cache (the panel does not tick while it reconnects)
+                self._dropped_preparation = self._prep is not None
+                # whether a snapshot was owed with its gate, before the abandon and the reset below set it
+                self._owed_at_drop = self._needed_seen
+                self._abandon()
                 self._paused = True
                 self._debouncer.hold()
+                if self._reset_owed and self._inflight is None:
+                    # a reset whose snapshot has not begun: hold the client's updates so none names the closed scene
+                    # (§7.3); one in flight is owed by the resume or adopted by it. Not a lost-connection re-sync: the
+                    # reset's export ignores the gate
+                    self._client.require_snapshot()
+                    self._needed_seen = True
             version = self._inflight
             if version is not None and self._client.snapshot_in_flight != version:
-                self._end_inflight()  # lost with the connection (§6.3) unless acked first
+                self._end_inflight()
                 if self._client.accepted_version >= version:
-                    self._acked()
-            self._check_cause(lost=True)
-            return
+                    self._acked()  # acknowledged just before the drop
+                else:
+                    # the resume says whether the relay holds it (§6.3)
+                    self._lost_inflight = version
+                    self._emit(LiveEventKind.LOST)
+            return  # a drop alone owes nothing: the resume decides
         if self._paused:
             self._paused = False
+            lost, self._lost_inflight = self._lost_inflight, None
+            cut = lost is not None and self._client.accepted_version < lost
+            # changes the relay did not get (an update lost with the connection, or marks flushed while offline): the
+            # resume owes a re-sync that no snapshot owed before the drop explains — one asked for while reconnecting
+            # (a setting, *Send now*) does not hide it
+            lost_update = self._client.snapshot_needed and not self._owed_at_drop
+            if cut or self._dropped_preparation or lost_update:
+                # what the drop cut — a snapshot or an update on its way, or a snapshot being prepared — goes again at
+                # once, whatever the send policy (SLC-56): what waits is flushed at the hold's end, or a pending mark
+                # would keep the owed snapshot back for the delay or until *Send now*. A snapshot owed before the drop
+                # keeps the policy it had
+                self._debouncer.send_now()
             self._debouncer.release()
+            if lost is not None and self._client.accepted_version >= lost:
+                self._acked()  # the relay had it; only its ack was lost
+            # an error answering the resume is not a scene refusal
+            self._seen_error = self._client.last_error
+            self._check_cause(lost=True)  # an owed snapshot is a lost-connection re-sync
+            return
         self._check_inflight()
         if self._running:
             self._check_cause()

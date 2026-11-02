@@ -12,7 +12,16 @@ States (``SessionState``)::
     idle ──start()──▶ connecting ──session.created──▶ created ──begin_snapshot()──▶ active
                           │                              │                            │
                           └─ error (CAPACITY, …) ─▶ closed ◀─ close() / session.expired / fatal error
-    created/active ──transport_lost()──▶ grace ──(SLC-17: session.resume)──▶ resuming ──▶ active
+    created/active ──transport_lost()──▶ grace ──resume()──▶ resuming ──session.resumed──▶ created/active
+    resuming ─error SESSION_NOT_FOUND─▶ closed (the caller may fall back to start(profile, old code), with the
+                                               code it read before handle(): closing forgets it)
+    resuming ─UNAUTHORIZED / 4003─▶ closed        resuming ─transport_lost()─▶ grace
+
+Resume (§4.3, SLC-17): a drop owes a snapshot until ``session.resumed`` shows the relay holds our last snapshot and our
+last version; a snapshot in flight at the drop is owed unless ``snapshotVersion`` names it (§6.3, §13 step 10) — the
+relay's ``sceneVersion`` may be a maximum over the versions announced to it (§4.3 does not say), so it alone proves
+nothing. Versions continue
+from the larger of ours and the relay's (§6.2, §8.4); a fallback ``session.create`` restarts them at 1.
 
 Scene updates (§8, SLC-16): :meth:`ProtocolClient.send_changes`, :meth:`~ProtocolClient.send_removed` and
 :meth:`~ProtocolClient.announce_added` build ``scene.update``/``scene.nodeRemoved``/``scene.nodeAdded`` on the shared
@@ -320,8 +329,8 @@ def make_client_info(slicer_version: str, platform: str) -> dict[str, str]:
     return info
 
 
-def glb_extensions(glb: bytes | bytearray | memoryview) -> tuple[list[str], list[str]]:
-    """``(extensionsUsed, extensionsRequired)`` read from a GLB's JSON chunk (so ``begin`` matches the file)."""
+def _glb_document(glb: bytes | bytearray | memoryview) -> dict[str, Any]:
+    """The glTF document of a GLB's JSON chunk."""
     view = memoryview(glb)
     if view.nbytes < 20:
         raise ValueError("not a GLB: shorter than the header")
@@ -333,11 +342,57 @@ def glb_extensions(glb: bytes | bytearray | memoryview) -> tuple[list[str], list
     document = json.loads(bytes(view[20 : 20 + json_length]))
     if not isinstance(document, dict):
         raise ValueError("GLB JSON chunk is not a glTF document")
+    return document
+
+
+def glb_extensions(glb: bytes | bytearray | memoryview) -> tuple[list[str], list[str]]:
+    """``(extensionsUsed, extensionsRequired)`` read from a GLB's JSON chunk (so ``begin`` matches the file)."""
+    return _extensions(_glb_document(glb))
+
+
+def _extensions(document: Mapping[str, Any]) -> tuple[list[str], list[str]]:
     lists = [document.get(key, []) for key in ("extensionsUsed", "extensionsRequired")]
     for names in lists:
         if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
             raise ValueError("GLB extensionsUsed/extensionsRequired must be lists of strings")
     return lists[0], lists[1]
+
+
+def _root_figures(document: Mapping[str, Any]) -> tuple[int, Any, int, int] | None:
+    """``(sceneVersion, profile, nodeCount, triangleCount)`` as the GLB states them (§6.2, §7.1–7.3): the root extras of
+    the single root node of the one scene, the number of its children (the ``T`` nodes) and the sum of their
+    ``extras.triangleCount``; ``None`` for a GLB without that layout — more than one scene, a ``scene`` other than 0, an
+    index that is not a uint, ``children`` that is not a list, a child listed twice or the root among its own children,
+    root extras that are not ``nodeId``/``kind`` ``"root"`` with a uint ``sceneVersion``, a count that is not a uint
+    (JSON ``true`` and ``1.0`` are not ``1``). The profile is returned as found: only an equal string matches the
+    ``begin``. Reads structure only — never a name."""
+    scene_index = document.get("scene", 0)
+    try:
+        [scene] = document["scenes"]
+        nodes = document["nodes"]
+        [root_index] = scene["nodes"]
+        if not (_uint(scene_index, 0, 0) and _uint(root_index)):
+            return None
+        # JSON object keys are strings: a uint index into an object raises KeyError
+        root = nodes[root_index]
+        extras = root["extras"]
+        version, profile = extras.get("sceneVersion"), extras.get("profile")
+        marks = extras.get("nodeId"), extras.get("kind")
+        children = root.get("children", [])
+        if not (isinstance(children, list) and all(_uint(i) for i in children)):
+            return None
+        counts = [nodes[i]["extras"]["triangleCount"] for i in children]
+    except (AttributeError, KeyError, IndexError, TypeError, ValueError):
+        return None
+    if (
+        marks != ("root", "root")
+        or not _uint(version)
+        or len(set(children)) < len(children)
+        or root_index in children
+        or not all(_uint(c) for c in counts)
+    ):
+        return None
+    return version, profile, len(children), sum(counts)
 
 
 def build_snapshot_messages(  # noqa: PLR0913 — one keyword per scene.snapshot.begin field (§6.2)
@@ -354,7 +409,9 @@ def build_snapshot_messages(  # noqa: PLR0913 — one keyword per scene.snapshot
     """Messages for one snapshot (§6.2–6.4) using the vendored chunk codec.
 
     Raises ``ValueError`` for values the relay would reject (chunk size outside 64 KiB–1 MiB, more than 1,024
-    chunks, empty or > 64 MiB, extensions other than ``KHR_mesh_quantization``) before anything is sent.
+    chunks, empty or > 64 MiB, extensions other than ``KHR_mesh_quantization``), and for a ``begin`` whose
+    ``sceneVersion``/``profile``/``nodeCount``/``triangleCount`` differ from the GLB root's extras and its ``T`` nodes
+    (§6.2, SLC-38), before anything is sent.
     ``message_id``/``end_message_id`` let the relay's ``error`` name the ``begin``/``end`` it answers (``replyTo``,
     §3.2).
     """
@@ -367,11 +424,16 @@ def build_snapshot_messages(  # noqa: PLR0913 — one keyword per scene.snapshot
     data = bytes(glb)
     # Validates the sizes eagerly; the pieces are memoryviews, not copies.
     pieces = list(chunk_header.chunkify(data, chunk_size))
-    used, required = glb_extensions(data)
+    document = _glb_document(data)
+    used, required = _extensions(document)
     unique = len(set(used)) == len(used) and len(set(required)) == len(required)
     if not unique or not set(required) <= set(used) <= ALLOWED_EXTENSIONS:
         raise ValueError(
             f"GLB extensions must be unique and within {sorted(ALLOWED_EXTENSIONS)} (§6.2)"
+        )
+    if _root_figures(document) != (scene_version, profile, node_count, triangle_count):
+        raise ValueError(
+            "the GLB root's sceneVersion/profile or its T-node and triangle totals differ from the begin (§6.2)"
         )
     digest = chunk_header.sha256_hex(data)
     begin = envelope(
@@ -446,6 +508,45 @@ def _valid_created(m: Mapping[str, Any]) -> bool:
     )
 
 
+def _valid_resumed(m: Mapping[str, Any]) -> bool:
+    snapshot = m.get("snapshotVersion", 0)
+    return (
+        _matches(m.get("sessionId"), _SESSION_ID)
+        and isinstance(m.get("code"), str)
+        and alphabet.is_code(m["code"])
+        and _uint(m.get("sceneVersion"))
+        and (snapshot is None or (_uint(snapshot, 1) and snapshot <= m["sceneVersion"]))
+        and _uint(m.get("viewerCount"))
+        and _valid_ttl(m.get("ttl"))
+    )
+
+
+def resume_plan(
+    last: int,
+    snapshot_version: int | None,
+    lost: int | None,
+    relay_scene: int,
+    relay_snap: int | None,
+) -> tuple[int | None, bool, int]:
+    """What ``session.resumed`` means to the publisher (§4.3, §6.2, §6.3, §8.4): ``(adopted, consistent, continue_at)``.
+
+    ``last`` is our highest ``sceneVersion``, ``snapshot_version`` our last acknowledged snapshot, ``lost`` the
+    snapshot in flight at the drop (or ``None``); ``relay_scene``/``relay_snap`` are the relay's ``sceneVersion`` and
+    ``snapshotVersion``. A lost snapshot the relay holds is *adopted* (its ack was lost with the connection). The resume
+    is *consistent* — nothing is owed — only when the relay holds our current snapshot, our last version, and no
+    snapshot was cut by the drop: the relay's ``sceneVersion`` may be a maximum over the versions announced to it (a
+    ``begin`` counts), so it alone proves nothing. Versions continue from the larger of ours and the relay's: every
+    ``begin`` must be above every version used (§6.2) and the publisher continues from the relay's value (§8.4)."""
+    adopted = lost if lost is not None and relay_snap == lost else None
+    current = adopted if adopted is not None else snapshot_version
+    # in flight at the drop, and the relay does not hold it (§6.3)
+    cut = lost is not None and adopted is None
+    consistent = (
+        not cut and relay_snap is not None and relay_snap == current and relay_scene == last
+    )
+    return adopted, consistent, max(last, relay_scene)
+
+
 def _valid_viewer_count(m: Mapping[str, Any]) -> bool:
     platforms = m.get("platforms")
     return (
@@ -484,6 +585,10 @@ def _valid_error(m: Mapping[str, Any]) -> bool:
 _SESSION_END_TYPES = frozenset({"session.expired", "session.closed"})
 
 
+def _valid_expiring(m: Mapping[str, Any]) -> bool:
+    return _matches(m.get("reason"), _ENUM_VALUE) and _uint(m.get("closesAt"), 0, 2**63 - 1)
+
+
 def _valid_session_end(m: Mapping[str, Any]) -> bool:
     return _matches(m.get("sessionId"), _SESSION_ID) and _matches(m.get("reason"), _ENUM_VALUE)
 
@@ -493,7 +598,8 @@ def _valid_session_end(m: Mapping[str, Any]) -> bool:
 _INBOUND_CHECKS: Mapping[str, Callable[[Mapping[str, Any]], bool]] = MappingProxyType(
     {
         "session.created": _valid_created,
-        "session.expiring": lambda m: True,  # nothing is read from it
+        "session.resumed": _valid_resumed,
+        "session.expiring": _valid_expiring,
         "session.renewed": lambda m: _valid_ttl(m.get("ttl")),
         "viewer.count": _valid_viewer_count,
         "scene.snapshot.ack": lambda m: _uint(m.get("sceneVersion"), 1),
@@ -515,6 +621,8 @@ class ProtocolClient:
     returned (a builder bug fails loudly instead of earning ``INVALID_MESSAGE`` strikes) and every inbound message
     before it changes state. Inbound messages that fail are ignored and counted in :attr:`invalid_inbound`;
     :attr:`last_error` keeps the last real relay error. Builders validate before they change any state.
+    ``auto_renew`` answers a live session's ``session.expiring`` with ``session.renew`` (§4.4): a bool, or a callable
+    asked at each one (the panel renews only after recent user activity, SLC-47).
     """
 
     def __init__(
@@ -522,7 +630,7 @@ class ProtocolClient:
         client_info: Mapping[str, Any],
         *,
         validate: Callable[[dict[str, Any]], Sequence[Any]] | None = None,
-        auto_renew: bool = True,
+        auto_renew: bool | Callable[[], bool] = True,
     ) -> None:
         self.client_info = dict(client_info)
         self._validate = validate
@@ -541,6 +649,9 @@ class ProtocolClient:
         self.viewer_count = 0
         self.platforms: dict[str, int] = {}
         self.ttl: dict[str, Any] | None = None
+        #: ``closesAt`` of the last ``session.expiring`` (§4.4, ms on the relay's clock), until ``session.renewed`` or a
+        #: viewer: the idle timer runs only while no viewer is connected.
+        self.closes_at: int | None = None
         self.limits: dict[str, Any] | None = None
         self.close_reason: str | None = None
         self.last_error: ErrorInfo | None = None
@@ -562,6 +673,11 @@ class ProtocolClient:
         self._epoch = 0
         self._pending_create_id: str | None = None
         self._pending_ping_id: str | None = None
+        #: Resume (SLC-17): a snapshot is owed only because the connection dropped; the snapshot in flight at the first
+        #: drop of this outage (the relay may still hold it); the ID of the session.resume waiting for its answer.
+        self._loss_resync = False
+        self._lost_snapshot: int | None = None
+        self._pending_resume_id: str | None = None
         self.versions.reset()
 
     def __repr__(self) -> str:  # no code, no token (T4, T6)
@@ -576,16 +692,16 @@ class ProtocolClient:
     @property
     def snapshot_needed(self) -> bool:
         """The viewers can only be brought up to date by a new snapshot (§8.1 re-sync): the relay refused a snapshot or
-        an update sent after the last ``begin``, the connection dropped, ``scene.nodeAdded`` was sent and its snapshot
-        did not begin yet (§8.2), or the caller asked for one (:meth:`require_snapshot`). :meth:`begin_snapshot`
-        clears it."""
-        return self._snapshot_needed
+        an update sent after the last ``begin``, ``scene.nodeAdded`` was sent and its snapshot did not begin yet
+        (§8.2), or the caller asked for one (:meth:`require_snapshot`); and from a drop until ``session.resumed`` shows
+        the relay is up to date (§4.3). :meth:`begin_snapshot` clears it."""
+        return self._snapshot_needed or self._loss_resync
 
     @property
     def updates_held(self) -> bool:
         """Changes and removals are held now (see the module docstring)."""
         return (
-            self._snapshot_needed
+            self.snapshot_needed
             or self.snapshot_in_flight is not None
             or self.snapshot_version is None
         )
@@ -632,6 +748,33 @@ class ProtocolClient:
         _log.info("session: connecting")
         return message
 
+    def resume(self) -> dict[str, Any]:
+        """``grace`` → ``resuming``; returns ``session.resume`` (§4.3), the first message on a new connection.
+
+        ``lastSceneVersion`` is the highest ``sceneVersion`` sent, not the last acknowledged one. The token is revealed
+        only into the returned message (T4)."""
+        if (
+            self.state is not SessionState.GRACE
+            or self.session_id is None
+            or self._publisher_token is None
+        ):
+            raise ProtocolStateError(f"cannot resume a session in state {self.state.value}")
+        message_id = self._id()
+        message = self._out(
+            envelope(
+                "session.resume",
+                message_id,
+                sessionId=self.session_id,
+                publisherToken=self._publisher_token.reveal(),
+                clientInfo=dict(self.client_info),
+                lastSceneVersion=self.versions.last,
+            )
+        )
+        self._pending_resume_id = message_id
+        self.state = SessionState.RESUMING
+        _log.info("session: resuming")
+        return message
+
     def begin_snapshot(
         self,
         glb: bytes,
@@ -642,7 +785,8 @@ class ProtocolClient:
     ) -> SnapshotMessages:
         """Allocate the next ``sceneVersion`` and build the snapshot messages; ``created`` → ``active`` (§6, §8.4).
 
-        A new snapshot while one is in flight supersedes it (§6.2). Size limits announced in
+        A new snapshot while one is in flight supersedes it (§6.2); a GLB whose root does not state this ``begin``'s
+        figures raises before a version is used (SLC-38). Size limits announced in
         ``session.created.limits`` are enforced here so an oversize GLB never leaves the PC; ``chunk_size``
         defaults to 1 MiB or the relay's smaller ``maxChunkBytes``. The SHA-256 is computed on the calling thread.
         """
@@ -680,6 +824,7 @@ class ProtocolClient:
         self._held_changes.clear()
         self._held_removed.clear()
         self._snapshot_needed = False
+        self._loss_resync = False
         self._epoch = self._next_id
         return messages
 
@@ -881,18 +1026,21 @@ class ProtocolClient:
         return message
 
     def transport_lost(self, close_code: int | None = None) -> None:
-        """The socket closed without our ``session.close``: ``created``/``active`` → ``grace`` (§9.1; resume is
-        SLC-17), or ``closed`` for the terminal close codes of §9.3 (:data:`TERMINAL_CLOSE_CODES`: 4003 forgets the
-        token, 4011 means another connection took the session over)."""
+        """The socket closed without our ``session.close``: ``created``/``active``/``resuming`` → ``grace`` (§9.1;
+        :meth:`resume` on the next connection), or ``closed`` for the terminal close codes of §9.3
+        (:data:`TERMINAL_CLOSE_CODES`: 4003 forgets the token, 4011 means another connection took the session over)."""
         reason = TERMINAL_CLOSE_CODES.get(close_code) if close_code is not None else None
         if reason is not None and self.state not in (SessionState.IDLE, SessionState.CLOSED):
             self._close(reason)
         elif self.state in (SessionState.CREATED, SessionState.ACTIVE, SessionState.RESUMING):
-            self.snapshot_in_flight = None  # the relay discards a partial snapshot (§6.3)
+            if self.snapshot_in_flight is not None:
+                # the relay may hold it complete (its ack lost with the socket) or discard it (§6.3): the resume says
+                self._lost_snapshot = self.snapshot_in_flight
+            self.snapshot_in_flight = None
             self._snapshot_ids = frozenset()
             self._pending_ping_id = None
-            # messages on the way may be lost: a snapshot after the resume (SLC-17 may compare versions instead)
-            self._snapshot_needed = True
+            # messages on the way may be lost: a snapshot is owed until session.resumed shows the relay is up to date
+            self._loss_resync = True
             self.state = SessionState.GRACE
         elif self.state is SessionState.CONNECTING:
             self._close("CONNECT_FAILED")
@@ -929,7 +1077,9 @@ class ProtocolClient:
         self.state = SessionState.CLOSED
         self.close_reason = reason
         self._publisher_token = None
-        # an ended session's code must not stay on screen or be reused as preferredCode
+        # an ended session's code must not stay on screen or be reused as preferredCode — the one exception is the
+        # §4.3 fallback after SESSION_NOT_FOUND, for which the caller keeps its own copy of the code (SLC-45: only
+        # after a close 4008 in the same outage, inside the reconnect window, never after Stop; T1)
         self.code = None
         self.snapshot_in_flight = None
         self._snapshot_ids = frozenset()
@@ -938,6 +1088,7 @@ class ProtocolClient:
         self._held_changes.clear()
         self._held_removed.clear()
         self._snapshot_needed = False
+        self._loss_resync = False
         _log.info("session: closed (%s)", reason)
 
     # ------------------------------------------------------------------ inbound
@@ -995,20 +1146,58 @@ class ProtocolClient:
         _log.info("session: created")
         return []
 
+    def _on_resumed(self, m: Mapping[str, Any]) -> list[dict[str, Any]]:
+        if self.state is not SessionState.RESUMING:
+            return []
+        if (
+            ("replyTo" in m and m["replyTo"] != self._pending_resume_id)
+            or m["sessionId"] != self.session_id
+            or m["code"] != self.code
+        ):
+            return self._invalid("session.resumed")  # another session's answer (T11)
+        adopted, consistent, continue_at = resume_plan(
+            self.versions.last,
+            self.snapshot_version,
+            self._lost_snapshot,
+            m["sceneVersion"],
+            m["snapshotVersion"],
+        )
+        if adopted is not None:  # its ack was lost with the connection
+            self.snapshot_version = self.accepted_version = adopted
+        self.versions.continue_from(continue_at)
+        self.ttl = dict(m["ttl"])
+        self._count_viewers(m["viewerCount"])
+        self._pending_resume_id = None
+        self._lost_snapshot = None
+        # a need from before the drop or set while offline stays in _snapshot_needed
+        self._loss_resync = not consistent
+        self.state = SessionState.ACTIVE if self.versions.last > 0 else SessionState.CREATED
+        _log.info("session: resumed" if consistent else "session: resumed, snapshot needed")
+        # the changes held behind an ack lost with the connection go out on top of the snapshot (§6.2)
+        return [] if self.updates_held else self._release_held()
+
     def _on_expiring(self, m: Mapping[str, Any]) -> list[dict[str, Any]]:
-        if self.auto_renew and self.state in (SessionState.CREATED, SessionState.ACTIVE):
-            return [self.build_session_renew()]
-        return []
+        self.closes_at = m["closesAt"]
+        if self.state not in (SessionState.CREATED, SessionState.ACTIVE):
+            return []
+        renew = self.auto_renew() if callable(self.auto_renew) else self.auto_renew
+        return [self.build_session_renew()] if renew else []
 
     def _on_renewed(self, m: Mapping[str, Any]) -> list[dict[str, Any]]:
         self.ttl = dict(m["ttl"])
+        self.closes_at = None
         return []
 
     def _on_viewer_count(self, m: Mapping[str, Any]) -> list[dict[str, Any]]:
-        self.viewer_count = m["viewerCount"]
+        self._count_viewers(m["viewerCount"])
         self.viewer_limit = m["viewerLimit"]
         self.platforms = _platform_counts(m["platforms"])
         return []
+
+    def _count_viewers(self, count: int) -> None:
+        self.viewer_count = count
+        if count:  # the idle timer runs only while no viewer is connected (§4.4): no expiry now
+            self.closes_at = None
 
     def _on_ack(self, m: Mapping[str, Any]) -> list[dict[str, Any]]:
         if m["sceneVersion"] != self.snapshot_in_flight:
@@ -1033,6 +1222,13 @@ class ProtocolClient:
             if reply_to is None or reply_to == self._pending_create_id:
                 # session.create refused (CAPACITY, RATE_LIMITED, …); the relay closes the socket
                 self._close(code)
+        elif (
+            self.state is SessionState.RESUMING
+            and code == "SESSION_NOT_FOUND"
+            and reply_to in (None, self._pending_resume_id)
+        ):
+            # §4.3: the relay no longer knows the session; the caller may fall back to session.create{preferredCode}
+            self._close(code)
         elif code in _FATAL_ERRORS:
             self._close(code)
         elif self.snapshot_in_flight is not None and (
@@ -1068,6 +1264,7 @@ class ProtocolClient:
     ] = MappingProxyType(
         {
             "session.created": _on_created,
+            "session.resumed": _on_resumed,
             "session.expiring": _on_expiring,
             "session.renewed": _on_renewed,
             "viewer.count": _on_viewer_count,

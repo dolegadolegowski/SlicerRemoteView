@@ -9,6 +9,7 @@ import sys
 import time
 import types
 import xml.etree.ElementTree as ET
+from dataclasses import replace
 
 import pytest
 from conftest import MODULE_DIR, ui_widget_names
@@ -23,6 +24,7 @@ from support import (
     needs_relay_stub,
     parent_widget,
     pump_while,
+    relay_error,
     start_relay_stub,
     viewer_count,
 )
@@ -48,8 +50,13 @@ UI_FILE = MODULE_DIR / "Resources" / "UI" / "RemoteView.ui"
 
 
 def controller(clock=time.monotonic) -> PanelController:
+    """``clock`` is the wall clock too: no host clock step can reach the reconnect window."""
     return PanelController(
-        slicer_version="5.12.4", platform="win32", transport_factory=FakeTransport, clock=clock
+        slicer_version="5.12.4",
+        platform="win32",
+        transport_factory=FakeTransport,
+        clock=clock,
+        wall=clock,
     )
 
 
@@ -262,19 +269,6 @@ def test_panel_relay_ends_a_live_session(fake, message, close_code, detail, send
     assert message.get("message", "<none>") not in view_text(view)  # relay free text (§9.2)
 
 
-def test_panel_does_not_renew_a_session_by_itself(fake):
-    """NFR-11, T1: until release decides on renewal, a session nobody joins ends after the relay's idle TTL."""
-    ctl = controller()
-    live(ctl)
-    deliver(
-        ctl, Received(1, envelope.make("session.expiring", reason="IDLE", closesAt=1792240260000))
-    )
-    assert [m["type"] for _, m in fake.made[0].sent] == ["session.create"]  # no session.renew
-    deliver(ctl, Received(1, envelope.make("session.expired", sessionId=SESSION_ID, reason="IDLE")))
-    view = deliver(ctl, Disconnected(1, None, None))
-    assert (view.status, view.detail) == (panel.SESSION_ENDED, panel.END_REASONS["IDLE"])
-
-
 def test_panel_ignores_relay_messages_while_stopping(fake):
     ctl = controller()
     live(ctl)
@@ -406,11 +400,14 @@ def test_panel_one_controller_runs_many_sessions(fake):
     ctl.stop()
     view = deliver(ctl, Disconnected(1, None, None, final_sent=False))
     assert (view.status, view.detail) == (panel.SESSION_ENDED, panel.FINAL_NOT_SENT)
-    view = live(ctl)  # 4: a drop ends it — the panel's own end, not a lost stop message
+    # 4: a drop outlasts the reconnect window — the panel's own end, not a lost stop message
+    view = live(ctl)
     assert view.code == CODE and view.detail == "" and len(fake.made) == 4
     deliver(ctl, Disconnected(1, TransportError(ErrorKind.NETWORK, retryable=True), 0.5))
+    now[0] += 180  # the relay's grace (120 s) and the slack (60 s)
+    ctl.pump()
     view = deliver(ctl, Disconnected(None, None, None, final_sent=False))
-    assert (view.status, view.detail) == (panel.SESSION_ENDED, panel.RESUME_LATER)
+    assert (view.status, view.detail) == (panel.SESSION_ENDED, panel.RECONNECT_GAVE_UP)
 
 
 def test_panel_shutdown_reports_a_transport_that_did_not_end(fake):
@@ -432,14 +429,12 @@ def test_panel_retry_text_never_says_zero_seconds(fake):
     assert view.status == "Relay unreachable — retrying in 1 s."
 
 
-def test_panel_drop_after_the_session_started_ends_it(fake):
-    """No resume before SLC-17: the session ends instead of silently getting a new code."""
+def test_panel_drop_after_the_session_started_reconnects(fake):
+    """SLC-44: the session waits for a resume with the same code instead of ending (test_panel_resume.py)."""
     ctl = controller()
     live(ctl)
-    deliver(ctl, Disconnected(1, TransportError(ErrorKind.NETWORK, retryable=True), 0.5))
-    assert fake.made[0].stops == [(None, 0)]  # in grace there is no socket for session.close
-    view = deliver(ctl, Disconnected(None, None, None))
-    assert (view.status, view.detail) == (panel.SESSION_ENDED, panel.RESUME_LATER)
+    view = deliver(ctl, Disconnected(1, TransportError(ErrorKind.NETWORK, retryable=True), 0.5))
+    assert ctl.phase is Phase.RECONNECTING and view.code == CODE and fake.made[0].stops == []
 
 
 def test_panel_binary_frame_from_the_relay_stops_the_session(fake):
@@ -511,6 +506,31 @@ def test_panel_shutdown_closes_and_waits(fake):
     assert PanelController(slicer_version="5.12.4", platform="linux").shutdown()  # never started
 
 
+def test_panel_shutdown_after_stop_only_waits(fake):
+    """Stop's own stop() carried the session.close: cleanup only waits for the transport (no second close)."""
+    ctl = controller()
+    live(ctl)
+    ctl.stop()
+    assert ctl.shutdown(timeout=3.0)
+    [(close, first), (second, wait)] = fake.made[0].stops
+    assert (close["type"], first) == ("session.close", 0) and (second, wait) == (None, 3.0)
+
+
+def test_panel_shutdown_sends_no_fallback_close_without_a_connection(fake, monkeypatch):
+    """SLC-43: a plain ``session.close`` replaces a close that raised only on a socket the panel knows."""
+    ctl = controller()
+    ctl.start(URL)  # the transport has not connected yet
+
+    def boom():
+        raise RuntimeError("close failed")
+
+    monkeypatch.setattr(ctl._client, "close", boom)
+    with pytest.raises(RuntimeError):
+        ctl.shutdown(timeout=3.0)
+    assert fake.made[0].stops == [(None, 3.0)]
+    assert ctl.phase is Phase.IDLE and not ctl.active
+
+
 def test_panel_pump_handles_a_bounded_number_of_events(fake):
     ctl = controller()
     live(ctl)
@@ -560,6 +580,103 @@ def test_panel_texts_are_plain_and_complete():
         assert "<" not in text and ">" not in text
         assert (text == "") == (reason == "USER_STOPPED")  # every other end is explained
     assert panel.viewers_text(0) == "Session running · no viewers yet."
+    # SLC-43: the reconnect texts (shown from SLC-44 on)
+    reconnect = [
+        panel.RECONNECTING_IN,
+        panel.RESTARTING_IN,
+        panel.RECONNECTING,
+        panel.RELAY_HOLDS_SESSION,
+        panel.RECONNECT_DETAIL,
+        panel.RECONNECT_GAVE_UP,
+        panel.RELAY_HOLDS_SESSION_LONGER,
+        panel.SESSION_LOST,
+        panel.SESSION_GONE_OFFLINE,
+        panel.RESUME_NO_ANSWER,
+        panel.STOPPED_OFFLINE,
+        panel.RELAY_RESTARTED,
+        panel.NEW_CODE,
+        panel.SCENE_INTERRUPTED,
+        panel.RESET_PENDING,
+    ]
+    assert len(set(reconnect)) == len(reconnect) and all(reconnect)
+    assert [text for text in reconnect if "stop and start" in text.lower()] == []
+    assert set(panel.RECONNECT_END_REASONS.values()) <= set(reconnect)
+    # while the relay may keep the session they say who can still see the scene (the consent text's warning), for
+    # "a few minutes", never a number
+    assert panel.RELAY_HOLDS_SESSION.startswith("Anyone with the code can still see the last scene")
+    for text in (
+        panel.RELAY_HOLDS_SESSION,
+        panel.RECONNECT_DETAIL,
+        panel.STOPPED_OFFLINE,
+        panel.RESET_PENDING,
+        panel.SESSION_LOST,
+    ):
+        assert re.search(r"anyone with the code (can )?still sees?\b", text, re.IGNORECASE)
+        assert "a few minutes" in text
+    # SLC-44: a stop whose session.close was lost says so too
+    assert panel.FINAL_NOT_SENT.endswith(panel.RELAY_HOLDS_SESSION)
+    # a relay that keeps sessions longer than RemoteView waits: the same warning, with no duration
+    longer = panel.RELAY_HOLDS_SESSION_LONGER
+    assert re.search(r"anyone with the code (can )?still sees?\b", longer, re.IGNORECASE)
+    assert [text for text in reconnect if re.search(r"[0-9]", text)] == []
+    # fixed texts: the only placeholder is the seconds of the two retry statuses
+    assert [text for text in reconnect if "{" in text or "}" in text] == [
+        panel.RECONNECTING_IN,
+        panel.RESTARTING_IN,
+    ]
+    assert panel.SESSION_LOST.startswith("Session lost")
+    assert "The old code may now belong to another session." in panel.NEW_CODE  # T4
+    # §4.1: preferredCode is granted only when the code is free
+    assert "if it is still free" in panel.RELAY_RESTARTED
+    for text in (
+        panel.RECONNECT_GAVE_UP,
+        panel.SESSION_LOST,
+        panel.SESSION_GONE_OFFLINE,
+        panel.RESUME_NO_ANSWER,
+    ):
+        assert text.endswith("Click Start session for a new code.")  # the session is over
+    for text in (panel.RECONNECTING_IN, panel.RESTARTING_IN):
+        assert text.count("{seconds}") == 1
+        for retry_in in (0.0, 0.2, 2.5):
+            assert " 0 s" not in text.format(seconds=panel.retry_seconds(retry_in))
+    seconds = [panel.retry_seconds(r) for r in (0.0, 0.2, 1.0, 1.01, 29.5)]
+    assert seconds == [1, 1, 1, 2, 30]
+    # every text of the module is plain (the adapter's labels are plain text too)
+    constants = [
+        value for name, value in vars(panel).items() if name.isupper() and isinstance(value, str)
+    ]
+    assert all("<" not in text and ">" not in text for text in constants)
+
+
+def test_panel_view_link_needs_a_code():
+    """SLC-11 review: the link holds the code, so a view never carries one without the other (SLC-43)."""
+    link = f"https://relay.example.org/j#{CODE}"
+    assert PanelView("Live", code=CODE, link=link).link == link
+    with pytest.raises(ValueError, match=r"^a join link needs its code$") as raised:
+        PanelView("Live", link=link)
+    assert CODE not in str(raised.value)
+    with pytest.raises(ValueError, match=r"^a join link needs its code$"):
+        replace(PanelView("Live", code=CODE, link=link), code="")
+    # a code alone is fine (no QR code for this relay)
+    assert PanelView("Live", code=CODE).link == ""
+
+
+@pytest.mark.parametrize("phase", ["connecting", "live"])
+def test_panel_reconnect_texts_only_while_reconnecting(fake, phase):
+    """Outside a reconnect the same reasons keep their usual texts: a refused create was not "offline", and a live
+    session the relay stops authorising says so."""
+    ctl = controller()
+    ctl.start(URL)
+    if phase == "connecting":
+        deliver(ctl, Connected(1), Received(1, relay_error("SESSION_NOT_FOUND", "p-1")))
+        expected = (panel.CANNOT_START, panel.end_text("SESSION_NOT_FOUND"))
+    else:
+        live_view = deliver(ctl, Connected(1), Received(1, created()))
+        assert live_view.code == CODE
+        deliver(ctl, Received(1, relay_error("UNAUTHORIZED")))
+        expected = (panel.SESSION_ENDED, panel.END_REASONS["UNAUTHORIZED"])
+    view = deliver(ctl, Disconnected(1, None, None, final_sent=True))
+    assert (view.status, view.detail) == expected
 
 
 @pytest.mark.parametrize("missing", ["scene", "flush_timer"])
@@ -619,6 +736,8 @@ def test_panel_ui_properties():
     ]
     assert opens == ["consentLabel"]
     assert prop("stopButton", "enabled").findtext("bool") == "false"
+    # SLC-47: only when the relay warns
+    assert prop("keepButton", "visible").findtext("bool") == "false"
     assert widgets["extraCaPathLineEdit"].get("class") == "ctkPathLineEdit"
     assert (
         prop("extraCaPathLineEdit", "filters").findtext("set")
@@ -780,6 +899,54 @@ def test_panel_adapter_start_pump_and_stop(widget, slicer_stubs, fake):
     transport.events.put(Disconnected(1, None, None, final_sent=True))
     instance.onPump()
     assert not instance.pumpTimer.isActive() and instance.ui.startButton.enabled is True
+    instance.cleanup()
+
+
+def test_panel_adapter_keep_session_follows_the_relays_warning(widget, fake, monkeypatch):
+    """SLC-47: the button shows while the relay is about to end the idle session; a click renews it."""
+    _, instance = widget
+    monkeypatch.setattr(panel, "ACTIVITY_WINDOW_S", -1.0)  # nobody active: the panel asks
+    instance.ui.relayUrlLineEdit.text = URL
+    instance.ui.extraCaPathLineEdit.currentPath = ""
+    instance.onKeepClicked()  # no session yet
+    instance.onStartClicked()
+    transport = fake.made[0]
+    transport.events.put(Connected(1))
+    transport.events.put(Received(1, created()))
+    instance.onPump()
+    assert instance.ui.keepButton.visible is False
+    expiring = envelope.make("session.expiring", reason="IDLE", closesAt=1792240260000)
+    transport.events.put(Received(1, expiring))
+    instance.onPump()
+    assert instance.ui.keepButton.visible is True
+    assert panel.KEEP_SESSION in instance.ui.detailLabel.text
+    instance.onKeepClicked()
+    assert [m["type"] for _, m in transport.sent if isinstance(m, dict)][-1] == "session.renew"
+    assert instance.ui.keepButton.visible is False
+    assert panel.KEEP_SESSION not in instance.ui.detailLabel.text
+    instance.cleanup()
+
+
+def test_panel_adapter_link_buttons_are_activity_and_timers_are_not(widget, fake, monkeypatch):
+    """SLC-47: Copy link, the Presentation window and *Remove small islands* count as someone at the panel; the pump
+    and flush do not."""
+    _, instance = widget
+    instance.ui.relayUrlLineEdit.text = URL
+    instance.ui.extraCaPathLineEdit.currentPath = ""
+    instance.onCopyLinkClicked()  # no controller yet: nothing to note
+    instance.onStartClicked()
+    transport = fake.made[0]
+    transport.events.put(Connected(1))
+    transport.events.put(Received(1, created()))
+    noted = []
+    monkeypatch.setattr(instance.controller, "note_activity", lambda: noted.append(1))
+    instance.onPump()
+    instance.onFlushTimer()
+    assert noted == []
+    instance.onCopyLinkClicked()
+    instance.onPresentClicked()
+    instance.onRemoveIslandsToggled(False)  # the panel's checkbox too (the toolbar: test_sendmode)
+    assert noted == [1, 1, 1]
     instance.cleanup()
 
 

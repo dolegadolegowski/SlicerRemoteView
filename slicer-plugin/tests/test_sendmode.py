@@ -126,6 +126,7 @@ def test_sendmode_toolbar_saves_the_mode_and_hands_it_to_the_panel(
     controller.view = PanelView("Live · no viewers yet.", code="ABCDE")
     toolbar.modeBox.currentIndex = mode_index("manual")
     controller.set_send_policy.assert_called_once_with(SendPolicy(manual=True))
+    controller.note_activity.assert_called_once_with()  # someone is at Slicer (SLC-47)
     assert widget.ui.statusLabel.text == "Live · no viewers yet."  # rendered after the change
     widget.cleanup()
     assert toolbar.widget is None and widget.toolbar is None
@@ -151,6 +152,7 @@ def test_sendmode_toolbar_sends_now_or_opens_the_panel(
     assert (action.enabled, action.text) == (True, "Send now (5 s)")
     action.slots["triggered()"]()
     controller.send_now.assert_called_once_with()
+    controller.note_activity.assert_called_once_with()  # someone is at Slicer (SLC-47)
     widget.render(PanelView("Live · no viewers yet.", code="ABCDE", changes_wait=True))
     assert action.text == SEND_NOW_HELD
     toolbar.modeBox.currentIndex = mode_index("now")

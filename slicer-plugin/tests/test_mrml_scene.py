@@ -4,6 +4,7 @@ models; v5.12.4 ``vtkMRMLSegmentationsDisplayableManager3D::vtkInternal`` for se
 from __future__ import annotations
 
 import logging
+import sys
 
 import numpy as np
 import pytest
@@ -17,6 +18,7 @@ from support import (
     FakeSegment,
     FakeSegmentation,
     FakeView,
+    leaks,
 )
 from support import (
     FakeMrmlTransform as FakeTransform,
@@ -511,3 +513,45 @@ def test_mrml_scene_a_segment_whose_visibility_binding_fails_is_listed_as_invali
         (f"{SEG}/Segment_1", SkipReason.INVALID_DISPLAY)
     ]
     assert "TypeError" in caplog.text and "Segment_1" not in caplog.text
+
+
+class LoggingSegDisplay(FakeSegDisplay):
+    """A display node whose per-segment getters, asked about a segment the segmentation no longer has, print its ID
+    the way Slicer v5.12.4's do (``vtkErrorMacro`` in ``vtkMRMLSegmentationDisplayNode``: "No display properties
+    found" from ``GetSegmentVisibility``/``GetSegmentOpacity3D``, "segment not found by id" from
+    ``GetSegmentColor``)."""
+
+    def __init__(self, segmentation: FakeSegmentation, **kw) -> None:
+        super().__init__(**kw)
+        self._segmentation = segmentation
+
+    def _props(self, segment_id):
+        if self._segmentation.GetSegmentation().GetSegment(segment_id) is None:
+            print(
+                f"ERROR: GetSegmentVisibility: no display properties for segment {segment_id}",
+                file=sys.stderr,
+            )
+        return super()._props(segment_id)
+
+
+def test_mrml_scene_a_segment_removed_while_preparing_asks_no_display_getter(caplog, capfd):
+    """SLC-71: a segment removed after the list was read — between two preparation steps — reads as not shown and
+    without a mesh, and no per-segment display getter is asked with its ID: Slicer's would print it, and a segment ID
+    may be name-derived (T7). The collection then leaves it out."""
+    node = segmentation(
+        segments=[
+            FakeSegment("Segment_1", name="Liver", polydata=sphere()),
+            FakeSegment("Doe tumour", name="Doe tumour", polydata=sphere()),
+        ]
+    )
+    display = LoggingSegDisplay(node, opacity_3d=0.5)
+    node.displays = [display]
+    api, _ = scene([], segmentations=[node])
+    [kept, removed] = handles(api, node)
+    node.segmentation.segments = node.segmentation.segments[:1]  # "Doe tumour" removed
+    display.asked.clear()
+    assert api.display_props(removed) == ((0.0, 0.0, 0.0), 0.0, False)
+    assert api.polydata(removed) is None and api.name(removed) is None
+    assert api.display_props(kept)[2] is True
+    assert display.asked and "Doe tumour" not in display.asked
+    assert leaks(caplog, capfd, "Doe", "tumour") == []

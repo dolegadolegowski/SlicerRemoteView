@@ -302,10 +302,20 @@ def test_panel_snapshot_state_starts_over_with_each_session(fake):
     assert kinds(fake.made[1])[:2] == ["session.create", "scene.snapshot.begin"]
 
 
-def test_panel_snapshot_owns_one_alias_registry_per_session(fake):
+def test_panel_snapshot_owns_one_alias_registry_per_session(fake, monkeypatch):
     """SLC-35 (§7.3, D-a): the panel hands ``LiveUpdates`` a ``SceneIds`` of its own — one per ``session.create``, so a
-    Stop → Start may renumber while every export within a session reuses the aliases it issued."""
+    Stop → Start may renumber while every export within a session reuses the aliases it issued. The resume keeps it
+    (``test_panel_live_resume_keeps_the_aliases_and_sends_segment_marks_made_offline``); the re-create after a relay
+    restart makes a new one (``test_panel_live_resume_recreate_with_segments_starts_a_new_registry``)."""
     seg = "vtkMRMLSegmentationNode1"
+    made: list[SceneIds] = []
+
+    def registry() -> SceneIds:
+        made.append(SceneIds())
+        return made[-1]
+
+    # the panel's own registry, not the one LiveUpdates makes when it is handed none
+    monkeypatch.setattr(panel, "SceneIds", registry)
 
     def scene():
         return FakeScene(
@@ -317,7 +327,7 @@ def test_panel_snapshot_owns_one_alias_registry_per_session(fake):
     ctl.start(URL)
     deliver(ctl, Connected(1), Received(1, created()))
     first = ctl._live.ids
-    assert isinstance(first, SceneIds)
+    assert len(made) == 1 and made[0] is first
     _, glb, _ = reassemble([m for _, m in fake.made[0].sent[1:]])
     assert [m["nodeId"] for m in manifest(glb)] == [f"{seg}/s_1", f"{seg}/s_2"]
     # the export used this very registry: the tumour's alias is already s_2 here (an untouched one would say s_1)
@@ -326,7 +336,7 @@ def test_panel_snapshot_owns_one_alias_registry_per_session(fake):
     deliver(ctl, Disconnected(1, None, None, final_sent=True))
     ctl.start(URL)
     deliver(ctl, Connected(1), Received(1, created()))
-    assert ctl._live.ids is not first and isinstance(ctl._live.ids, SceneIds)
+    assert len(made) == 2 and made[1] is ctl._live.ids and made[1] is not first
 
 
 def test_panel_snapshot_carries_the_slicer_version(fake):

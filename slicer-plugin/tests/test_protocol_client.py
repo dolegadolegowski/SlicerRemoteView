@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import logging
 import pickle
+import re
 import struct
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+from support import glb_container, restamped, rewrite_json
 
 from remoteview_core import protocol_client
 from remoteview_core.protocol_client import (
@@ -86,15 +88,9 @@ def _ack(version: int) -> dict:
     )
 
 
-def _glb_json(document) -> bytes:
-    """A GLB container holding only a JSON chunk (for the extension checks)."""
-    text = json.dumps(document).encode()
-    text += b" " * (-len(text) % 4)
-    return struct.pack("<IIIII", 0x46546C67, 2, 20 + len(text), len(text), 0x4E4F534A) + text
-
-
 def _snapshot(client: ProtocolClient):
-    return client.begin_snapshot(ASYMMETRIC_GLB, node_count=2, triangle_count=36)
+    glb = restamped(ASYMMETRIC_GLB, client.next_scene_version, client.profile)
+    return client.begin_snapshot(glb, node_count=2, triangle_count=36)
 
 
 @pytest.fixture
@@ -265,13 +261,13 @@ def test_protocol_client_multi_chunk_frames_pass_the_receiver_rules():
     glb = bytearray(ASYMMETRIC_GLB) + bytes(case["byteLength"] - len(ASYMMETRIC_GLB))
     glb[8:12] = len(glb).to_bytes(4, "little")  # GLB header length matches the padding
     messages = build_snapshot_messages(
-        bytes(glb), 43, chunk_size=65_536, profile="mobile", node_count=2, triangle_count=36
+        bytes(glb), 1, chunk_size=65_536, profile="mobile", node_count=2, triangle_count=36
     )
     assert messages.begin["chunkCount"] == case["chunkCount"]
     out = bytearray(messages.begin["byteLength"])
     for index, frame in enumerate(messages.chunks):
         chunk = chunk_header.decode_chunk_header(frame)
-        expected = chunk_header.ExpectedChunk(43, len(glb), 65_536, case["chunkCount"], index)
+        expected = chunk_header.ExpectedChunk(1, len(glb), 65_536, case["chunkCount"], index)
         # raises BadSequenceError on any §6.3 violation
         offset = chunk_header.check_chunk(chunk, expected)
         out[offset : offset + chunk.payload.nbytes] = chunk.payload
@@ -284,9 +280,165 @@ def test_protocol_client_quantized_glb_announces_its_extensions():
     used, required = glb_extensions(QUANTIZED_GLB)
     assert used == required == ["KHR_mesh_quantization"]
     begin = build_snapshot_messages(
-        QUANTIZED_GLB, 3, profile="mobile", node_count=1, triangle_count=128
+        QUANTIZED_GLB, 1, profile="mobile", node_count=1, triangle_count=128
     ).begin
     assert begin["extensionsUsed"] == begin["extensionsRequired"] == ["KHR_mesh_quantization"]
+
+
+# --------------------------------------------------------------------------- SLC-38: the begin says what the GLB says
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "asymmetric-2nodes",
+        "quantized-1node",
+        "aliased-segments",
+        "anonymized-segments",
+        "large-synthetic",
+    ],
+)
+def test_protocol_client_shared_begin_fixtures_match_their_glbs(name):
+    """§6.2: the TS generator's begin of every valid GLB fixture states the root's figures; built here it passes."""
+    reference = _fixture_begin(f"valid-{name}.json")
+    glb = (FIXTURES / "glb" / f"{name}.glb").read_bytes()
+    begin = build_snapshot_messages(
+        glb,
+        reference["sceneVersion"],
+        profile=reference["profile"],
+        node_count=reference["nodeCount"],
+        triangle_count=reference["triangleCount"],
+    ).begin
+    assert {
+        k: begin[k] for k in ("sceneVersion", "profile", "nodeCount", "triangleCount", "sha256")
+    } == {
+        k: reference[k] for k in ("sceneVersion", "profile", "nodeCount", "triangleCount", "sha256")
+    }
+
+
+def _root(document) -> dict:
+    return document["nodes"][document["scenes"][0]["nodes"][0]]
+
+
+def _first_t(document) -> dict:
+    return document["nodes"][_root(document)["children"][0]]
+
+
+def _set(where, **changes):
+    """An edit of ASYMMETRIC_GLB's document: ``where(document)`` updated with ``changes``."""
+    return lambda document: where(document).update(changes)
+
+
+def _child(index: int, value):
+    return lambda document: _root(document)["children"].__setitem__(index, value)
+
+
+def _refused(edit=None, *, glb=ASYMMETRIC_GLB, node_count=2, triangle_count=36, id):
+    """A GLB that a ``begin`` for version 1, profile ``mobile`` and these totals must not be built for (the totals
+    match the GLB's sum where a case is about a type, so only the type check can refuse it)."""
+    glb = rewrite_json(glb, edit) if edit is not None else glb
+    return pytest.param(glb, node_count, triangle_count, id=id)
+
+
+#: What ASYMMETRIC_GLB holds that an error must never carry (T7): its names and IDs.
+GLB_NEEDLES = ("Liver", "Tumor", "Segment_1", "vtkMRML")
+
+
+@pytest.mark.parametrize(
+    ("glb", "node_count", "triangle_count"),
+    [
+        _refused(triangle_count=35, id="triangles"),
+        _refused(node_count=1, id="fewer-nodes"),
+        _refused(node_count=3, id="more-nodes"),
+        _refused(glb=(FIXTURES / "glb" / "no-root-extras.glb").read_bytes(), id="no-root-extras"),
+        _refused(glb=(FIXTURES / "glb" / "two-scenes.glb").read_bytes(), id="two-scenes"),
+        _refused(lambda d: d.update(scenes=[]), id="no-scene"),
+        _refused(lambda d: d.update(scene=1), id="scene-index"),
+        _refused(lambda d: d.update(scene=-1), id="scene-negative"),
+        _refused(lambda d: d.update(scene=False), id="scene-bool"),
+        _refused(lambda d: d["scenes"][0]["nodes"].append(1), id="two-roots"),
+        _refused(lambda d: d["scenes"][0].update(nodes=[False]), id="root-index-bool"),
+        _refused(lambda d: d["scenes"][0].update(nodes=[-5]), id="root-index-negative"),
+        _refused(lambda d: d.update(nodes={"0": d["nodes"][0]}), id="nodes-object"),
+        _refused(_set(_root, extras=[]), id="root-extras-not-an-object"),
+        _refused(_set(lambda d: _root(d)["extras"], kind="model"), id="root-kind"),
+        _refused(_set(lambda d: _root(d)["extras"], sceneVersion="1"), id="version-string"),
+        _refused(_set(lambda d: _root(d)["extras"], sceneVersion=True), id="version-bool"),
+        _refused(_set(lambda d: _root(d)["extras"], sceneVersion=1.0), id="version-float"),
+        _refused(_set(lambda d: _root(d)["extras"], nodeId="vtkMRMLModelNode9"), id="root-nodeId"),
+        _refused(_set(_root, children={}), node_count=0, triangle_count=0, id="children-object"),
+        _refused(_set(_root, children=""), node_count=0, triangle_count=0, id="children-string"),
+        _refused(lambda d: _root(d)["children"].append(99), id="child-index"),
+        _refused(_child(0, True), id="child-bool"),
+        _refused(_child(0, 1.0), id="child-float"),
+        _refused(
+            lambda d: _child(1, _root(d)["children"][0])(d), triangle_count=8, id="child-twice"
+        ),
+        _refused(
+            lambda d: (_root(d)["children"].append(0), _root(d)["extras"].update(triangleCount=0)),
+            node_count=3,
+            id="root-own-child",
+        ),
+        _refused(lambda d: _first_t(d).pop("extras"), id="T-without-extras"),
+        _refused(_set(_first_t, extras=[]), id="T-extras-not-an-object"),
+        _refused(_set(lambda d: _first_t(d)["extras"], triangleCount=4.0), id="triangles-float"),
+        _refused(
+            _set(lambda d: _first_t(d)["extras"], triangleCount=-4),
+            triangle_count=28,
+            id="triangles-negative",
+        ),
+        _refused(
+            _set(lambda d: _first_t(d)["extras"], triangleCount=True),
+            triangle_count=33,
+            id="triangles-bool",
+        ),
+    ],
+)
+def test_protocol_client_begin_differing_from_the_glb_root_is_refused(
+    glb, node_count, triangle_count, live, caplog
+):
+    """SLC-38 (§6.2, §7.1–7.3): sceneVersion/profile equal the root's extras, nodeCount is the number of T nodes and
+    triangleCount the sum of theirs — or nothing is built, sent or allocated, and the error names nothing (T7)."""
+    caplog.set_level(logging.DEBUG)
+    figures = {"node_count": node_count, "triangle_count": triangle_count}
+    with pytest.raises(ValueError, match="differ from the begin") as built:
+        build_snapshot_messages(glb, 1, profile="mobile", **figures)
+    with pytest.raises(ValueError, match="differ from the begin") as begun:
+        live.begin_snapshot(glb, **figures)
+    assert (live.versions.last, live.snapshot_in_flight, live.state) == (
+        0,
+        None,
+        SessionState.CREATED,
+    )
+    for error in (built.value, begun.value):
+        assert error.__cause__ is None and error.__context__ is None
+        shown = f"{error} {error!r} {caplog.text}"
+        assert [needle for needle in GLB_NEEDLES if needle in shown] == []
+
+
+def test_protocol_client_begin_with_another_version_or_profile_is_refused(live):
+    """The client's own figures: a root stamped for the wrong version or profile uses no version; the right one then
+    begins (the refusal changed nothing)."""
+    for glb in (restamped(ASYMMETRIC_GLB, 2), restamped(ASYMMETRIC_GLB, 1, "quest3")):
+        with pytest.raises(ValueError, match="differ from the begin"):
+            live.begin_snapshot(glb, node_count=2, triangle_count=36)
+        assert (live.versions.last, live.snapshot_in_flight) == (0, None)
+    begin = live.begin_snapshot(ASYMMETRIC_GLB, node_count=2, triangle_count=36).begin
+    assert begin["sceneVersion"] == 1 and live.snapshot_in_flight == 1
+
+
+def test_protocol_client_begin_without_a_scene_key_reads_scene_0():
+    """glTF's ``scene`` is optional: without it the scene to show is scene 0 (§7.1 has exactly one)."""
+    glb = rewrite_json(ASYMMETRIC_GLB, lambda document: document.pop("scene"))
+    begin = build_snapshot_messages(glb, 1, profile="mobile", node_count=2, triangle_count=36).begin
+    assert (begin["nodeCount"], begin["triangleCount"]) == (2, 36)
+
+
+def test_protocol_client_begin_of_a_root_without_children_counts_nothing():
+    """An empty scene (the snapshot that clears a closed scene off the viewers): glTF's ``children`` is optional."""
+    glb = rewrite_json(ASYMMETRIC_GLB, lambda document: _root(document).pop("children"))
+    begin = build_snapshot_messages(glb, 1, profile="mobile", node_count=0, triangle_count=0).begin
+    assert (begin["nodeCount"], begin["triangleCount"]) == (0, 0)
 
 
 @pytest.mark.parametrize(
@@ -302,23 +454,26 @@ def test_protocol_client_quantized_glb_announces_its_extensions():
         ({"glb": b""}, "snapshot"),
         ({"glb": b"glTF" + bytes(30)}, "glTF 2.0"),
         ({"glb": (FIXTURES / "glb" / "truncated.glb").read_bytes()}, "glTF 2.0"),
-        ({"glb": _glb_json([])}, "glTF document"),
+        ({"glb": glb_container([])}, "glTF document"),
         ({"glb": b"glTF\x02\x00\x00\x00"}, "shorter than the header"),
-        ({"glb": b"glTX" + _glb_json({})[4:]}, "glTF 2.0"),  # magic
-        ({"glb": _glb_json({})[:4] + b"\x01" + _glb_json({})[5:]}, "glTF 2.0"),  # version 1
-        ({"glb": _glb_json({})[:16] + b"BIN\x00" + _glb_json({})[20:]}, "glTF 2.0"),  # chunk type
+        ({"glb": b"glTX" + glb_container({})[4:]}, "glTF 2.0"),  # magic
+        ({"glb": glb_container({})[:4] + b"\x01" + glb_container({})[5:]}, "glTF 2.0"),  # version 1
+        (
+            {"glb": glb_container({})[:16] + b"BIN\x00" + glb_container({})[20:]},
+            "glTF 2.0",
+        ),  # chunk type
         (  # JSON chunk length beyond the container
-            {"glb": _glb_json({})[:12] + struct.pack("<I", 404) + _glb_json({})[16:]},
+            {"glb": glb_container({})[:12] + struct.pack("<I", 404) + glb_container({})[16:]},
             "truncated",
         ),
-        ({"glb": _glb_json({"extensionsUsed": "KHR_mesh_quantization"})}, "lists of strings"),
-        ({"glb": _glb_json({"extensionsUsed": [5]})}, "lists of strings"),
-        ({"glb": _glb_json({"extensionsUsed": ["KHR_materials_unlit"]})}, "extensions"),
-        ({"glb": _glb_json({"extensionsUsed": ["KHR_mesh_quantization"] * 2})}, "extensions"),
-        ({"glb": _glb_json({"extensionsRequired": ["KHR_mesh_quantization"]})}, "extensions"),
+        ({"glb": glb_container({"extensionsUsed": "KHR_mesh_quantization"})}, "lists of strings"),
+        ({"glb": glb_container({"extensionsUsed": [5]})}, "lists of strings"),
+        ({"glb": glb_container({"extensionsUsed": ["KHR_materials_unlit"]})}, "extensions"),
+        ({"glb": glb_container({"extensionsUsed": ["KHR_mesh_quantization"] * 2})}, "extensions"),
+        ({"glb": glb_container({"extensionsRequired": ["KHR_mesh_quantization"]})}, "extensions"),
         (
             {
-                "glb": _glb_json(
+                "glb": glb_container(
                     {
                         "extensionsUsed": ["KHR_mesh_quantization"],
                         "extensionsRequired": ["KHR_mesh_quantization"] * 2,
@@ -623,6 +778,61 @@ def test_protocol_client_expiring_auto_renews(live, validators):
     assert live.handle(expiring) == []
     with pytest.raises(ProtocolStateError):
         live.build_session_renew()  # no socket in grace
+
+
+def test_protocol_client_renew_records_when_the_idle_session_closes(live):
+    """SLC-47: ``closesAt`` is kept until ``session.renewed`` or a viewer (the idle timer stops, §4.4)."""
+    live.auto_renew = False
+    assert live.closes_at is None
+    live.handle(envelope.make("session.expiring", reason="IDLE", closesAt=1792240260000))
+    assert live.closes_at == 1792240260000
+    live.handle(envelope.make("viewer.count", viewerCount=0, viewerLimit=20, platforms={}))
+    assert live.closes_at == 1792240260000
+    live.handle(envelope.make("viewer.count", viewerCount=1, viewerLimit=20, platforms={"web": 1}))
+    assert live.closes_at is None
+    live.handle(envelope.make("session.expiring", reason="IDLE", closesAt=1792240320000))
+    renew = live.build_session_renew()
+    ttl = {"graceS": 120, "idleS": 1800, "maxLifetimeS": 43200, "expiresAt": 1792290000000}
+    live.handle(envelope.make("session.renewed", replyTo=renew["id"], ttl=ttl))
+    assert live.closes_at is None
+    live.handle(envelope.make("session.expiring", reason="IDLE", closesAt=1792240380000))
+    live.close()
+    live.start("mobile")  # a new session: nothing of the old one's expiry
+    assert live.closes_at is None
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"closesAt": "soon"},
+        {"closesAt": -1},
+        {"closesAt": 1.5},
+        {"closesAt": None},
+        {"reason": "idle"},
+        {},
+    ],
+)
+def test_protocol_client_renew_ignores_an_invalid_expiring(bare, fields):
+    """Without a validator (Slicer) the stdlib checks refuse it: no renew, nothing recorded."""
+    message = envelope.make("session.expiring", reason="IDLE", closesAt=1792240260000)
+    message.update(fields)
+    if not fields:
+        del message["closesAt"]
+    assert bare.handle(message) == []
+    assert bare.closes_at is None and bare.invalid_inbound == 1
+    assert bare.last_invalid_type == "session.expiring"
+
+
+def test_protocol_client_renew_asks_a_callable_at_each_live_expiring(live):
+    answers = [True, False]
+    asked = []
+    live.auto_renew = lambda: asked.append(live.state) or answers.pop(0)
+    expiring = envelope.make("session.expiring", reason="IDLE", closesAt=1792240260000)
+    assert [m["type"] for m in live.handle(expiring)] == ["session.renew"]
+    assert live.handle(expiring) == []
+    live.transport_lost()
+    assert live.handle(expiring) == []  # in grace nothing can be sent: not asked
+    assert asked == [SessionState.CREATED, SessionState.CREATED]
 
 
 def test_protocol_client_ping_pong(live):
@@ -1028,11 +1238,82 @@ def test_protocol_client_handle_never_raises(bare, message):
     assert bare.state is SessionState.CREATED
 
 
+def _defs() -> dict:
+    """``defs.schema.json#/definitions`` of the vendored protocol package (what the relay validates against)."""
+    path = Path(schemas.__file__).parent / "schema" / "defs.schema.json"
+    return json.loads(path.read_text(encoding="utf-8"))["definitions"]
+
+
 def test_protocol_client_known_platforms_match_the_schema():
-    defs = json.loads(
-        (Path(schemas.__file__).parent / "schema" / "defs.schema.json").read_text(encoding="utf-8")
-    )["definitions"]
-    assert set(defs["platform"]["enum"]) == protocol_client.KNOWN_PLATFORMS
+    assert set(_defs()["platform"]["enum"]) == protocol_client.KNOWN_PLATFORMS
+
+
+# --------------------------------------------------------------------------- contract bounds (branch audit, SLC-43)
+# The Slicer runtime has no jsonschema: the client's own checks must accept exactly what the vendored schema allows,
+# so a bound widened in a protocol minor fails here instead of making the client drop valid relay messages.
+
+
+def test_protocol_client_enum_bounds_match_the_vendored_schema():
+    defs = _defs()
+    assert tuple(defs["profile"]["enum"]) == protocol_client.PROFILES
+    assert frozenset(defs["gltfExtension"]["enum"]) == protocol_client.ALLOWED_EXTENSIONS
+
+
+def _schema_accepts(definition: dict, value: str) -> bool:
+    """An anchored ``^…$`` schema pattern with ECMA-262 semantics (``$`` never matches before a trailing newline)
+    and the schema's length bounds."""
+    pattern = definition["pattern"]
+    assert pattern.startswith("^") and pattern.endswith("$")
+    return (
+        definition["minLength"] <= len(value) <= definition["maxLength"]
+        and re.fullmatch(pattern[1:-1], value) is not None
+    )
+
+
+@pytest.mark.parametrize(
+    ("definition", "name"),
+    [("token", "_TOKEN"), ("sessionId", "_SESSION_ID"), ("nodeId", "_NODE_ID")],
+)
+def test_protocol_client_string_bounds_match_the_vendored_schema(definition, name):
+    pattern = getattr(protocol_client, name)
+    schema = _defs()[definition]
+    low, high = schema["minLength"], schema["maxLength"]
+    # every ASCII character and a few look-alikes (\uff21 is a full-width A), alone at both length bounds
+    chars = [chr(i) for i in range(0x80)] + ["é", "٣", "\u00a0", "\uff21", "\u2028"]
+    values = [char * length for char in chars for length in {max(low, 1), high}]
+    values += ["A" * length for length in (low - 1, low, high, high + 1) if length >= 0]
+    values.append("A" * low + "\n")
+    for value in values:
+        accepted = pattern.fullmatch(value) is not None
+        assert accepted == _schema_accepts(schema, value), (definition, len(value), value[:1])
+
+
+def _accepts_created(message: dict) -> bool:
+    client = ProtocolClient(make_client_info("5.12.4", "win32"))  # no validator: the runtime path
+    client.start("mobile")
+    client.handle(message)
+    return client.state is SessionState.CREATED and client.invalid_inbound == 0
+
+
+def test_protocol_client_number_bounds_match_the_vendored_schema(bare):
+    defs = _defs()
+    limits = defs["limits"]["properties"]
+    assert set(limits) == set(protocol_client._LIMITS)
+    cases = [(None, "viewerLimit", defs["viewerLimit"])]
+    cases += [("limits", key, spec) for key, spec in limits.items()]
+    for parent, key, spec in cases:
+        low, high = spec["minimum"], spec["maximum"]
+        for value, accepted in ((low - 1, False), (low, True), (high, True), (high + 1, False)):
+            message = _created()
+            (message[parent] if parent else message)[key] = value
+            assert _accepts_created(message) is accepted, (key, value)
+    low, high = defs["viewerLimit"]["minimum"], defs["viewerLimit"]["maximum"]
+    for value, accepted in ((low - 1, False), (low, True), (high, True), (high + 1, False)):
+        before = bare.invalid_inbound
+        bare.handle(
+            envelope.make("viewer.count", viewerCount=1, viewerLimit=value, platforms={"web": 1})
+        )
+        assert (bare.invalid_inbound == before) is accepted, ("viewer.count", value)
 
 
 def test_protocol_client_inbound_checks_cover_every_handler():

@@ -45,7 +45,9 @@ and ``vtkInternal::UpdateDisplayNodePipeline``; SLC-35). One :class:`SegmentRef`
   keeps its own gated reading (the model DM differs); the two are deliberately not unified. A ``TypeError``,
   ``ValueError`` or ``AttributeError`` from a per-segment getter (a binding that differs from the one probed) makes
   that one segment :data:`INVALID_DISPLAY_PROPS` (type-only log) → ``invalid-display`` in the collection; the rest of
-  the scene ships;
+  the scene ships. A segment ``GetSegment`` no longer has (removed since the list was read, a preparation in steps,
+  SLC-71) reads as hidden without asking any per-segment getter: Slicer's would print its ID (``vtkErrorMacro``,
+  T7);
 - geometry, **read-only and never converted**: ``GetSegmentation().GetSegmentRepresentation(id,
   GetDisplayRepresentationName3D())`` — the live polydata the DM draws (collect makes its own geometry-only copy).
   ``CreateClosedSurfaceRepresentation()``/``CreateRepresentation()`` are never called: they write MRML, fire
@@ -273,10 +275,14 @@ class MrmlSceneApi:
         self, handle: SegmentRef, views: Sequence[str]
     ) -> tuple[tuple[float, float, float], float, bool]:
         """``UpdateDisplayNodePipeline`` for one segment (module docstring); :data:`INVALID_DISPLAY_PROPS` when a
-        per-segment getter's binding fails."""
+        per-segment getter's binding fails; hidden, asking no getter, for a segment removed since it was listed."""
         node, sid = handle.node, handle.segment_id
         display = self._segmentation_display(node, views)
         if display is None:
+            return (0.0, 0.0, 0.0), 0.0, False
+        if node.GetSegmentation().GetSegment(sid) is None:
+            # removed since the list was read (a preparation in steps, SLC-71): Slicer's per-segment getters would
+            # print its ID (vtkErrorMacro, T7); ``GetSegment`` returns nullptr without a word
             return (0.0, 0.0, 0.0), 0.0, False
         allowed = bool(display.GetFolderDisplayOverrideAllowed())
         folder = self._folders.GetOverridingHierarchyDisplayNode(

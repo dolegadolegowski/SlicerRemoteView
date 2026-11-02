@@ -26,8 +26,11 @@ transport in order.
 
 :func:`prepare_snapshot` is the same in steps (SLC-28, :mod:`remoteview_core.steps`): the collection and the
 decimation yield between their passes over a mesh, and the client is asked for nothing — no version, no hint — before
-the last step, so a preparation abandoned before it (``close()``) sends nothing and uses no version. Main thread only
-(VTK, and the client is not thread-safe). The SHA-256 is computed here too (decided in SLC-08).
+the last step, so a preparation abandoned before it (``close()``) sends nothing and uses no version. It also stops
+itself (SLC-68, T7): a scene closed between two steps (``SceneIds.reset``) raises
+:class:`~remoteview_core.ids.SceneClosedError` at the next one, before any handle of it is read again, and a session
+created again in between (SLC-45: other aliases) raises ``ProtocolStateError`` at the last. Main thread only (VTK, and
+the client is not thread-safe). The SHA-256 is computed here too (decided in SLC-08).
 """
 
 from __future__ import annotations
@@ -51,7 +54,7 @@ from remoteview_core.collect import (
 )
 from remoteview_core.decimate import PROFILES, Budget, FitResult, estimate_glb_size, glb_binary_size
 from remoteview_core.glb_writer import Entity, RootExtras, write_glb
-from remoteview_core.ids import SceneIds
+from remoteview_core.ids import SceneClosedError, SceneIds
 from remoteview_core.meshcache import CachedMesh, MeshCache
 from remoteview_core.names import NameAssigner
 from remoteview_core.protocol_client import (
@@ -168,24 +171,40 @@ def prepare_snapshot(  # noqa: PLR0913 — build_snapshot's options, and the pro
     remove_islands: bool = False,
 ) -> Steps[Snapshot]:
     """:func:`build_snapshot` in steps (the module docstring); ``progress`` counts the nodes collected and fitted.
-    The session's state and the relay's limits are checked at the first step and read again at the last: a
-    preparation in steps spans the event loop."""
+    The session's state and the relay's limits are checked at the first step and read again at the last, where the
+    session must still be the same one; ``ids`` reset between two steps (a scene closed) stops it at the next one
+    (``SceneClosedError``, the module docstring): a preparation in steps spans the event loop. With ``ids=None`` it
+    makes a registry of its own, which nothing can reset: an owner that steps it across the event loop passes the
+    session's."""
     _live_limits(client)
+    session = client.session_id  # the aliases in ids are this session's (§7.3)
+    ids = ids if ids is not None else SceneIds()
+    # a scene closed between two steps stops the preparation at the next one (T7)
+    generation = ids.generation
     progress = progress if progress is not None else Progress()
     cache = cache if cache is not None else MeshCache()  # a single export: every node is a miss
     # what the fit makes of a mesh depends on the island rule: a cache made with another one starts again
     cache.use_settings(
         (remove_islands, decimate.SMALL_ISLAND_TRIANGLES, decimate.SMALL_ISLAND_SHARE)
     )
-    collected = yield from collect_steps(
-        scene_api, anonymize_names=anonymize_names, ids=ids, progress=progress, cache=cache
+    collected = yield from _same_scene(
+        collect_steps(
+            scene_api, anonymize_names=anonymize_names, ids=ids, progress=progress, cache=cache
+        ),
+        ids,
+        generation,
     )
     budget = PROFILES[client.profile]
-    fitted, skipped = yield from _fit_steps(
-        collected, budget, cache, progress, remove_islands=remove_islands
+    fitted, skipped = yield from _same_scene(
+        _fit_steps(collected, budget, cache, progress, remove_islands=remove_islands),
+        ids,
+        generation,
     )
     progress.done = progress.total  # the nodes left out need no fit
     limits = _live_limits(client)
+    # created again between steps (SLC-45): another session, other aliases
+    if client.session_id != session:
+        raise ProtocolStateError("the session changed while the scene was prepared")
     if glb_binary_size(fitted.entities, quantize=quantize) > limits["maxSnapshotBytes"]:
         # too large whatever the JSON: refused before the file is written (NFR-23)
         raise SnapshotTooLargeError(
@@ -194,6 +213,8 @@ def prepare_snapshot(  # noqa: PLR0913 — build_snapshot's options, and the pro
     # the hint takes a version before the snapshot's own; once built, a snapshot must follow (§8.2): the client keeps
     # snapshot_needed set if the full GLB below is refused after all, and that message is then never sent. Only IDs
     # this export takes are announced: they passed collect's ID rules (T7)
+    # closed off the main thread during this last step (SLC-70): stopped before any version is used
+    _still_open(ids, generation)
     exported = {e.node_id for e in fitted.entities}
     announced = client.announce_added([(i, kind) for i, kind in announce if i in exported])
     version = client.next_scene_version
@@ -207,6 +228,8 @@ def prepare_snapshot(  # noqa: PLR0913 — build_snapshot's options, and the pro
     if len(glb) > limits["maxSnapshotBytes"]:
         raise SnapshotTooLargeError(len(glb), limits["maxSnapshotBytes"])
     triangles = fitted.triangle_count
+    # the GLB takes long (≈ 1 s near the relay's limit): closed meanwhile, it is never begun (SLC-70)
+    _still_open(ids, generation)
     # before begin uses a version: nothing after it can fail but the invariant below
     sent = SentScene.from_export(fitted.entities, skipped, anonymized=collected.anonymized_names)
     messages = client.begin_snapshot(glb, node_count=len(fitted.entities), triangle_count=triangles)
@@ -227,6 +250,29 @@ def prepare_snapshot(  # noqa: PLR0913 — build_snapshot's options, and the pro
         sent=sent,
         announced=announced,
     )
+
+
+def _still_open(ids: SceneIds, generation: int) -> None:
+    """``SceneClosedError`` once the scene was closed (``ids`` reset) since the preparation read ``generation``."""
+    if ids.generation != generation:
+        raise SceneClosedError("the scene was closed while it was prepared")
+
+
+def _same_scene[T](steps: Steps[T], ids: SceneIds, generation: int) -> Steps[T]:
+    """``steps``, checked before every step after the first that the scene was not closed (``ids`` reset) since the
+    preparation started: its handles may be the next patient's (T7). Checked between steps, not per node — a close
+    in the middle of a node, or once the last one has started, would still go out. A stop here, or the caller's
+    ``close()``, ends ``steps`` at once."""
+    try:
+        while True:
+            try:
+                next(steps)
+            except StopIteration as stop:
+                return stop.value
+            yield
+            _still_open(ids, generation)
+    finally:
+        steps.close()
 
 
 def _live_limits(client: ProtocolClient) -> dict[str, Any]:

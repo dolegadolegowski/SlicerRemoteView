@@ -6,10 +6,12 @@ Pure test code: importing it starts nothing. Fixtures that use these fakes live 
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import json
 import os
 import queue
+import random
 import shutil
 import struct
 import subprocess
@@ -30,7 +32,7 @@ from vtkmodules.vtkFiltersSources import vtkSphereSource
 
 from remoteview_core.glb_writer import Entity
 from remoteview_core.protocol_client import ProtocolClient, SessionState, make_client_info
-from remoteview_core.transport import check_relay_url
+from remoteview_core.transport import RelayTransport, check_relay_url
 from remoteview_core.vendored import chunk_header
 from remoteview_protocol import envelope
 
@@ -43,6 +45,10 @@ URL = "wss://relay.example.org/ws"
 CODE = "7KQ4X"
 TOKEN = "pt_Mn3Vq8YtK2cR9xLwZaBdE7fGhJ4uP6sTvW1yXoNQ5kA"  # noqa: S105 — the protocol.md §4.2 example token
 SESSION_ID = "sess_01K7Q4XMB2TJ9RD6"
+#: A second session (a re-create after a relay restart may get another code, SLC-45).
+OTHER_CODE = "9HJ4M"
+OTHER_SESSION_ID = "sess_01K7Q9ZRB4MP2WX8"
+OTHER_TOKEN = "pt_Zq2Wx7Rb4Mp9Kt3Hv6Nc8Yd1Lf5Gs0Je2Ua7Qo4Xi"  # noqa: S105 — a made-up token of the defs pattern
 LIMITS = {
     "maxSnapshotBytes": 67_108_864,
     "maxChunkBytes": 1_048_576,
@@ -95,7 +101,9 @@ def validate_glb(tmp_path: Path, files: dict[str, bytes]) -> dict:
 class NodeProcess:
     """A helper script run by Node (fixed argv: ``node`` and repository files); its first stdout line is its address.
 
-    :meth:`finish` closes its stdin, which makes the script print its summary and exit; a script that hangs is killed.
+    One reader thread owns the script's stdout and queues its lines. :meth:`command` writes one line to the script and
+    returns its one-line answer (the relay stub's commands, SLC-46); :meth:`finish` closes its stdin, which makes the
+    script print its summary and exit; a script that hangs is killed.
     """
 
     def __init__(self, script: str, *args: str) -> None:
@@ -105,28 +113,55 @@ class NodeProcess:
             stdout=subprocess.PIPE,
             text=True,
         )
+        self._lines: queue.Queue[str | None] = queue.Queue()
+        self._ended = False  # the reader reached the end of the output
+        threading.Thread(target=self._read, daemon=True).start()
         self.output: str | None = None
-        self.address = self._first_line(timeout=15)
+        self.address = (self._line(timeout=15) or "").strip()
 
-    def _first_line(self, timeout: float) -> str:
-        """The first line the script prints, or ``""`` after ``timeout`` s (never hangs)."""
-        lines: queue.Queue[str] = queue.Queue()
-        threading.Thread(
-            target=lambda: lines.put(self._process.stdout.readline()), daemon=True
-        ).start()
+    def _read(self) -> None:
+        stdout = self._process.stdout
+        if stdout is not None:
+            with stdout:
+                for line in stdout:
+                    self._lines.put(line)
+        self._lines.put(None)  # end of output
+
+    def _line(self, timeout: float) -> str | None:
+        """The next line the script prints, or ``None`` at its end or after ``timeout`` s (never hangs)."""
         try:
-            return lines.get(timeout=timeout).strip()
+            line = self._lines.get(timeout=timeout)
         except queue.Empty:
-            return ""
+            return None
+        self._ended = self._ended or line is None
+        return line
+
+    def command(self, line: str, timeout: float = 10) -> str:
+        """Send one command line; its answer, which must start with ``ok``."""
+        stdin = self._process.stdin
+        assert stdin is not None and self.output is None, "the script has finished"
+        stdin.write(f"{line}\n")
+        stdin.flush()
+        answer = (self._line(timeout) or "").strip()
+        assert answer.startswith("ok"), f"{line!r} answered {answer!r}"
+        return answer
 
     def finish(self) -> str:
-        """Close stdin and return what the script printed after its first line (idempotent)."""
+        """Close stdin and return what the script printed after its first line and its answers (idempotent)."""
         if self.output is None:
-            try:
-                self.output, _ = self._process.communicate(timeout=10)
-            except subprocess.TimeoutExpired:
-                self._process.kill()
-                self.output, _ = self._process.communicate()
+            if self._process.stdin is not None:
+                with contextlib.suppress(BrokenPipeError):  # a script that died
+                    self._process.stdin.close()
+            lines: list[str] = []
+            deadline = time.monotonic() + 10
+            while not self._ended and (line := self._line(max(0.0, deadline - time.monotonic()))):
+                lines.append(line)
+            if not self._ended:
+                self._process.kill()  # a script that hangs
+                while (line := self._line(5)) is not None:
+                    lines.append(line)
+            self._process.wait(timeout=10)
+            self.output = "".join(lines)
         return self.output
 
 
@@ -145,6 +180,70 @@ def start_relay_stub(*options: str) -> NodeProcess:
         "ws://127.0.0.1:",
         "the relay stub",
     )
+
+
+class WorstJitter(random.Random):
+    """The transport's retry delays at their longest (``uniform`` → its upper bound): timing tests stay honest."""
+
+    def uniform(self, a: float, b: float) -> float:
+        return b
+
+
+class LeastJitter(random.Random):
+    """The transport's retry delays at their shortest (``uniform`` → its lower bound): quick, still realistic."""
+
+    def uniform(self, a: float, b: float) -> float:
+        return a
+
+
+def stub_transport(*, rng: random.Random, drop_out=None, drop_in=None, **knobs: Any):
+    """A transport factory for the panel against the relay stub (no proxy, the given ``rng`` and ``knobs`` such as
+    ``ping_interval``). ``drop_out(frame)`` swallows the first outbound frame it matches, as if lost on the way
+    (``transport.dropped_out``); ``drop_in(event)`` swallows the first inbound ``Received`` it matches
+    (``transport.dropped_in``). ``transport.sent_types`` lists ``(connection, type)`` for every frame the panel handed
+    to ``send`` (``"chunk"`` for binary ones) and ``(None, "stop:<type of the final message or none>")`` for each
+    ``stop``. ``factory.made`` lists the transports built."""
+    made: list[RelayTransport] = []
+
+    def factory(
+        url: str, events: queue.Queue, *, extra_ca_file: str | None = None
+    ) -> RelayTransport:
+        transport = RelayTransport(url, events, use_proxy=False, rng=rng, min_uplink=1e12, **knobs)
+        transport.dropped_out = transport.dropped_in = False  # type: ignore[attr-defined]
+        sent_types: list[tuple[int | None, str]] = []
+        transport.sent_types = sent_types  # type: ignore[attr-defined]
+        if drop_in is not None:
+            put = events.put
+
+            def put_unless_dropped(event: Any, *args: Any, **kwargs: Any) -> None:
+                if not transport.dropped_in and drop_in(event):  # type: ignore[attr-defined]
+                    transport.dropped_in = True  # type: ignore[attr-defined]
+                    return
+                put(event, *args, **kwargs)
+
+            events.put = put_unless_dropped  # type: ignore[method-assign]  # the worker thread puts here
+        send, stop = transport.send, transport.stop
+
+        def send_unless_dropped(frame: Any, *, connection: int) -> bool:
+            kind = frame.get("type", "?") if isinstance(frame, dict) else "chunk"
+            sent_types.append((connection, kind))
+            if drop_out is not None and not transport.dropped_out and drop_out(frame):  # type: ignore[attr-defined]
+                transport.dropped_out = True  # type: ignore[attr-defined]
+                return True
+            return send(frame, connection=connection)
+
+        def recorded_stop(final: Any = None, **kwargs: Any) -> Any:
+            kind = final.get("type", "?") if isinstance(final, dict) else "none"
+            sent_types.append((None, f"stop:{kind}"))
+            return stop(final, **kwargs)
+
+        transport.send = send_unless_dropped  # type: ignore[method-assign]
+        transport.stop = recorded_stop  # type: ignore[method-assign]
+        made.append(transport)
+        return transport
+
+    factory.made = made  # type: ignore[attr-defined]
+    return factory
 
 
 def start_throttle_proxy(target: NodeProcess | str, rate: int) -> NodeProcess:
@@ -247,18 +346,66 @@ class FakeTransport:
         return True
 
 
-def created(reply_to: str = "p-1", *, code: str = CODE, **limits: int) -> dict:
+def ttl(grace_s: int = 120) -> dict:
+    """``ttl`` of ``session.created``/``session.resumed``/``session.renewed`` (defs.schema.json)."""
+    return {"graceS": grace_s, "idleS": 1800, "maxLifetimeS": 43200, "expiresAt": 1792281600120}
+
+
+def created(
+    reply_to: str = "p-1",
+    *,
+    code: str = CODE,
+    session_id: str = SESSION_ID,
+    token: str = TOKEN,
+    grace_s: int = 120,
+    **limits: int,
+) -> dict:
     """``session.created`` (protocol §4.2); ``limits`` override the announced ``limits``."""
     return envelope.make(
         "session.created",
         reply_to=reply_to,
-        sessionId=SESSION_ID,
+        sessionId=session_id,
         code=code,
-        publisherToken=TOKEN,
+        publisherToken=token,
         viewerLimit=20,
-        ttl={"graceS": 120, "idleS": 1800, "maxLifetimeS": 43200, "expiresAt": 1792281600120},
+        ttl=ttl(grace_s),
         limits={**LIMITS, **limits},
     )
+
+
+def resumed(  # noqa: PLR0913
+    reply_to: str | None,
+    *,
+    scene_version: int,
+    snapshot_version: int | None,
+    viewer_count: int = 0,
+    code: str = CODE,
+    session_id: str = SESSION_ID,
+    grace_s: int = 120,
+) -> dict:
+    """``session.resumed`` (protocol §4.3)."""
+    return envelope.make(
+        "session.resumed",
+        reply_to=reply_to,
+        sessionId=session_id,
+        code=code,
+        sceneVersion=scene_version,
+        snapshotVersion=snapshot_version,
+        viewerCount=viewer_count,
+        ttl=ttl(grace_s),
+    )
+
+
+def relay_error(
+    code: str, reply_to: str | None = None, *, retryable: bool = False, **details
+) -> dict:
+    """A relay ``error`` (protocol §9.2) with a fixed free text."""
+    message = envelope.make(
+        "error", reply_to=reply_to, code=code, message=f"{code} for test", retryable=retryable
+    )
+    if details:
+        message["details"] = details
+    return message
 
 
 def live_client(profile: str = "mobile", *, validate=None, **limits: int) -> ProtocolClient:
@@ -914,10 +1061,65 @@ def glb_strings(glb: bytes) -> list[str]:
     return found
 
 
-def root_extras(glb: bytes) -> dict:
+def glb_container(document: dict, binary: bytes = b"") -> bytes:
+    """A GLB of ``document`` (its JSON chunk padded with spaces) and an optional BIN chunk (§7.1)."""
+    text = json.dumps(document).encode()
+    text += b" " * (-len(text) % 4)
+    chunks = struct.pack("<II", len(text), 0x4E4F534A) + text
+    if binary:
+        chunks += struct.pack("<II", len(binary), 0x004E4942) + binary
+    return struct.pack("<III", 0x46546C67, 2, 12 + len(chunks)) + chunks
+
+
+def minimal_glb(scene_version: int) -> bytes:
+    """The smallest GLB whose root says what a ``scene.snapshot.begin`` for it must say (§6.2, SLC-38): one scene, the
+    root's extras with ``sceneVersion`` and profile ``mobile``, and one ``T`` node of 12 triangles."""
+    root = {
+        "name": "SlicerRemoteView",
+        "extras": {
+            "nodeId": "root",
+            "kind": "root",
+            "sceneVersion": scene_version,
+            "profile": "mobile",
+        },
+        "children": [1],
+    }
+    t_node = {"extras": {"nodeId": "vtkMRMLModelNode1", "triangleCount": 12}}
+    document = {
+        "asset": {"version": "2.0"},
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [root, t_node],
+    }
+    return glb_container(document)
+
+
+def rewrite_json(glb: bytes, edit) -> bytes:
+    """``glb`` with its JSON document changed in place by ``edit(document)`` (the BIN chunk kept)."""
     document = glb_json(glb)
+    edit(document)
+    json_length = struct.unpack_from("<I", glb, 12)[0]
+    rest = glb[20 + json_length :]
+    binary = rest[8 : 8 + struct.unpack_from("<I", rest, 0)[0]] if rest else b""
+    return glb_container(document, binary)
+
+
+def _root_node(document: dict) -> dict:
     [root] = [n for n in document["nodes"] if n.get("name") == "SlicerRemoteView"]
-    return root["extras"]
+    return root
+
+
+def restamped(glb: bytes, scene_version: int, profile: str = "mobile") -> bytes:
+    """``glb`` with its root's ``extras.sceneVersion``/``profile`` set: a fixture sent as a later snapshot or for
+    another profile (§6.2: the ``begin`` names the root's figures)."""
+    stamp = {"sceneVersion": scene_version, "profile": profile}
+    if _root_node(glb_json(glb))["extras"].items() >= stamp.items():
+        return glb
+    return rewrite_json(glb, lambda document: _root_node(document)["extras"].update(stamp))
+
+
+def root_extras(glb: bytes) -> dict:
+    return _root_node(glb_json(glb))["extras"]
 
 
 def manifest(glb: bytes) -> list[dict]:

@@ -171,6 +171,7 @@ class SendToolbar:
         try:
             widget = self.widget
             if widget is not None and widget.controller is not None:
+                widget.noteActivity()  # someone is at Slicer: SLC-47's renewal may follow
                 widget.controller.set_send_policy(self.mode().policy)
                 widget.render(widget.controller.view)
         except Exception as exc:  # noqa: BLE001
@@ -181,6 +182,7 @@ class SendToolbar:
         try:
             widget = self.widget
             if widget is not None and widget.controller is not None and widget.controller.active:
+                widget.noteActivity()  # someone is at Slicer: SLC-47's renewal may follow
                 widget.render(widget.controller.send_now())
             else:
                 slicer.util.selectModule("RemoteView")
@@ -258,6 +260,7 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
         self.ui.stopButton.connect("clicked(bool)", self.onStopClicked)
         self.ui.copyLinkButton.connect("clicked(bool)", self.onCopyLinkClicked)
         self.ui.presentButton.connect("clicked(bool)", self.onPresentClicked)
+        self.ui.keepButton.connect("clicked(bool)", self.onKeepClicked)
 
         self.pumpTimer = qt.QTimer()
         self.pumpTimer.setInterval(PUMP_INTERVAL_MS)
@@ -327,6 +330,7 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
         except Exception as exc:  # noqa: BLE001 — a Qt slot (T7)
             _log.error("RemoteView: Remove small islands not saved (%s)", type(exc).__name__)
         try:
+            self.noteActivity()  # someone is at the panel: SLC-47's renewal may follow
             if self.controller is not None:
                 self.controller.set_remove_islands(bool(checked))
         except Exception as exc:  # noqa: BLE001 — a Qt slot (T7)
@@ -379,6 +383,10 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
     def onStopClicked(self, _checked: bool = False) -> None:
         if self.controller is not None:
             self.render(self.controller.stop())
+
+    def onKeepClicked(self, _checked: bool = False) -> None:
+        if self.controller is not None:
+            self.render(self.controller.keep())
 
     def makeWatcher(self, sink):
         """The scene observers of one live session (SLC-31), marking changes on ``sink`` (its ``LiveUpdates``)."""
@@ -440,6 +448,7 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
         self.ui.stopButton.enabled = view.stop_enabled
         self.ui.relayUrlLineEdit.enabled = view.settings_enabled
         self.ui.extraCaPathLineEdit.enabled = view.settings_enabled
+        self.ui.keepButton.visible = view.keep_shown
         # the QR code next: Start/Stop and the texts are in place whatever drawing it does
         drawn = self.showLink(view.link, view.code)
         if view.link and not drawn:
@@ -519,6 +528,7 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
         return pixmap
 
     def onCopyLinkClicked(self, _checked: bool = False) -> None:
+        self.noteActivity()
         if not self.link:
             return
         qt.QApplication.clipboard().setText(self.link)
@@ -529,7 +539,13 @@ class RemoteViewWidget(ScriptedLoadableModuleWidget):
         if self.ui is not None:
             self.ui.copyLinkButton.text = "Copy link"
 
+    def noteActivity(self) -> None:
+        """Someone used the panel: the controller may renew an idle session by itself (SLC-47)."""
+        if self.controller is not None:
+            self.controller.note_activity()
+
     def onPresentClicked(self, _checked: bool = False) -> None:
+        self.noteActivity()
         code = self.controller.view.code if self.controller is not None else ""
         if not code:
             return

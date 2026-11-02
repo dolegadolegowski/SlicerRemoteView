@@ -199,8 +199,8 @@ Steps:
 
     start a session, join with the viewer, and turn Slicer's 3D view and the viewer to look from the front (Slicer:
     *Anterior* view).
-16. Slow uplink (SLC-26): with relay (c) — its viewer shows the result; relay (a) works too, without a viewer. In a
-    second terminal start the throttle proxy, `node slicer-plugin/tests/throttle_proxy.mjs --target 127.0.0.1:8787
+16. Slow uplink (SLC-26, SLC-40): with relay (c) — its viewer shows the result; relay (a) works too, without a viewer.
+    In a second terminal start the throttle proxy, `node slicer-plugin/tests/throttle_proxy.mjs --target 127.0.0.1:8787
     --rate 125000 --listen 8788` (1 Mbit/s towards the relay; end its input like the relay's to see how many bytes it
     passed), and enter `ws://127.0.0.1:8788/ws` as the relay address. In a new scene run in the Python console
 
@@ -260,14 +260,24 @@ Expected results:
   axis error (protocol §7.1, ADR 0005): report it with a screenshot of both.
 - Step 16, first upload: the status stays "Sending the scene · …" for about 46 s (5.8 MB at 1 Mbit/s; snapshots are
   quantised, `KHR_mesh_quantization` — SLC-12), then "Live"; the viewer then shows the five spheres; the panel never
-  shows "Relay unreachable" or "Session ended" on the way, the console shows no reconnect, and the proxy passed about
-  5.8 MB. With the old fixed 10 s deadline the first `ping` (at 15 s)
-  would have been late and the connection cut about 25 s in ("Relay unreachable"). A relay that closes the connection on its own
-  WebSocket ping (SRV-14, report `2026-10-20-slicer-7`) would show as a reconnect here: note it.
-- Step 16, stop during the upload: the panel leaves "Sending the scene". The stop message waits behind the bytes already
-  written (several MB at 1 Mbit/s), so after 2 s the connection is aborted and the panel says the relay keeps the
-  session for up to 2 minutes; the viewer shows the frozen scene as offline until the relay expires it. Quitting Slicer
-  behaves the same and Slicer exits within 3 s. Expected, not a defect (`docs/research/slicer-heartbeat.md`).
+  shows "Relay unreachable", "Connection lost" or "Session ended" on the way, the console shows no reconnect, and the
+  proxy passed about 5.8 MB. With the old fixed 10 s deadline the first `ping` (at 15 s) would have been late and the
+  connection cut about 25 s in ("Relay unreachable"). `relay-server` counts the chunks as signs of life while Slicer's
+  pong to its WebSocket ping waits behind them (SRV-27; closing run in report `2026-10-20-slicer-7`); a relay deployed
+  before SRV-27 may close the connection with 4009 during the upload, which shows as a reconnect here: note it.
+- Step 16, stop during the upload: the panel leaves "Sending the scene". The stop message waits behind up to 4 MiB (≈ 34
+  s at 1 Mbit/s, SLC-40) and the connection is aborted 2 s after *Stop*: stopped with more than about 2 s of the upload
+  still ahead (≈ 240 kB through this proxy; most of the upload), the panel says the stop message could not be sent in
+  time and that anyone with the code can still see the last scene until the relay ends the session, after a few minutes
+  (SLC-44), and the viewer shows the frozen scene as offline until the relay expires it — through the throttle proxy the
+  stop message never arrives then, since the proxy drops what it still holds when Slicer closes the connection. This is
+  a known gap, not a new defect (report `2026-10-20-slicer-6`, second part → SLC-59;
+  `docs/research/slicer-heartbeat.md`). Stopped in the last ≈ 2 s of the upload, the panel says nothing about the stop
+  message and the viewer shows "presentation ended" within 5 s. When quitting, Slicer exits within 3 s; the stop message
+  can be lost the same way, with no panel left to say so — the residual for `release`. Whether a stop message handed
+  over in time survives the abort on a real slow link (`tc netem`, a phone hotspot) is `[TODO verify]` for SLC-59. After
+  *Stop* through the throttle proxy (not when quitting), a panel that says nothing while the viewer keeps the frozen
+  scene offline is a defect (T1): note the time of *Stop* and report it (SLC-59).
 - Throughout: no traceback in the Python console, no session code or token in the console or the application log.
 
 | Date | Slicer version | OS | Result | Tester |
@@ -665,12 +675,136 @@ Steps:
     - No publisher token anywhere (a 43+ character `[A-Za-z0-9_-]` string on a RemoteView line).
 
 Known gaps (not failures):
-- A reset not acknowledged when the connection drops stays on the viewers until the relay's grace ends (≤ 2 min;
-  SLC-17).
 - An error answering an update with a busy code shows "Updating the scene" during the relay's wait (SLC-18).
 - A Close Scene missed off the main thread is not handled as a reset: if the new scene is too large, the closed one
   stays on the viewers, and a snapshot of the closed scene already in flight is not superseded.
 - Events off the main thread that keep coming re-send the whole scene about every 60 s (SLC-33).
+
+| Date | Slicer version | OS | Result | Tester |
+|---|---|---|---|---|
+| | | | | |
+
+## §7 Resume and reconnect (SLC-44 to SLC-47; FR-14, US-05, NFR-11, NFR-20, protocol §4.3, §4.4, §6.3, §8.4, §9.1, §9.3; T1, T4)
+
+Preconditions: §2's setup, with its relays (a), (b) and (c); §6's helpers and two of its synthetic models shown in 3D
+(`spheres(2)`; never patient data in §7); a large scene for
+steps 3 and 4: §2 step 16's snippet run in a new scene with its function renamed `big_spheres` (so that it does not
+replace §6's `spheres`) — five spheres, about 5.8 MB. Write down every session code shown; step 12 searches the logs
+for them.
+- (a) the stub with the resume report —
+  `node slicer-plugin/tests/relay_stub.mjs --port 8787 --grace-ms 120000 --report-sessions --report-updates` — whose
+  commands are typed into its input (`restart`, `close-publisher 1001`, `pongs off-until-handshake`, `status`; each
+  answers `ok…`); when its input ends it prints its summary, the update report and, last,
+  `{"sessions": [{"first": …, "preferredCode": …, "lastSceneVersion": …, "frames": [...]}, …], "violations": [...]}`
+  (one entry per handshake; no code, token or name in it). It listens on 127.0.0.1 without TLS: no phone or viewer can
+  join it, so its steps check the panel and the report only, and every one of them expects `violations == []`. Never
+  expose it beyond the loopback interface.
+- (b) the deployed relay with its viewer page and a phone joined with the code: the only relay that turning Wi-Fi off
+  or a sleep separates from this computer, and the one for the visual checks.
+- (c) `relay-server` and `web-viewer` on this machine, the viewer page at `http://localhost:5173`: Wi-Fi and sleep do
+  not separate it from Slicer, so it serves the restart and the idle renewal steps only. It listens unencrypted on
+  every interface (§2): sample data only, or a host firewall.
+
+Relays (b) and (c) must run a `relay-server` that answers `session.resume` (SRV-15: the socket stays open 10 s after
+`SESSION_NOT_FOUND` for the fallback create) and closes with 4008 on SIGTERM (SRV-17). Both are done on `main`. A relay
+deployed before SRV-15 answers a resume with `UNSUPPORTED_TYPE` and closes the socket with 4012 10 s after it opened (no
+session is bound to it). The panel then resumes again on every new connection ("Reconnecting to the session…",
+"Connection lost — reconnecting in N s.") until its reconnect window ends, about 3 minutes after the loss at the default
+120 s grace. It then shows "Session ended." with "The connection to the relay was lost for too long, …" and "Anyone with
+the code can still see the last scene …" (relay (b) keeps the session until its grace ends). Against such a relay,
+record the steps marked *[SRV-15]* as blocked, not failed. Every step expects no traceback in the Python console.
+
+Steps:
+
+1. **Wi-Fi off for 40 s** (FR-14; relay (b)). Click *Start*, wait for "Live", turn Wi-Fi off.
+   Expected: within 25 s the status reads "Connection lost — reconnecting in N s.", the same code, QR code and
+   Presentation window stay, *Stop* stays enabled; the viewer may show the presenter as offline (the relay notices the
+   loss within 30–60 s, §9.1). Turn Wi-Fi on (*[SRV-15]* from here). Expected: within 40 s (the retry delay grows to
+   30 s) "Live · 1 viewer.", the same code, no "Sending the scene" (nothing is uploaded again); a colour change then
+   reaches the phone.
+2. **Edits while offline** (relay (b); *[SRV-15]*). As step 1, but change a colour and hide a model while Wi-Fi is off.
+   Expected: both reach the phone within 2 s of "Live"; no snapshot is sent again (the panel never shows
+   "Updating the scene").
+3. **Cut while "Sending the scene"** (relay (a) behind §2 step 16's throttle proxy, so that the upload of the large
+   scene lasts at least 10 s). Load the large scene, click *Start*; while "Sending the scene" shows, type
+   `close-publisher 1001`. Expected: "Connection lost — reconnecting…" with "Sending the scene was interrupted:
+   RemoteView sends it again once reconnected."; after the reconnect "Preparing the scene" (briefly), "Sending the
+   scene", then "Live". The report's resume entry starts with `["scene.snapshot.begin", v]` for a version above the cut
+   one. Repeat once with relay (b) (*[SRV-15]*), turning Wi-Fi off during the upload: after the reconnect the phone
+   shows the whole scene.
+4. **Close the scene while it is sent, then cut** (relay (a) behind the throttle proxy of step 3). With the large
+   scene loaded click *Start* and wait for "Live"; then run `slicer.mrmlScene.Clear(0); big_spheres()` in the Python
+   console, in one line — `Clear(0)` is what *File → Close Scene* does (`qSlicerMainWindow`), and the new spheres are
+   added before the closed scene's snapshot is made, so that snapshot takes long to upload — and, while "Updating the
+   scene" shows, type `close-publisher 1001`. Expected: while reconnecting the panel says "Sending the scene was
+   interrupted: …" and "The scene was closed in Slicer, but anyone with the code still sees it until RemoteView
+   reconnects, …"; after the reconnect the first frame of the resume entry is `scene.snapshot.begin`. Repeat once with
+   relay (b) (*[SRV-15]*), turning Wi-Fi off while "Updating the scene" shows: after the reconnect the phone shows the
+   new spheres and never the closed models again.
+5. **Relay restart.** From here on relay (a) is reached at its own address (`ws://127.0.0.1:8787/ws`, no throttle
+   proxy); first run `slicer.mrmlScene.Clear(0); spheres(2)` for the two models of the preconditions. (a) Wait for
+   "Live", type `restart`. Expected: within 5 s "Live" again with the same code; while reconnecting the panel says "The
+   relay restarted: RemoteView starts the session again, …"; "Preparing the scene" (for seconds with large models: the
+   new session prepares the whole scene again), "Sending the scene", then "Live" (the scene is uploaded again: a
+   restarted relay keeps none). Report: `create none`, `resume`, `create previous`. (c) (*[SRV-15]*, SRV-17) Stop the
+   local relay-server (SIGTERM) and start it again within 3 s. Expected: the same code; the viewer page rejoins by
+   itself. The relay closes Slicer's socket with 4008 and answers a reconnect during its drain with HTTP `503
+   {"error":"RELAY_RESTARTING"}` (report `2026-10-27-server-5`). If the relay's 4008 close frame has not reached Slicer
+   when the drain ends (about 5 s; rare for a publisher, whose send buffer on the relay holds only short replies),
+   Slicer sees 1006 instead. A resume after that is answered `SESSION_NOT_FOUND`, and without a 4008 the panel ends the
+   session ("The relay ended the session while RemoteView was offline. …"): the known gap below, not a failure. A
+   reconnect that meets the drain may also show "The relay answered HTTP 503 instead of opening the connection. Check
+   the relay address." under the restart text until SLC-49.
+6. **Restart without the old code** (relay (a) started with `--ignore-preferred-code` added). Type `restart`. Expected:
+   a new code in the panel, the QR code and the Presentation window, with "The relay restarted and could not keep the
+   old code: give the viewers the new code. …" until the session ends. Type `close-publisher 1001`: the note stays while
+   reconnecting (under a second against the stub: watch the detail line).
+7. **Lost longer than the window.** (a) Stop the stub (Ctrl-C) and leave it stopped for 190 s. Expected: the panel
+   keeps "Connection lost — reconnecting…" (every attempt fails); 180 s after the loss "Session ended." with "The
+   connection to the relay was lost for too long, so RemoteView stopped the session. …". Start the stub again on the
+   same port: nothing reaches it (its report has no entry). (b) Wi-Fi off for 4 minutes with relay (b): the same
+   ending; the relay's `/healthz` shows 0 sessions after Wi-Fi returns. (c) Relay (a) started with `--grace-ms 50`:
+   type `close-publisher 1001`. Expected: "Session ended." with "The relay ended the session while RemoteView was
+   offline. …"; the report has `create none` and `resume`, and no second create (a relay that ended the session is
+   not asked for its code again: it may belong to another session).
+8. **Stop while offline** (relay (b)). Wi-Fi off, wait for "Connection lost", click *Stop*. Expected: at once "Session
+   ended." with "RemoteView was not connected to the relay when you stopped. Anyone with the code can still see the last
+   scene until the relay ends the session, after a few minutes."; 3 s later, and again after Wi-Fi returns, no
+   `RemoteView-transport` thread (`[t.name for t in threading.enumerate()]`): nothing can connect. With relay (a): type
+   `close-publisher 1001` and click *Stop* right after the reconnect ("Live" again); the closes count is `1`.
+9. **Laptop sleep** (relay (b)), while "Live" with no edits in progress. Sleep for 1 minute (*[SRV-15]*): after waking
+   the session resumes with the same code. Sleep for 10 minutes: within about 25 s of waking (when the next ping finds
+   the connection gone) "Session ended." with the "lost for too long" text and nothing more (no "Anyone with the code
+   …": no resume went out), and **no frame goes out** after the wake (the reconnect window starts at the connection's
+   last sign of life before the sleep, SLC-58; with the relay at `LOG_LEVEL=debug`, no `websocket closed` line with
+   `role: "publisher"` after the wake — a resume or a create sets that role).
+10. **Reload or exit while reconnecting** (relay (b) with Wi-Fi off, or relay (a) stopped with Ctrl-C). Wait for
+    "Connection lost", then *Developer → Reload*. Bring the relay back, click *Start*, wait for "Live", cut it again
+    the same way and, while reconnecting, *File → Exit*. Expected: no traceback; no `RemoteView-transport` thread 3 s
+    after the reload (`[t.name for t in threading.enumerate()]`); *Start* works after the reload; Slicer exits within
+    3 s.
+11. **Idle renewal** (SLC-47; relay (c) started with `SESSION_TTL_S=90 LOG_LEVEL=debug` added, so it warns with
+    `session.expiring` 30–40 s after the session's idle period starts (its sweep runs every 10 s) — at creation, when
+    the last viewer leaves, at a renewal; the viewer page not joined until (iii)). (i) Click *Start*. Expected: 30–40 s
+    after "Live" nothing changes in the panel: it renewed the session by itself (relay log: `session renewed`), because
+    *Start* was clicked within 5 minutes. (ii) Do not touch the panel. Expected: 30–40 s later "No viewer is connected,
+    so the relay ends the session in about a minute. Click Keep session to keep it running." with a *Keep session*
+    button (the automatic renewal is used once per Start). Change a model's colour: the text and the button stay. Click
+    *Keep session*. Expected: both go, the relay logs `session renewed`, the code stays. (iii) When the text is back,
+    join with the viewer page. Expected: the text and the button go at once. Close the viewer's tab. Expected: 30–40 s
+    later the text again. Leave it. Expected: about 60 s later "Session ended." with "The session expired because nobody
+    joined for a while."
+12. **Logs** (T7). As §6 step 15, after steps 1-11: no session code written down here, no publisher token (`pt_…`), no
+    `sess_` session ID and no `Doe` on any RemoteView line.
+
+Known gaps (not failures):
+- A relay that crashes without close 4008, or whose 4008 frame did not reach Slicer before its drain ended (step 5
+  (c)), and comes back without the session ends it (`SESSION_NOT_FOUND`, no re-create; report `2026-10-28-slicer-4.md`
+  item 4).
+- A fallback create refused by the relay (`CAPACITY`, `RATE_LIMITED`) ends the session; there is no retry loop.
+- On Windows a sleep of roughly 3 to 6.5 minutes (default grace) still resumes at the wake and ends with "The relay
+  ended the session while RemoteView was offline."; a frame that reached Slicer before the sleep but is read only
+  after the wake dates the loss at the wake (SLC-58, `docs/research/slicer-sleep-clocks.md`).
 
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|
@@ -1227,6 +1361,97 @@ Expected results:
 |---|---|---|---|---|
 | | | | | |
 
+### §14.1 A mesh with an edge shared by thousands of triangles (SLC-41; written for `ws/slicer`'s SLC-63)
+
+Preconditions: §14's. In a new scene run in the Python console (a "book" of 3,000 pages, 100 × 150 mm, all on one spine
+edge; 6,000 triangles, so nothing is decimated under `mobile`):
+
+```python
+import numpy as np
+import vtk
+from vtkmodules.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray
+pages = 3000
+a = np.linspace(0.0, np.pi, pages)
+rim = np.c_[100 * np.cos(a), 100 * np.sin(a), np.zeros(pages)]
+points = np.vstack([[0, 0, 0], [0, 0, 150], rim, rim + [0, 0, 150]])
+outer = 2 + np.arange(pages)
+triangles = np.vstack([np.c_[np.zeros(pages), outer, np.ones(pages)],
+                       np.c_[np.ones(pages), outer, outer + pages]]).astype(np.int64)
+book = vtk.vtkPolyData()
+book.SetPoints(vtk.vtkPoints())
+book.GetPoints().SetData(numpy_to_vtk(points, deep=True))
+cells = vtk.vtkCellArray()
+cells.SetData(numpy_to_vtkIdTypeArray(np.arange(0, triangles.size + 1, 3, dtype=np.int64), deep=True),
+              numpy_to_vtkIdTypeArray(triangles.ravel(), deep=True))
+book.SetPolys(cells)
+slicer.modules.models.logic().AddModel(book).SetName("Book")
+```
+
+Steps:
+
+1. Click *Start session*; time how long the code takes to appear (a stopwatch is enough). Join with the viewer.
+
+Expected results:
+
+- Step 1: the code appears within about a second (Slicer was frozen for more than 10 s here when collect's normals
+  step walked the winding of every page; SLC-41 skips that walk on a non-manifold fan and keeps the given winding);
+  the viewer shows a half-circle fan of 3,000 thin pages around one edge.
+- Throughout: no traceback in the Python console.
+
+| Date | Slicer version | OS | Result | Tester |
+|---|---|---|---|---|
+| | | | | |
+
+### §14.2 Flat meshes decimate in seconds (SLC-41; written for `ws/slicer`'s SLC-61)
+
+Preconditions: Slicer with the RemoteView module loaded (no session needed). In the Python console of a new scene
+(`RemoteView/remoteview_core` is on the module's path once the module has loaded; `[TODO verify]`):
+
+```python
+import time
+import numpy as np
+import vtk
+from vtkmodules.util.numpy_support import numpy_to_vtk
+from remoteview_core import decimate
+from remoteview_core.collect import mesh_from_polydata
+from remoteview_core.glb_writer import Entity
+
+def node(polydata):
+    mesh = mesh_from_polydata(polydata)
+    return Entity(node_id="n", kind="model", name="n", positions=mesh.positions * 0.001, normals=mesh.normals,
+                  indices=mesh.triangles, color=(1, 1, 1), opacity=1.0, visible=True, mrml_id="n")
+
+def timed(polydata, share):
+    entity = node(polydata)
+    started = time.time()
+    smaller = decimate.decimate_entity(entity, share)
+    print(entity.triangle_count, "->", smaller.triangle_count, "in", round(time.time() - started, 2), "s")
+
+plane = vtk.vtkPlaneSource(); plane.SetPoint1(100, 0, 0); plane.SetPoint2(0, 100, 0); plane.SetResolution(300, 300)
+triangles = vtk.vtkTriangleFilter(); triangles.SetInputConnection(plane.GetOutputPort()); triangles.Update()
+timed(triangles.GetOutput(), 100_000)                      # a flat plane of 180,000 triangles
+side = np.arange(-111, 112); y, x = np.meshgrid(side, side, indexing="ij")
+volume = np.zeros((162, len(side), len(side)), np.uint8); volume[1:-1] = x * x + y * y <= 110 * 110
+image = vtk.vtkImageData(); image.SetDimensions(len(side), len(side), 162)
+image.GetPointData().SetScalars(numpy_to_vtk(volume.ravel(), deep=True))
+surface = vtk.vtkDiscreteFlyingEdges3D(); surface.SetInputData(image); surface.SetValue(0, 1); surface.Update()
+timed(surface.GetOutput(), 100_000)                        # an unsmoothed labelmap cylinder, 434,800 triangles
+sphere = vtk.vtkSphereSource(); sphere.SetThetaResolution(448); sphere.SetPhiResolution(448); sphere.Update()
+timed(sphere.GetOutput(), 100_000)                         # a smooth sphere of 399,616 triangles
+```
+
+Expected results:
+
+- Each line prints the share reached (100000 or just under) and a time: the plane ≈ 0.8 s, the labelmap cylinder
+  ≈ 3 s, the sphere ≈ 2.5 s in the development sandbox (they took over 90 s, over 90 s and ≈ 3 s with SLC-14's
+  filters). Record the times in the Result column: `[TODO verify]` Slicer's own VTK build is as fast as the `vtk`
+  9.6.2 wheel.
+- Throughout: no traceback in the Python console.
+
+| Date | Slicer version | OS | Result | Tester |
+|---|---|---|---|---|
+| | | | | |
+
 ## §15 Preparing the scene in steps (SLC-28, SLC-50, SLC-51; FR-10, R-05, `docs/research/slicer-prepare.md`)
 
 Preconditions: §2's setup with relay (b) or (c); a phone ready to join. Every step watches the main thread with a
@@ -1313,6 +1538,120 @@ Expected results:
   about 1 s; `longest()` prints less than 1 s.
 - Step 8: a `scene.update` only (no "Preparing the scene"), as in §13 step 7.
 - The progress dialog of SLC-51 (`qt.QProgressDialog`) is gone since SLC-55: no window may appear at any step.
+
+Steps (the scene changed during a preparation, and the last step near the relay's limit; SLC-68, `[TODO verify]`):
+
+9. Choose *At once* in the toolbar's *Send changes* box (§16), then redo steps 1-2 (a new scene, the stall meter, five
+   spheres live, the phone joined). Give `Big0` a 448-resolution mesh again (step 4's snippet with
+   `SetCenter(0, 0, 0)`, resolution 448 and `getNode("Big0")`) to start a preparation, and while the panel says
+   "Preparing the scene" delete `Big3` (*Data* module, right-click, *Delete*) and hide `Big4` (its eye icon).
+10. Stop the session and, in a new scene, make ten triangle soups of 99,456 triangles (every corner its own point):
+
+    ```python
+    import numpy as np
+    import vtk
+    from vtkmodules.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray, vtk_to_numpy
+    def soup(center, name):
+        source = vtk.vtkSphereSource()
+        source.SetCenter(*center)
+        source.SetRadius(40)
+        source.SetThetaResolution(224)
+        source.SetPhiResolution(224)
+        source.Update()
+        mesh = source.GetOutput()
+        corners = vtk_to_numpy(mesh.GetPoints().GetData())[
+            vtk_to_numpy(mesh.GetPolys().GetConnectivityArray())
+        ]
+        out = vtk.vtkPolyData()
+        out.SetPoints(vtk.vtkPoints())
+        out.GetPoints().SetData(numpy_to_vtk(corners, deep=True))
+        polys = vtk.vtkCellArray()
+        polys.SetData(numpy_to_vtkIdTypeArray(np.arange(0, len(corners) + 1, 3, dtype=np.int64), deep=True),
+                      numpy_to_vtkIdTypeArray(np.arange(len(corners), dtype=np.int64), deep=True))
+        out.SetPolys(polys)
+        slicer.modules.models.logic().AddModel(out).SetName(name)
+    for i in range(10):
+        soup((100 * i, 0, 0), f"Soup{i}")
+    ```
+
+    Select the `quest3` profile (until SLC-18's selector: after one *Start session*/*Stop session*, run
+    `slicer.modules.remoteview.widgetRepresentation().self().controller.profile = "quest3"`, `[TODO verify]`), run
+    `longest()`, click *Start session*, and run `longest()` when the panel says "Live".
+11. (SLC-68) Stop the session. The *Doe scene*: a new scene with step 1's five spheres, renamed like a patient's
+    (`for i in range(5): getNode(f"Big{i}").SetName(f"Doe^John {i}")`). Make it, time a *Start session* to the end
+    of "Preparing the scene" ("Sending the scene"; on a relay on this computer it may go straight to "Live") once,
+    and stop. Then three runs, each from a new Doe scene with the session stopped:
+    (a) close the scene in the middle of the first preparation, with one line in the console:
+    `w = slicer.modules.remoteview.widgetRepresentation().self(); w.onStartClicked();
+    qt.QTimer.singleShot(1500, lambda: slicer.mrmlScene.Clear(0))`; join with the phone as soon as the code shows,
+    and stop the session once the phone shows the empty scene;
+    (b) the same with the delay at about two thirds of the timed preparation;
+    (c) against §7's relay (a) (its step 5: the stub at `ws://127.0.0.1:8787/ws`; no phone can join it): start the
+    session and type `restart` in the stub's input while the panel says "Preparing the scene"; once the panel says
+    "Live", stop the session and end the stub's input.
+12. (SLC-71) Stop the session. The *Segs scene*: a new scene with step 1's five spheres and a segmentation of two
+    segments whose IDs are their names, one named like a patient's (a segment ID is what Slicer's log lines quote):
+
+    ```python
+    seg = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Segs")
+    seg.CreateDefaultDisplayNodes()
+    for i, name in enumerate(["Segment A", "Doe tumour"]):
+        source = vtk.vtkSphereSource()
+        source.SetCenter(100 * i, 150, 0)
+        source.SetRadius(30)
+        source.Update()
+        seg.AddSegmentFromClosedSurfaceRepresentation(source.GetOutput(), name, [0.9, 0.2, 0.2], name)
+    ```
+
+    Keep *At once* in the toolbar (step 9). Make it, time a *Start session* once — to the code (`c`) and to the end of
+    "Preparing the scene" (`p`, as in step 11) — and stop. Then two runs, each from a new Segs scene with the session
+    stopped, joining with the phone as soon as the code shows:
+    (a) delete the segmentation late in the first preparation, after its segments were read — with `t` about two
+    thirds of `p`, in ms: `w = slicer.modules.remoteview.widgetRepresentation().self();
+    w.onStartClicked(); qt.QTimer.singleShot(t, lambda: slicer.mrmlScene.RemoveNode(getNode("Segs")))`;
+    (b) remove `Doe tumour` early in the first preparation, after the nodes are listed but before its segment is read
+    (the segments come right after the five spheres are collected, about a tenth into the preparation): the same line
+    with `t` about `c` plus a twentieth of `p`, and
+    `lambda: getNode("Segs").GetSegmentation().RemoveSegment("Doe tumour")`.
+
+Expected results:
+
+- Step 9: the snapshot that goes out may still show `Big3` and `Big4` (each is collected as it is at its step; the
+  last step does not list the shown nodes again); within about a second after it the phone loses `Big3` and `Big4`
+  (their marks go out after the snapshot's ack). No `RemoteView`, `live:` or `scene:` error line and no traceback —
+  `[TODO verify]` that the adapter reads a model deleted between two steps as hidden, with no error line, and that
+  `Big3` is gone from the phone after the ack (`docs/research/slicer-prepare.md`, SLC-71).
+- Step 10: the GLB is about 45.5 MiB (each soup is under the 100k cap and is sent as it is); the phone shows ten
+  spheres; `longest()` prints less than 1.5 s — the last step writes and hashes the GLB on the main thread (≈ 0.9 s for
+  45.8 MiB in the sandbox, `docs/research/slicer-prepare.md`). Record the time in the Result column.
+- Step 11: (a) and (b): the phone shows an empty scene and never a sphere, and the panel stays live with the same code
+  until Stop. A run in which the preparation ended before the scene closed ("Sending the scene" or "Live" showed) does
+  not count — the snapshot had begun, so its spheres may reach the phone (when its upload ended before the close;
+  otherwise the empty snapshot's begin aborts it, protocol §6.2): repeat it with a shorter delay. (c): the panel says
+  "The relay restarted: RemoteView starts the session again, …", then "Preparing the scene" and "Live" with the same
+  code; the stub's final report lists `create none`, `resume` and `create previous` (as in §7 step 5) — the first two
+  hold no `scene.snapshot.begin`, the third holds one, version 1 — and `violations == []`. In every run, in Slicer's
+  Error Log window and the application log file (not the console window, which echoes the commands typed): no `Doe` on a
+  line from `remoteview_core` or `RemoteView.py` (echoed console commands are allowed), no `RemoteView`, `live:` or
+  `scene:` error line; no traceback in the Python console.
+- Step 12: (a) the first snapshot may show both segments; within about a second after its ack the phone drops them; the
+  spheres stay. A run does not count when "Sending the scene" or "Live" showed before `Segs` left Slicer's 3D view
+  (repeat with a shorter delay) or when the panel says "2 models or segments shown in 3D could not be shared." (the
+  removal came before the segments were read: repeat with a longer one). (b) the phone never shows `Doe tumour`, and
+  the panel says "1 model or segments shown in 3D could not be shared." until the next snapshot (the segment was left
+  out). A run without that note does not count: the removal came after the segment's step (repeat with a shorter delay)
+  or before the code showed (`Doe tumour` was never listed: repeat with a longer one). In both, in Slicer's Error Log
+  window and the application log file (not the console window, which echoes the commands typed): no `Doe tumour`
+  (echoed console commands are allowed) — Slicer's segment getters would log the ID ("No display properties found" or
+  "segment not found by id") —, no `RemoteView`, `live:` or `scene:` error line, no traceback. Then, in run (b)'s
+  scene, as a control, type `getNode("Segs").GetDisplayNode().GetSegmentOpacity3D("Doe tumour")`: its "No display
+  properties found for segment with ID Doe tumour" line must appear in the Error Log window and the log file (record
+  it; this closes the `[TODO verify]` that such VTK lines reach them). Without it, the log checks of steps 11 and 12 do
+  not count.
+
+SLC-70 (a scene closed off the main thread) has no manual step: no path of Slicer itself closes the scene off the main
+thread, and a script that does is unsupported and may crash Slicer (`docs/research/slicer-prepare.md`, *A scene closed
+off the main thread*); its tests fire the close from a worker thread through the real observers.
 
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|

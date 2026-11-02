@@ -551,7 +551,7 @@ def test_adapter_a_qr_code_that_cannot_be_drawn_is_said_and_the_window_shows_the
 
 
 def test_adapter_a_link_that_changes_while_live_replaces_the_qr_code(widget):
-    """A code that changes without an empty view in between (SLC-17's resume may do that) gets its own QR code."""
+    """A code that changes without an empty view in between (SLC-45's re-create may do that) gets its own QR code."""
     _, instance = widget
     live_view = panel.PanelView("Session running", start_enabled=False, stop_enabled=True)
     first, second = "https://relay.example.org/j#7KQ4X", "https://relay.example.org/j#ABCDE"

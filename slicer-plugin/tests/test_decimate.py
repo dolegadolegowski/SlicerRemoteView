@@ -799,13 +799,14 @@ def test_decimate_book_routes_around_the_quadric(monkeypatch):
     assert calls and 0 < smaller.triangle_count <= 2_000
 
 
-@pytest.mark.parametrize(("target", "limit"), [(2_000, 2.0), (100_000, 5.0)])
+@pytest.mark.parametrize(("target", "limit"), [(2_000, 2.0), (100_000, 8.0)])
 def test_decimate_a_fan_below_the_fan_limit_is_routed_by_its_quadric_work(
     target, limit, monkeypatch
 ):
     """400 pages of 16 × 16 quads: ``fan_weight`` 42 is below ``FAN_LIMIT``, but the quadric's set-up (which cannot be
     aborted) would cost ``edge_work`` 8.8e9 — 2.8-4.0 s here, 16.8 s on 672 pages. It goes the fan path instead
-    (measured 0.12 s and 1.9 s)."""
+    (measured 0.12 s and 1.9 s natively; 0.5 s and 4.7-5.0 s in a 4-core sandbox, so the 100k share is bounded at 8 s,
+    not 5 s: the merge of `main` into `ws/slicer`, 2026-10-30)."""
     positions, triangles = book(400, 16)
     assert clustering.fan_weight(triangles) < decimate.FAN_LIMIT
     assert clustering.edge_work(triangles) > decimate.QUADRIC_WORK
