@@ -1,0 +1,82 @@
+# Bug report form (DEP-12). Mirrors docs/testing/reports/README.md, the format workstreams use for
+# cross-component reports (CLAUDE.md rule 9). Schema: GitHub issue forms (docs/research/deploy-github-actions.md).
+name: Bug report
+description: Something in SlicerRemoteView does not work as documented.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never paste session codes, resume tokens, `METRICS_TOKEN`/`RAILWAY_TOKEN` values, patient data, scene
+        files or screenshots that show any of them** (CLAUDE.md rule 6). Write `<code>` instead of a code; describe
+        the scene ("2 segmentations, about 1 M triangles") instead of attaching it.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected component
+      description: The component whose behaviour is wrong (CLAUDE.md component map).
+      options:
+        - protocol (shared/, tools/)
+        - server (relay-server/)
+        - web (web-viewer/)
+        - slicer (slicer-plugin/)
+        - quest (quest-app/)
+        - deploy (.github/, .railway/, docs/deploy.md)
+        - qa (tests/)
+        - not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - high (data exposure, crash, sessions lost)
+        - medium (feature broken, workaround exists)
+        - low (cosmetic, wording)
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Commit SHA, release tag or the `version` field of `https://<your-domain>/api/version`; Slicer, browser and device versions if relevant.
+      placeholder: "v0.1.0, relay 1a2b3c4, Slicer 5.12.0, Safari on iOS 19"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps, starting from a fresh session. No codes or tokens.
+      placeholder: |
+        1. Start a session in Slicer with …
+        2. Join from …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual
+      description: What happened instead; error message or close code shown. Paste log lines only after removing codes, tokens and addresses.
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes / suspected cause
+      description: Optional. Protocol section (`docs/protocol.md` §…) if the bug is about the contract.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy
+      options:
+        - label: This report contains no session code, token, patient data or scene file.
+          required: true
