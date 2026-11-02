@@ -1,0 +1,87 @@
+# Railway IaC (DEP-13; ADR 0007 §7; docs/deploy.md §1.4). Uses railwayapp/config (plan on pull requests, apply of
+# the reviewed plan after the merge; docs/research/deploy-railway-iac.md §5).
+#
+# Safety, because an apply that changes the service redeploys the live relay and ends every running session:
+# - nothing happens without the secret RAILWAY_TOKEN (a project token of the production environment, which can
+#   also deploy). Recommended: do not store it at all and plan/apply locally; a *repository* secret is usable from
+#   any pushed branch (docs/deploy.md §1.4). Forks never get it, so their plan job skips its steps and stays green;
+# - apply runs only for a push to main AND when the repository variable RAILWAY_IAC_APPLY is `true` (opt-in,
+#   set after the first clean `railway config plan`, docs/deploy.md §1.4) AND after the `railway-production`
+#   environment's protection rules (required reviewers where the GitHub plan offers them);
+# - destructive changes (deleting a service or a variable) make the apply fail (`confirm-destructive: "false"`).
+name: Railway
+
+on:
+  pull_request:
+    paths: [".railway/**"]
+  push:
+    branches: [main]
+    paths: [".railway/**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: railway-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Railway CLI evaluating .railway/railway.ts; the SDK in .railway/package.json needs >= 5.42.1.
+  RAILWAY_CLI_VERSION: 5.71.0
+
+jobs:
+  plan:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: read
+    env:
+      HAS_TOKEN: ${{ secrets.RAILWAY_TOKEN != '' }}
+    steps:
+      - name: No RAILWAY_TOKEN — nothing to plan
+        if: env.HAS_TOKEN != 'true'
+        run: echo "::notice::RAILWAY_TOKEN is not set; skipping railway config plan (docs/deploy.md §1.4)."
+      - if: env.HAS_TOKEN == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - if: env.HAS_TOKEN == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.x
+      # railway/iac resolves from .railway/node_modules (the action installs only the root workspaces).
+      - if: env.HAS_TOKEN == 'true'
+        run: npm ci --prefix .railway --ignore-scripts
+      - if: env.HAS_TOKEN == 'true'
+        run: npm run typecheck --prefix .railway
+      - if: env.HAS_TOKEN == 'true'
+        uses: railwayapp/config@9e17d413dbe219f19d62538d9c06b5dbb5e9abf8 # v1.2.0
+        with:
+          command: plan
+          railway-token: ${{ secrets.RAILWAY_TOKEN }}
+          cli-version: ${{ env.RAILWAY_CLI_VERSION }}
+
+  apply:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.RAILWAY_IAC_APPLY == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: railway-production
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Applies the plan artifact of the merged pull request; it fails when .railway/ or the environment changed
+      # since that plan, or when there is no plan (a direct push to main).
+      - uses: railwayapp/config@9e17d413dbe219f19d62538d9c06b5dbb5e9abf8 # v1.2.0
+        with:
+          command: apply
+          railway-token: ${{ secrets.RAILWAY_TOKEN }}
+          cli-version: ${{ env.RAILWAY_CLI_VERSION }}
+          confirm-destructive: "false"

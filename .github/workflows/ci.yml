@@ -1,0 +1,437 @@
+# CI (docs/plan/deploy.md DEP-01…DEP-03; owner guide docs/deploy.md §7).
+#
+# `detect` decides which jobs a change needs (.github/scripts/detect-changes.mjs: changed paths against the base
+# and whether the component exists on the branch); jobs it skips report "skipped", which a required check treats
+# as passing. Branch protection requires one check only, `ci-ok`, which fails when any blocking job failed or was
+# cancelled. Non-blocking jobs (Node 24, audit, load smoke, qa) are not in its `needs`.
+# Every `uses:` is pinned to a commit SHA (`.github/scripts/check-pinned-actions.mjs`). No job needs a secret:
+# pull requests from forks pass with the read-only GITHUB_TOKEN.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer run cancels an older one on the same branch or pull request. On main every commit has its own group:
+# a queued run there is never cancelled, so Railway's "Wait for CI" always gets a result for each commit.
+concurrency:
+  group: ci-${{ github.ref == 'refs/heads/main' && github.sha || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  detect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      node: ${{ steps.detect.outputs.node }}
+      python_shared: ${{ steps.detect.outputs.python_shared }}
+      python_slicer: ${{ steps.detect.outputs.python_slicer }}
+      docker: ${{ steps.detect.outputs.docker }}
+      load_smoke: ${{ steps.detect.outputs.load_smoke }}
+      qa: ${{ steps.detect.outputs.qa }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.x
+      - id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: node .github/scripts/detect-changes.mjs
+
+  repo-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.x
+      - name: CI script tests
+        run: node --test ".github/scripts/test/*.test.mjs"
+      # DEP-09: every `uses:` names a 40-character commit SHA (T12).
+      - name: Actions pinned to SHAs
+        run: node .github/scripts/check-pinned-actions.mjs
+      # DEP-13: the same variable names in .railway/railway.ts and relay-server/.env.example.
+      - name: Env parity (railway.ts, .env.example, architecture §9, deploy.md §2)
+        run: node .github/scripts/check-env-parity.mjs --with-docs
+      # DEP-05: non-blocking; a finding means rotate the secret, then clean the history (docs/deploy.md §3).
+      - name: Secret scan (non-blocking)
+        continue-on-error: true
+        run: node .github/scripts/scan-secrets.mjs
+      # DEP-04: .railway/railway.ts against the railway SDK's types (field names, values).
+      - name: Railway IaC type-check
+        run: |
+          if [ -f .railway/package.json ]; then
+            npm ci --prefix .railway --ignore-scripts --no-audit --no-fund
+            npm run typecheck --prefix .railway
+          else
+            echo "no .railway/ on this branch"
+          fi
+
+  node:
+    needs: detect
+    if: needs.detect.outputs.node == 'true'
+    name: node 22
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.x
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      # Schemas, fixtures and generated TypeScript; the Python half and the vendored copy run in the `python` job.
+      - name: npm run check -w shared
+        run: npm run check -w shared --if-present -- --skip-python --skip-vendored
+
+  # NFR-41 / R-04: the next Node LTS, reported but never blocking (not in ci-ok's needs).
+  node-next:
+    needs: detect
+    if: needs.detect.outputs.node == 'true'
+    name: node 24 (non-blocking)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.x
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  # DEP-02: shared/py (ruff, mypy, pytest, generated Python, vendored copy) and slicer-plugin (ruff, pytest with
+  # every opt-in gate on: the Khronos validator, openssl and the fake-slicer relay stub must exist, not be skipped).
+  python:
+    needs: detect
+    if: needs.detect.outputs.python_shared == 'true' || needs.detect.outputs.python_slicer == 'true'
+    name: python 3.12
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      SHARED: ${{ needs.detect.outputs.python_shared }}
+      SLICER: ${{ needs.detect.outputs.python_slicer }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.x
+          cache: npm
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            shared/py/pyproject.toml
+            slicer-plugin/requirements-dev.txt
+      # gltf-validator (a devDependency of shared) and the generators come from the root lockfile.
+      - run: npm ci
+      # ADR 0007 §3: the Slicer module imports only its vendored copy of shared/py; drift lists the files.
+      - name: Vendored copy equals shared/py
+        run: |
+          if [ -d slicer-plugin/RemoteView/_vendor/remoteview_protocol ] && [ -d shared/py/remoteview_protocol ]; then
+            node shared/scripts/vendor-py.mjs slicer-plugin/RemoteView/_vendor/remoteview_protocol --check
+          else
+            echo "no vendored copy on this branch"
+          fi
+
+      - name: shared/py — install
+        if: env.SHARED == 'true'
+        run: |
+          python -m venv shared/py/.venv
+          shared/py/.venv/bin/pip install --disable-pip-version-check -e "shared/py[dev]"
+      - name: shared/py — ruff and mypy
+        if: env.SHARED == 'true'
+        working-directory: shared/py
+        run: |
+          .venv/bin/ruff check .
+          .venv/bin/ruff format --check .
+          .venv/bin/mypy -p remoteview_protocol --config-file pyproject.toml
+      - name: shared/py — pytest
+        if: env.SHARED == 'true'
+        run: shared/py/.venv/bin/pytest -p no:cacheprovider shared/py
+      # Generated Python and the Python conformance replay (the TypeScript half ran in the node job).
+      - name: npm run check -w shared
+        if: env.SHARED == 'true'
+        run: npm run check -w shared --if-present -- --skip-vendored
+
+      - name: slicer-plugin — install
+        if: env.SLICER == 'true'
+        run: |
+          python -m venv slicer-plugin/.venv
+          slicer-plugin/.venv/bin/pip install --disable-pip-version-check -r slicer-plugin/requirements-dev.txt
+      - name: slicer-plugin — ruff
+        if: env.SLICER == 'true'
+        run: |
+          slicer-plugin/.venv/bin/ruff check slicer-plugin
+          slicer-plugin/.venv/bin/ruff format --check slicer-plugin
+      # The end-to-end tests start the relay stub of tools/fake-slicer (slicer-plugin/README.md, Development).
+      - name: slicer-plugin — build the relay stub
+        if: env.SLICER == 'true'
+        run: npm run build -w shared -w tools/fake-slicer
+      - name: slicer-plugin — pytest
+        if: env.SLICER == 'true'
+        env:
+          REMOTEVIEW_REQUIRE_GLTF_VALIDATOR: "1" # report 2026-10-19-slicer-1
+          REMOTEVIEW_REQUIRE_OPENSSL: "1" # report 2026-10-20-slicer-2
+          REMOTEVIEW_REQUIRE_RELAY_STUB: "1"
+        run: slicer-plugin/.venv/bin/pytest -p no:cacheprovider -W error -rs slicer-plugin
+
+  # DEP-03: the relay image from a clean checkout with the repository root as context (ADR 0007 §5), smoke-tested;
+  # on a push to main also pushed to GHCR as ghcr.io/<owner>/slicerremoteview-relay:sha-<commit> (GITHUB_TOKEN
+  # only). Railway builds its own image from the same Dockerfile; this one is the fallback (docs/deploy.md §7).
+  docker:
+    needs: detect
+    if: needs.detect.outputs.docker == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    env:
+      LOCAL_TAG: slicerremoteview-relay:ci
+      PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && !github.event.repository.fork }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: relay-server/Dockerfile
+          load: true
+          tags: ${{ env.LOCAL_TAG }}
+          cache-from: type=gha,scope=relay
+          cache-to: type=gha,scope=relay,mode=max
+      - name: Smoke (/healthz, /api/version, uid 1000)
+        run: .github/scripts/smoke-relay-image.sh "$LOCAL_TAG"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.x
+          cache: npm
+      - run: npm ci
+      # PID 1 is dumb-init, clean SIGTERM, heap sizing, no dev dependency (report 2026-10-20-server-9).
+      - name: relay-server docker-smoke tests
+        env:
+          RELAY_IMAGE: ${{ env.LOCAL_TAG }}
+        run: npm test -w relay-server -- docker-smoke
+      - name: Image name for GHCR
+        if: env.PUSH == 'true'
+        id: image
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: echo "name=ghcr.io/${OWNER,,}/slicerremoteview-relay" >> "$GITHUB_OUTPUT"
+      - if: env.PUSH == 'true'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Same inputs and cache as the build above: Buildx reuses every layer, nothing is rebuilt.
+      - name: Push to GHCR (main only)
+        if: env.PUSH == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: relay-server/Dockerfile
+          push: true
+          tags: ${{ steps.image.outputs.name }}:sha-${{ github.sha }}
+          cache-from: type=gha,scope=relay
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+  # DEP-10: system tests of the qa workstream (tests/, its own npm project; tests/README.md) and the relay's load
+  # smoke. Non-blocking (continue-on-error, not in ci-ok's needs) until they have been stable for two weeks; then
+  # add them to ci-ok's needs and drop continue-on-error (docs/deploy.md §7.5). Every suite starts its own relay
+  # on 127.0.0.1 — never a deployed relay. Artefacts (Playwright traces, relay.log for QA-07's log grep) are
+  # internal: a trace can show a session code typed on screen.
+  e2e:
+    needs: detect
+    if: needs.detect.outputs.qa == 'true'
+    name: e2e (non-blocking)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.x
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            tests/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm ci --prefix tests
+      - run: npm run lint --prefix tests --if-present
+      # Not cached: Playwright advises against caching browsers (restoring takes as long as downloading,
+      # docs/research/deploy-github-actions.md §12); --with-deps installs WebKit's system libraries.
+      - name: Playwright browsers
+        working-directory: tests
+        run: npx playwright install --with-deps chromium webkit
+      - run: npm run e2e --prefix tests
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-results
+          path: |
+            tests/test-results/
+            tests/playwright-report/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  security:
+    needs: detect
+    if: needs.detect.outputs.qa == 'true'
+    name: security (non-blocking)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.x
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            tests/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm ci --prefix tests
+      - name: Playwright browser (GLB fuzz)
+        working-directory: tests
+        run: npx playwright install --with-deps chromium
+      # --pass-with-no-tests: green while tests/security has no spec yet (QA-05).
+      - run: npm run security --prefix tests -- --pass-with-no-tests
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: security-results
+          path: |
+            tests/test-results/
+            tests/playwright-report/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  load-smoke:
+    needs: detect
+    if: needs.detect.outputs.load_smoke == 'true' || needs.detect.outputs.qa == 'true'
+    name: load smoke (non-blocking)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    continue-on-error: true
+    env:
+      RELAY_SMOKE: ${{ needs.detect.outputs.load_smoke }}
+      QA: ${{ needs.detect.outputs.qa }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.x
+          cache: npm
+      - run: npm ci
+      # SRV-21: one relay process, one publisher, 20 viewers (relay-server/scripts/load-smoke.ts).
+      - name: relay load smoke (SRV-21)
+        if: env.RELAY_SMOKE == 'true'
+        run: npm run load:smoke -w relay-server
+      - name: qa load smoke (tests/load)
+        if: env.QA == 'true'
+        run: |
+          npm run build
+          npm ci --prefix tests
+          npm run load:smoke --prefix tests -- --pass-with-no-tests
+      - if: always() && env.QA == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: load-smoke-results
+          path: tests/test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # DEP-09 (T12): known vulnerabilities in the relay's production npm dependencies and the Python dev/test
+  # dependencies, on every run; reported, never blocking (not in ci-ok's needs). Findings go to the owning
+  # component through docs/testing/reports/ (docs/deploy.md §7.4).
+  audit:
+    name: audit (non-blocking)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.x
+      - name: npm audit (production dependencies)
+        run: npm audit --omit=dev
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        if: always()
+        with:
+          python-version: "3.12"
+      - name: pip-audit
+        if: always()
+        run: |
+          python -m pip install --disable-pip-version-check --quiet pip-audit==2.10.1
+          status=0
+          if [ -f slicer-plugin/requirements-dev.txt ]; then
+            # Fully pinned: audit the pins themselves, no resolver run.
+            pip-audit --progress-spinner off --no-deps --disable-pip -r slicer-plugin/requirements-dev.txt || status=1
+          fi
+          if [ -f shared/py/pyproject.toml ]; then
+            pip-audit --progress-spinner off shared/py || status=1
+          fi
+          exit "$status"
+
+  # The one required check (docs/deploy.md §7): green when every blocking job passed or was skipped by `detect`.
+  ci-ok:
+    if: always()
+    needs: [detect, repo-checks, node, python, docker]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Blocking jobs passed or were skipped
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$RESULTS" | jq -e 'all(.[]; .result == "success" or .result == "skipped")' > /dev/null
