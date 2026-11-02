@@ -1,0 +1,120 @@
+# CI (docs/plan/deploy.md DEP-01…DEP-03; owner guide docs/deploy.md §7).
+#
+# `detect` decides which jobs a change needs (.github/scripts/detect-changes.mjs: changed paths against the base
+# and whether the component exists on the branch); jobs it skips report "skipped", which a required check treats
+# as passing. Branch protection requires one check only, `ci-ok`, which fails when any blocking job failed or was
+# cancelled. Non-blocking jobs (Node 24, audit, load smoke, qa) are not in its `needs`.
+# Every `uses:` is pinned to a commit SHA (`.github/scripts/check-pinned-actions.mjs`). No job needs a secret:
+# pull requests from forks pass with the read-only GITHUB_TOKEN.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  detect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      node: ${{ steps.detect.outputs.node }}
+      python_shared: ${{ steps.detect.outputs.python_shared }}
+      python_slicer: ${{ steps.detect.outputs.python_slicer }}
+      docker: ${{ steps.detect.outputs.docker }}
+      load_smoke: ${{ steps.detect.outputs.load_smoke }}
+      qa: ${{ steps.detect.outputs.qa }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.x
+      - id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: node .github/scripts/detect-changes.mjs
+
+  repo-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.x
+      - name: CI script tests
+        run: node --test ".github/scripts/test/*.test.mjs"
+
+  node:
+    needs: detect
+    if: needs.detect.outputs.node == 'true'
+    name: node 22
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.x
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      # Schemas, fixtures and generated TypeScript; the Python half and the vendored copy run in the `python` job.
+      - name: npm run check -w shared
+        run: npm run check -w shared --if-present -- --skip-python --skip-vendored
+
+  # NFR-41 / R-04: the next Node LTS, reported but never blocking (not in ci-ok's needs).
+  node-next:
+    needs: detect
+    if: needs.detect.outputs.node == 'true'
+    name: node 24 (non-blocking)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.x
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  # The one required check (docs/deploy.md §7): green when every blocking job passed or was skipped by `detect`.
+  ci-ok:
+    if: always()
+    needs: [detect, repo-checks, node]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Blocking jobs passed or were skipped
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$RESULTS" | jq -e 'all(.[]; .result == "success" or .result == "skipped")' > /dev/null
