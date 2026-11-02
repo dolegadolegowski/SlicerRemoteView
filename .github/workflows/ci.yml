@@ -59,6 +59,9 @@ jobs:
           node-version: 22.x
       - name: CI script tests
         run: node --test ".github/scripts/test/*.test.mjs"
+      # DEP-09: every `uses:` names a 40-character commit SHA (T12).
+      - name: Actions pinned to SHAs
+        run: node .github/scripts/check-pinned-actions.mjs
       # DEP-13: the same variable names in .railway/railway.ts and relay-server/.env.example.
       - name: Env parity (railway.ts, .env.example, architecture §9, deploy.md §2)
         run: node .github/scripts/check-env-parity.mjs --with-docs
@@ -265,6 +268,41 @@ jobs:
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
+
+  # DEP-09 (T12): known vulnerabilities in the relay's production npm dependencies and the Python dev/test
+  # dependencies, on every run; reported, never blocking (not in ci-ok's needs). Findings go to the owning
+  # component through docs/testing/reports/ (docs/deploy.md §7.4).
+  audit:
+    name: audit (non-blocking)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.x
+      - name: npm audit (production dependencies)
+        run: npm audit --omit=dev
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        if: always()
+        with:
+          python-version: "3.12"
+      - name: pip-audit
+        if: always()
+        run: |
+          python -m pip install --disable-pip-version-check --quiet pip-audit==2.10.1
+          status=0
+          if [ -f slicer-plugin/requirements-dev.txt ]; then
+            # Fully pinned: audit the pins themselves, no resolver run.
+            pip-audit --progress-spinner off --no-deps --disable-pip -r slicer-plugin/requirements-dev.txt || status=1
+          fi
+          if [ -f shared/py/pyproject.toml ]; then
+            pip-audit --progress-spinner off shared/py || status=1
+          fi
+          exit "$status"
 
   # The one required check (docs/deploy.md §7): green when every blocking job passed or was skipped by `detect`.
   ci-ok:

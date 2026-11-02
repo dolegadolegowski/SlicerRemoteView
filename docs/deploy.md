@@ -190,11 +190,12 @@ files with the base and checks which components exist on the branch; the other j
 | Job | Runs when | What it checks | Blocking |
 |---|---|---|---|
 | `detect` | always | change detection; the step summary lists each job's decision | yes |
-| `repo-checks` | always | unit tests of `.github/scripts/`; `.railway/railway.ts` type-check | yes |
+| `repo-checks` | always | unit tests of `.github/scripts/`; actions pinned to SHAs; env parity (§2); `.railway/railway.ts` type-check; secret scan (non-blocking step, §3) | yes |
 | `node 22` | `shared/`, `relay-server/`, `web-viewer/`, `tools/`, `package*.json` changed | `npm ci`, `npm run lint`, `npm run typecheck`, `npm test`, `npm run build`, `npm run check -w shared` (TypeScript half) | yes |
 | `node 24 (non-blocking)` | as `node 22` | the same on the next Node LTS (NFR-41) | no |
 | `python 3.12` | `shared/`, `slicer-plugin/`, `tools/fake-slicer/`, `package*.json` changed | vendored copy of `shared/py` up to date; `shared/py`: ruff, mypy, pytest, the Python half of `npm run check -w shared`; `slicer-plugin`: ruff, pytest with every opt-in gate required | yes |
 | `docker` | the relay image's inputs changed (the Railway watch paths) | build of `relay-server/Dockerfile` from the repository root; smoke test (`/healthz` 200 within 10 s, `/api/version`, uid 1000); `docker-smoke` tests; on `main` only: push to `ghcr.io/<owner>/slicerremoteview-relay:sha-<commit>` | yes |
+| `audit (non-blocking)` | always | `npm audit --omit=dev`, `pip-audit` (§7.4) | no |
 | `ci-ok` | always | fails when a blocking job failed or was cancelled; passes when they passed or were skipped | **the required check** |
 
 A full run (every job whose component exists) happens on a push to `main`, a manual run, the first push of a new
@@ -226,3 +227,22 @@ after the GitHub Actions runs on that commit finished, and skips the deploy when
 (`docs/research/deploy-railway-ops.md` §10). The toggle appears once a workflow runs on `push` to `main` — `ci.yml`
 does — and after accepting the updated Railway GitHub App permissions. A non-blocking job (`continue-on-error`) does
 not fail its run. `ci.yml` never cancels runs on `main`, as Railway asks.
+
+### 7.4 Supply chain (Dependabot, audit, pinned actions)
+
+- **Dependabot** (`.github/dependabot.yml`, weekly): npm at the root (all workspaces share one lockfile) and in
+  `.railway/`, pip in `shared/py` and `slicer-plugin`, the pinned GitHub Actions, and the relay's base image
+  (`node:22-alpine`, no major bumps). Minor and patch updates come grouped, one pull request per ecosystem. Its pull
+  requests get no secrets and run the same CI. Merging an npm update changes `package-lock.json` and therefore
+  **redeploys the relay**: merge them when no session is running. A pip bump of `slicer-plugin` must be followed by
+  regenerating `slicer-plugin/requirements-dev.txt` (`slicer-plugin/README.md`). Check after the first run that the
+  root npm entry covers every workspace `[TODO verify]`.
+- **`audit (non-blocking)`** runs on every push: `npm audit --omit=dev` (the relay image's production tree) and
+  `pip-audit` (the Python dev/test pins and `shared/py`). It reports and never blocks; a finding goes to the owning
+  component as a report under `docs/testing/reports/` (the first one: `2026-11-02-deploy-1.md`).
+- **Pinned actions**: every `uses:` names a 40-character commit SHA with the version as a comment;
+  `.github/scripts/check-pinned-actions.mjs` (in `repo-checks`) fails on a tag or branch reference. Dependabot keeps
+  the SHAs and comments current. `railwayapp/config` itself uses tag-pinned actions inside; that cannot be pinned
+  from here.
+- **CODEOWNERS** is not added: on a private repository it needs GitHub Pro, Team or Enterprise, and every component
+  has the same maintainer today.
