@@ -117,6 +117,68 @@ Merge `.railway/**` changes like deploys: when no session is running.
 |---|---|---|---|
 | — | — | not run yet (§1.3) | owner |
 
+## 2. Variables
+
+The relay reads these variables (`relay-server/src/config.ts`; the same names in `docs/architecture.md` §9,
+`relay-server/.env.example` and `.railway/railway.ts`). `.github/scripts/check-env-parity.mjs --with-docs`, run by
+CI, fails when a name is added to one of these four places only. An invalid value stops the relay at start with a
+`fatal` log line naming the variable (never its value), so a typo shows as a failed deploy, not a running relay
+with surprising limits.
+
+| Variable | Default | Where it is set | Who may change it | Meaning |
+|---|---|---|---|---|
+| `PORT` | injected by Railway (`8787` locally) | Railway, automatically | nobody — never add it as a variable | listen port, `0.0.0.0` |
+| `LOG_LEVEL` | `info` | `.railway/railway.ts` | owner (`debug` only briefly: more volume, same redaction) | pino level |
+| `METRICS_TOKEN` | unset → `/metrics` answers `404` | Railway dashboard, sealed (§3); `preserve()` in the file | owner | bearer token of `GET /metrics` |
+| `SESSION_TTL_S` | `1800` | `.railway/railway.ts` | owner, ≤ the protocol maximum | idle TTL without viewers |
+| `PUBLISHER_GRACE_S` | `120` | `.railway/railway.ts` | owner, ≤ 120 | resume window after the publisher's drop |
+| `SESSION_MAX_LIFETIME_S` | `43200` | `.railway/railway.ts` | owner, ≤ 43200 | hard cap per session |
+| `CODE_QUARANTINE_S` | `600` | `.railway/railway.ts` | owner, ≥ 60 | a released code is not reissued for this long (ADR 0008) |
+| `MAX_SNAPSHOT_BYTES` | `67108864` | `.railway/railway.ts` | owner, ≤ 64 MiB | per-snapshot cap |
+| `MAX_TOTAL_SNAPSHOT_BYTES` | `536870912` | `.railway/railway.ts` | owner with `server` (memory budget, §6) | cached + assembling snapshots of all sessions |
+| `MAX_TOTAL_BUFFERED_BYTES` | `167772160` | `.railway/railway.ts` | owner with `server` (memory budget, §6) | Σ viewer send buffers; slowest viewers closed `4010` above it |
+| `MAX_VIEWERS` | `20` | `.railway/railway.ts` | owner, ≤ 20 | viewers per session |
+| `MAX_SESSIONS` | `100` | `.railway/railway.ts` | owner | live sessions |
+| `TRUST_PROXY` | `true` | `.railway/railway.ts` | owner after the hop count of §4 | client IP from the `X-Forwarded-For` entry the Railway edge adds; `false` locally |
+| `ALLOWED_ORIGINS` | `https://${RAILWAY_PUBLIC_DOMAIN}` when empty | Railway dashboard (`https://<your-domain>`); `preserve()` in the file | owner, with every domain change (§5) | browser `Origin` allow-list of `/ws`, comma-separated, exact |
+| `NODE_OPTIONS` | `--max-old-space-size-percentage=75` | `relay-server/Dockerfile` | `server` (a Railway variable would override the image) | heap size relative to the container memory |
+| `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` | `30` (Railway's own default is 0) | `.railway/railway.ts` | owner | SIGTERM → SIGKILL window; the relay drains with close `4008` inside it |
+
+`RAILWAY_PUBLIC_DOMAIN` is injected by Railway (the generated domain) and only feeds the default of
+`ALLOWED_ORIGINS`. The relay's test-only timer switch is never set on Railway, in `.railway/railway.ts` or in
+`.env.example` (the parity check fails if it reaches `railway.ts`).
+
+A changed variable takes effect with the next deploy, and every deploy ends the running sessions: change variables
+when no session is running. With IaC in use (§1.4), change the declared ones in `.railway/railway.ts` through a
+pull request; a dashboard edit of a declared variable is reverted by the next apply.
+
+### 2.1 Local development
+
+`cp relay-server/.env.example relay-server/.env` (git-ignored, CLAUDE.md rule 6), then for direct local access
+`TRUST_PROXY=false` and `ALLOWED_ORIGINS=http://localhost:5173`. Put no real token in a local `.env` you build
+images next to: the root `.dockerignore` excludes only a root-level `.env`, so `relay-server/.env` reaches the
+image's build stage and the build cache (report 2026-10-20-server-9; not in the shipped image).
+
+## 3. Secrets
+
+| Secret | Where it lives | Used by | Create | Rotate |
+|---|---|---|---|---|
+| `RAILWAY_TOKEN` | GitHub → **Settings** → **Secrets and variables** → **Actions** → repository secret | `.github/workflows/railway.yml` only (§1.4) | Railway project → **Settings** → **Tokens** → project token for `production` `[TODO verify]` (menu path) | create a new token, replace the secret, delete the old token in Railway |
+| `METRICS_TOKEN` | Railway → service **Variables**, sealed `[TODO verify]` (seal option) | the relay (`GET /metrics`) and whoever scrapes it | `openssl rand -base64 32` (≥ 32 printable characters) | set a new value; it takes effect with the deploy that follows (ends sessions); update the scraper |
+| `GITHUB_TOKEN` | provided by GitHub per job | CI (GHCR push on `main`, plan comments) | automatic | automatic |
+
+- Never put a secret into the repository, a workflow file, a pull request, an issue, a log line, a URL or a query
+  string. `.github/scripts/scan-secrets.mjs` scans every tracked file in CI (non-blocking: it reports, it does not
+  stop the run). A finding means: rotate the secret first, then remove it from the git history — deleting the line
+  is not enough.
+- CI needs no secret at all; pull requests from forks and from Dependabot get none.
+- `/metrics`: without `METRICS_TOKEN` it answers `404` (endpoint disabled); with it, a request without or with
+  another `Authorization: Bearer` token gets `401` with `WWW-Authenticate: Bearer`, the right token gets the
+  Prometheus text format with relay-wide counters and gauges only — sessions, viewers, bytes, failed joins,
+  rate-limit hits, reconnects, errors by code, quarantine evictions, memory (`relay-server/README.md`, "HTTP
+  endpoints"; report 2026-10-27-server-7). No label carries a code, session, token or address, but a leaked token
+  still shows activity and headroom over time: rotate it when in doubt.
+
 ## 7. CI and branch protection
 
 ### 7.1 What runs

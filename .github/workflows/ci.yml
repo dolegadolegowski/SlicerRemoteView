@@ -60,8 +60,12 @@ jobs:
       - name: CI script tests
         run: node --test ".github/scripts/test/*.test.mjs"
       # DEP-13: the same variable names in .railway/railway.ts and relay-server/.env.example.
-      - name: Env parity
-        run: node .github/scripts/check-env-parity.mjs
+      - name: Env parity (railway.ts, .env.example, architecture §9, deploy.md §2)
+        run: node .github/scripts/check-env-parity.mjs --with-docs
+      # DEP-05: non-blocking; a finding means rotate the secret, then clean the history (docs/deploy.md §3).
+      - name: Secret scan (non-blocking)
+        continue-on-error: true
+        run: node .github/scripts/scan-secrets.mjs
       # DEP-04: .railway/railway.ts against the railway SDK's types (field names, values).
       - name: Railway IaC type-check
         run: |

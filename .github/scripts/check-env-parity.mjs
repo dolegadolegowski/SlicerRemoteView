@@ -2,12 +2,14 @@
 /**
  * Variable-name parity between the relay's configuration sources (DEP-13):
  *
- *   node .github/scripts/check-env-parity.mjs
+ *   node .github/scripts/check-env-parity.mjs [--with-docs]
  *
  * - `.railway/railway.ts` — the `env: { … }` block of the relay service (what Railway gets);
- * - `relay-server/.env.example` — every variable `relay-server/src/config.ts` reads, with its default.
+ * - `relay-server/.env.example` — every variable `relay-server/src/config.ts` reads, with its default;
+ * - with `--with-docs` (DEP-05) also the variable tables of `docs/architecture.md` §9 and `docs/deploy.md` §2
+ *   (first-column names in backticks).
  *
- * Every name must be in both, except the known exceptions below. Exit 1 names each name and the source that
+ * Every name must be in every source, except the known exceptions below. Exit 1 names each name and the source that
  * lacks it, e.g. `FOO: in relay-server/.env.example, missing from .railway/railway.ts`.
  */
 import { existsSync, readFileSync } from "node:fs";
@@ -26,6 +28,11 @@ export const EXCEPTIONS = {
 export const FORBIDDEN_ON_RAILWAY = ["RELAY_TEST_FAST_TIMERS"];
 
 const NAME = "[A-Z][A-Z0-9_]*";
+/** `--with-docs`: the variable tables of the documentation. */
+export const DOCS = [
+  ["docs/architecture.md", "## 9. Deployment view"],
+  ["docs/deploy.md", "## 2. Variables"],
+];
 
 /** Keys of the first `env: { … }` object literal (one key per line, as in the file). */
 export function namesFromRailwayTs(text) {
@@ -40,6 +47,25 @@ export function namesFromRailwayTs(text) {
 /** `NAME=value` lines; comments and blank lines ignored. */
 export function namesFromEnvExample(text) {
   return [...text.matchAll(new RegExp(`^(${NAME})=`, "gm"))].map((m) => m[1]);
+}
+
+/**
+ * First-column `` `NAME` `` cells of the Markdown tables between the heading that starts with `heading` and the next
+ * heading of the same or a higher level.
+ */
+export function namesFromMarkdownSection(text, heading) {
+  const lines = text.split("\n");
+  const start = lines.findIndex((l) => l.startsWith(heading));
+  if (start < 0) throw new Error(`heading "${heading}" not found`);
+  const level = heading.match(/^#+/)[0].length;
+  const names = [];
+  for (const line of lines.slice(start + 1)) {
+    const h = line.match(/^(#+)\s/);
+    if (h && h[1].length <= level) break;
+    const m = line.match(new RegExp(`^\\|\\s*\`(${NAME})\`\\s*\\|`));
+    if (m) names.push(m[1]);
+  }
+  return names;
 }
 
 /**
@@ -75,6 +101,9 @@ function main() {
     [RAILWAY]: namesFromRailwayTs(readFileSync(RAILWAY, "utf8")),
     [ENV_EXAMPLE]: namesFromEnvExample(readFileSync(ENV_EXAMPLE, "utf8")),
   };
+  if (process.argv.includes("--with-docs")) {
+    for (const [file, heading] of DOCS) sources[`${file} (${heading})`] = namesFromMarkdownSection(readFileSync(file, "utf8"), heading);
+  }
   const problems = compare(sources, { railwayLabel: RAILWAY });
   if (problems.length > 0) {
     console.error(`env parity: ${problems.length} problem(s)`);
