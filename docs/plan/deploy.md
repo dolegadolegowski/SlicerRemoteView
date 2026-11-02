@@ -34,6 +34,22 @@ a manual, documented step (`docs/deploy.md`). CI must pass for PRs from forks wi
 | DEP-11 | Release workflow `.github/workflows/release.yml` on tag `v*`: build the Slicer extension zip via `python slicer-plugin/scripts/package.py` (`SLC-20`), build the relay image tagged with the version (GHCR), create a GitHub Release whose body is the matching `CHANGELOG.md` section (single source, maintained by `release`), with a checklist line "APK: attach manually" (QST-15); `docs/deploy.md` §8 "Releasing". | M4 | DEP-01, DEP-03, SLC-20 | 1. Dry run on a `v0.0.1-rc` tag on the branch produces the zip and a draft release with the changelog excerpt (prompt 08 step 5). 2. Fails clearly when `CHANGELOG.md` lacks the version heading. 3. The release never contains `.env` or keystore files (artefact listing step). | `actionlint` · manual: tag dry run documented in `docs/deploy.md` §8 | todo |
 | DEP-12 | Repository templates: `.github/PULL_REQUEST_TEMPLATE.md` (checklist: task IDs, tests added, plan status updated, protocol unchanged or `docs(protocol)` commit + ADR, no secrets, `docs/testing/<component>.md` updated for manual items), `.github/ISSUE_TEMPLATE/bug.yml` mirroring `docs/testing/reports/README.md` fields (component, severity, steps, no payloads/codes). | M1 | DEP-01 | 1. Opening a PR shows the checklist; the issue form validates (`actionlint`-style schema check for issue forms). 2. Templates reference CLAUDE.md rules 2, 3, 6 and 9 by number. 3. Bug template warns against pasting session codes/tokens (CLAUDE.md rule 6). | manual: open a draft PR on `ws/deploy` and verify the template renders | todo |
 
+## Incoming reports (CLAUDE.md rule 9, triaged 2026-11-02)
+
+Each report is folded into the task that already covers it; the task's acceptance criteria include the request.
+
+| Report | Request | Task |
+|---|---|---|
+| `2026-10-19-slicer-1` | `slicer-plugin` tests in CI with the root `npm ci` and `REMOTEVIEW_REQUIRE_GLTF_VALIDATOR=1`, `-W error` | DEP-02 |
+| `2026-10-20-slicer-2` | `openssl` on `PATH` and `REMOTEVIEW_REQUIRE_OPENSSL=1` in the same job | DEP-02 |
+| `2026-10-20-server-9` | run `RELAY_IMAGE=<tag> npm test -w relay-server -- docker-smoke` on the image CI builds | DEP-03 |
+| `2026-10-18-server-2` | env parity: `NODE_OPTIONS` and `RAILWAY_PUBLIC_DOMAIN` are not parsed by `config.ts` (exceptions) | DEP-13, DEP-05 |
+| `2026-10-27-server-7` | `docs/deploy.md`: `/metrics` answers (`404` unset, `401` wrong token), what it holds, token rotation | DEP-05 |
+| `2026-10-18-server-1` | first deploy: count the `X-Forwarded-For` hops the Railway edge adds | DEP-06 |
+| `2026-10-20-server-8` | first-deploy checklist names the `relay starting` and `first websocket upgrade` log lines, `xffEntries` | DEP-06 |
+| `2026-10-21-slicer-1` | the production host name length (QR link ≤ 48-character host) and a separate viewer domain | DEP-07 |
+| `2026-10-27-protocol-4` item 7 | serve the relay on a dedicated host name (HSTS `includeSubDomains`) | DEP-07 |
+
 ## Follow-ups / later milestones
 
 - Railway PR environments (ephemeral deploys per PR) once the IaC supports them and the plan budget allows;
