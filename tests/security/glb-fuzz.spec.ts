@@ -32,6 +32,7 @@
 // Options: GLB_FUZZ_SEED (decimal or 0x…, default 0x5eed13 = 6221075), GLB_FUZZ_COUNT (default 200),
 // GLB_FUZZ_ONLY (one index). Failures name seed, index, kind and base only — never the file, the code or a token.
 
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import type { Page } from "@playwright/test";
@@ -39,7 +40,7 @@ import { loadGlb, sendSnapshot } from "@slicerremoteview/fake-slicer";
 import type { LoadedGlb } from "@slicerremoteview/fake-slicer";
 import { LIMITS, sha256Hex } from "@slicerremoteview/shared";
 import { expect, test } from "../harness/fixtures.ts";
-import { FIXTURES_DIR } from "../harness/paths.ts";
+import { FIXTURES_DIR, TESTS_DIR } from "../harness/paths.ts";
 import {
   BASES,
   DEFAULT_SEED,
@@ -368,4 +369,19 @@ test("glb-fuzz: the mutator is deterministic and its reset snapshots are the fix
     expect(Buffer.from(a.bytes).equals(Buffer.from(b.bytes)), `mutant ${index} is not deterministic`).toBe(true);
   }
   expect(generateMutant(SEED, 0).kind).toBe("identity");
+});
+
+// Regression (CI run 41545110645): the mutator must not depend on the test process's stack. `JSON.stringify` of the
+// ~5,000-deep `deep-json` value overflowed Node's stack on x64 Linux, but not on arm64 macOS, so batch 4 failed on CI
+// only. Every mutant of the run is generated here in a child Node with a third of the default V8 stack
+// (`--stack-size` in KiB; Node 22 strips the harness's TypeScript itself).
+test("glb-fuzz: every mutant is generated within a small stack (platform-independent)", () => {
+  const mutator = path.join(TESTS_DIR, "harness", "qa13-glb-mutator.ts");
+  const script =
+    `const { generateMutant } = await import(${JSON.stringify(mutator)});` +
+    `for (let i = 0; i < ${COUNT}; i++) generateMutant(${SEED}, i);`;
+  const run = spawnSync(process.execPath, ["--stack-size=300", "--input-type=module", "-e", script], {
+    encoding: "utf8",
+  });
+  expect(run.status, `mutator failed in a small stack: ${run.stderr.split("\n").find((l) => /Error/.test(l)) ?? ""}`).toBe(0);
 });
