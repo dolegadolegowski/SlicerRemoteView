@@ -28,15 +28,20 @@ Nazwy menu, przycisków i komunikatów Slicera i RemoteView podajemy po angielsk
 ## 1. Pobierz plugin
 
 1. Zaloguj się do GitHuba i otwórz stronę repozytorium.
-2. Nad listą plików kliknij **Code**, a potem **Download ZIP**. Rozpakuj pobrany plik (Windows: kliknij go
-   prawym przyciskiem myszy → **Wyodrębnij wszystko**). Powstanie folder `SlicerRemoteView-main`.
+2. Po prawej stronie, w części **Releases**, kliknij najnowszą wersję i pobierz plik
+   `SlicerRemoteView-<wersja>.zip` (np. `SlicerRemoteView-0.1.0.zip`). Rozpakuj go (Windows: kliknij go prawym
+   przyciskiem myszy → **Wyodrębnij wszystko**; może powstać jeszcze jeden folder dookoła). Powstanie folder
+   `SlicerRemoteView-<wersja>`.
 3. Przenieś ten folder w miejsce, w którym może zostać na stałe, np. do swojego folderu domowego
    (macOS: Finder → **Idź** → **Katalog domowy**; Windows: `C:\Users\<Twoja nazwa>`). Nie zostawiaj go
    w folderze z pobranymi plikami (**Pobrane** w Windows, **Pobrane rzeczy** w macOS) ani w folderze
    tymczasowym: Slicer wczytuje plugin z tego miejsca przy każdym uruchomieniu.
 
-Sam plugin to folder `SlicerRemoteView-main/slicer-plugin/RemoteView`, czyli folder z plikiem `RemoteView.py`.
+Sam plugin to folder `SlicerRemoteView-<wersja>/RemoteView`, czyli folder z plikiem `RemoteView.py`.
 Nie usuwaj z niego żadnych plików.
+
+Nie ma jeszcze żadnego wydania albo chcesz najnowsze zmiany? Nad listą plików kliknij **Code**, a potem
+**Download ZIP**: powstanie folder `SlicerRemoteView-main`, a plugin to jego folder `slicer-plugin/RemoteView`.
 
 ## 2. Dodaj moduł do Slicera
 
@@ -114,8 +119,10 @@ oglądać scenę, dopóki trwa sesja. Połączenie jest szyfrowane, ale sam serw
 
 ## Aktualizacja i usuwanie
 
-- Aktualizacja: zastąp folder nowszą wersją pobraną w to samo miejsce i pod tą samą nazwą
-  (albo uruchom w nim `git pull`), a potem uruchom Slicera ponownie.
+- Aktualizacja: pobierz nowsze wydanie, rozpakuj je obok starego folderu i w **Modules** (krok 2) zastąp starą
+  ścieżkę nowym folderem `RemoteView` (nazwa folderu zawiera numer wersji, więc ścieżka się zmienia), a potem
+  uruchom Slicera ponownie. Stary folder możesz usunąć. (Kopię z `git clone` aktualizuje `git pull` i ścieżka
+  zostaje.)
 - Usunięcie: w **Modules** (krok 2) kliknij przycisk **>>**, zaznacz wiersz, kliknij **Remove**, **OK**
   i uruchom Slicera ponownie.
 - Po instalacji nowszej wersji Slicera sprawdź, czy RemoteView nadal jest na liście modułów. Jeśli nie,

@@ -25,14 +25,18 @@ so you add it by hand.
 ## 1. Download the plugin
 
 1. Sign in to GitHub and open the repository page.
-2. Above the list of files, click **Code**, then **Download ZIP**. Unzip the file (Windows: right-click it →
-   **Extract All**). You get a folder `SlicerRemoteView-main`.
+2. On the right, under **Releases**, click the newest version and download `SlicerRemoteView-<version>.zip`
+   (for example `SlicerRemoteView-0.1.0.zip`). Unzip the file (Windows: right-click it → **Extract All**; it may
+   put one more folder around the result). You get a folder `SlicerRemoteView-<version>`.
 3. Move this folder to a place where it can stay, for example your home folder (macOS: Finder → **Go** →
    **Home**; Windows: `C:\Users\<your name>`). Not Downloads or a temporary folder: Slicer loads the plugin
    from this place at every start.
 
-The plugin is the folder `SlicerRemoteView-main/slicer-plugin/RemoteView`: the folder that contains
-`RemoteView.py`. Keep this folder complete.
+The plugin is the folder `SlicerRemoteView-<version>/RemoteView`: the folder that contains `RemoteView.py`. Keep
+this folder complete.
+
+No release yet, or you want the newest changes? Above the list of files, click **Code**, then **Download ZIP**:
+you get `SlicerRemoteView-main`, and the plugin is its folder `slicer-plugin/RemoteView`.
 
 ## 2. Add the module to Slicer
 
@@ -107,8 +111,9 @@ session runs. The connection is encrypted, but the server itself can read the sc
 
 ## Update or remove
 
-- Update: replace the folder with a newer download at the same place and under the same name
-  (or run `git pull` in it), then restart Slicer.
+- Update: download the newer release, unzip it next to the old folder and, in **Modules** (step 2), replace the
+  old path with the new `RemoteView` folder (the folder name carries the version, so the path changes), then
+  restart Slicer. Delete the old folder afterwards. (A `git clone` is updated with `git pull` and keeps its path.)
 - Remove: in **Modules** (step 2) click the **>>** button, select the line, click **Remove**, **OK**, restart.
 - After installing a newer Slicer, check that RemoteView is still in the module list. If not, repeat step 2.
 
