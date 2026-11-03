@@ -9,15 +9,15 @@ a report without an owner component or a status. Triage flow, status transitions
 
 | Status | high | medium | low | no severity | Total |
 |---|---|---|---|---|---|
-| open | 0 | 12 | 16 | 0 | 28 |
-| triaged | 0 | 8 | 18 | 0 | 26 |
-| fixed | 0 | 2 | 4 | 0 | 6 |
+| open | 0 | 11 | 21 | 0 | 32 |
+| triaged | 0 | 8 | 17 | 0 | 25 |
+| fixed | 0 | 3 | 6 | 0 | 9 |
 | rejected | 0 | 0 | 0 | 0 | 0 |
-| **all reports** | 0 | 22 | 38 | 0 | 60 |
+| **all reports** | 0 | 22 | 44 | 0 | 66 |
 
 ## Open and triaged reports by owner component
 
-### protocol — 20 (1 open, 19 triaged)
+### protocol — 21 (3 open, 18 triaged)
 
 | Report | Severity | Milestone | Status | Also affects | Title |
 |---|---|---|---|---|---|
@@ -26,30 +26,32 @@ a report without an owner component or a status. Triage flow, status transitions
 | [2026-10-27-server-1](2026-10-27-server-1.md) | medium | M2 | triaged (PRO-20, 2026-10-27-protocol-3) | web, quest, release | `scene.request`: the relay's 5 s throttle and other answers the protocol does not state yet |
 | [2026-10-27-server-3](2026-10-27-server-3.md) | medium | M1 | triaged (PRO-25) | slicer, web, quest, qa | A per-socket message budget: `RATE_LIMITED` and `4006` beyond join and create (SRV-25) |
 | [2026-10-27-server-7](2026-10-27-server-7.md) | low | M4 | open | deploy, release | `/metrics`: gauges and memory figures beside the counters of §10 (SRV-19) |
+| [2026-10-28-slicer-3](2026-10-28-slicer-3.md) | low | M2 | open (for protocol (tools/fake-slicer, not yet triaged) | — | Relay stub: what the resume tests reach into, and a fallback create it can drop |
+| [2026-10-28-slicer-4](2026-10-28-slicer-4.md) | low | M2 | open (items 4, 6, 7, the rest of 8 and the §4.3 wordi…) | — | Resume (§4.3, §8.4): readings the slicer client relies on, and gaps around a relay restart |
 | [2026-10-18-server-5](2026-10-18-server-5.md) | low | M1 | triaged (PRO-20) | — | Protocol §9.3 wording of close `4012` vs the relay's handshake timer |
 | [2026-10-18-server-6](2026-10-18-server-6.md) | low | M1 | triaged (PRO-20, PRO-24) | — | `parseEnvelope` issues can carry sender-chosen keys in `instancePath` |
 | [2026-10-18-server-7](2026-10-18-server-7.md) | low | M1 | triaged (PRO-20, 2026-10-27-protocol-4) | release | T11 wording vs `session.publisherState`, and the answer for a just-ended code |
 | [2026-10-18-slicer-2](2026-10-18-slicer-2.md) | low | M1 | triaged (PRO-24) | release | `jsonschema` as a Slicer runtime dependency contradicts FR-16 / T12 |
 | [2026-10-19-server-1](2026-10-19-server-1.md) | low | M1 | triaged (PRO-20, PRO-24) | — | Code release on `session.close` vs the quarantine; a value entry point for `parseEnvelope` |
 | [2026-10-19-slicer-2](2026-10-19-slicer-2.md) | low | M1 | triaged (PRO-20) | web | §2 "MUST reply `error` `UNSUPPORTED_TYPE`" contradicts §11 for clients |
-| [2026-10-19-slicer-4](2026-10-19-slicer-4.md) | low | M1 | triaged (SLC-38) | web | Must `scene.snapshot.begin` match the GLB's root extras? |
 | [2026-10-20-server-1](2026-10-20-server-1.md) | low | M1 | triaged (PRO-20) | release, qa | §12 rate limits: what the relay does beyond the wording |
 | [2026-10-20-server-2](2026-10-20-server-2.md) | low | M1 | triaged (PRO-20, PRO-21, 2026-10-27-protocol-1) | — | `byteLength` above 64 MiB: the schema says INVALID_MESSAGE, §6.2 says PAYLOAD_TOO_LARGE |
-| [2026-10-20-server-5](2026-10-20-server-5.md) | low | M1 | triaged (PRO-20) | slicer | `SLOW_CONSUMER` / `4010` can now reach a publisher |
+| [2026-10-20-server-5](2026-10-20-server-5.md) | low | M1 | triaged (PRO-20, SLC-48) | slicer | `SLOW_CONSUMER` / `4010` can now reach a publisher |
 | [2026-10-20-server-6](2026-10-20-server-6.md) | low | M1 | triaged (PRO-20, 2026-10-27-protocol-3) | web, quest | A slow viewer's `pong` can wait longer than the clients' 10 s `pong` timeout |
 | [2026-10-20-server-7](2026-10-20-server-7.md) | low | M1 | triaged (PRO-20, 2026-10-27-protocol-4) | release, qa, deploy | Notes from serving the viewer (SRV-16): CSP pointer, `/j?query`, HSTS |
 | [2026-10-27-server-2](2026-10-27-server-2.md) | low | M2 | triaged (PRO-20, 2026-10-27-protocol-4) | release, slicer | §9.1: a publisher's inbound frames count as life for the relay's WebSocket ping (SRV-27) |
 | [2026-10-27-server-4](2026-10-27-server-4.md) | low | M2 | triaged (PRO-25, SRV-28) | web, slicer, release | Resume and rejoin: answers the protocol does not state yet (SRV-15) |
 | [2026-10-27-server-5](2026-10-27-server-5.md) | low | M2 | triaged (PRO-25) | web, slicer, quest | A draining relay: the `503` answers the protocol does not list (SRV-17) |
 
-### server — 5 (5 open, 0 triaged)
+### server — 6 (6 open, 0 triaged)
 
 | Report | Severity | Milestone | Status | Also affects | Title |
 |---|---|---|---|---|---|
-| [2026-10-20-slicer-7](2026-10-20-slicer-7.md) | medium | M1 | open | — | SRV-14: a healthy publisher uploading on a slow uplink answers the relay's WebSocket ping late — count inbound frames as liveness |
 | [2026-10-20-web-2](2026-10-20-web-2.md) | medium | M2 | open | release, qa | After a relay restart, a lecture room behind one NAT address can trip the per-IP join ban while rejoining by code |
 | [2026-10-21-web](2026-10-21-web.md) | medium | M2, M3a | open | — | The relay serves only `/`, `/j` and `/assets/*`: the viewer's manifest and icons 404, and its CSP refuses `fetch(blob:)` |
 | [2026-10-27-protocol-1](2026-10-27-protocol-1.md) | low | M3b | open | — | Protocol 1.1: what the relay must change (little) and may now close |
+| [2026-10-29-slicer-2](2026-10-29-slicer-2.md) | low | M3b | open | — | Server plan: the publisher's pong bound is ≤ 70 s since SLC-40, not SLC-26's ≈ 77 s |
+| [2026-11-02-deploy-1](2026-11-02-deploy-1.md) | low | M1 | open | protocol | `npm audit --omit=dev`: 4 vulnerable packages (6 moderate advisories) in the relay's production dependencies |
 | [2026-11-03-qa-1](2026-11-03-qa-1.md) | low | M2 | open | — | Production dependencies carry 4 moderate npm advisories; `fast-uri` has an in-range fix |
 
 ### web — 3 (2 open, 1 triaged)
@@ -82,7 +84,7 @@ a report without an owner component or a status. Triage flow, status transitions
 |---|---|---|---|---|---|
 | [2026-10-27-server-6](2026-10-27-server-6.md) | low | M2 | triaged (SRV-29, DEP-05, DEP-13) | release, deploy | `RELAY_TEST_FAST_TIMERS`: which timers should it shorten? (SRV-21) |
 
-### release — 19 (16 open, 3 triaged)
+### release — 20 (17 open, 3 triaged)
 
 | Report | Severity | Milestone | Status | Also affects | Title |
 |---|---|---|---|---|---|
@@ -95,7 +97,7 @@ a report without an owner component or a status. Triage flow, status transitions
 | [2026-10-28-slicer-1](2026-10-28-slicer-1.md) | medium | M2 | open | — | Segments: hidden segments left out, `Opacity3D ≤ 0` as "not shown", geometry read-only, four-factor opacity (ADR 0005 Decisions 2 and 6) |
 | [2026-10-28-slicer-2](2026-10-28-slicer-2.md) | medium | M2 | open | — | Architecture §6 step 4 and ADR 0005 Decision 2 name `vtkDecimatePro` as the decimation fallback; SLC-41 removed it |
 | [2026-10-20-slicer-1](2026-10-20-slicer-1.md) | medium | M1 | triaged (D5, 2026-10-27-protocol-4) | — | Threat model T5 omits TLS-inspecting proxies and Slicer's end-of-life OpenSSL |
-| [2026-10-20-slicer-6](2026-10-20-slicer-6.md) | medium | M1 | triaged (SLC-40, 2026-10-27-protocol-4) | — | Heartbeat: the 10 s `pong` deadline of §9.1 / NFR-21 cuts a live snapshot upload on a slow uplink |
+| [2026-10-20-slicer-6](2026-10-20-slicer-6.md) | medium | M1 | triaged (SLC-59, SLC-40, 2026-10-27-protocol-4) | — | Heartbeat: the 10 s `pong` deadline of §9.1 / NFR-21 cuts a live snapshot upload on a slow uplink |
 | [2026-10-18-server-4](2026-10-18-server-4.md) | low | M1 | open | — | Session state diagram and ADR 0008 §3: grace before the first snapshot, idle timer refresh |
 | [2026-10-19-server-2](2026-10-19-server-2.md) | low | M1 | open | web, quest | Viewer entries are capped per session; interim answer to a token rejoin |
 | [2026-10-20-slicer-3](2026-10-20-slicer-3.md) | low | M1 | open | — | Architecture §6 and the ADR index do not reflect ADR 0009 (Slicer transport on the asyncio client) |
@@ -103,16 +105,17 @@ a report without an owner component or a status. Triage flow, status transitions
 | [2026-10-21-slicer-1](2026-10-21-slicer-1.md) | low | M2 | open | — | NFR-30: "a link of at most 64 characters fits QR version ≤ 4 at error level M" is off by two characters |
 | [2026-10-21-slicer-2](2026-10-21-slicer-2.md) | low | M2 | open | — | T6: the copied join link (and so the session code) stays on the system clipboard after the session ends |
 | [2026-10-21-slicer-3](2026-10-21-slicer-3.md) | low | M2 | open | — | FR-09 says "16-bit positions/normals"; protocol §7.4 and the writer store normals as 8-bit `BYTE` |
-| [2026-10-21-slicer-4](2026-10-21-slicer-4.md) | low | M2 | open | — | ADR 0005 Decision 2 names two decimation filters; the publisher needs a third, and SLC-28 may reorder them |
+| [2026-10-29-slicer-1](2026-10-29-slicer-1.md) | low | M2 | open (SRV-15) | protocol | Idle renewal: the client's `auto_renew` default |
+| [2026-10-30-slicer-1](2026-10-30-slicer-1.md) | low | M2 | open | — | Architecture §6 step 4 still names the progress dialog that SLC-55 removed |
 | [2026-10-20-server-4](2026-10-20-server-4.md) | low | M1 | triaged (PRO-20, 2026-10-27-protocol-3) | protocol, web, quest | Viewer token hashes of an ended session are kept for `CODE_QUARANTINE_S` (for `410`) |
 
 ## Fixed and rejected (counts)
 
 | Owner | fixed | rejected | Reports |
 |---|---|---|---|
-| protocol | 3 | 0 | [2026-10-18-slicer-3](2026-10-18-slicer-3.md), [2026-10-19-slicer-3](2026-10-19-slicer-3.md), [2026-10-19-slicer-5](2026-10-19-slicer-5.md) |
-| server | 1 | 0 | [2026-10-27-release-1](2026-10-27-release-1.md) |
-| release | 2 | 0 | [2026-10-18-server-3](2026-10-18-server-3.md), [2026-10-28-server-1](2026-10-28-server-1.md) |
+| protocol | 4 | 0 | [2026-10-18-slicer-3](2026-10-18-slicer-3.md), [2026-10-19-slicer-3](2026-10-19-slicer-3.md), [2026-10-19-slicer-4](2026-10-19-slicer-4.md), [2026-10-19-slicer-5](2026-10-19-slicer-5.md) |
+| server | 2 | 0 | [2026-10-20-slicer-7](2026-10-20-slicer-7.md), [2026-10-27-release-1](2026-10-27-release-1.md) |
+| release | 3 | 0 | [2026-10-18-server-3](2026-10-18-server-3.md), [2026-10-21-slicer-4](2026-10-21-slicer-4.md), [2026-10-28-server-1](2026-10-28-server-1.md) |
 
 ## Problems
 
@@ -123,6 +126,7 @@ that cannot be parsed. Warnings are listed so the owner can normalise the report
 |---|---|---|
 | [2026-10-18-slicer-3](2026-10-18-slicer-3.md) | warning | non-canonical status "closed" read as `fixed` |
 | [2026-10-19-slicer-3](2026-10-19-slicer-3.md) | warning | non-canonical status "closed" read as `fixed` |
+| [2026-10-19-slicer-4](2026-10-19-slicer-4.md) | warning | non-canonical status "done" read as `fixed` |
 | [2026-10-19-slicer-5](2026-10-19-slicer-5.md) | warning | non-canonical status "closed" read as `fixed` |
 | [2026-10-27-protocol-2](2026-10-27-protocol-2.md) | warning | non-canonical status "in progress" read as `triaged` |
 | [2026-10-27-server-6](2026-10-27-server-6.md) | warning | non-canonical status "decided" read as `triaged` |
