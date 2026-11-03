@@ -17,6 +17,7 @@ zgodnie z regułą własności plików w `CLAUDE.md` (zasada 4).
 | `testing/reports/<data>.md`| zgłoszenia błędów między komponentami (triage przez właściciela na starcie) | `qa` (zgłasza), właściciel (przenosi do planu) |
 | `security.md`              | checklista bezpieczeństwa i prywatności (RODO), wyniki testów negatywnych   | `qa`          |
 | `deploy.md`                | kroki konfiguracji Railway (klik po kliku), zmienne środowiskowe            | `deploy`      |
+| `release/<temat>.md`       | listy kroków wydania (np. `extensions-index.md`: zgłoszenie do Slicer Extensions Index) | `release`     |
 | `user-guide/{pl,en}/`      | dokumentacja użytkownika (instalacja pluginu, łączenie urządzeń)            | `release`     |
 
 Prefiksy ID zadań: `PRO-` protokół, `SRV-` relay-server, `WEB-` web-viewer, `SLC-` slicer-plugin,

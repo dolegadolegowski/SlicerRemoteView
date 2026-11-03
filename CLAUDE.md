@@ -13,7 +13,7 @@ mobilnych (iPhone/iPad/Android). Urządzenia łączą się z konkretną sesją 3
 | `protocol`    | `shared/`, `tools/`                 | `ws/protocol` | `docs/plan/protocol.md` | `PRO-`   | `server-dev` | JSON Schema, generowane typy TS/Python/C#, symulator `tools/fake-slicer` |
 | `server`      | `relay-server/` (incl. Dockerfile)  | `ws/server`   | `docs/plan/server.md`   | `SRV-`   | `server-dev` | Node.js 22 LTS, TypeScript, `ws`, Fastify, Docker, Railway |
 | `web`         | `web-viewer/`                       | `ws/web`      | `docs/plan/web.md`      | `WEB-`   | `web-dev`    | Vite, TypeScript, three.js, opcjonalnie WebXR    |
-| `slicer`      | `slicer-plugin/`                    | `ws/slicer`   | `docs/plan/slicer.md`   | `SLC-`   | `slicer-dev` | Python (Slicer 5.x), PythonQt, VTK, numpy        |
+| `slicer`      | `slicer-plugin/`, root `CMakeLists.txt` | `ws/slicer`   | `docs/plan/slicer.md`   | `SLC-`   | `slicer-dev` | Python (Slicer 5.x), PythonQt, VTK, numpy        |
 | `quest`       | `quest-app/`                        | `ws/quest`    | `docs/plan/quest.md`    | `QST-`   | `quest-dev`  | Unity LTS, OpenXR, Meta XR SDK, glTFast          |
 | `deploy`      | `.github/`, `.railway/`, `docs/deploy.md` | `ws/deploy`   | `docs/plan/deploy.md`   | `DEP-`   | `server-dev` | GitHub Actions, Docker, Railway                  |
 | `qa`          | `tests/`, `docs/security.md`        | `ws/qa`       | `docs/plan/qa.md`       | `QA-`    | `qa`         | Playwright, k6                                   |

@@ -48,7 +48,8 @@ W sandboxie **nie ma 3D Slicera**. Dlatego:
   debounce; małe zmiany → `scene.update`, zmiana geometrii → nowy snapshot (wersja +1).
 - Sieć: klient WebSocket w wątku roboczym (kolejka wysyłania, heartbeat, reconnect z backoffem, wznowienie sesji
   tokenem), nigdy nie blokuj głównego wątku Qt; chunkowanie GLB; limity rozmiaru.
-- Pakowanie: `slicer-plugin/CMakeLists.txt`, metadane extension (zgodne z wymaganiami Slicer Extension Index),
+- Pakowanie: `CMakeLists.txt` w katalogu głównym repo (jedyne miejsce metadanych extension, zgodne z wymaganiami
+  Slicer Extensions Index; ADR 0010) i `slicer-plugin/CMakeLists.txt` dodający moduł,
   ikona, `README.md` z instalacją „developer mode” (`Edit → Application Settings → Modules → Additional module paths`)
   i instrukcją budowy pakietu.
 

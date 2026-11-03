@@ -17,6 +17,8 @@ Decisions that shape SlicerRemoteView. Each ADR is immutable once **Accepted**; 
 | 0006 | [Web viewer hosted by the relay on the same origin (`@fastify/static`, `/j` route, CSP)](0006-viewer-hosting-same-origin-as-relay.md) | Accepted | 2026-10-17 |
 | 0007 | [Monorepo wiring — npm workspaces, vendored shared types, root Docker context, single Railway replica, Railway IaC](0007-monorepo-wiring-and-docker-context.md) | Accepted | 2026-10-17 |
 | 0008 | [Session code format (5 × 31-symbol alphabet), lifecycle, tokens and anti-guessing controls](0008-session-code-format-and-anti-guessing.md) | Accepted | 2026-10-17 |
+| 0009 | [Slicer transport — `websockets` asyncio client on a private event loop in one worker thread](0009-slicer-transport-asyncio-worker-thread.md) | Accepted | 2026-10-20 |
+| 0010 | [The Slicer extension's top level at the repository root (Extensions Index layout)](0010-slicer-extension-top-level-at-repository-root.md) | Accepted | 2026-11-03 |
 
 > **Note (2026-10-17, pre-implementation review).** Message, error and close-code names quoted in ADRs 0001–0008
 > predate protocol v1.0; `docs/protocol.md` is authoritative. Errata sections record known deviations.
