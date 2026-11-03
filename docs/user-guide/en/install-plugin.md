@@ -15,16 +15,14 @@ so you add it by hand.
   - Windows: the installer suggests a folder inside your Windows user folder. If your user name has letters
     outside English (for example ł or é), change the folder to `C:\Slicer`: the path may contain only
     English (ASCII) characters.
-- **A free GitHub account** ([github.com/signup](https://github.com/signup)) **with access to the repository**
-  [dolegadolegowski/SlicerRemoteView](https://github.com/dolegadolegowski/SlicerRemoteView).
-  The repository is private: send the owner your GitHub user name, then accept the invitation in the e-mail
-  from GitHub. Until then the link shows a 404 page.
+- **The repository page** [dolegadolegowski/SlicerRemoteView](https://github.com/dolegadolegowski/SlicerRemoteView)
+  (public; no GitHub account is needed).
 - **A server address** like `wss://<your-server>/ws` (see [Which server to use](#which-server-to-use)).
 - Internet access the first time you click **Start session**: Slicer then downloads two Python packages.
 
 ## 1. Download the plugin
 
-1. Sign in to GitHub and open the repository page.
+1. Open the repository page.
 2. On the right, under **Releases**, click the newest version and download `RemoteView-<version>.zip`
    (for example `RemoteView-0.1.0.zip`). Unzip the file (Windows: right-click it → **Extract All**; it
    may put one more folder around the result). You get a folder `RemoteView-<version>`.

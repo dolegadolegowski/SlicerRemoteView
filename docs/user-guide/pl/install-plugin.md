@@ -18,16 +18,14 @@ Nazwy menu, przycisków i komunikatów Slicera i RemoteView podajemy po angielsk
   - Windows: instalator proponuje folder wewnątrz Twojego folderu użytkownika. Jeśli nazwa użytkownika ma
     litery spoza alfabetu angielskiego (np. ł albo é), zmień folder na `C:\Slicer`: ścieżka może mieć tylko
     angielskie litery (znaki ASCII).
-- **Bezpłatne konto na GitHubie** ([github.com/signup](https://github.com/signup)) **z dostępem do repozytorium**
-  [dolegadolegowski/SlicerRemoteView](https://github.com/dolegadolegowski/SlicerRemoteView).
-  Repozytorium jest prywatne: wyślij właścicielowi swoją nazwę użytkownika GitHuba, a potem przyjmij
-  zaproszenie z e-maila od GitHuba. Do tego czasu link pokazuje stronę błędu 404.
+- **Strona repozytorium** [dolegadolegowski/SlicerRemoteView](https://github.com/dolegadolegowski/SlicerRemoteView)
+  (publiczne; konto na GitHubie nie jest potrzebne).
 - **Adres serwera** w postaci `wss://<your-server>/ws` (zobacz [Który serwer wybrać](#który-serwer-wybrać)).
 - Dostęp do internetu przy pierwszym kliknięciu **Start session**: Slicer pobiera wtedy dwa pakiety Pythona.
 
 ## 1. Pobierz plugin
 
-1. Zaloguj się do GitHuba i otwórz stronę repozytorium.
+1. Otwórz stronę repozytorium.
 2. Po prawej stronie, w części **Releases**, kliknij najnowszą wersję i pobierz plik
    `RemoteView-<wersja>.zip` (np. `RemoteView-0.1.0.zip`). Rozpakuj go (Windows: kliknij go prawym
    przyciskiem myszy → **Wyodrębnij wszystko**; może powstać jeszcze jeden folder dookoła). Powstanie folder
