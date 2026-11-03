@@ -5,7 +5,7 @@ name = "slicer-remote-view-extension"
 # The version is written once, as __version__ in RemoteView/remoteview_core/__init__.py (SLC-20); see
 # [tool.setuptools.dynamic]. `uv pip compile` still reads the dependencies below statically.
 dynamic = ["version"]
-description = "3D Slicer extension SlicerRemoteView (module RemoteView): development and test tooling."
+description = "3D Slicer extension RemoteView (module RemoteView) of SlicerRemoteView: development and test tooling."
 requires-python = ">=3.12"
 dependencies = []
 

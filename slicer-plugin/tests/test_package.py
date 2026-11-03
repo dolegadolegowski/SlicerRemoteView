@@ -28,7 +28,7 @@ package = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(package)
 
 VERSION = remoteview_core.__version__
-ROOT = f"SlicerRemoteView-{VERSION}"
+ROOT = f"RemoteView-{VERSION}"
 
 
 def _listed() -> set[str]:
@@ -62,7 +62,7 @@ def test_package_zip_holds_exactly_the_cmake_listed_files_and_the_licence(built:
         names = archive.namelist()
         assert len(names) == len(set(names))
         assert set(names) == {f"{ROOT}/LICENSE.txt"} | {f"{ROOT}/RemoteView/{p}" for p in _listed()}
-        # what the user adds to Additional module paths: SlicerRemoteView-<version>/RemoteView
+        # what the user adds to Additional module paths: RemoteView-<version>/RemoteView
         assert f"{ROOT}/RemoteView/RemoteView.py" in names
         assert f"{ROOT}/RemoteView/_vendor/remoteview_protocol/VENDORED.json" in names
         assert f"{ROOT}/RemoteView/Resources/Icons/RemoteView.png" in names
@@ -268,14 +268,14 @@ def test_package_cli_refuses_another_version(
 
 def test_package_default_output_is_where_release_yml_finds_it():
     """release.yml runs ``python slicer-plugin/scripts/package.py`` with no arguments from the repository root and
-    takes the first ``SlicerRemoteView-*.zip`` that ``find .`` (``./node_modules`` pruned) lists as newer than
+    takes the first ``RemoteView-*.zip`` that ``find .`` (``./node_modules`` pruned) lists as newer than
     CHANGELOG.md."""
     workflow = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text()
     assert re.search(r"^\s*python slicer-plugin/scripts/package\.py\s*$", workflow, re.MULTILINE)
-    assert '-name "SlicerRemoteView-*.zip" -newer CHANGELOG.md' in workflow
+    assert '-name "RemoteView-*.zip" -newer CHANGELOG.md' in workflow
     out = package.DEFAULT_OUTPUT_DIR.relative_to(REPO_ROOT)
     assert out.parts[0] != "node_modules"
-    assert re.fullmatch(r"SlicerRemoteView-.*\.zip", f"{ROOT}.zip")
+    assert re.fullmatch(r"RemoteView-.*\.zip", f"{ROOT}.zip")
     # git-ignored, so a local build never shows up as a change
     ignored = subprocess.run(
         ["git", "check-ignore", "-q", str(out / f"{ROOT}.zip")], cwd=REPO_ROOT, check=False
@@ -318,7 +318,7 @@ def _cmake_set(name: str) -> str:
 
 
 def test_package_catalog_entry_matches_the_schema_and_the_cmake_metadata():
-    path = PLUGIN_ROOT / "SlicerRemoteView.json"
+    path = PLUGIN_ROOT / "RemoteView.json"
     raw = path.read_bytes()
     assert b"\r" not in raw and raw.endswith(b"}\n")  # the index CI wants LF line endings
     entry = json.loads(raw)

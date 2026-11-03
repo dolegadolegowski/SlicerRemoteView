@@ -1,4 +1,4 @@
-# Manual tests — `slicer` (3D Slicer extension `SlicerRemoteView`, module `RemoteView`)
+# Manual tests — `slicer` (3D Slicer extension `RemoteView`, module `RemoteView`)
 
 Owned by the `slicer` workstream (`docs/plan/slicer.md`). These steps need a real 3D Slicer **5.12.x** and cannot
 run in the sandbox (CLAUDE.md rule 10). Record every run in the section's results table: date, Slicer version,
@@ -837,13 +837,13 @@ Known gaps (not failures):
 
 Preconditions: a Slicer 5.12.x that has never had RemoteView (or *Edit → Application Settings → Modules → Additional
 module paths* emptied and Slicer restarted); the zip from a draft GitHub Release, or built locally with
-`python slicer-plugin/scripts/package.py` (it prints the path, `slicer-plugin/dist/SlicerRemoteView-<version>.zip`).
+`python slicer-plugin/scripts/package.py` (it prints the path, `slicer-plugin/dist/RemoteView-<version>.zip`).
 
 Steps:
 
-1. List the archive (`unzip -l SlicerRemoteView-<version>.zip`), then unzip it with the system's own tool (macOS:
+1. List the archive (`unzip -l RemoteView-<version>.zip`), then unzip it with the system's own tool (macOS:
    double-click; Windows: *Extract All*) into the home folder.
-2. Add the folder `SlicerRemoteView-<version>/RemoteView` (the one with `RemoteView.py`) to *Additional module paths*,
+2. Add the folder `RemoteView-<version>/RemoteView` (the one with `RemoteView.py`) to *Additional module paths*,
    click *OK* and restart Slicer.
 3. Open *Remote → RemoteView*; in the Python console run
    `import remoteview_core; print(remoteview_core.__version__, remoteview_core.__file__)`.
@@ -851,10 +851,10 @@ Steps:
 
 Expected results:
 
-- Step 1: one top-level folder `SlicerRemoteView-<version>/` holding `LICENSE.txt` and `RemoteView/` — `RemoteView.py`,
+- Step 1: one top-level folder `RemoteView-<version>/` holding `LICENSE.txt` and `RemoteView/` — `RemoteView.py`,
   `remoteview_core/`, `_vendor/remoteview_protocol/`, `Resources/` — and nothing else: no `tests/`, `__pycache__`,
-  `.pyc`, `CMakeLists.txt` or hidden files. macOS gives `SlicerRemoteView-<version>/RemoteView/RemoteView.py`;
-  Windows may nest it in one more `SlicerRemoteView-<version>` folder.
+  `.pyc`, `CMakeLists.txt` or hidden files. macOS gives `RemoteView-<version>/RemoteView/RemoteView.py`;
+  Windows may nest it in one more `RemoteView-<version>` folder.
 - Step 3: the panel shows *Relay address*, *Start session* and "Not connected."; the console prints the version in the
   zip's name and a path inside the unzipped folder (not a repository checkout).
 - Step 4: as in §2.

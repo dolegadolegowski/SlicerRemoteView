@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Build the release zip of the SlicerRemoteView extension (SLC-20, DEP-11).
+"""Build the release zip of the RemoteView extension of SlicerRemoteView (SLC-20, DEP-11).
 
-    python slicer-plugin/scripts/package.py                      # -> slicer-plugin/dist/SlicerRemoteView-<version>.zip
+    python slicer-plugin/scripts/package.py                      # -> slicer-plugin/dist/RemoteView-<version>.zip
     python slicer-plugin/scripts/package.py --output-dir DIR     # somewhere else
     python slicer-plugin/scripts/package.py --expect-version X   # fail unless the module's version is X
 
-The archive holds one folder ``SlicerRemoteView-<version>/`` with ``LICENSE.txt`` (the repository's ``LICENSE``) and
+The archive holds one folder ``RemoteView-<version>/`` with ``LICENSE.txt`` (the repository's ``LICENSE``) and
 the module folder
 ``RemoteView/`` — exactly the files that ``RemoteView/CMakeLists.txt`` lists (the files an Extensions Manager build
 installs), so tests, caches, ``.pyc`` files and editor files never get in. The user adds
-``SlicerRemoteView-<version>/RemoteView`` (the folder with ``RemoteView.py``) to *Additional module paths*.
+``RemoteView-<version>/RemoteView`` (the folder with ``RemoteView.py``) to *Additional module paths*.
 
 The version is ``__version__`` of ``RemoteView/remoteview_core/__init__.py``, the only place it is written (read
 here without importing the package). Run by ``.github/workflows/release.yml`` on a ``v*`` tag: there the tag
@@ -37,7 +37,7 @@ VERSION_FILE = MODULE_DIR / "remoteview_core" / "__init__.py"
 #: The repository's licence (MIT), shipped as ``LICENSE.txt``; the Extensions Index looks for it at the repository root.
 LICENSE_FILE = PLUGIN_ROOT.parent / "LICENSE"
 DEFAULT_OUTPUT_DIR = PLUGIN_ROOT / "dist"
-ARCHIVE_PREFIX = "SlicerRemoteView"
+ARCHIVE_PREFIX = "RemoteView"
 #: ``X.Y.Z`` or ``X.Y.Z-<pre-release>`` (a tag ``vX.Y.Z-rc.1`` makes a pre-release, docs/deploy.md §8); safe in a
 #: file name.
 VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z][0-9A-Za-z.]*)?")
@@ -166,7 +166,7 @@ def build(
     version: str | None = None,
     timestamp: tuple[int, ...] = DEFAULT_TIMESTAMP,
 ) -> Path:
-    """Write ``<output_dir>/SlicerRemoteView-<version>.zip`` and return its path (replaced atomically)."""
+    """Write ``<output_dir>/RemoteView-<version>.zip`` and return its path (replaced atomically)."""
     version = version or read_version(module_dir / "remoteview_core" / "__init__.py")
     root = f"{ARCHIVE_PREFIX}-{version}"
     if license_file.is_symlink() or not license_file.is_file():

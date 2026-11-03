@@ -2,12 +2,12 @@ cmake_minimum_required(VERSION 3.28.0...3.28.0 FATAL_ERROR)
 
 # Layout follows the Slicer 5.12.4 extension template
 # (Utilities/Templates/Extensions/Default/CMakeLists.txt at tag v5.12.4).
-project(SlicerRemoteView)
+project(RemoteView)
 
 #-----------------------------------------------------------------------------
 # Extension meta-information
 set(EXTENSION_HOMEPAGE "https://github.com/dolegadolegowski/SlicerRemoteView")
-# The Extensions Index category is authoritative in SlicerRemoteView.json (SLC-20; tests/test_package.py keeps them
+# The Extensions Index category is authoritative in RemoteView.json (SLC-20; tests/test_package.py keeps them
 # equal); kept here for the generated extension description.
 set(EXTENSION_CATEGORY "Remote")
 set(EXTENSION_CONTRIBUTORS "SlicerRemoteView contributors")

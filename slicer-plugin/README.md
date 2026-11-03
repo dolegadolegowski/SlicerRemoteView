@@ -1,4 +1,4 @@
-# slicer-plugin — 3D Slicer extension `SlicerRemoteView` (module `RemoteView`)
+# slicer-plugin — 3D Slicer extension `RemoteView` (module `RemoteView`)
 
 Part of **SlicerRemoteView**. Owned by the `slicer` workstream (branch `ws/slicer`, plan
 `docs/plan/slicer.md`). Contract: `docs/protocol.md`. Rules: `CLAUDE.md`.
@@ -40,17 +40,17 @@ opt-in rule, FR-02). Design: `docs/architecture.md` §6, ADR 0005; tasks: `docs/
 
 ## Install from a release zip
 
-`SlicerRemoteView-<version>.zip` (GitHub Releases, built by `scripts/package.py`) holds one folder:
+`RemoteView-<version>.zip` (GitHub Releases, built by `scripts/package.py`) holds one folder:
 
 ```text
-SlicerRemoteView-<version>/
+RemoteView-<version>/
   LICENSE.txt
   RemoteView/            <- add this folder to Additional module paths
     RemoteView.py
     remoteview_core/  _vendor/  Resources/
 ```
 
-Unzip it to a place where it can stay (on Windows *Extract All* may add one more `SlicerRemoteView-<version>`
+Unzip it to a place where it can stay (on Windows *Extract All* may add one more `RemoteView-<version>`
 folder around it), then in Slicer: *Edit → Application Settings → Modules → Additional module paths → Add* →
 the `RemoteView` folder (the one with `RemoteView.py`) → restart. The repository's own `slicer-plugin/RemoteView`
 folder (a clone or *Download ZIP*) installs the same way and holds the same files.
@@ -59,7 +59,7 @@ folder (a clone or *Download ZIP*) installs the same way and holds the same file
 
 | Path | Content |
 |---|---|
-| `CMakeLists.txt` | extension (`project(SlicerRemoteView)`, category `Remote`) — Slicer 5.12.4 extension template |
+| `CMakeLists.txt` | extension (`project(RemoteView)`, category `Remote`) — Slicer 5.12.4 extension template |
 | `RemoteView/CMakeLists.txt` | `slicerMacroBuildScriptedModule(... WITH_GENERIC_TESTS)`; **every** file under `RemoteView/` is listed (`.py` in `MODULE_PYTHON_SCRIPTS`, everything else in `MODULE_PYTHON_RESOURCES`) — `tests/test_skeleton.py` enforces it |
 | `RemoteView/RemoteView.py` | thin Slicer adapter: `RemoteView`, `RemoteViewWidget` (loads `Resources/UI/RemoteView.ui`, remembers the relay address and CA path in `QSettings`, shows the consent statement of `remoteview_core.consent` for the address being typed, starts sessions with `RemoteViewLogic.sceneApi` as the scene, renders `remoteview_core.panel` views, 50 ms `QTimer` pump, a single-shot flush `QTimer` and `makeWatcher` (SLC-34: the `SceneWatcher` of `remoteview_core.observers` on `slicer.mrmlScene` with the `slicer.vtkMRML*` event ids and, since SLC-36/SLC-37, the five `slicer.vtkSegmentation.*` ids — `SegmentAdded`, `SegmentRemoved`, `SegmentModified`, `RepresentationModified`, `ContainedRepresentationNamesModified`; a Slicer build without one of the attributes fails *Start* with an `AttributeError` instead of observing a guessed id —, made at each live session), flush and pump slots that log exception types only, closes a running session on unload and stops and disconnects both timers — a failed close is logged, so Reload finishes), `RemoteViewLogic` (`sceneApi()`: `remoteview_core.mrml_scene` over Slicer's `getNodesByClass` and folder display node — models and segments, no segmentations logic: the adapter reads the representation the 3D view draws; `installPackages()`: `slicer.packaging.pip_ensure`, SLC-10), the dependency dialog (`ensureDependencies`/`confirmInstall`, asked at the first *Start session* — SLC-10), the QR code of the join link painted dark on white, *Copy link* and the *Presentation window* (SLC-11; hidden and emptied when the session ends), *Keep session* shown while the relay is about to end an idle session, with the link buttons, *Remove small islands* and the toolbar (*Send scene now*, the send mode) counted as activity (SLC-47), `RemoteViewTest`; SLC-54: the *Remove small islands* checkbox under the consent statement, on unless turned off (`RemoteView/RemoveSmallIslands`, read with `slicer.util.toBool`, saved at every toggle), handed to `PanelController(remove_islands=)` at Start and to `set_remove_islands` on every toggle; SLC-55: no progress dialog (the one of SLC-51 went at the owner's request; `PanelView.progress` is not shown); import-light: no network, subprocess, pip or runtime-dependency import at import or construction — the session code of `remoteview_core` is imported only when *Start session* is clicked; SLC-57: the toolbar on Slicer's main window (`SendToolbar`, made at `startupCompleted()` by the module class and on first use by the panel, one per module object — a Reload removes the previous one by its `objectName`): *Send scene now* (enabled while a session runs; counts down while changes wait; sends the waiting changes or the scene again, or opens the panel without a session) and the *Send changes* combo box (`remoteview_core.sendmode.SEND_MODES`, saved as `RemoteView/SendMode` at every change and applied to the controller at once); `sendPolicy()` reads the setting for `PanelController(send_policy=)` at Start |
 | `RemoteView/remoteview_core/` | pure-Python core (Python 3.12 + numpy, `vtk` for geometry filters only); never imports `slicer`/`qt`/`ctk` — `tests/test_core_purity.py` enforces it; `__init__.py` holds `__version__`, the extension's only version (SLC-20: `pyproject.toml` and `scripts/package.py` read it) |
@@ -93,8 +93,8 @@ folder (a clone or *Download ZIP*) installs the same way and holds the same file
 | `tests/validate_glb.mjs` | test helper: Khronos `gltf-validator` (devDependency of `shared/`, needs `npm ci`) + the §7.1 viewer pre-checks on GLBs written by the tests |
 | `tests/` | pytest suites run outside Slicer; `conftest.py` provides strict stub `slicer`/`qt`/`ctk` modules (with `slicer.mrmlScene` on VTK's own dispatch and the MRML event ids, SLC-34, and `slicer.vtkSegmentation` holding the seven `vtkSegmentation` ids of `tests/mrml_fakes.py`, SLC-36 — `[TODO verify]` against Slicer in manual §13 step 1) and puts `RemoteView/` on `sys.path` like Slicer does |
 | `.gitattributes` | `RemoteView/_vendor/** -text`: the vendored bytes (and their hashes) survive Windows checkouts |
-| `scripts/package.py` | release zip (SLC-20, DEP-11): `SlicerRemoteView-<version>.zip` in `dist/` (git-ignored) with `LICENSE.txt` (the repository's MIT `LICENSE`) and exactly the files `RemoteView/CMakeLists.txt` lists — see [Release zip](#release-zip) |
-| `SlicerRemoteView.json` | the entry for the Slicer Extensions Index (`Slicer/ExtensionsIndex`), kept here until the extension is submitted — see [Release zip](#release-zip) |
+| `scripts/package.py` | release zip (SLC-20, DEP-11): `RemoteView-<version>.zip` in `dist/` (git-ignored) with `LICENSE.txt` (the repository's MIT `LICENSE`) and exactly the files `RemoteView/CMakeLists.txt` lists — see [Release zip](#release-zip) |
+| `RemoteView.json` | the entry for the Slicer Extensions Index (`Slicer/ExtensionsIndex`), kept here until the extension is submitted — see [Release zip](#release-zip) |
 | `Screenshots/RemoteView-panel.png` | the panel in Slicer 5.12.4 with a generated sphere (no patient data), for the Extensions Index (`EXTENSION_SCREENSHOTURLS`) |
 | `scripts/vendor_shared.py` | vendoring tool: wraps `node shared/scripts/vendor-py.mjs` (Node 22) and has a byte-identical pure-Python port (`--python`, used when Node is missing); `--check` exits 1 on drift |
 | `pyproject.toml` | ruff and pytest configuration, direct dev pins (`dev` extra), the version read from `remoteview_core.__version__` (`[tool.setuptools.dynamic]`; `uv pip compile` still reads the pins statically) — development only, Slicer never reads it |
@@ -177,12 +177,12 @@ New or removed vendored files must also be listed in `RemoteView/CMakeLists.txt`
 ## Release zip
 
 ```bash
-python3 slicer-plugin/scripts/package.py                     # slicer-plugin/dist/SlicerRemoteView-<version>.zip
+python3 slicer-plugin/scripts/package.py                     # slicer-plugin/dist/RemoteView-<version>.zip
 python3 slicer-plugin/scripts/package.py --output-dir /tmp/x # elsewhere; --expect-version X.Y.Z to double-check
 ```
 
 Run from the repository root with any Python ≥ 3.12 (standard library only). The zip holds
-`SlicerRemoteView-<version>/LICENSE.txt` (the repository's MIT `LICENSE`) and `SlicerRemoteView-<version>/RemoteView/`
+`RemoteView-<version>/LICENSE.txt` (the repository's MIT `LICENSE`) and `RemoteView-<version>/RemoteView/`
 with exactly the files `RemoteView/CMakeLists.txt` lists — the script stops if the module tree has a file the lists
 miss (or the other way round), so tests, caches and `.pyc` files never get in. The bytes are reproducible (fixed
 order, mode and timestamp; `SOURCE_DATE_EPOCH` is honoured). `.github/workflows/release.yml` (DEP-11) runs it on a
@@ -190,7 +190,7 @@ order, mode and timestamp; `SOURCE_DATE_EPOCH` is honoured). `.github/workflows/
 `remoteview_core/__init__.py` (the only place the version is written — `pyproject.toml` reads it), otherwise nothing
 is built. To release `X.Y.Z`: set `__version__ = "X.Y.Z"` on `main`, then tag.
 
-`SlicerRemoteView.json` is the entry for the Slicer Extensions Index (catalog schema v1.0.2). It is not submitted:
+`RemoteView.json` is the entry for the Slicer Extensions Index (catalog schema v1.0.2). It is not submitted:
 the index needs a public repository, the extension's `CMakeLists.txt` and licence at the repository root, and an
 extension name that does not start with `Slicer` — `docs/research/slicer-packaging.md` §4 lists the sources and the
 options.

@@ -291,7 +291,7 @@ def test_skeleton_cmake_mismatch_is_detected(tmp_path: Path):
 
 def test_skeleton_extension_cmake_metadata():
     text = (PLUGIN_ROOT / "CMakeLists.txt").read_text()
-    assert re.search(r"^project\(SlicerRemoteView\)", text, re.MULTILINE)
+    assert re.search(r"^project\(RemoteView\)", text, re.MULTILINE)
     assert re.search(r'^set\(EXTENSION_CATEGORY "Remote"\)', text, re.MULTILINE)
     assert re.search(r'^set\(EXTENSION_HOMEPAGE "https://', text, re.MULTILINE)
     assert re.search(r"^add_subdirectory\(RemoteView\)", text, re.MULTILINE)
