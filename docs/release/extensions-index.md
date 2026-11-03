@@ -81,6 +81,11 @@ All three must work without signing in (a private window), from `main`:
 
 ## 5. Fork the index and open the pull requests
 
+> Submitted on 2026-11-03 from the fork `dolegadolegowski/ExtensionsIndex`:
+> [Slicer/ExtensionsIndex#2438](https://github.com/Slicer/ExtensionsIndex/pull/2438) (`main`, Preview) and
+> [Slicer/ExtensionsIndex#2439](https://github.com/Slicer/ExtensionsIndex/pull/2439) (`5.12`, Stable). Steps 2–3 were
+> done the same day (public repository, topic, Projects off).
+
 One file, `RemoteView.json` at the root of the index, byte for byte the repository's copy (LF line endings,
 `scm_revision` `main`). Two pull requests: `main` serves the Slicer Preview Release, `5.12` the 5.12 Stable
 Release.
