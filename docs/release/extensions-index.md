@@ -137,7 +137,10 @@ For the comment section at the end:
 | *Extension Validation* | clones `scm_url` at `scm_revision` without credentials; checkout ≤ 100 MB with `.git` (ours ≈ 19 MB); JSON against its schema, LF endings; the name does not start with `Slicer`; category known; repository name starts with `Slicer`; topic `3d-slicer-extension`; the root `CMakeLists.txt`: first `project(` is `RemoteView`, the icon and screenshot lines are found and each URL serves an image; a licence file at the root | the run's *Summary* (a fork's pull request gets no comment) |
 | *Lint* | `pre-commit` on the pull request's files: LF endings, final newline, no tabs or trailing spaces, `prettier` formatting of the JSON, the JSON against the index's copy of schema v1.0.2 | the job's log |
 | *Package Python Extension* | on Windows and Linux: clone, then configure, build and `cpack` the root as in step 1 | artifacts `package-RemoteView-Windows` and `-Linux` |
-| *Extension AI Analysis* | a language model answers twelve questions (eleven on `5.12`) about the `*.py`, `*.md` and `CMakeLists.txt` files (uploads, downloads, code at import, pinned packages); this monorepo makes about 77 calls, which may not fit its 60 minutes (30 on `5.12`) `[TODO verify]` | the run's *Summary*, written only when it finishes; a failed clone turns it red |
+| *Extension AI Analysis* | a language model answers twelve questions (eleven on `5.12`) about the `*.py`, `*.md` and `CMakeLists.txt` files (uploads, downloads, code at import, pinned packages); this monorepo makes about 77 calls; on 2026-11-03 the run finished in about 13 minutes on both pull requests (#2438, #2439), well inside its 60 minutes (30 on `5.12`) | the run's *Summary*, written only when it finishes; a failed clone turns it red |
+
+On a first contribution to the index, *Extension Validation*, *Lint* and *Package Python Extension* wait for a
+maintainer to approve the workflow run (`action_required`); only the AI analysis runs at once.
 
 A red *Extension Validation* before step 2 or 3 is expected (clone or topic). On the `5.12` pull request the
 topic check calls GitHub's API without a token; a `ValueError: Failed to get github topics …` with status 403
