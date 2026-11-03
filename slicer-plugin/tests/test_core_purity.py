@@ -69,8 +69,13 @@ def forbidden_imports(source: str) -> list[str]:
 
 
 def test_core_purity_package_imports_and_has_version():
-    project = tomllib.loads((PLUGIN_ROOT / "pyproject.toml").read_text())["project"]
-    assert remoteview_core.__version__ == project["version"]
+    pyproject = tomllib.loads((PLUGIN_ROOT / "pyproject.toml").read_text())
+    # SLC-20: one version, in remoteview_core/__init__.py; pyproject.toml reads it from there
+    assert "version" not in pyproject["project"] and pyproject["project"]["dynamic"] == ["version"]
+    setuptools = pyproject["tool"]["setuptools"]
+    assert setuptools["dynamic"]["version"] == {"attr": "remoteview_core.__version__"}
+    assert (PLUGIN_ROOT / setuptools["package-dir"][""] / "remoteview_core") == CORE_DIR
+    assert isinstance(remoteview_core.__version__, str)
     assert Path(remoteview_core.__file__).parent == CORE_DIR
 
 

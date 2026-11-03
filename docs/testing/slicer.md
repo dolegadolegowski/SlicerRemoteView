@@ -8,7 +8,7 @@ OS, result (`pass` / `fail` + note), tester. Automated checks run with `slicer-p
 ## Scenario index
 
 Added by `qa` (QA-10, `CLAUDE.md` rule 4 exception): a table of contents only. Section numbers, step numbers and
-step text are the `slicer` workstream's and are unchanged (§7–§11 are not used in this file). Each section is one
+step text are the `slicer` workstream's and are unchanged (§8, §9 and §11 are not used in this file). Each section is one
 end-to-end scenario on a real 3D Slicer 5.12.x and ends with its own results table (`Date | Slicer version | OS |
 Result | Tester`); write the module's git commit in **Result** with the outcome (e.g. `pass @ <sha>`, or `fail @
 <sha>, step 4 — report <file>`), as release checks need the version (`docs/plan/00-overview.md` §5).
@@ -21,6 +21,7 @@ Result | Tester`); write the module's git commit in **Result** with the outcome 
 | [§4](#4-qr-code-copy-link-and-the-presentation-window-slc-11-fr-04-nfr-29-nfr-30-us-07-t6) | QR code, Copy link and the Presentation window | SLC-11 | FR-04, NFR-29, NFR-30, US-07, T6 | 1–10 | yes |
 | [§5](#5-transforms-baked-into-the-vertices-slc-13-fr-06-fr-12-part-us-02-protocol-73) | Transforms baked into the vertices | SLC-13 | FR-06, FR-12 part, US-02, protocol §7.3 | 1–7 | yes |
 | [§6](#6-live-scene-changes-slc-32-slc-33-slc-34-nfr-02-fr-11-fr-12-architecture-6-protocol-62-73-8) | Live scene changes | SLC-32, SLC-33, SLC-34 | NFR-02, FR-11, FR-12, architecture §6, protocol §6.2, §7.3, §8 | 1–15 | yes |
+| [§10](#10-install-from-the-release-zip-slc-20-r-06-nfr-16-dep-11) | Install from the release zip | SLC-20 | R-06, NFR-16, DEP-11 | 1–4 | yes |
 | [§12](#12-consent-text-and-the-scene-adapter-slc-22-r-06-nfr-16-fr-05) | Consent text and the scene adapter | SLC-22 | R-06, NFR-16, FR-05 | 1–4 | yes |
 | [§13](#13-segments-slc-27-slc-35-slc-36-slc-37-us-02-fr-06-fr-64-adr-0005-6-protocol-v11-73-t7) | Segments | SLC-27, SLC-35, SLC-36, SLC-37 | US-02, FR-06, FR-64, ADR 0005 §6, protocol v1.1 §7.3, T7 | 1–14 | yes |
 | [§14](#14-decimation-to-the-device-profile-slc-14-slc-41-slc-53-slc-54-fr-10-nfr-03-nfr-04-protocol-75) | Decimation to the device profile | SLC-14, SLC-41, SLC-53, SLC-54 | FR-10, NFR-03, NFR-04, protocol §7.5 | 1–12 (blocks: “large segmentation, SLC-41”, “small islands, SLC-53”, “the *Remove small islands* checkbox, SLC-54”) | yes |
@@ -831,6 +832,40 @@ Known gaps (not failures):
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|
 | | | | | |
+
+## §10 Install from the release zip (SLC-20; R-06, NFR-16, DEP-11)
+
+Preconditions: a Slicer 5.12.x that has never had RemoteView (or *Edit → Application Settings → Modules → Additional
+module paths* emptied and Slicer restarted); the zip from a draft GitHub Release, or built locally with
+`python slicer-plugin/scripts/package.py` (it prints the path, `slicer-plugin/dist/SlicerRemoteView-<version>.zip`).
+
+Steps:
+
+1. List the archive (`unzip -l SlicerRemoteView-<version>.zip`), then unzip it with the system's own tool (macOS:
+   double-click; Windows: *Extract All*) into the home folder.
+2. Add the folder `SlicerRemoteView-<version>/RemoteView` (the one with `RemoteView.py`) to *Additional module paths*,
+   click *OK* and restart Slicer.
+3. Open *Remote → RemoteView*; in the Python console run
+   `import remoteview_core; print(remoteview_core.__version__, remoteview_core.__file__)`.
+4. Run §2 with this installation.
+
+Expected results:
+
+- Step 1: one top-level folder `SlicerRemoteView-<version>/` holding `LICENSE.txt` and `RemoteView/` — `RemoteView.py`,
+  `remoteview_core/`, `_vendor/remoteview_protocol/`, `Resources/` — and nothing else: no `tests/`, `__pycache__`,
+  `.pyc`, `CMakeLists.txt` or hidden files. macOS gives `SlicerRemoteView-<version>/RemoteView/RemoteView.py`;
+  Windows may nest it in one more `SlicerRemoteView-<version>` folder.
+- Step 3: the panel shows *Relay address*, *Start session* and "Not connected."; the console prints the version in the
+  zip's name and a path inside the unzipped folder (not a repository checkout).
+- Step 4: as in §2.
+
+Steps 1–3 ran natively on 2026-11-03 (Slicer 5.12.4, macOS Intel build under Rosetta, settings disabled with
+`--disable-settings`, the folder passed with `--additional-module-paths`; Archive Utility for step 1); step 4 and
+Windows are open.
+
+| Date | Slicer version | OS | Result | Tester |
+|---|---|---|---|---|
+| 2026-11-03 | 5.12.4 | macOS 27 (Intel build, Rosetta) | steps 1–3 pass @ ws/slicer-packaging (SLC-20), step 4 not run | slicer-dev |
 
 ## §12 Consent text and the scene adapter (SLC-22; R-06, NFR-16, FR-05)
 

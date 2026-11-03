@@ -5,6 +5,7 @@ from __future__ import annotations
 import _socket
 import ast
 import importlib.metadata
+import importlib.util
 import os
 import re
 import socket
@@ -250,56 +251,16 @@ def test_skeleton_self_test_class_runs_against_stubs(import_remote_view):
 
 # --- CMake lists ---------------------------------------------------------------------------------
 
-_SET_RE = re.compile(
-    r"set\(\s*(MODULE_PYTHON_SCRIPTS|MODULE_PYTHON_RESOURCES)\s+(.*?)\)", re.DOTALL
+# The packager ships exactly these lists (scripts/package.py, SLC-20): the check and the zip share one parser.
+_PACKAGE_SPEC = importlib.util.spec_from_file_location(
+    "package_script", PLUGIN_ROOT / "scripts" / "package.py"
 )
-_TREE_EXCLUDED_DIRS = {"__pycache__", ".pytest_cache", ".ruff_cache"}
-
-
-def cmake_listed_files(cmake_text: str) -> tuple[set[str], set[str]]:
-    """Return (scripts, resources) from a module ``CMakeLists.txt`` with ``${MODULE_NAME}`` expanded."""
-    code = "\n".join(line.split("#", 1)[0] for line in cmake_text.splitlines())  # drop comments
-    name = re.search(r"set\(\s*MODULE_NAME\s+(\S+?)\s*\)", code)
-    assert name, "MODULE_NAME not set"
-    lists: dict[str, set[str]] = {}
-    for var, body in _SET_RE.findall(code):
-        entries = (e.strip('"') for e in body.split())
-        lists[var] = {e.replace("${MODULE_NAME}", name.group(1)) for e in entries if e}
-    return lists.get("MODULE_PYTHON_SCRIPTS", set()), lists.get("MODULE_PYTHON_RESOURCES", set())
-
-
-def module_tree_files(module_dir: Path) -> tuple[set[str], set[str]]:
-    """Return (python files, other files) under ``module_dir`` as POSIX paths, minus build/cache files."""
-    scripts: set[str] = set()
-    resources: set[str] = set()
-    for path in module_dir.rglob("*"):
-        rel = path.relative_to(module_dir)
-        hidden = any(
-            part.startswith(".") for part in rel.parts
-        )  # .DS_Store, editor files (git-ignored)
-        if path.is_dir() or hidden or _TREE_EXCLUDED_DIRS.intersection(rel.parts):
-            continue
-        if path.suffix in {".pyc", ".pyo"} or path.name == "CMakeLists.txt":
-            continue
-        (scripts if path.suffix == ".py" else resources).add(rel.as_posix())
-    return scripts, resources
-
-
-def cmake_tree_mismatch(module_dir: Path) -> list[str]:
-    listed_scripts, listed_resources = cmake_listed_files(
-        (module_dir / "CMakeLists.txt").read_text()
-    )
-    tree_scripts, tree_resources = module_tree_files(module_dir)
-    problems = [f"not in SCRIPTS: {p}" for p in sorted(tree_scripts - listed_scripts)]
-    problems += [f"not in RESOURCES: {p}" for p in sorted(tree_resources - listed_resources)]
-    problems += [
-        f"listed but missing: {p}"
-        for p in sorted((listed_scripts | listed_resources) - (tree_scripts | tree_resources))
-    ]
-    problems += [
-        f"python file in RESOURCES: {p}" for p in sorted(listed_resources) if p.endswith(".py")
-    ]
-    return problems
+assert _PACKAGE_SPEC and _PACKAGE_SPEC.loader
+_PACKAGE = importlib.util.module_from_spec(_PACKAGE_SPEC)
+_PACKAGE_SPEC.loader.exec_module(_PACKAGE)
+cmake_listed_files = _PACKAGE.cmake_listed_files
+module_tree_files = _PACKAGE.module_tree_files
+cmake_tree_mismatch = _PACKAGE.cmake_tree_mismatch
 
 
 def test_skeleton_cmake_lists_every_module_file():

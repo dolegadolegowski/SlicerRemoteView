@@ -7,13 +7,14 @@ project(SlicerRemoteView)
 #-----------------------------------------------------------------------------
 # Extension meta-information
 set(EXTENSION_HOMEPAGE "https://github.com/dolegadolegowski/SlicerRemoteView")
-# The Extension Index category is authoritative in SlicerRemoteView.json (SLC-20); kept here for the
-# generated extension description.
+# The Extensions Index category is authoritative in SlicerRemoteView.json (SLC-20; tests/test_package.py keeps them
+# equal); kept here for the generated extension description.
 set(EXTENSION_CATEGORY "Remote")
 set(EXTENSION_CONTRIBUTORS "SlicerRemoteView contributors")
 set(EXTENSION_DESCRIPTION "Share the 3D Slicer scene with phones, tablets and Meta Quest headsets through a relay server and a 5-character session code. Nothing is sent until the user clicks Start session.")
 set(EXTENSION_ICONURL "https://raw.githubusercontent.com/dolegadolegowski/SlicerRemoteView/main/slicer-plugin/RemoteView/Resources/Icons/RemoteView.png")
-set(EXTENSION_SCREENSHOTURLS "") # [TODO] screenshot with SLC-20
+# Space-separated raw image URLs (Extensions Index CI: no space before the closing parenthesis).
+set(EXTENSION_SCREENSHOTURLS "https://raw.githubusercontent.com/dolegadolegowski/SlicerRemoteView/main/slicer-plugin/Screenshots/RemoteView-panel.png")
 set(EXTENSION_DEPENDS "NA") # Specified as a list or "NA" if no dependencies
 
 #-----------------------------------------------------------------------------

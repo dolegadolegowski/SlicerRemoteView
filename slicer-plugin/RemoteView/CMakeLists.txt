@@ -3,7 +3,7 @@ set(MODULE_NAME RemoteView)
 
 # Every file under RemoteView/ must be listed below (Python files in SCRIPTS, everything else in
 # RESOURCES) so the installed module is self-contained; tests/test_skeleton.py compares these lists
-# with the source tree. _vendor/ is the copy of shared/py made by slicer-plugin/scripts/vendor_shared.py.
+# with the source tree, and scripts/package.py puts exactly these files in the release zip (SLC-20). _vendor/ is the copy of shared/py made by slicer-plugin/scripts/vendor_shared.py.
 
 #-----------------------------------------------------------------------------
 set(MODULE_PYTHON_SCRIPTS
