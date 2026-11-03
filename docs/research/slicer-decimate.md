@@ -1,4 +1,4 @@
-# Decimation to the profile budgets (SLC-14, SLC-41, SLC-61)
+# Decimation to the profile budgets (SLC-14, SLC-41, SLC-61, SLC-66)
 
 What `remoteview_core.decimate` relies on. Checked against VTK v9.6.0 headers; the dev venv runs VTK 9.6.2, and Slicer
 5.12.4 builds VTK 9.6 by default — Slicer's fork tag `slicer-v9.6.2-2026-05-15-f49a1dbaf`
@@ -570,3 +570,100 @@ away: the area of moderate non-manifold books (`vtkDecimatePro(PreserveTopologyO
 400 × 16 0.92 against 0.10, at up to 10× the time) and the full share on fans → SLC-69. The harness and raw numbers were
 in the session's scratchpad (`cmp_decimate/bench.py`), not kept.
 
+## Coincident points merged before the quadric (SLC-66)
+
+SLC-41 decimated a node whose triangles have points of their own piece by piece below the size bound. Such nodes are
+a triangle soup (an STL read without merging), or a reader's or a normal filter's unwelded seams. `_reduce_parts`
+counts parts by point IDs, so every loose triangle of a soup was a part of its own and the quadric ate them.
+`_weld_float32` welds only the two ends of one edge. Measured at `1b07db6` through `decimate_entity` (open edges
+counted after merging equal positions):
+
+| Mesh → share | Before SLC-66 | Now |
+|---|---|---|
+| Soup of `support.sphere(64)` (7,936 triangles) → 2k | area 0.380, 207 open edges | 0.9995, 0 |
+| … with a facet written twice, on its own points / on the same points | 0.380, 208 / 0.380, 208 | 0.9995, 0 / 0.9995, 0 |
+| Seamed spheres, 7.9k / 79k triangles → 2k | 176 / 750 open edges | 0 / 0 |
+| Two-sided sphere on its own points (± a facet twice) → 2k | area 0.9987 / 0.9986 | the same |
+| Duplicated shell on its own points (± a facet twice) → 2k | area 0.9987 / 0.9986 | the same |
+| Two ball-half labels touching (± a facet twice) → 1/5 | area 1.0000 / 0.9999 | the same |
+| Soup of a two-sided sphere → 2k | area 0.194, 96 open edges | 0.4997, 0 |
+| Two-sided sphere on shared points → 2k | area 0.4997 (nothing coincides) | the same |
+| `vtkTessellatedBoxSource` level 40 with `DuplicateSharedPointsOn` (a 20 mm cube, each face on its own points: 90° seams) / its soup → 2k | 190 open / area 0.099, 3,770 open | 0 / 0, area 1.0 |
+| Soup + facet twice on its own points, a duplicated shell and a seamed sphere in one node → 6k | area 0.851, 748 open | 0.9992, 0 |
+
+### Which points are merged
+
+Three rules were measured on `1b07db6`'s pipeline (SLC-66's understanding pass; scripts in the session's scratchpad):
+
+- **SLC-61's rule (`e4573c3`)**: merge every coincident point, then keep the merge if the input was a soup (no point
+  used by two distinct triangles) or if the merge did not add edges of more than two triangles. It passes every case
+  above but decides for the whole node: a soup next to a part that refuses keeps its holes (0.690, 210 open edges
+  for a soup with a facet twice next to a connected sphere), and a duplicated shell next to a seamed sphere keeps
+  the seams open.
+- **`clustering.coincident_pairs`** (the size bound's rule: twins whose vertex normals agree): it merges a duplicated
+  shell, whose layers then share every edge and keep half the area (0.5002). It leaves a two-sided soup's inner
+  sheet loose (232 open edges) and never joins a seam of 90° or more (a soup's copies carry only their own face
+  normal; the box's 190 open edges, no pair).
+- **Per class (chosen, `clustering.merge_coincident_steps`)**: the used points at one position form a class. Every class
+  is merged into its lowest point unless the merge would give an edge more triangles than two and than any input edge it
+  comes from. Such a class keeps its points, and so do the classes at the edge's other end. Blocking only removes
+  merges, so, counted over distinct triangles, no edge then has more triangles than the larger of two and its input
+  edges (a soup's classes, below, aside). A class whose points all belong to triangles sharing no point (a soup's) is
+  merged anyway. A soup has no surface to keep apart, and a two-sided soup becomes one sheet with both windings: half
+  its area, as for a two-sided sheet on shared points. The first version counted a point used by one triangle as a
+  soup's. That also took a sheet's corner points, which belong to one triangle of a connected sheet; the rule now asks
+  for loose triangles.
+
+Repeats on the same points (a facet written twice) count once in the guard. Triangles left repeating a point after
+the merge are dropped. Unused points never count: a book's spare spine copies coincide with its pages' points
+(`test_decimate_book_routes_around_the_quadric`). Only the points whose hash key repeats are sorted again, and the
+positions are compared exactly, so a hash collision merges nothing.
+
+### Where, and in what order
+
+The merge runs after the size bound and before the fan check (`decimate.decimate_steps`):
+
+- **After the size bound.** The bound's clustering already joins twins with agreeing normals: a soup or seamed
+  sphere of 1M triangles is closed there (area 1.0, 0 open edges). The merge then sees at most 2 · goal triangles and
+  catches what the pairs rule leaves.
+- **Before the fan check.** A soup of N wedges sharing one corner becomes a bow tie once merged (`fan_weight` ≈ N/3).
+  Merged after the check, the quadric got the bow tie: 1.21 s at 16k wedges, and at 32k its set-up passed
+  `QUADRIC_WORK`, so the node fell back. Merged before, it takes the fan path: 0.24 s for 16k and 0.48 s for 32k,
+  longest step 0.03 s.
+- **Point order.** The merged points keep their input order (each class becomes its lowest point, then
+  `clustering.compact`). Merged in hash-key order, the soup of the 400k sphere took 3.62 s to decimate to 100k,
+  against 2.77 s in input order (best of three).
+
+### Cost
+
+Measured in the sandbox, best of three, per step of `merge_coincident_steps`:
+
+| Input | Triangles | Points | Total | Longest step |
+|---|---|---|---|---|
+| `support.sphere(448)`, nothing coincides | 399,616 | 199,810 | 0.015 s (one step, the check) | 0.015 s |
+| Soup of it | 399,616 | 1,198,848 | 0.59 s | 0.31 s |
+| Seamed sphere 448 | 399,616 | 202,493 | 0.25 s | 0.15 s |
+| Duplicated shell of `sphere(448)` | 799,232 | 399,620 | 0.63 s | 0.35 s |
+| Soup of `sphere(640)`, the merge alone: a proxy for the largest soup it can meet (≈ 800k triangles: a larger node is clustered by the size bound first) | 816,640 | 2,449,920 | 1.74 s | 1.04 s |
+
+The longest step is the search for twins on 2.4M points at the size bound. It is about 1 s in the sandbox, shorter
+than the quadric step that follows on that node. Nodes above the bound are not slower: the soup of `sphere(710)`
+(1,005,360 triangles) → 100k took 10.6 s in all with a longest step of 4.67 s (11.0 s and 5.06 s before). The seamed
+sphere of the same size took 5.34 s and 4.33 s (5.42 s and 4.32 s before).
+
+Criterion 3: `support.sphere(448)` collected and decimated to 100k in seven interleaved rounds with the collector
+off, with the merge and with the merge replaced by the identity (the pipeline before SLC-66). Best 2.368 s against
+2.497 s (ratio 0.95), median 2.672 s against 2.613 s (1.02). The output was identical to the bit: a node without
+coincident points gets its own arrays back.
+
+Residuals:
+
+- A soup that merges into a fan takes the fan path and keeps the share and the area that path keeps. A soup of 16k
+  wedges → 3,200 gives 774 triangles and area 0.048, against 0.200 before SLC-66 as loose triangles; 32k → 0.024.
+  SLC-69 weighs the fan path.
+- A point merged on a sharp edge has one normal (§7.4, `SplittingOff`), so a seamed box's edges look slightly
+  rounded once decimated. On the manual's box (level 150) about 4 % of the area has a point normal more than 30° off its
+  face, against 0 % with its seams open (SLC-66 review). A node at or below its share is not decimated and keeps its
+  seams.
+- The size bound's clustering keeps the pairs rule above the bound; the merge after it covers the cases that rule
+  misses.

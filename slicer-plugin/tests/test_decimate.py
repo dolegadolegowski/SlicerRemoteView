@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import math
 import struct
 import time
 
@@ -23,9 +24,11 @@ from support import (
     sphere,
     validate_glb,
 )
+from vtkmodules.util.numpy_support import numpy_to_vtk
 from vtkmodules.vtkCommonCore import reference
-from vtkmodules.vtkCommonDataModel import vtkPolyData, vtkStaticCellLocator
+from vtkmodules.vtkCommonDataModel import vtkImageData, vtkPolyData, vtkStaticCellLocator
 from vtkmodules.vtkFiltersCore import vtkQuadricDecimation
+from vtkmodules.vtkFiltersGeneral import vtkDiscreteFlyingEdges3D
 from vtkmodules.vtkFiltersSources import vtkCubeSource, vtkPlaneSource, vtkSphereSource
 
 from remoteview_core import clustering, decimate, glb_writer, protocol_client
@@ -516,6 +519,308 @@ def test_decimate_double_sided_sheet_still_reduces(monkeypatch):
     assert 0 < smaller.triangle_count <= 2_000
     up = face_normals(smaller.positions, smaller.indices)[:, 2]
     assert np.sum(up > 0) > 500 and np.sum(up < 0) > 500
+
+
+# --------------------------------------------------------------------------- coincident points (SLC-66)
+
+
+def area(entity) -> float:
+    return float(np.linalg.norm(face_normals(entity.positions, entity.indices), axis=1).sum() / 2)
+
+
+def open_edges(entity) -> int:
+    """Edges of one triangle only once the points at one position count as one: a hole, or a seam a soup leaves."""
+    _, merged = np.unique(entity.positions, axis=0, return_inverse=True)
+    return boundary_edges(merged.reshape(-1)[entity.indices])
+
+
+def soup_of(entity):
+    """``entity`` with every triangle on points of its own (an STL read without merging)."""
+    corners = np.asarray(entity.indices).ravel()
+    return dataclasses.replace(
+        entity,
+        positions=entity.positions[corners],
+        normals=entity.normals[corners],
+        indices=np.arange(corners.size).reshape(-1, 3),
+    )
+
+
+def facet_twice(entity, *, own_points: bool):
+    """``entity`` with its first triangle written twice: on the same points, or on copies of them (an STL facet)."""
+    triangles = np.asarray(entity.indices)
+    corners = triangles[0]
+    if not own_points:
+        return dataclasses.replace(entity, indices=np.vstack([triangles, corners]))
+    added = len(entity.positions) + np.arange(3)
+    return dataclasses.replace(
+        entity,
+        positions=np.vstack([entity.positions, entity.positions[corners]]),
+        normals=np.vstack([entity.normals, entity.normals[corners]]),
+        indices=np.vstack([triangles, added]),
+    )
+
+
+def two_sheets(entity, *, reversed_: bool, own_points: bool):
+    """``entity`` and a second copy of its surface lying on it: wound the other way (a two-sided surface) or the same
+    way (a duplicated shell), on the same points or on points of its own."""
+    triangles = np.asarray(entity.indices)
+    second = triangles[:, ::-1] if reversed_ else triangles
+    positions, normals = entity.positions, entity.normals
+    if own_points:
+        second = second + len(positions)
+        positions, normals = np.vstack([positions, positions]), np.vstack([normals, normals])
+    return dataclasses.replace(
+        entity, positions=positions, normals=normals, indices=np.vstack([triangles, second])
+    )
+
+
+def beside(entity, other, shift=(0.1, 0.0, 0.0)):
+    """``entity`` and ``other`` moved by ``shift`` in one node."""
+    return dataclasses.replace(
+        entity,
+        positions=np.vstack([entity.positions, other.positions + np.asarray(shift)]),
+        normals=np.vstack([entity.normals, other.normals]),
+        indices=np.vstack([entity.indices, np.asarray(other.indices) + len(entity.positions)]),
+    )
+
+
+def ball_halves():
+    """Two labels touching along a disc (the halves of a ball), one ``vtkDiscreteFlyingEdges3D`` surface: the disc's
+    points are those of both labels' surfaces."""
+    z, y, x = np.mgrid[0:40, 0:40, 0:40]
+    ball = (x - 20) ** 2 + (y - 20) ** 2 + (z - 20) ** 2 <= 16**2
+    volume = np.where(ball, np.where(x < 20, 1, 2), 0).astype(np.uint8)
+    image = vtkImageData()
+    image.SetDimensions(40, 40, 40)
+    image.GetPointData().SetScalars(numpy_to_vtk(volume.ravel(), deep=True))
+    surface = vtkDiscreteFlyingEdges3D()
+    surface.SetInputData(image)
+    surface.SetValue(0, 1)
+    surface.SetValue(1, 2)
+    surface.ComputeNormalsOff()
+    surface.ComputeGradientsOff()
+    surface.ComputeScalarsOff()
+    surface.Update()
+    [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": surface.GetOutput()})
+    return entity
+
+
+def merged_ok(smaller, entity, target, *, kept=0.99) -> bool:
+    return 0 < smaller.triangle_count <= target and area(smaller) >= kept * area(entity)
+
+
+@pytest.mark.parametrize("repeat", [None, "own-points", "same-points", "same-points-reversed"])
+def test_decimate_coincident_soup_comes_out_without_holes(repeat):
+    """A soup (every triangle on points of its own) was decimated as loose triangles: area 0.38 and 207 holes for this
+    sphere → 2k. Its coincident points are merged first, so it is one surface again; also with a facet written twice
+    (an edge of three or four triangles, merged anyway: a soup has no surface to keep apart)."""
+    [connected] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(64)})
+    entity = soup_of(connected)
+    if repeat == "same-points-reversed":  # a repeat in another order counts once too
+        entity = dataclasses.replace(
+            entity, indices=np.vstack([entity.indices, entity.indices[0, ::-1]])
+        )
+    elif repeat is not None:
+        entity = facet_twice(entity, own_points=repeat == "own-points")
+    smaller = decimate_entity(entity, 2_000)
+    assert merged_ok(smaller, entity, 2_000) and open_edges(smaller) == 0
+    np.testing.assert_allclose(
+        np.linalg.norm(smaller.positions - [0.1, 0.0, 0.0], axis=1), 0.020, atol=0.002
+    )
+    assert outward(smaller) > 0.9
+
+
+@pytest.mark.parametrize("resolution", [64, 200])
+def test_decimate_coincident_seams_close_below_the_size_bound(resolution):
+    """Below the size bound the seams of a node (7.9k / 79k triangles) opened as 176 / 750 cracks: its points at one
+    position are merged first, so it has no open edge, by position or by point."""
+    positions, triangles = seamed_sphere(resolution)
+    entity = mesh_entity(positions, triangles)
+    smaller = decimate_entity(entity, 2_000)
+    assert merged_ok(smaller, entity, 2_000)
+    assert open_edges(smaller) == 0 and boundary_edges(smaller.indices) == 0
+
+
+@pytest.mark.parametrize(
+    ("reversed_", "own_points", "repeat", "kept"),
+    [
+        pytest.param(True, True, False, 0.99, id="two-sided-own-points"),
+        pytest.param(False, True, False, 0.99, id="duplicated-shell"),
+        pytest.param(True, True, True, 0.99, id="two-sided-own-points-and-a-facet-twice"),
+        pytest.param(False, True, True, 0.99, id="duplicated-shell-and-a-facet-twice"),
+        pytest.param(True, False, False, 0.45, id="two-sided-on-shared-points"),
+    ],
+)
+def test_decimate_coincident_sheets_on_each_other_keep_their_area(
+    reversed_, own_points, repeat, kept
+):
+    """Two layers on each other on points of their own stay apart: merged, they would share every edge (four
+    triangles) and the quadric would keep half the area (a duplicated shell 0.50). On shared points nothing is
+    merged: the two sides of one sheet keep about half (as before SLC-66)."""
+    [connected] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(64)})
+    entity = two_sheets(connected, reversed_=reversed_, own_points=own_points)
+    if repeat:
+        entity = facet_twice(entity, own_points=False)
+    smaller = decimate_entity(entity, 2_000)
+    assert merged_ok(smaller, entity, 2_000, kept=kept)
+
+
+def test_decimate_coincident_soup_of_a_two_sided_surface_keeps_one_side():
+    """A soup of a two-sided sphere is merged whatever the merge makes of it: one sheet with both windings, half the
+    area kept (0.19, with holes, before), and closed."""
+    [connected] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(64)})
+    entity = soup_of(two_sheets(connected, reversed_=True, own_points=False))
+    smaller = decimate_entity(entity, 2_000)
+    assert merged_ok(smaller, entity, 2_000, kept=0.45) and open_edges(smaller) == 0
+
+
+@pytest.mark.parametrize("repeat", [False, True])
+def test_decimate_coincident_touching_labels_keep_their_area(repeat):
+    """Two labels touching along a disc: merged, the disc's edges would have four triangles; they stay apart."""
+    entity = ball_halves()
+    if repeat:
+        entity = facet_twice(entity, own_points=False)
+    target = entity.triangle_count // 5
+    assert merged_ok(decimate_entity(entity, target), entity, target)
+
+
+def test_decimate_coincident_merges_class_by_class():
+    """The guard is per class of coincident points, not per node: in one node, a soup and a seamed sphere are merged
+    while a duplicated shell beside them stays two shells (a node-wide rule refused all three, or merged all)."""
+    [connected] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(64)})
+    shell = two_sheets(connected, reversed_=False, own_points=True)
+    seamed = mesh_entity(*seamed_sphere(64))
+    entity = beside(
+        beside(facet_twice(soup_of(connected), own_points=True), shell), seamed, (0.2, 0.0, 0.0)
+    )
+    smaller = decimate_entity(entity, 6_000)
+    assert merged_ok(smaller, entity, 6_000)
+    assert open_edges(smaller) == 0
+
+
+def test_decimate_coincident_merge_leaves_other_input_alone():
+    """No repeated position among the used points: the very arrays come back (one hash sort, no step), so a node
+    without coincident points is decimated as before. Unused points (a book's spare spine) never count."""
+    [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(64)})
+    positions, triangles = entity.positions, np.asarray(entity.indices, dtype=np.int64)
+    steps = clustering.merge_coincident_steps(positions, triangles)
+    with pytest.raises(StopIteration) as stop:
+        next(steps)
+    assert stop.value.value[0] is positions and stop.value.value[1] is triangles
+    spare = np.vstack([positions, positions[:10]])  # unused copies of used points
+    with pytest.raises(StopIteration) as stop:
+        next(clustering.merge_coincident_steps(spare, triangles))
+    assert stop.value.value[0] is spare and stop.value.value[1] is triangles
+
+
+SQUARE = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], dtype=np.float64)
+QUAD = np.array([[0, 1, 2], [0, 2, 3]])
+TETRAHEDRON = np.array([[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]])
+CORNERS = np.vstack([SQUARE[:3], [[0, 0, 1]]])
+
+
+@pytest.mark.parametrize(
+    ("positions", "triangles", "expected"),
+    [
+        pytest.param(  # points 4, 5 copy 1, 2: merged, the other points keep their order
+            np.vstack([SQUARE, SQUARE[[1, 2]], [[2, 0, 0], [2, 1, 0]]]),
+            [[0, 1, 2], [0, 2, 3], [4, 6, 7], [4, 7, 5]],
+            ([0, 1, 2, 3, 6, 7], [[0, 1, 2], [0, 2, 3], [1, 4, 5], [1, 5, 2]]),
+            id="seam",
+        ),
+        pytest.param(  # every edge would have four triangles
+            np.vstack([CORNERS, CORNERS]),
+            np.vstack([TETRAHEDRON, TETRAHEDRON + 4]),
+            None,
+            id="closed-shells",
+        ),
+        pytest.param(  # merged whatever: a soup has no surface to keep apart
+            np.vstack([SQUARE[:3], SQUARE[:3]]),
+            [[0, 1, 2], [3, 4, 5]],
+            ([0, 1, 2], [[0, 1, 2], [0, 1, 2]]),
+            id="soup",
+        ),
+        pytest.param(  # a sheet's corner belongs to one triangle, but not to a soup's
+            np.vstack([SQUARE] * 3), np.vstack([QUAD, QUAD + 4, QUAD + 8]), None, id="three-sheets"
+        ),
+        pytest.param(  # a soup's sliver whose two corners merge goes
+            np.vstack([SQUARE[:3], SQUARE[[0, 0, 1]]]),
+            [[0, 1, 2], [3, 4, 5]],
+            ([0, 1, 2], [[0, 1, 2]]),
+            id="sliver",
+        ),
+        pytest.param(np.zeros((3, 3)), [[0, 1, 2]], None, id="every-triangle-would-go"),
+        pytest.param(  # an input edge of three pages: no edge gets more than the input had
+            np.array(
+                [
+                    [0, 0, 0],
+                    [0, 0, 1],
+                    [1, 0, 0],
+                    [0, 1, 0],
+                    [-1, 0, 0],
+                    [0, 0, 0],
+                    [0, -1, 0],
+                    [-1, -1, 0],
+                ]
+            ),
+            [[0, 1, 2], [0, 1, 3], [0, 1, 4], [5, 6, 7]],
+            ([0, 1, 2, 3, 4, 6, 7], [[0, 1, 2], [0, 1, 3], [0, 1, 4], [0, 5, 6]]),
+            id="seam-beside-a-three-page-edge",
+        ),
+        pytest.param(  # the winding makes point 1 never the start of the oversharing edge
+            np.vstack([SQUARE, SQUARE[:3]]),
+            [[0, 1, 2], [0, 1, 3], [4, 5, 6]],
+            ([0, 1, 2, 3, 4, 5], [[0, 1, 2], [0, 1, 3], [4, 5, 2]]),
+            id="both-ends-of-an-oversharing-edge",
+        ),
+    ],
+)
+def test_decimate_coincident_merge_by_hand(positions, triangles, expected):
+    """Small cases of the rule: ``expected`` is the kept points (indices into the input) and the triangles, or
+    ``None`` when the input itself comes back."""
+    positions = np.asarray(positions, dtype=np.float64)
+    triangles = np.asarray(triangles, dtype=np.int64)
+    merged, joined = clustering.merge_coincident(positions, triangles)
+    if expected is None:
+        assert merged is positions and joined is triangles
+    else:
+        np.testing.assert_array_equal(merged, positions[expected[0]])
+        np.testing.assert_array_equal(joined, expected[1])
+
+
+def test_decimate_coincident_soup_merged_into_a_fan_takes_the_fan_path(monkeypatch):
+    """A soup of wedges sharing one corner is a bow tie once merged: the merge comes before the fan check, so it is
+    clustered by normal instead of reaching the quadric (1.2 s at 16k wedges there; at 32k its set-up is over
+    ``QUADRIC_WORK``)."""
+    fans = []
+    original = decimate._unfanned_steps
+    monkeypatch.setattr(
+        decimate, "_unfanned_steps", lambda p, t, n: fans.append(len(t)) or original(p, t, n)
+    )
+    n = 4_000
+    angle = np.linspace(0.0, 2.0 * np.pi, n, endpoint=False)
+    rim = np.c_[np.cos(angle), np.sin(angle), np.zeros(n)] * 0.01
+    wedges = np.stack([np.zeros((n, 3)), rim, rim + np.array([0.0, 0.0, 0.01])], axis=1).reshape(
+        -1, 3
+    )
+    smaller = decimate_entity(mesh_entity(wedges, np.arange(3 * n).reshape(-1, 3)), n // 5)
+    assert fans == [n] and 0 < smaller.triangle_count <= n // 5
+
+
+def test_decimate_coincident_merge_costs_little_on_a_smooth_sphere():
+    """Criterion 3: on a 400k sphere without coincident points the merge's check is a few milliseconds against the
+    decimation's seconds — far within 1.2× of the decimation before SLC-66 (best of seven interleaved runs: the
+    research note) — and gives the arrays back, so the result is that of before."""
+    [entity] = entities({"id": "vtkMRMLModelNode4", "mesh": sphere(448)})
+    positions = np.asarray(entity.positions, dtype=np.float64)
+    triangles = np.asarray(entity.indices, dtype=np.int64)
+    best = math.inf
+    for _ in range(3):
+        start = time.perf_counter()
+        merged = clustering.merge_coincident(positions, triangles)
+        best = min(best, time.perf_counter() - start)
+    assert merged[0] is positions and merged[1] is triangles
+    assert best < 0.05
 
 
 def test_decimate_dust_is_bounded(monkeypatch):

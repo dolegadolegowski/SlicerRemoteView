@@ -22,6 +22,10 @@ collected entities (glTF metres, after SLC-07's clean-up), one node per :func:`d
 - size bound: a node above ``2 · max(CLUSTER_GOAL, 3 · share)`` triangles (800k for a 100k share) is first reduced to
   at most twice that goal by connected vertex clustering (:mod:`remoteview_core.clustering`; both sides of a thin wall
   stay apart, seams stay closed);
+- coincident points (SLC-66): the used points that lie at exactly one position are merged class by class, unless the
+  merge would give an edge more triangles than two and than the input edges it comes from (two layers on each other
+  stay apart; a soup's classes are merged anyway), so a soup or a seam is one surface for the quadric
+  (:func:`~remoteview_core.clustering.merge_coincident_steps`); a node without such points is left as it is;
 - fans: a mesh with non-manifold fans (pages sharing one spine: ``fan_weight`` above :data:`FAN_LIMIT`, or a
   quadric set-up above :data:`QUADRIC_WORK`) is clustered by grid cell and normal class instead, since the quadric's
   set-up and its work per collapse grow with the valences;
@@ -409,14 +413,16 @@ def decimate_entity(
 
     1. A mesh above ``2 · max(CLUSTER_GOAL, 3 · target)`` triangles is clustered to at most twice that goal
        (:func:`_bounded_steps`).
-    2. A mesh with non-manifold fans (``fan_weight`` above :data:`FAN_LIMIT`, or ``edge_work`` above
+    2. Its used points at exactly one position are merged class by class
+       (:func:`~remoteview_core.clustering.merge_coincident_steps`, SLC-66; unchanged when none coincide).
+    3. A mesh with non-manifold fans (``fan_weight`` above :data:`FAN_LIMIT`, or ``edge_work`` above
        :data:`QUADRIC_WORK`) is clustered by normal class (:func:`_unfanned_steps`).
-    3. The quadric (``quadric``, default :data:`QUADRIC`, looked up at the call) on the large parts and on the small
+    4. The quadric (``quadric``, default :data:`QUADRIC`, looked up at the call) on the large parts and on the small
        ones (:func:`_reduce_parts`), on welded and scaled coordinates, within :data:`QUADRIC_SECONDS` of the start of
        this step.
-    4. If any part gives no usable result: :func:`_fallback_steps` (clustering) on the whole mesh of step 2, with a
+    5. If any part gives no usable result: :func:`_fallback_steps` (clustering) on the whole mesh of step 3, with a
        warning in the log (counts only, no node data).
-    5. Folds repaired, normals recomputed (:func:`_finished`).
+    6. Folds repaired, normals recomputed (:func:`_finished`).
 
     Returns ``None`` — before any VTK filter runs — for indices outside the positions or a triangle that repeats a
     vertex (VTK does not check them), and when nothing can reduce the mesh; :func:`fit_to_budget` then keeps the
@@ -455,6 +461,8 @@ def decimate_steps(
                 )
             )
         positions, triangles = bounded, bounded_triangles
+    # before the fans: a soup merged into a bow tie is a fan
+    positions, triangles = yield from clustering.merge_coincident_steps(positions, triangles)
     if (
         clustering.fan_weight(triangles) > FAN_LIMIT
         or clustering.edge_work(triangles) > QUADRIC_WORK

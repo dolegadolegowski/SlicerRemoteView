@@ -1452,6 +1452,57 @@ Expected results:
 |---|---|---|---|---|
 | | | | | |
 
+### §14.3 Soups and seams close (SLC-66)
+
+Preconditions: §14's setup (relay, viewer, the `mobile` profile: 100k triangles per model). In the Python console of a
+new scene:
+
+```python
+import numpy as np
+import vtk
+from vtkmodules.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray, vtk_to_numpy
+def model(points, triangles, name):
+    data = vtk.vtkPolyData()
+    data.SetPoints(vtk.vtkPoints())
+    data.GetPoints().SetData(numpy_to_vtk(np.ascontiguousarray(points, dtype=np.float64), deep=True))
+    cells = vtk.vtkCellArray()
+    cells.SetData(numpy_to_vtkIdTypeArray(np.arange(0, triangles.size + 1, 3, dtype=np.int64), deep=True),
+                  numpy_to_vtkIdTypeArray(np.ascontiguousarray(triangles.ravel(), dtype=np.int64), deep=True))
+    data.SetPolys(cells)
+    node = slicer.modules.models.logic().AddModel(data)
+    node.SetName(name)
+def arrays(source):
+    source.Update()
+    data = source.GetOutput()
+    return (vtk_to_numpy(data.GetPoints().GetData()),
+            vtk_to_numpy(data.GetPolys().GetConnectivityArray()).reshape(-1, 3))
+sphere = vtk.vtkSphereSource(); sphere.SetRadius(40); sphere.SetThetaResolution(448); sphere.SetPhiResolution(448)
+points, triangles = arrays(sphere)
+model(points[triangles.ravel()], np.arange(triangles.size).reshape(-1, 3), "Soup")  # 399,616 loose triangles
+box = vtk.vtkTessellatedBoxSource(); box.SetLevel(150); box.QuadsOff(); box.DuplicateSharedPointsOn()
+box.SetBounds(100, 180, -40, 40, -40, 40)
+model(*arrays(box), "Seamed box")  # 273,612 triangles, each face on points of its own: 138,624 points at 136,808 places
+```
+
+Steps:
+
+1. Click *Start session* and join with the viewer.
+2. On the phone, zoom in on *Soup* and on the edges and corners of *Seamed box*, and orbit around both.
+
+Expected results:
+
+- Step 1: "Live" within about twice as long as §14 step 1 (each model is decimated to 100k triangles; the soup is
+  merged first and is collected with six times Big's points, three per triangle).
+- Step 2: *Soup* is a closed, smooth sphere and *Seamed box* a closed box: no holes, no missing triangles, no cracks
+  along the box's 12 edges. The box's edges may look slightly rounded: once merged, a point on an edge has one normal
+  (protocol §7.4). Before SLC-66, about 60 % of the soup's surface was missing (its loose triangles were decimated one
+  by one) and the box decimated with 1,688 open edges along its seams. Record a screenshot in the Result column.
+- Throughout: no traceback in the Python console, no warning line from `decimate` in the Error Log.
+
+| Date | Slicer version | OS | Result | Tester |
+|---|---|---|---|---|
+| | | | | |
+
 ## §15 Preparing the scene in steps (SLC-28, SLC-50, SLC-51; FR-10, R-05, `docs/research/slicer-prepare.md`)
 
 Preconditions: §2's setup with relay (b) or (c); a phone ready to join. Every step watches the main thread with a

@@ -9,7 +9,8 @@ keeps the order of its clusters, a repeated one is kept once, and the two sides 
 cancel, go both. For non-manifold fans (pages sharing one spine) :func:`cluster_by_normal` clusters by grid cell and the
 tetrahedral class of the vertex normal instead. :func:`small_islands` finds the small connected parts that *Remove
 small islands* leaves out before the shares (SLC-53), with parts joined through shared vertex IDs and through exactly
-equal positions.
+equal positions. :func:`merge_coincident` merges the vertices at one position before the quadric (SLC-66), class
+by class, keeping layers that would then share edges apart.
 
 Pure numpy (no VTK, no Slicer), deterministic (fixed seed). Indices are int64, positions float64. Sources and
 measurements: ``docs/research/slicer-decimate.md`` § SLC-41, ``docs/research/slicer-islands.md`` (SLC-53). The
@@ -330,6 +331,99 @@ def coincident_pairs(positions: Positions, triangles: Triangles) -> NDArray[np.i
     )
     agree = np.einsum("ij,ij->i", normal[a], normal[b]) > 0
     return np.stack([a[agree], b[agree]], axis=1)
+
+
+def _distinct(triangles: Triangles) -> Triangles:
+    """``triangles`` with a repeat on the same vertices (in any order or winding) kept once, at its first place."""
+    corners = np.sort(triangles, axis=1)
+    order = np.lexsort(corners.T[::-1])  # stable: the first of equal triples comes first
+    corners = corners[order]
+    first = np.r_[True, np.any(corners[1:] != corners[:-1], axis=1)]
+    return triangles[np.sort(order[first])]
+
+
+def _edge_slots(triangles: Triangles, n: int) -> NDArray[np.int64]:
+    """An undirected key per edge slot: the edges ``(0, 1), (1, 2), (2, 0)`` of every triangle in turn."""
+    starts, ends = triangles.ravel(), triangles[:, [1, 2, 0]].ravel()
+    return np.minimum(starts, ends) * np.int64(n) + np.maximum(starts, ends)
+
+
+def merge_coincident(positions: Positions, triangles: Triangles) -> tuple[Positions, Triangles]:
+    """The vertices ``triangles`` use merged where they lie at exactly the same position, before the quadric (SLC-66): a
+    triangle soup (an STL read without merging) or a seam (a reader's or a normal filter's duplicated points) is
+    then one surface instead of loose pieces the quadric eats or opens.
+
+    Every class of vertices at one position is merged into its lowest vertex unless the merge would give an edge more
+    triangles than two and than any input edge it comes from (two layers lying on each other — a duplicated shell, a
+    two-sided surface on points of its own, two labels touching — which would then share every edge); such a class
+    keeps its vertices, and so do the classes at the edge's other end. A class whose vertices all belong to
+    triangles that share no vertex (a soup's) is merged anyway: a soup has no surface to keep apart, and a two-sided
+    soup becomes one two-sided sheet. Triangles left repeating a vertex go; the used vertices keep their order (an
+    order by key slowed the quadric by a third, ``docs/research/slicer-decimate.md`` § SLC-66). Returns
+    ``positions`` and ``triangles`` themselves when nothing is merged — no repeated position among the used vertices
+    costs a hash and a sort of the used vertices (about 15 ms for the 200k of a 400k-triangle sphere)."""
+    return run(merge_coincident_steps(positions, triangles))
+
+
+def merge_coincident_steps(
+    positions: Positions, triangles: Triangles
+) -> Steps[tuple[Positions, Triangles]]:
+    """:func:`merge_coincident` in steps."""
+    n = len(positions)
+    used = np.zeros(n, dtype=bool)
+    used[triangles.ravel()] = True
+    # unused vertices (a book's spare spine, dropped islands) are not hashed
+    candidates = np.flatnonzero(used)
+    key = np.zeros(n, dtype=np.uint64)
+    key[candidates] = position_keys(positions[candidates])
+    used_keys = key[candidates]
+    ordered = np.sort(used_keys)
+    repeated = ordered[1:] == ordered[:-1]
+    if not repeated.any():
+        return positions, triangles
+    yield
+    values = np.unique(ordered[1:][repeated])  # the repeated keys; only their vertices are sorted
+    slot = np.minimum(np.searchsorted(values, used_keys), len(values) - 1)
+    twins, lowest = _same_position(positions, key, candidates[values[slot] == used_keys])
+    del key, used_keys, ordered, slot
+    label = np.arange(n)  # equal keys at different positions make no twins: nothing is merged
+    label[twins] = lowest
+    yield
+    distinct = _distinct(triangles)
+    single = np.bincount(distinct.ravel(), minlength=n) == 1
+    loose = np.zeros(n, dtype=bool)  # the vertices of triangles that share none
+    loose[distinct[single[distinct].all(axis=1)].ravel()] = True
+    soup = np.ones(n, dtype=bool)  # per class: every vertex in a loose triangle
+    np.logical_and.at(soup, label, loose)
+    yield
+    _, before, before_count = np.unique(
+        _edge_slots(distinct, n), return_inverse=True, return_counts=True
+    )
+    merged = label[distinct]
+    slots, after, after_count = np.unique(
+        _edge_slots(merged, n), return_inverse=True, return_counts=True
+    )
+    # an edge the full merge would share by more triangles than two and than its input edges: both of its classes
+    # keep their vertices. Keeping a class apart only takes merges away, so, counted over distinct triangles, no edge
+    # then has more triangles than the larger of two and its input edges — except between a soup's classes, merged
+    # anyway below.
+    most_before = np.zeros(len(slots), dtype=np.int64)
+    np.maximum.at(most_before, after, before_count[before])
+    new = ((after_count > 2) & (after_count > most_before))[after]
+    blocked = np.zeros(n, dtype=bool)
+    blocked[merged.ravel()[new]] = True
+    blocked[merged[:, [1, 2, 0]].ravel()[new]] = True
+    blocked &= ~soup
+    target = np.where(blocked[label], np.arange(n), label)
+    if np.array_equal(target, np.arange(n)):
+        return positions, triangles
+    yield
+    joined = target[triangles]
+    a, b, c = joined.T
+    joined = joined[(a != b) & (b != c) & (a != c)]
+    if not len(joined):
+        return positions, triangles
+    return compact(positions, joined)
 
 
 def cluster_connected(
