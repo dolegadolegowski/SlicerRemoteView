@@ -25,14 +25,14 @@ so you add it by hand.
 ## 1. Download the plugin
 
 1. Sign in to GitHub and open the repository page.
-2. On the right, under **Releases**, click the newest version and download `SlicerRemoteView-<version>.zip`
-   (for example `SlicerRemoteView-0.1.0.zip`). Unzip the file (Windows: right-click it → **Extract All**; it
-   may put one more folder around the result). You get a folder `SlicerRemoteView-<version>`.
+2. On the right, under **Releases**, click the newest version and download `RemoteView-<version>.zip`
+   (for example `RemoteView-0.1.0.zip`). Unzip the file (Windows: right-click it → **Extract All**; it
+   may put one more folder around the result). You get a folder `RemoteView-<version>`.
 3. Move this folder to a place where it can stay, for example your home folder (macOS: Finder → **Go** →
    **Home**; Windows: `C:\Users\<your name>`). Not Downloads or a temporary folder: Slicer loads the plugin
    from this place at every start.
 
-The plugin is the folder `SlicerRemoteView-<version>/RemoteView`: the folder that contains `RemoteView.py`.
+The plugin is the folder `RemoteView-<version>/RemoteView`: the folder that contains `RemoteView.py`.
 Keep this folder complete.
 
 No release yet, or you want the newest changes? Above the list of files, click **Code**, then

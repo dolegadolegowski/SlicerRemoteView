@@ -29,15 +29,15 @@ Nazwy menu, przycisków i komunikatów Slicera i RemoteView podajemy po angielsk
 
 1. Zaloguj się do GitHuba i otwórz stronę repozytorium.
 2. Po prawej stronie, w części **Releases**, kliknij najnowszą wersję i pobierz plik
-   `SlicerRemoteView-<wersja>.zip` (np. `SlicerRemoteView-0.1.0.zip`). Rozpakuj go (Windows: kliknij go prawym
+   `RemoteView-<wersja>.zip` (np. `RemoteView-0.1.0.zip`). Rozpakuj go (Windows: kliknij go prawym
    przyciskiem myszy → **Wyodrębnij wszystko**; może powstać jeszcze jeden folder dookoła). Powstanie folder
-   `SlicerRemoteView-<wersja>`.
+   `RemoteView-<wersja>`.
 3. Przenieś ten folder w miejsce, w którym może zostać na stałe, np. do swojego folderu domowego
    (macOS: Finder → **Idź** → **Katalog domowy**; Windows: `C:\Users\<Twoja nazwa>`). Nie zostawiaj go
    w folderze z pobranymi plikami (**Pobrane** w Windows, **Pobrane rzeczy** w macOS) ani w folderze
    tymczasowym: Slicer wczytuje plugin z tego miejsca przy każdym uruchomieniu.
 
-Sam plugin to folder `SlicerRemoteView-<wersja>/RemoteView`, czyli folder z plikiem `RemoteView.py`.
+Sam plugin to folder `RemoteView-<wersja>/RemoteView`, czyli folder z plikiem `RemoteView.py`.
 Nie usuwaj z niego żadnych plików.
 
 Nie ma jeszcze żadnego wydania albo chcesz najnowsze zmiany? Nad listą plików kliknij **Code**, a potem

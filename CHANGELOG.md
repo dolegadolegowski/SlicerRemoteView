@@ -3,6 +3,14 @@
 All notable changes to SlicerRemoteView. The section of a version is the text of its GitHub release
 (`.github/workflows/release.yml` reads it). Dates are ISO (YYYY-MM-DD).
 
+## [Unreleased]
+
+- The Slicer extension is named **RemoteView**, as the Extensions Index requires (names starting with "Slicer" are
+  refused): `project(RemoteView)` in `slicer-plugin/CMakeLists.txt`, the catalog entry `RemoteView.json`, and the
+  release zip `RemoteView-<version>.zip` holding the folder `RemoteView-<version>/RemoteView`. The project, the
+  repository, the relay and the protocol identifiers keep the name SlicerRemoteView; the module is `RemoteView` as
+  before.
+
 ## [0.1.0] - 2026-11-03
 
 The first release: the 3D Slicer module, the relay server and the web viewer, as used by the project's own
@@ -27,7 +35,7 @@ testers since October 2026.
 - **Privacy by design.** Nothing leaves the computer before *Start session*; the panel names the relay that
   will receive the scene; the connection is encrypted (`wss://`); session codes and tokens never appear in
   URLs or logs; the relay keeps the scene in memory only.
-- Installation from the release zip (`SlicerRemoteView-<version>/RemoteView` as an additional module path);
+- Installation from the release zip (`RemoteView-<version>/RemoteView` as an additional module path);
   the two Python packages the module needs are installed on the first *Start session*, after asking.
 
 ### Relay server
