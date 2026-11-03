@@ -195,15 +195,17 @@ def test_package_version_is_written_once():
     assert package.read_version() == VERSION
     pattern = re.compile(rf"(?<![0-9.]){re.escape(VERSION)}(?![0-9])")
     hits = [
-        p.relative_to(PLUGIN_ROOT).as_posix()
+        p.relative_to(REPO_ROOT).as_posix()
         for p in [
             *MODULE_DIR.rglob("*.py"),
             PLUGIN_ROOT / "pyproject.toml",
             PLUGIN_ROOT / "CMakeLists.txt",
+            REPO_ROOT / "CMakeLists.txt",
+            PLUGIN_ROOT / "RemoteView.json",
         ]
-        if "_vendor" not in p.parts and pattern.search(p.read_text())
+        if "_vendor" not in p.parts and pattern.search(p.read_text(encoding="utf-8"))
     ]
-    assert hits == ["RemoteView/remoteview_core/__init__.py"]
+    assert hits == ["slicer-plugin/RemoteView/remoteview_core/__init__.py"]
 
 
 @pytest.mark.parametrize(
@@ -305,16 +307,47 @@ CATALOG_KEYS = CATALOG_REQUIRED | {
     "scm_type",
     "tier",
 }
+REPOSITORY = "https://github.com/dolegadolegowski/SlicerRemoteView"
 RAW_MAIN = "https://raw.githubusercontent.com/dolegadolegowski/SlicerRemoteView/main/"
+#: The extension's top level, the only copy of its metadata: the index CI and the factory configure the root of the
+#: clone (SLC-72, ADR 0010).
+EXTENSION_CMAKE = REPO_ROOT / "CMakeLists.txt"
+#: How the index CI reads the top-level CMakeLists.txt — the patterns and flags of ExtensionsIndex
+#: ``scripts/check_description_files.py`` L410, L432, L448 and its licence names L497 (``main`` at ``a29e473``,
+#: 2026-11-03): the first ``project(`` anywhere in the file, comments included, names the extension.
+INDEX_PROJECT_RE = re.compile(r"project\s*\(\s*([^\s\)\n\r]+)", re.IGNORECASE | re.MULTILINE)
+INDEX_ICONURL_RE = re.compile(
+    r'set\s*\(EXTENSION_ICONURL\s*"([^"]+)"[ ]*\)', re.IGNORECASE | re.MULTILINE
+)
+INDEX_SCREENSHOTURLS_RE = re.compile(
+    r'set\s*\(EXTENSION_SCREENSHOTURLS\s*"([^"]+)"\)', re.IGNORECASE | re.MULTILINE
+)
+INDEX_LICENSE_NAMES = (
+    "LICENSE",
+    "LICENCE",
+    "License.txt",
+    "license.txt",
+    "LICENSE.txt",
+    "COPYING",
+    "COPYING.txt",
+)
 
 
 def _cmake_set(name: str) -> str:
-    """The quoted value of ``set(<name> "...")`` in the extension's CMakeLists.txt, in the form the index CI reads."""
-    match = re.search(
-        rf'set\s*\({name}\s*"([^"]*)"\)', (PLUGIN_ROOT / "CMakeLists.txt").read_text()
+    """The quoted value of ``set(<name> "...")`` in the extension's top-level CMakeLists.txt, which sets it once —
+    comments included, so a commented-out older line cannot be the one a reader finds first."""
+    text = EXTENSION_CMAKE.read_text(encoding="utf-8")
+    values = re.findall(rf'set\s*\({name}\s*"([^"]*)"\)', text)
+    assert len(values) == 1, f"{name}: {len(values)} quoted set() lines"
+    return values[0]
+
+
+def _tracked(rel: str) -> bool:
+    """Whether git tracks ``rel`` (a raw URL serves only committed files)."""
+    result = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", rel], cwd=REPO_ROOT, capture_output=True, check=False
     )
-    assert match, f"{name} is not one quoted string"
-    return match.group(1)
+    return result.returncode == 0
 
 
 def test_package_catalog_entry_matches_the_schema_and_the_cmake_metadata():
@@ -328,11 +361,13 @@ def test_package_catalog_entry_matches_the_schema_and_the_cmake_metadata():
         "https://raw.githubusercontent.com/Slicer/Slicer/main/Schemas/"
         "slicer-extension-catalog-entry-schema-v1.0.2.json#"
     )
-    # the file is named after the extension: the project() of its top-level CMakeLists.txt
-    project = re.search(r"^project\((\w+)\)", (PLUGIN_ROOT / "CMakeLists.txt").read_text(), re.M)
-    assert project and path.stem == project.group(1)
+    # the file is named after the extension: the project() of the repository's top-level CMakeLists.txt
+    project = re.search(r"^project\((\w+)\)", EXTENSION_CMAKE.read_text(encoding="utf-8"), re.M)
+    assert project and path.stem == project.group(1) == package.ARCHIVE_PREFIX
     assert entry["category"] == _cmake_set("EXTENSION_CATEGORY") == "Remote"
-    assert entry["scm_url"] == _cmake_set("EXTENSION_HOMEPAGE") + ".git"
+    assert entry["scm_url"] == f"{REPOSITORY}.git"
+    # the homepage is the extension's README as GitHub shows it
+    assert _cmake_set("EXTENSION_HOMEPAGE") == f"{REPOSITORY}/tree/main/slicer-plugin"
     # Slicer's CMake reader requires scm_revision, although the schema does not
     assert entry["scm_revision"] == "main"
     assert entry["build_dependencies"] == [] and _cmake_set("EXTENSION_DEPENDS") == "NA"
@@ -345,8 +380,41 @@ def test_package_cmake_image_urls_point_at_committed_pngs():
     assert len(icon) == 1 and screenshots
     for url in icon + screenshots:
         assert url.startswith(RAW_MAIN), url  # the raw file, not the GitHub page
-        data = (REPO_ROOT / url.removeprefix(RAW_MAIN)).read_bytes()
+        rel = url.removeprefix(RAW_MAIN)
+        assert _tracked(rel), f"{rel} is not committed"
+        data = (REPO_ROOT / rel).read_bytes()
         assert data[:8] == b"\x89PNG\r\n\x1a\n", url
     data = (REPO_ROOT / icon[0].removeprefix(RAW_MAIN)).read_bytes()
     width, height = int.from_bytes(data[16:20]), int.from_bytes(data[20:24])  # the IHDR chunk
     assert (width, height) == (128, 128)
+
+
+def test_package_top_level_cmake_reads_as_the_index_ci_reads_it():
+    """The index CI's checks of the repository (``check_description_files.py``) on our files."""
+    text = EXTENSION_CMAKE.read_text(encoding="utf-8")
+    name = PLUGIN_ROOT.joinpath("RemoteView.json").stem
+    # one match each: the index CI takes the first, CMake the last one it runs, so a second (a comment naming
+    # another project, a commented-out older URL) could make them disagree
+    projects = INDEX_PROJECT_RE.findall(text)
+    assert len(projects) == 1 and projects[0].strip("\"'") == name
+    icons = INDEX_ICONURL_RE.findall(text)
+    screenshots = INDEX_SCREENSHOTURLS_RE.findall(text)
+    assert len(icons) == 1 and icons[0].strip() == _cmake_set("EXTENSION_ICONURL")
+    assert len(screenshots) == 1
+    assert screenshots[0].split() == _cmake_set("EXTENSION_SCREENSHOTURLS").split()
+    # check_extension_name and check_git_repository_name (L189–234)
+    assert not name.lower().startswith("slicer")
+    assert REPOSITORY.rsplit("/", 1)[1].startswith("Slicer")
+    # check_license_file (L494–515): the first of its names found at the root, the repository's MIT licence
+    licences = [n for n in INDEX_LICENSE_NAMES if (REPO_ROOT / n).is_file()]
+    assert licences[:1] == ["LICENSE"] and _tracked("LICENSE")
+    assert (REPO_ROOT / "LICENSE").read_text().startswith("MIT License\n")
+
+
+def test_package_contributors_name_a_person_and_an_organization():
+    """``Firstname Lastname (Organization)``, comma-separated for several (Slicer 5.12.4
+    ``Docs/developer_guide/extensions.md``, *Supported metadata fields*)."""
+    contributors = _cmake_set("EXTENSION_CONTRIBUTORS")
+    person = r"[^\s,()]+(?: [^\s,()]+)+ \([^()]+\)"
+    assert re.fullmatch(rf"{person}(?:, {person})*", contributors), contributors
+    assert contributors == "Damian Dołęga-Dołęgowski (SlicerRemoteView)"

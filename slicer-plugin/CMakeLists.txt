@@ -1,32 +1,7 @@
-cmake_minimum_required(VERSION 3.28.0...3.28.0 FATAL_ERROR)
+# The modules of the RemoteView extension. The extension's top level — its name, the EXTENSION_* metadata, Slicer's
+# use file and the packaging — is the repository root's CMakeLists.txt, which adds this directory (ADR 0010).
+if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+  message(FATAL_ERROR "Configure the repository root: its CMakeLists.txt is the top level of the RemoteView extension.")
+endif()
 
-# Layout follows the Slicer 5.12.4 extension template
-# (Utilities/Templates/Extensions/Default/CMakeLists.txt at tag v5.12.4).
-project(RemoteView)
-
-#-----------------------------------------------------------------------------
-# Extension meta-information
-set(EXTENSION_HOMEPAGE "https://github.com/dolegadolegowski/SlicerRemoteView")
-# The Extensions Index category is authoritative in RemoteView.json (SLC-20; tests/test_package.py keeps them
-# equal); kept here for the generated extension description.
-set(EXTENSION_CATEGORY "Remote")
-set(EXTENSION_CONTRIBUTORS "SlicerRemoteView contributors")
-set(EXTENSION_DESCRIPTION "Share the 3D Slicer scene with phones, tablets and Meta Quest headsets through a relay server and a 5-character session code. Nothing is sent until the user clicks Start session.")
-set(EXTENSION_ICONURL "https://raw.githubusercontent.com/dolegadolegowski/SlicerRemoteView/main/slicer-plugin/RemoteView/Resources/Icons/RemoteView.png")
-# Space-separated raw image URLs (Extensions Index CI: no space before the closing parenthesis).
-set(EXTENSION_SCREENSHOTURLS "https://raw.githubusercontent.com/dolegadolegowski/SlicerRemoteView/main/slicer-plugin/Screenshots/RemoteView-panel.png")
-set(EXTENSION_DEPENDS "NA") # Specified as a list or "NA" if no dependencies
-
-#-----------------------------------------------------------------------------
-# Extension dependencies
-find_package(Slicer REQUIRED)
-include(${Slicer_USE_FILE})
-
-#-----------------------------------------------------------------------------
-# Extension modules
 add_subdirectory(RemoteView)
-## NEXT_MODULE
-
-#-----------------------------------------------------------------------------
-include(${Slicer_EXTENSION_GENERATE_CONFIG})
-include(${Slicer_EXTENSION_CPACK})

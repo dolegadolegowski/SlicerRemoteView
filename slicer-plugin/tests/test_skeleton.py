@@ -22,6 +22,8 @@ from mrml_fakes import EVENT_IDS
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 MODULE_DIR = PLUGIN_ROOT / "RemoteView"
+#: The extension's top-level CMakeLists.txt (the repository root's, SLC-72), read before any test patches I/O.
+EXTENSION_CMAKE_TEXT = (PLUGIN_ROOT.parent / "CMakeLists.txt").read_text(encoding="utf-8")
 
 #: Runtime dependencies that must only be imported after the user clicks Start (FR-02, FR-16).
 LAZY_MODULES = ("websockets", "segno", "jsonschema", "remoteview_protocol")
@@ -145,6 +147,9 @@ def test_skeleton_import_and_construct_have_no_side_effects(
     module.RemoteView(parent)
     assert parent.title == "RemoteView"
     assert parent.categories == ["Remote"]
+    # the extension's contributors, as the top-level CMakeLists.txt names them (SLC-72)
+    contributors = re.search(r'set\(EXTENSION_CONTRIBUTORS "([^"]*)"\)', EXTENSION_CMAKE_TEXT)
+    assert contributors and parent.contributors == [contributors.group(1)]
     missing = [w for w in DISCLOSURE_WORDS if w not in parent.helpText]
     assert missing == [], f"help text does not disclose: {missing}"  # Extension Index opt-in
 
@@ -289,14 +294,51 @@ def test_skeleton_cmake_mismatch_is_detected(tmp_path: Path):
     ]
 
 
+def _cmake_code(path: Path) -> str:
+    """The CMake code of ``path``, comments dropped."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    return "\n".join(line.split("#", 1)[0] for line in lines)
+
+
+#: The repository's top-level CMakeLists.txt, statement by statement in the order of the Slicer 5.12.4 extension
+#: template (``Utilities/Templates/Extensions/Default/CMakeLists.txt``), the module directory added in its place.
+TOP_LEVEL_STATEMENTS = (
+    r"cmake_minimum_required\(VERSION 3\.28\.0\.\.\.3\.28\.0 FATAL_ERROR\)",
+    r"project\(RemoteView\)",
+    r'set\(EXTENSION_HOMEPAGE "https://',
+    r'set\(EXTENSION_CATEGORY "Remote"\)',
+    r'set\(EXTENSION_CONTRIBUTORS "',
+    r'set\(EXTENSION_DESCRIPTION "',
+    r'set\(EXTENSION_ICONURL "',
+    r'set\(EXTENSION_SCREENSHOTURLS "',
+    r'set\(EXTENSION_DEPENDS "NA"\)',
+    r"find_package\(Slicer REQUIRED\)",
+    r"include\(\$\{Slicer_USE_FILE\}\)",
+    r"add_subdirectory\(slicer-plugin\)",
+    r"include\(\$\{Slicer_EXTENSION_GENERATE_CONFIG\}\)",
+    r"include\(\$\{Slicer_EXTENSION_CPACK\}\)",
+)
+
+
 def test_skeleton_extension_cmake_metadata():
-    text = (PLUGIN_ROOT / "CMakeLists.txt").read_text()
-    assert re.search(r"^project\(RemoteView\)", text, re.MULTILINE)
-    assert re.search(r'^set\(EXTENSION_CATEGORY "Remote"\)', text, re.MULTILINE)
-    assert re.search(r'^set\(EXTENSION_HOMEPAGE "https://', text, re.MULTILINE)
-    assert re.search(r"^add_subdirectory\(RemoteView\)", text, re.MULTILINE)
-    module_cmake = (MODULE_DIR / "CMakeLists.txt").read_text()
-    code = "\n".join(line.split("#", 1)[0] for line in module_cmake.splitlines())
+    """SLC-72 (ADR 0010): the extension's top level is the repository root — the index CI and Slicer's extensions
+    build system configure the root of the clone, and ``SlicerMacroExtractRepositoryInfo`` reads
+    ``${CMAKE_SOURCE_DIR}/.git`` for the package name and revision — while ``slicer-plugin/CMakeLists.txt`` only adds
+    the module, so the metadata has one copy."""
+    root = _cmake_code(PLUGIN_ROOT.parent / "CMakeLists.txt")
+    positions = []
+    for statement in TOP_LEVEL_STATEMENTS:
+        found = [m.start() for m in re.finditer(rf"^{statement}", root, re.MULTILINE)]
+        assert len(found) == 1, f"top-level CMakeLists.txt: {statement!r} {len(found)} times"
+        positions += found
+    assert positions == sorted(positions), "not in the template's order"
+    # unconditional: the index's packaging test sets no <Name>_BUILD_SLICER_EXTENSION (only the factory does)
+    assert not re.search(r"^\s*if\s*\(", root, re.MULTILINE)
+    plugin = _cmake_code(PLUGIN_ROOT / "CMakeLists.txt")
+    assert re.findall(r"^add_subdirectory\((\S+)\)", plugin, re.MULTILINE) == ["RemoteView"]
+    for top_level_only in (r"project\s*\(", r"EXTENSION_", r"find_package\s*\(", r"\$\{Slicer_"):
+        assert not re.search(top_level_only, plugin, re.IGNORECASE), top_level_only
+    code = _cmake_code(MODULE_DIR / "CMakeLists.txt")
     macro = re.search(r"slicerMacroBuildScriptedModule\((.*?)\)", code, re.DOTALL)
     assert macro, "slicerMacroBuildScriptedModule call missing"
     args = macro.group(1).split()
