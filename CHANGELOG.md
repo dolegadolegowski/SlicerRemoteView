@@ -10,24 +10,25 @@ testers since October 2026.
 
 ### RemoteView module for 3D Slicer 5.12
 
-- **Share the 3D view in one click.** *Start session* sends the models and segments shown in the 3D view to a
-  relay server and shows a 5-character code and a QR code; phones, tablets and Meta Quest headsets join with
-  them. A *Presentation window* shows both in large print for a projector; *Copy link* copies the join link.
-- **Live.** Changes in Slicer — colour, opacity, visibility, transforms, meshes, segments edited, models added,
-  renamed or removed, a scene opened or closed — reach the viewers while the session runs. A toolbar on Slicer's
-  main window chooses when they go: at once, 15, 30 or 60 s after the last change (30 s by default, with a
-  countdown on *Send scene now*), or only when you click *Send scene now*.
-- **Slicer stays responsive.** Large scenes are simplified for the devices in steps between Slicer's own events,
-  with a cache per model, so editing goes on while the scene is prepared.
-- **Small islands.** *Remove small islands* (on by default) leaves out small pieces not connected to the rest of
-  a model or segment before the scene is reduced for sending.
-- **Sessions survive a lost connection.** The module reconnects and resumes the same session and code after a
-  dropped network link or a relay restart.
-- **Privacy by design.** Nothing leaves the computer before *Start session*; the panel names the relay that will
-  receive the scene; the connection is encrypted (`wss://`); session codes and tokens never appear in URLs or
-  logs; the relay keeps the scene in memory only.
-- Installation from the release zip (`SlicerRemoteView-<version>/RemoteView` as an additional module path); the
-  two Python packages the module needs are installed on the first *Start session*, after asking.
+- **Share the 3D view in one click.** *Start session* sends the models and segments shown in the 3D view to
+  a relay server and shows a 5-character code and a QR code; phones, tablets and Meta Quest headsets join
+  with them. A *Presentation window* shows both in large print for a projector; *Copy link* copies the join
+  link.
+- **Live.** Changes in Slicer — colour, opacity, visibility, transforms, meshes, segments edited, models
+  added, renamed or removed, a scene opened or closed — reach the viewers while the session runs. A toolbar
+  on Slicer's main window chooses when they go: at once, 15, 30 or 60 s after the last change (30 s by
+  default, with a countdown on *Send scene now*), or only when you click *Send scene now*.
+- **Slicer stays responsive.** Large scenes are simplified for the devices in steps between Slicer's own
+  events, with a cache per model, so editing goes on while the scene is prepared.
+- **Small islands.** *Remove small islands* (on by default) leaves out small pieces not connected to the
+  rest of a model or segment before the scene is reduced for sending.
+- **Sessions survive a lost connection.** The module reconnects and resumes the same session and code after
+  a dropped network link or a relay restart.
+- **Privacy by design.** Nothing leaves the computer before *Start session*; the panel names the relay that
+  will receive the scene; the connection is encrypted (`wss://`); session codes and tokens never appear in
+  URLs or logs; the relay keeps the scene in memory only.
+- Installation from the release zip (`SlicerRemoteView-<version>/RemoteView` as an additional module path);
+  the two Python packages the module needs are installed on the first *Start session*, after asking.
 
 ### Relay server
 
