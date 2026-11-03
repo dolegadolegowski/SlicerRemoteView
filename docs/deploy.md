@@ -391,7 +391,7 @@ follows `main`, not tags.
 3. The workflow:
    - takes the tag's section from `CHANGELOG.md` (`.github/scripts/changelog-section.mjs`) and fails with a clear
      message when there is none;
-   - builds `SlicerRemoteView-X.Y.Z.zip` with `slicer-plugin/scripts/package.py` (SLC-20; fails while that script
+   - builds `RemoteView-X.Y.Z.zip` with `slicer-plugin/scripts/package.py` (SLC-20; fails while that script
      does not exist) and fails if the archive lists a `.env`, `.npmrc`, key or keystore file;
    - builds the relay image and pushes `ghcr.io/<owner>/slicerremoteview-relay:X.Y.Z` (and `:sha-<commit>`);
    - creates a **draft** release with the notes, the zip and a checklist line for the Quest APK.
