@@ -11,6 +11,50 @@ segments (as Slicer's 3D view shows them) as GLB plus their live changes — app
 segments added or removed. **Nothing leaves the computer before that click** (Extension Index
 opt-in rule, FR-02). Design: `docs/architecture.md` §6, ADR 0005; tasks: `docs/plan/slicer.md`.
 
+![The RemoteView panel in 3D Slicer 5.12.4](Screenshots/RemoteView-panel.png)
+
+## Data flow: what leaves the computer (NFR-16)
+
+- **Before *Start session*: nothing.** Loading Slicer, opening the panel or typing an address makes no network
+  connection and installs nothing (`tests/test_skeleton.py` fails on any socket, process or pip call).
+- **On the first *Start session*** the module asks before Slicer's `pip` downloads two Python packages from PyPI
+  (or the index configured for pip; `websockets`, `segno`, exact pins in `remoteview_core/deps.py`) — that server
+  sees the computer's address and its Python and OS versions; nothing is downloaded if the user declines.
+- **During a session**, only to the relay whose address the user typed (there is no built-in relay), over TLS
+  (`wss://`; plain `ws://` only to the same computer): the surface meshes of the models and segments the 3D view
+  shows (no images, volumes, DICOM tags, file paths or MRML attributes), their names (unless *Hide node names* is
+  on), MRML and segment IDs, colours, opacity, visibility and transforms, the Slicer, extension and
+  operating-system versions, and every later change to them until *Stop session* — including models and segments
+  shown, added or renamed later and any scene opened or loaded. Hiding, deleting or renaming something later does not
+  take back what was already sent. The relay can read the scene
+  (no end-to-end encryption), and anyone who has the session code can view it.
+- **Retention**: the relay keeps a session and its last scene in memory only — never on disk or in its logs, which
+  hold no scene data, names, codes or tokens (NFR-12) — and drops them when the session ends: *Stop session*,
+  Slicer gone for more than 120 s, 30 minutes without a viewer (the panel can renew this), 12 hours at most, or a
+  relay restart (FR-20, NFR-11).
+- **Where**: wherever the chosen relay runs. The project's own relay is deployed on Railway in an EU region
+  (`docs/deploy.md`, ADR 0007 §6; whether Railway keeps its logs and metadata in the EU is `[TODO verify]` there).
+- No analytics, telemetry or update checks. What is sent and who can see it is also in the module's help text
+  (`RemoteView.py`); the panel's consent statement (`remoteview_core/consent.py`) sums it up next to the address
+  field, before the first click; neither states the retention or the region.
+
+## Install from a release zip
+
+`SlicerRemoteView-<version>.zip` (GitHub Releases, built by `scripts/package.py`) holds one folder:
+
+```text
+SlicerRemoteView-<version>/
+  LICENSE.txt
+  RemoteView/            <- add this folder to Additional module paths
+    RemoteView.py
+    remoteview_core/  _vendor/  Resources/
+```
+
+Unzip it to a place where it can stay (on Windows *Extract All* may add one more `SlicerRemoteView-<version>`
+folder around it), then in Slicer: *Edit → Application Settings → Modules → Additional module paths → Add* →
+the `RemoteView` folder (the one with `RemoteView.py`) → restart. The repository's own `slicer-plugin/RemoteView`
+folder (a clone or *Download ZIP*) installs the same way and holds the same files.
+
 ## Layout
 
 | Path | Content |
@@ -18,7 +62,7 @@ opt-in rule, FR-02). Design: `docs/architecture.md` §6, ADR 0005; tasks: `docs/
 | `CMakeLists.txt` | extension (`project(SlicerRemoteView)`, category `Remote`) — Slicer 5.12.4 extension template |
 | `RemoteView/CMakeLists.txt` | `slicerMacroBuildScriptedModule(... WITH_GENERIC_TESTS)`; **every** file under `RemoteView/` is listed (`.py` in `MODULE_PYTHON_SCRIPTS`, everything else in `MODULE_PYTHON_RESOURCES`) — `tests/test_skeleton.py` enforces it |
 | `RemoteView/RemoteView.py` | thin Slicer adapter: `RemoteView`, `RemoteViewWidget` (loads `Resources/UI/RemoteView.ui`, remembers the relay address and CA path in `QSettings`, shows the consent statement of `remoteview_core.consent` for the address being typed, starts sessions with `RemoteViewLogic.sceneApi` as the scene, renders `remoteview_core.panel` views, 50 ms `QTimer` pump, a single-shot flush `QTimer` and `makeWatcher` (SLC-34: the `SceneWatcher` of `remoteview_core.observers` on `slicer.mrmlScene` with the `slicer.vtkMRML*` event ids and, since SLC-36/SLC-37, the five `slicer.vtkSegmentation.*` ids — `SegmentAdded`, `SegmentRemoved`, `SegmentModified`, `RepresentationModified`, `ContainedRepresentationNamesModified`; a Slicer build without one of the attributes fails *Start* with an `AttributeError` instead of observing a guessed id —, made at each live session), flush and pump slots that log exception types only, closes a running session on unload and stops and disconnects both timers — a failed close is logged, so Reload finishes), `RemoteViewLogic` (`sceneApi()`: `remoteview_core.mrml_scene` over Slicer's `getNodesByClass` and folder display node — models and segments, no segmentations logic: the adapter reads the representation the 3D view draws; `installPackages()`: `slicer.packaging.pip_ensure`, SLC-10), the dependency dialog (`ensureDependencies`/`confirmInstall`, asked at the first *Start session* — SLC-10), the QR code of the join link painted dark on white, *Copy link* and the *Presentation window* (SLC-11; hidden and emptied when the session ends), *Keep session* shown while the relay is about to end an idle session, with the link buttons, *Remove small islands* and the toolbar (*Send scene now*, the send mode) counted as activity (SLC-47), `RemoteViewTest`; SLC-54: the *Remove small islands* checkbox under the consent statement, on unless turned off (`RemoteView/RemoveSmallIslands`, read with `slicer.util.toBool`, saved at every toggle), handed to `PanelController(remove_islands=)` at Start and to `set_remove_islands` on every toggle; SLC-55: no progress dialog (the one of SLC-51 went at the owner's request; `PanelView.progress` is not shown); import-light: no network, subprocess, pip or runtime-dependency import at import or construction — the session code of `remoteview_core` is imported only when *Start session* is clicked; SLC-57: the toolbar on Slicer's main window (`SendToolbar`, made at `startupCompleted()` by the module class and on first use by the panel, one per module object — a Reload removes the previous one by its `objectName`): *Send scene now* (enabled while a session runs; counts down while changes wait; sends the waiting changes or the scene again, or opens the panel without a session) and the *Send changes* combo box (`remoteview_core.sendmode.SEND_MODES`, saved as `RemoteView/SendMode` at every change and applied to the controller at once); `sendPolicy()` reads the setting for `PanelController(send_policy=)` at Start |
-| `RemoteView/remoteview_core/` | pure-Python core (Python 3.12 + numpy, `vtk` for geometry filters only); never imports `slicer`/`qt`/`ctk` — `tests/test_core_purity.py` enforces it; `__version__` lives in `__init__.py` |
+| `RemoteView/remoteview_core/` | pure-Python core (Python 3.12 + numpy, `vtk` for geometry filters only); never imports `slicer`/`qt`/`ctk` — `tests/test_core_purity.py` enforces it; `__init__.py` holds `__version__`, the extension's only version (SLC-20: `pyproject.toml` and `scripts/package.py` read it) |
 | `RemoteView/remoteview_core/clustering.py` | numpy vertex clustering for `decimate.py` (SLC-41): `cluster_connected` (a cluster is a connected piece of the mesh in one grid cell, represented by its member closest to the mean; vertices at the same position with agreeing normals joined (`coincident_pairs`: seams stay closed, a double-sided sheet's layers apart); winding kept, cancelling folds dropped, islands no kept triangle covers re-clustered finer up to a limit), `cluster_by_normal` (grid cell × tetrahedral normal class, for non-manifold fans), `components` (SLC-53: no gather in its first round, the edges left taken by index — 0.52-0.56 s → 0.32 s on two edges per triangle of 16.1M triangles, same roots), `part_sizes`, `fan_weight`, `edge_work` (the `GetCellEdgeNeighbors` work of the quadric's set-up and of `vtkOrientPolyData`), `median_edge`, `compact`; `small_islands(positions, triangles, minimum, share)` (SLC-53: per triangle whether it lies in a small island, and the island count — a part is connected through shared vertex IDs and exactly equal positions whatever the normals, so a `vtkCubeSource`, an STL soup or a double-sided sheet is one part; it compares every vertex by position when `share` × the largest part by vertex IDs is below `minimum` (the largest part, seams included, sets the threshold then), else only the vertices whose key prefix (`PREFIX_BITS` 24) is a small part's; `_key_order` orders their keys by four 16-bit radix passes (a stable argsort's order; `coincident_pairs` uses it too, same pairs); an island has fewer than `minimum` triangles and fewer than `share` × the largest part's, so the largest part never is one), `position_keys` (the 64-bit hash of the coordinate bits, also used by `coincident_pairs`); `cluster_connected_steps`, `cluster_by_normal_steps` and `components_steps` are the same in steps, one per pass (SLC-28, `steps.py`); no VTK |
 | `RemoteView/remoteview_core/collect.py` | MRML collection (architecture §6.4): `collect_scene(scene_api, *, anonymize_names=False, ids=None)` → `Entity` per model node, then per shown segment (`SceneApi.visible_segments()`/`segment_identity(handle)`, SLC-35), both through one `_collect_one` path, via an injectable `SceneApi` (the Slicer one is `mrml_scene.py`); every `nodeId`/`mrmlId`/`segmentId` comes from the session's `SceneIds` (`ids.py`; a fresh registry when `ids` is `None`); VTK pipeline on a geometry-only deep copy whose cells are checked first (integer IDs in range — the filters do not bounds-check) (`vtkTriangleFilter` → triangles repeating a vertex dropped → `vtkPolyDataNormals`, `ConsistencyOn` only when the winding is not already consistent (same result) and the mesh is not a non-manifold fan (`ORIENT_WORK`; SLC-41), `vtkmodules` imports), linear world matrix → `T.matrix`, names from `names.py`; triangles without area dropped; a non-linear or sheared world transform is baked into the vertices (SLC-13: `baked: true`, identity `T.matrix`, winding kept outward under a mirror); nodes without triangles, with non-finite data (also after a bake) or with a non-linear chain the scene cannot hand over are skipped and reported, never abort the snapshot; since SLC-35 (protocol v1.1 §7.3) a node whose MRML ID is not what Slicer generates (`Sphere`, a hand-edited `.mrml`) is exported as `m_<n>` via `SceneIds` in **both** modes — no string ID is ever skipped; `invalid-node-id` is reported only for a non-string `GetID()` (an adapter bug, never a Slicer state) — and `SkippedNode`'s repr shows the reason and the position (across both lists), never the ID (T7); `mesh_from_triangles` (the same normals step, for `decimate.py`; `orient=False` keeps the given winding); `display_of`/`placement_of`/`BAKE`/`transform_to_bake`/`raw_name` are the rules `changes.py` re-checks (with the same `SceneIds`, SLC-36), and `SkippedNode.baked` says a mesh left out passes unbaked, so its baked transform is to blame; `collect_steps` (and `mesh_steps`) is the same collection in steps (SLC-28, `steps.py`): one per filter or numpy pass over a mesh — the area test and the winding sort in parts of `CHUNK_TRIANGLES` (4M) — and one per node, with progress units; with `cache=` (SLC-50, `meshcache.py`) a node whose mesh still has its entry's stamp is not collected (its `Source` records where the mesh comes from; `recollect_steps` collects it again when its share changed); main thread only |
 | `RemoteView/remoteview_core/consent.py` | the consent statement shown before *Start session* (SLC-22, SLC-55; R-06, NFR-16): since SLC-55 two sentences and the project link (`PROJECT_URL`) as Qt rich text — nothing leaves before Start, then the models and segments shown in 3D and every later change go to the named relay host, encrypted or not; the full statement (what is sent, who can see it) stays in the module's Help tab and the user guide. Names only the host of the typed address (HTML-escaped; no user info, port, path or query), says when `ws://` is unencrypted and names a `ws://` host only on this computer (Start refuses others); standard library only |
@@ -49,8 +93,11 @@ opt-in rule, FR-02). Design: `docs/architecture.md` §6, ADR 0005; tasks: `docs/
 | `tests/validate_glb.mjs` | test helper: Khronos `gltf-validator` (devDependency of `shared/`, needs `npm ci`) + the §7.1 viewer pre-checks on GLBs written by the tests |
 | `tests/` | pytest suites run outside Slicer; `conftest.py` provides strict stub `slicer`/`qt`/`ctk` modules (with `slicer.mrmlScene` on VTK's own dispatch and the MRML event ids, SLC-34, and `slicer.vtkSegmentation` holding the seven `vtkSegmentation` ids of `tests/mrml_fakes.py`, SLC-36 — `[TODO verify]` against Slicer in manual §13 step 1) and puts `RemoteView/` on `sys.path` like Slicer does |
 | `.gitattributes` | `RemoteView/_vendor/** -text`: the vendored bytes (and their hashes) survive Windows checkouts |
+| `scripts/package.py` | release zip (SLC-20, DEP-11): `SlicerRemoteView-<version>.zip` in `dist/` (git-ignored) with `LICENSE.txt` (the repository's MIT `LICENSE`) and exactly the files `RemoteView/CMakeLists.txt` lists — see [Release zip](#release-zip) |
+| `SlicerRemoteView.json` | the entry for the Slicer Extensions Index (`Slicer/ExtensionsIndex`), kept here until the extension is submitted — see [Release zip](#release-zip) |
+| `Screenshots/RemoteView-panel.png` | the panel in Slicer 5.12.4 with a generated sphere (no patient data), for the Extensions Index (`EXTENSION_SCREENSHOTURLS`) |
 | `scripts/vendor_shared.py` | vendoring tool: wraps `node shared/scripts/vendor-py.mjs` (Node 22) and has a byte-identical pure-Python port (`--python`, used when Node is missing); `--check` exits 1 on drift |
-| `pyproject.toml` | ruff and pytest configuration, direct dev pins (`dev` extra) — development only, Slicer never reads it |
+| `pyproject.toml` | ruff and pytest configuration, direct dev pins (`dev` extra), the version read from `remoteview_core.__version__` (`[tool.setuptools.dynamic]`; `uv pip compile` still reads the pins statically) — development only, Slicer never reads it |
 | `requirements-dev.txt` | exact pins of every dev/test package (compiled from the `dev` extra) |
 
 ## Install in 3D Slicer (developer mode)
@@ -126,6 +173,27 @@ python3 slicer-plugin/scripts/vendor_shared.py --check    # exit 1 when the copy
 New or removed vendored files must also be listed in `RemoteView/CMakeLists.txt` (`pytest -k skeleton` fails otherwise).
 `jsonschema` is not installed in Slicer (FR-16): the core uses only `chunk_header` and `alphabet`; the tests import
 `remoteview_protocol.schemas`/`envelope` explicitly (after `remoteview_core.vendored`) to validate messages.
+
+## Release zip
+
+```bash
+python3 slicer-plugin/scripts/package.py                     # slicer-plugin/dist/SlicerRemoteView-<version>.zip
+python3 slicer-plugin/scripts/package.py --output-dir /tmp/x # elsewhere; --expect-version X.Y.Z to double-check
+```
+
+Run from the repository root with any Python ≥ 3.12 (standard library only). The zip holds
+`SlicerRemoteView-<version>/LICENSE.txt` (the repository's MIT `LICENSE`) and `SlicerRemoteView-<version>/RemoteView/`
+with exactly the files `RemoteView/CMakeLists.txt` lists — the script stops if the module tree has a file the lists
+miss (or the other way round), so tests, caches and `.pyc` files never get in. The bytes are reproducible (fixed
+order, mode and timestamp; `SOURCE_DATE_EPOCH` is honoured). `.github/workflows/release.yml` (DEP-11) runs it on a
+`v*` tag and attaches the zip to the draft release; there the tag must equal `__version__` of
+`remoteview_core/__init__.py` (the only place the version is written — `pyproject.toml` reads it), otherwise nothing
+is built. To release `X.Y.Z`: set `__version__ = "X.Y.Z"` on `main`, then tag.
+
+`SlicerRemoteView.json` is the entry for the Slicer Extensions Index (catalog schema v1.0.2). It is not submitted:
+the index needs a public repository, the extension's `CMakeLists.txt` and licence at the repository root, and an
+extension name that does not start with `Slicer` — `docs/research/slicer-packaging.md` §4 lists the sources and the
+options.
 
 ## Development (outside Slicer)
 
