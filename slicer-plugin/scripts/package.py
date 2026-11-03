@@ -37,6 +37,7 @@ VERSION_FILE = MODULE_DIR / "remoteview_core" / "__init__.py"
 #: The repository's licence (MIT), shipped as ``LICENSE.txt``; the Extensions Index looks for it at the repository root.
 LICENSE_FILE = PLUGIN_ROOT.parent / "LICENSE"
 DEFAULT_OUTPUT_DIR = PLUGIN_ROOT / "dist"
+#: The extension's name: ``project()`` of the repository's top-level ``CMakeLists.txt`` (``tests/test_package.py``).
 ARCHIVE_PREFIX = "RemoteView"
 #: ``X.Y.Z`` or ``X.Y.Z-<pre-release>`` (a tag ``vX.Y.Z-rc.1`` makes a pre-release, docs/deploy.md §8); safe in a
 #: file name.

@@ -9,11 +9,11 @@ a report without an owner component or a status. Triage flow, status transitions
 
 | Status | high | medium | low | no severity | Total |
 |---|---|---|---|---|---|
-| open | 0 | 11 | 21 | 0 | 32 |
+| open | 0 | 12 | 21 | 0 | 33 |
 | triaged | 0 | 8 | 17 | 0 | 25 |
 | fixed | 0 | 3 | 6 | 0 | 9 |
 | rejected | 0 | 0 | 0 | 0 | 0 |
-| **all reports** | 0 | 22 | 44 | 0 | 66 |
+| **all reports** | 0 | 23 | 44 | 0 | 67 |
 
 ## Open and triaged reports by owner component
 
@@ -68,10 +68,11 @@ a report without an owner component or a status. Triage flow, status transitions
 |---|---|---|---|---|---|
 | [2026-10-27-protocol-2](2026-10-27-protocol-2.md) | medium | M3b | triaged (SLC-27, SLC-13, SLC-40, SLC-38, …) | — | Protocol 1.1: segment aliases, TRS-only matrices, pong deadline, vendoring (slicer) |
 
-### deploy — 5 (4 open, 1 triaged)
+### deploy — 6 (5 open, 1 triaged)
 
 | Report | Severity | Milestone | Status | Also affects | Title |
 |---|---|---|---|---|---|
+| [2026-11-03-slicer-1](2026-11-03-slicer-1.md) | medium | M4 | open | — | CI skips the slicer job when only the root `CMakeLists.txt` or `LICENSE` changes |
 | [2026-10-18-server-1](2026-10-18-server-1.md) | medium | M1 | triaged (D6, PRO-20, DEP-06, 2026-10-27-protocol-4) | release | Verify how the Railway edge sets `X-Forwarded-For` (relay trusts exactly one proxy hop) |
 | [2026-10-18-server-2](2026-10-18-server-2.md) | low | M1 | open | — | Env parity check: variables the relay does not parse |
 | [2026-10-19-slicer-1](2026-10-19-slicer-1.md) | low | M1 | open | — | Future `slicer-plugin` CI must run the Khronos glTF validator tests, not skip them |

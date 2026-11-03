@@ -5,11 +5,15 @@ All notable changes to SlicerRemoteView. The section of a version is the text of
 
 ## [Unreleased]
 
-- The Slicer extension is named **RemoteView**, as the Extensions Index requires (names starting with "Slicer" are
-  refused): `project(RemoteView)` in `slicer-plugin/CMakeLists.txt`, the catalog entry `RemoteView.json`, and the
-  release zip `RemoteView-<version>.zip` holding the folder `RemoteView-<version>/RemoteView`. The project, the
-  repository, the relay and the protocol identifiers keep the name SlicerRemoteView; the module is `RemoteView` as
-  before.
+- The Slicer extension is named **RemoteView**, as the Extensions Index requires (names starting with "Slicer"
+  are refused): `project(RemoteView)` in the extension's top-level `CMakeLists.txt`, the catalog entry
+  `RemoteView.json`, and the release zip `RemoteView-<version>.zip` holding the folder
+  `RemoteView-<version>/RemoteView`. The project, the repository, the relay and the protocol identifiers keep
+  the name SlicerRemoteView; the module is `RemoteView` as before.
+- Groundwork for installing RemoteView from Slicer's Extensions Manager: the extension's top-level
+  `CMakeLists.txt` is now at the repository root, where the Slicer Extensions Index and Slicer's extension
+  builds look for it, and it names its contributor, Damian Dołęga-Dołęgowski. Until the extension is listed,
+  install it from the release zip; the submission steps are in `docs/release/extensions-index.md`.
 
 ## [0.1.0] - 2026-11-03
 

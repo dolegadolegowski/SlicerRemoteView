@@ -27,6 +27,7 @@ Result | Tester`); write the module's git commit in **Result** with the outcome 
 | [§14](#14-decimation-to-the-device-profile-slc-14-slc-41-slc-53-slc-54-fr-10-nfr-03-nfr-04-protocol-75) | Decimation to the device profile | SLC-14, SLC-41, SLC-53, SLC-54 | FR-10, NFR-03, NFR-04, protocol §7.5 | 1–12 (blocks: “large segmentation, SLC-41”, “small islands, SLC-53”, “the *Remove small islands* checkbox, SLC-54”) | yes |
 | [§15](#15-preparing-the-scene-in-steps-slc-28-slc-50-slc-51-fr-10-r-05-docsresearchslicer-preparemd) | Preparing the scene in steps | SLC-28, SLC-50, SLC-51 | FR-10, R-05, `docs/research/slicer-prepare.md` | 1–8 (blocks: “five large models”, “large segmentation; the reporter's scene or §14's large-segmentation preconditions”) | yes |
 | [§16](#16-the-toolbar-send-scene-now-and-the-send-mode-slc-55-slc-56-slc-57-fr-11-nfr-02-73) | The toolbar: Send scene now and the send mode | SLC-55, SLC-56, SLC-57 | FR-11, NFR-02, §7.3 | 1–8 | yes |
+| [§17](#17-install-from-the-extensions-manager-slc-72-r-06-nfr-16-adr-0010) | Install from the Extensions Manager | SLC-72 | R-06, NFR-16, ADR 0010 | 1–5 | yes |
 
 ## §1 Module loads (SLC-01; FR-01, FR-02, NFR-24)
 
@@ -1750,6 +1751,38 @@ Expected results:
   *15 s after the last change* (the setting) `[TODO verify]` `QComboBox.currentIndex`/`addItem(label, data)`.
 - Step 8: one toolbar, not two (the old one is removed); the new mode is saved and the session starts with it.
 - Throughout: no traceback; nothing in the log but exception type names, if anything.
+
+| Date | Slicer version | OS | Result | Tester |
+|---|---|---|---|---|
+| | | | | |
+
+## §17 Install from the Extensions Manager (SLC-72; R-06, NFR-16, ADR 0010)
+
+Preconditions: RemoteView is in the Slicer Extensions Index (`docs/release/extensions-index.md`) and CDash lists a
+package for the platform — for the `main` entry the Slicer Preview Release of that day, for the `5.12` entry Slicer
+5.12.x; a Slicer that has never had RemoteView (no *Additional module paths* entry for a checkout or a release zip).
+
+Steps:
+
+1. *View → Extensions Manager → Install extensions*, search for "RemoteView" and open its page.
+2. Install it and restart Slicer when asked.
+3. Open *Remote → RemoteView*; in the Python console run
+   `import remoteview_core; print(remoteview_core.__version__, remoteview_core.__file__)`.
+4. Run §2 with this installation (the first *Start session* asks before installing the Python packages, §3).
+5. *Extensions Manager → Manage extensions*: uninstall RemoteView and restart Slicer.
+
+Expected results:
+
+- Step 1: the page shows the icon, the description of the top-level `CMakeLists.txt`, the screenshot
+  `slicer-plugin/Screenshots/RemoteView-panel.png`, category *Remote* and the contributor "Damian Dołęga-Dołęgowski
+  (SlicerRemoteView)" with its Polish letters `[TODO verify]` (UTF-8 through the factory and the catalog); the
+  homepage link opens `slicer-plugin/README.md` on GitHub.
+- Step 2: no error; the module opens no connection and installs no Python package on install or restart (§1).
+- Step 3: the panel shows *Relay address*, *Start session* and "Not connected."; the version is the `__version__`
+  of the built revision; the path is inside Slicer's extensions folder (`Extensions-<revision>/RemoteView/…/
+  qt-scripted-modules/`), not a checkout `[TODO verify]` the layout of the factory's package.
+- Step 4: as in §2.
+- Step 5: after the restart *Remote → RemoteView* is gone.
 
 | Date | Slicer version | OS | Result | Tester |
 |---|---|---|---|---|

@@ -69,7 +69,8 @@ class RemoteView(ScriptedLoadableModule):
         self.parent.title = "RemoteView"
         self.parent.categories = ["Remote"]
         self.parent.dependencies = []
-        self.parent.contributors = ["SlicerRemoteView contributors"]
+        # EXTENSION_CONTRIBUTORS of the repository's top-level CMakeLists.txt (tests/test_skeleton.py)
+        self.parent.contributors = ["Damian Dołęga-Dołęgowski (SlicerRemoteView)"]
         self.parent.helpText = """
 Shows the 3D scene on phones, tablets and Meta Quest headsets that join with a 5-character code.
 Nothing leaves this computer until you click <b>Start session</b>. From then on the relay server
