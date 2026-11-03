@@ -41,7 +41,8 @@ Sam plugin to folder `SlicerRemoteView-<wersja>/RemoteView`, czyli folder z plik
 Nie usuwaj z niego żadnych plików.
 
 Nie ma jeszcze żadnego wydania albo chcesz najnowsze zmiany? Nad listą plików kliknij **Code**, a potem
-**Download ZIP**: powstanie folder `SlicerRemoteView-main`, a plugin to jego folder `slicer-plugin/RemoteView`.
+**Download ZIP**: powstanie folder `SlicerRemoteView-main`, a plugin to jego folder
+`slicer-plugin/RemoteView`.
 
 ## 2. Dodaj moduł do Slicera
 
