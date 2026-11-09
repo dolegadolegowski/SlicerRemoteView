@@ -12,13 +12,13 @@ dependencies = []
 [project.optional-dependencies]
 # Direct development pins; requirements-dev.txt pins the full (transitive) set compiled from this list.
 dev = [
-  "pytest==9.1.1",
-  "ruff==0.17.1",
+  "pytest==9.2.0",
+  "ruff==0.17.4",
   "numpy==2.5.4",
-  "vtk==9.6.2", # Slicer 5.12.x ships VTK 9.6 (docs/research/slicer.md §1)
+  "vtk==9.7.2", # Slicer 5.12.x ships VTK 9.6 (docs/research/slicer.md §1)
   "pygltflib==1.16.5", # test-only GLB reader
   "jsonschema==4.26.0", # vendored remoteview_protocol validation (SLC-03, SLC-06)
-  "websockets==17.2", # transport tests (SLC-08)
+  "websockets==17.4", # transport tests (SLC-08)
   "segno==1.6.6", # QR code of the join link (SLC-11); the runtime pin of remoteview_core.deps
   "zxing-cpp==3.1.1", # test-only QR decoder: the generated code must scan back to the join URL (SLC-11)
 ]
